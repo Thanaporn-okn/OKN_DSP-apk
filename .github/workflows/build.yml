@@ -1,13 +1,11 @@
 name: OKN_DSP Auto Build APK V5
 
 on:
-  push:
   workflow_dispatch:
+  push:
 
 jobs:
-
   build:
-
     runs-on: ubuntu-latest
 
     steps:
@@ -15,70 +13,52 @@ jobs:
     - name: Checkout
       uses: actions/checkout@v4
 
+    - name: Find ZIP
+      id: zip
+      run: |
+        ZIP=$(find . -name "*.zip" | head -1)
+        echo "ZIP=$ZIP" >> $GITHUB_ENV
 
     - name: Extract ZIP
       run: |
-        unzip -o OKN_DSP_V3_CLEAN_BUILD.zip -d extracted
-        echo "ZIP extracted"
-
+        mkdir app
+        unzip -o "$ZIP" -d app
 
     - name: Find Flutter Project
       run: |
-        PROJECT=$(find extracted -name pubspec.yaml | head -1 | xargs dirname)
-
-        if [ -z "$PROJECT" ]; then
-          echo "No Flutter project found"
-          exit 1
-        fi
-
+        PROJECT=$(find app -name pubspec.yaml | head -1 | xargs dirname)
         echo "PROJECT=$PROJECT" >> $GITHUB_ENV
-        echo "Project:"
         echo $PROJECT
-
 
     - name: Setup Flutter
       uses: subosito/flutter-action@v2
       with:
         flutter-version: '3.24.0'
-        channel: stable
-
 
     - name: Repair Android Project
       run: |
-        cd $PROJECT
+        cd "$PROJECT"
 
-        echo "Before repair"
-        ls
+        echo "Repair Android"
 
         rm -rf android
 
-        flutter create .
-
-        echo "Android regenerated"
-
+        flutter create \
+        --project-name okn_dsp_project \
+        .
 
     - name: Get Packages
       run: |
-        cd $PROJECT
+        cd "$PROJECT"
         flutter pub get
-
-
-    - name: Check MainActivity
-      run: |
-        cd $PROJECT
-        find android -name MainActivity.kt -o -name MainActivity.java
-        grep -R "FlutterActivity" android || true
-
 
     - name: Build APK
       run: |
-        cd $PROJECT
+        cd "$PROJECT"
         flutter build apk --release
-
 
     - name: Upload APK
       uses: actions/upload-artifact@v4
       with:
-        name: OKN_DSP_APK_V5
-        path: |
-          $PROJECT/build/app/outputs/flutter-apk/app-release.apk
+        name: OKN_DSP_APK
+        path: ${{ env.PROJECT }}/build/app/outputs/flutter-apk/app-release.apk
