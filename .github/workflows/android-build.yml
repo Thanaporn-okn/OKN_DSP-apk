@@ -9,55 +9,42 @@ jobs:
 
     steps:
 
-      - name: Checkout
-        uses: actions/checkout@v4
+    - name: Checkout
+      uses: actions/checkout@v4
 
+    - name: Setup Java 17
+      uses: actions/setup-java@v4
+      with:
+        distribution: temurin
+        java-version: 17
 
-      - name: Setup Java
-        uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: '17'
+    - name: Find ZIP
+      run: |
+        ls -la
+        find . -name "*.zip"
 
+    - name: Extract ZIP
+      run: |
+        mkdir project
+        unzip -o *.zip -d project
+        find project -maxdepth 3 -type f | head -50
 
-      - name: Show files
-        run: |
-          ls -la
-          find . -maxdepth 2 -type f
+    - name: Setup Gradle
+      uses: gradle/actions/setup-gradle@v4
 
+    - name: Find Android Project
+      run: |
+        cd project
+        find . -name "build.gradle"
+        find . -name "settings.gradle"
 
-      - name: Extract ZIP
-        run: |
-          mkdir project
-          unzip -o *.zip -d project
+    - name: Build APK
+      run: |
+        cd project/OKN_DSP_v2
+        gradle assembleDebug
 
-
-      - name: Find Project
-        id: project
-        run: |
-          GRADLE=$(find project -name gradlew | head -1)
-
-          if [ -z "$GRADLE" ]; then
-            echo "NO GRADLE FOUND"
-            exit 1
-          fi
-
-          DIR=$(dirname "$GRADLE")
-
-          echo "DIR=$DIR"
-          echo "dir=$DIR" >> $GITHUB_OUTPUT
-
-
-      - name: Build APK
-        run: |
-          cd ${{ steps.project.outputs.dir }}
-          chmod +x gradlew
-          ./gradlew assembleDebug --stacktrace
-
-
-      - name: Upload APK
-        uses: actions/upload-artifact@v4
-        with:
-          name: OKN_DSP_APK
-          path: |
-            project/**/build/outputs/apk/**/*.apk
+    - name: Upload APK
+      uses: actions/upload-artifact@v4
+      with:
+        name: OKN_DSP_APK
+        path: project/OKN_DSP_v2/app/build/outputs/apk/debug/*.apk
