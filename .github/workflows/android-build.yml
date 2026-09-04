@@ -11,6 +11,23 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Find ZIP
+        run: |
+          ZIP=$(find . -name "*.zip" | head -1)
+          echo ZIP=$ZIP
+          test -n "$ZIP"
+
+      - name: Extract Project
+        run: |
+          mkdir source
+          unzip -o $(find . -name "*.zip" | head -1) -d source
+          find source -maxdepth 3 -name pubspec.yaml
+
+      - name: Find Flutter Root
+        run: |
+          ROOT=$(find source -name pubspec.yaml -printf '%h' | head -1)
+          echo ROOT=$ROOT >> $GITHUB_ENV
+
       - name: Setup Java
         uses: actions/setup-java@v4
         with:
@@ -22,17 +39,18 @@ jobs:
         with:
           flutter-version: '3.24.0'
 
-      - name: Flutter packages
-        run: flutter pub get
+      - name: Get Packages
+        run: |
+          cd $ROOT
+          flutter pub get
 
       - name: Build APK
-        run: flutter build apk --release
-
-      - name: Check APK
-        run: ls -lh build/app/outputs/flutter-apk/
+        run: |
+          cd $ROOT
+          flutter build apk --release
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: OKN_DSP_APK
-          path: build/app/outputs/flutter-apk/*.apk
+          name: OKN_DSP_V5.8_APK
+          path: ${{ env.ROOT }}/build/app/outputs/flutter-apk/*.apk
