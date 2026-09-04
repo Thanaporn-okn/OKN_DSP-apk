@@ -9,30 +9,22 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-    - uses: actions/checkout@v4
 
-    - name: Show files
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Extract ZIP
       run: |
-        ls -la
+        unzip -o OKN_DSP_V3_CLEAN_BUILD.zip -d extracted
 
-    - - name: Find ZIP
-  run: |
-    unzip -o OKN_DSP_V3_CLEAN_BUILD.zip -d app
+    - name: Find Flutter Project
+      run: |
+        PROJECT=$(find extracted -name pubspec.yaml | head -1 | xargs dirname)
+        echo "PROJECT=$PROJECT" >> $GITHUB_ENV
+        echo $PROJECT
 
-    - - name: Find Flutter Project
-  run: |
-    PROJECT=$(find extracted -name pubspec.yaml | while read f; do
-      DIR=$(dirname "$f")
-      if find "$DIR/android" -name "MainActivity.kt" | grep -q .; then
-        echo "$DIR"
-        break
-      fi
-    done)
-
-    echo "PROJECT=$PROJECT" >> $GITHUB_ENV
-    echo $PROJECT
-
-    - uses: subosito/flutter-action@v2
+    - name: Setup Flutter
+      uses: subosito/flutter-action@v2
       with:
         flutter-version: '3.24.0'
 
@@ -46,4 +38,4 @@ jobs:
       uses: actions/upload-artifact@v4
       with:
         name: OKN_DSP_APK
-        path: "**/app-release.apk"
+        path: $PROJECT/build/app/outputs/flutter-apk/app-release.apk
