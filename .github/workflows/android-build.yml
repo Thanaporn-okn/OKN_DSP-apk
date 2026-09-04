@@ -5,148 +5,59 @@ on:
 
 jobs:
   build:
-
     runs-on: ubuntu-latest
 
     steps:
 
-    - name: Checkout source
-      uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
 
-    - name: Setup Java 17
-      uses: actions/setup-java@v4
-      with:
-        distribution: temurin
-        java-version: 17
-        cache: gradle
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
 
 
-    - name: Show repository files
-      run: |
-        echo "===== FILE LIST ====="
-        ls -la
-        find . -maxdepth 3 -type f | head -100
-
-
-    - name: Find ZIP Project
-      run: |
-        ZIP=$(find . -name "*.zip" | head -1)
-
-        if [ -z "$ZIP" ]; then
-          echo "No ZIP found"
-          exit 1
-        fi
-
-        echo "ZIP FOUND: $ZIP"
-
-        mkdir build_source
-
-        unzip -o "$ZIP" -d build_source
-
-
-    - name: Locate Android Project
-      id: locate
-      run: |
-
-        echo "Searching gradlew..."
-
-        GRADLE=$(find build_source -name gradlew | head -1)
-
-        if [ -z "$GRADLE" ]; then
-          echo "gradlew not found"
-          find build_source -maxdepth 4 -type f
-          exit 1
-        fi
-
-        PROJECT=$(dirname "$GRADLE")
-
-        echo "PROJECT=$PROJECT"
-
-        echo "project=$PROJECT" >> $GITHUB_OUTPUT
-
-
-    - name: Fix Gradle Permission
-      run: |
-        chmod +x ${{ steps.locate.outputs.project }}/gradlew
-
-
-    - name: Force Java Kotlin Compatibility
-      run: |
-
-        cd ${{ steps.locate.outputs.project }}
-
-        mkdir -p app
-
-        cat >> gradle.properties <<EOF
-
-org.gradle.jvmargs=-Xmx2048m
-android.useAndroidX=true
-android.enableJetifier=true
-kotlin.jvm.target.validation.mode=warning
-
-EOF
-
-
-    - name: Build Debug APK
-      run: |
-
-        cd ${{ steps.locate.outputs.project }}
-
-        ./gradlew clean assembleDebug \
-        -Dorg.gradle.java.home=$JAVA_HOME \
-        --stacktrace
-
-
-    - name: Find APK
-      id: apk
-      run: |
-
-        APK=$(find build_source -name "*.apk" | head -1)
-
-        if [ -z "$APK" ]; then
-          echo "APK NOT FOUND"
-          exit 1
-        fi
-
-        echo "APK=$APK"
-        echo "apk=$APK" >> $GITHUB_OUTPUT
-
-
-
-    - name: Upload APK
-      uses: actions/upload-artifact@v4
-      with:
-
-        name: OKN_DSP_APK
-
-        path: ${{ steps.apk.outputs.apk }}
-          fi
-
-
-      # 9. Find APK
-      - name: Locate APK
+      - name: Show files
         run: |
+          ls -la
+          find . -maxdepth 2 -type f
 
-          APK=$(find "$PROJECT_DIR" \
-          -name "*.apk" \
-          | head -n 1)
 
-          if [ -z "$APK" ]; then
-            echo "APK not found"
+      - name: Extract ZIP
+        run: |
+          mkdir project
+          unzip -o *.zip -d project
+
+
+      - name: Find Project
+        id: project
+        run: |
+          GRADLE=$(find project -name gradlew | head -1)
+
+          if [ -z "$GRADLE" ]; then
+            echo "NO GRADLE FOUND"
             exit 1
           fi
 
+          DIR=$(dirname "$GRADLE")
 
-          echo "APK=$APK" >> $GITHUB_ENV
+          echo "DIR=$DIR"
+          echo "dir=$DIR" >> $GITHUB_OUTPUT
 
 
-      # 10. Upload APK
+      - name: Build APK
+        run: |
+          cd ${{ steps.project.outputs.dir }}
+          chmod +x gradlew
+          ./gradlew assembleDebug --stacktrace
+
+
       - name: Upload APK
         uses: actions/upload-artifact@v4
-
         with:
-
           name: OKN_DSP_APK
-
-          path: ${{ env.APK }}
+          path: |
+            project/**/build/outputs/apk/**/*.apk
