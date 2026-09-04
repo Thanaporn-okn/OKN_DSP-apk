@@ -1,12 +1,10 @@
-name: OKN_DSP Auto Build APK V6
+name: Build Android APK ZIP AUTO FIX
 
 on:
   workflow_dispatch:
-  push:
 
 jobs:
   build:
-
     runs-on: ubuntu-latest
 
     steps:
@@ -14,93 +12,57 @@ jobs:
     - name: Checkout
       uses: actions/checkout@v4
 
-
     - name: Find ZIP
       run: |
-        ZIP=$(find . -name "*.zip" | head -1)
-        echo "ZIP=$ZIP" >> $GITHUB_ENV
-        echo $ZIP
-
-
-    - name: Extract ZIP
-      run: |
-        rm -rf app
-        mkdir app
-        unzip -o "$ZIP" -d app
-
+        unzip -o *.zip -d project
 
     - name: Find Flutter Project
       run: |
-        PROJECT=$(find app -name pubspec.yaml | head -1 | xargs dirname)
+        PROJECT=$(find project -name pubspec.yaml -exec dirname {} \; | head -1)
         echo "PROJECT=$PROJECT" >> $GITHUB_ENV
         echo $PROJECT
 
+    - name: Setup Java
+      uses: actions/setup-java@v4
+      with:
+        distribution: temurin
+        java-version: 17
 
     - name: Setup Flutter
       uses: subosito/flutter-action@v2
       with:
         flutter-version: '3.24.0'
 
-
-    - name: Repair Android
+    - name: Upgrade Android Embedding
       run: |
+        cd $PROJECT
 
-        cd "$PROJECT"
+        mkdir -p android/app/src/main/kotlin
 
-        rm -rf android
+        sed -i 's/io.flutter.app.FlutterActivity/io.flutter.embedding.android.FlutterActivity/g' android/app/src/main/kotlin/*/*.kt || true
 
-        flutter create \
-        --project-name okn_dsp_project \
-        .
+        sed -i '/import io.flutter.app.FlutterActivity/d' android/app/src/main/kotlin/*/*.kt || true
 
+        sed -i 's/FlutterActivity/FlutterActivity/g' android/app/src/main/kotlin/*/*.kt || true
 
-    - name: Replace Main App
+        flutter clean
+
+    - name: Pub Get
       run: |
+        cd $PROJECT
+        flutter pub get
 
-        cd "$PROJECT"
+    - name: Build APK
+      run: |
+        cd $PROJECT
+        flutter build apk --release
 
-        cat > lib/main.dart <<'EOF'
-
-import 'package:flutter/material.dart';
-
-void main(){
-  runApp(const OKNDSP());
-}
-
-
-class OKNDSP extends StatelessWidget{
-
-  const OKNDSP({super.key});
-
-
-  @override
-  Widget build(BuildContext context){
-
-    return MaterialApp(
-
-      debugShowCheckedModeBanner:false,
-
-      theme:ThemeData.dark(),
-
-      home:Scaffold(
-
-        appBar:AppBar(
-
-          title:
-          const Text(
-            "OKN DSP BP1048P4 V4"
-          ),
-
-        ),
-
-
-        body:
-
-        const Center(
-
-          child:
-
-          Text(
+    - name: Upload APK
+      uses: actions/upload-artifact@v4
+      with:
+        name: OKN_DSP_APK
+        path: |
+          $PROJECT/build/app/outputs/flutter-apk/app-release.apk          Text(
 
             "OKN DSP BP1048P4\n7 Channel DSP Controller",
 
