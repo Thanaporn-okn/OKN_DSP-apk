@@ -5,6 +5,7 @@ on:
 
 jobs:
   build:
+
     runs-on: ubuntu-latest
 
     steps:
@@ -12,39 +13,59 @@ jobs:
     - name: Checkout
       uses: actions/checkout@v4
 
-    - name: Setup Java 17
+
+    - name: Setup Java
       uses: actions/setup-java@v4
       with:
         distribution: temurin
         java-version: 17
+
 
     - name: Find ZIP
       run: |
         ls -la
         find . -name "*.zip"
 
+
     - name: Extract ZIP
       run: |
-        mkdir project
-        unzip -o *.zip -d project
-        find project -maxdepth 3 -type f | head -50
+        mkdir source
+        unzip -o *.zip -d source
+        echo "FILES:"
+        find source -maxdepth 3 -type f | head -100
+
 
     - name: Setup Gradle
       uses: gradle/actions/setup-gradle@v4
 
-    - name: Find Android Project
+
+    - name: Find Gradle Project
+      id: gradle
       run: |
-        cd project
-        find . -name "build.gradle"
-        find . -name "settings.gradle"
+        PROJECT=$(find source -name build.gradle -o -name build.gradle.kts | head -1 | xargs dirname)
+        echo "PROJECT=$PROJECT"
+        echo "PROJECT=$PROJECT" >> $GITHUB_ENV
+
 
     - name: Build APK
       run: |
-        cd project/OKN_DSP_v2
-        gradle assembleDebug
+        cd $PROJECT
+
+        if [ -f gradlew ]; then
+          chmod +x gradlew
+          ./gradlew clean assembleDebug
+        else
+          gradle clean assembleDebug
+        fi
+
+
+    - name: Find APK
+      run: |
+        find . -name "*.apk"
+
 
     - name: Upload APK
       uses: actions/upload-artifact@v4
       with:
         name: OKN_DSP_APK
-        path: project/OKN_DSP_v2/app/build/outputs/apk/debug/*.apk
+        path: "**/*.apk"
