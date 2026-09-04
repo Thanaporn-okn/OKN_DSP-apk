@@ -1,4 +1,4 @@
-name: OKN_DSP Auto Build APK
+name: OKN_DSP Auto Build APK V3
 
 on:
   push:
@@ -9,63 +9,36 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+    - uses: actions/checkout@v4
 
-      - name: Show files
-        run: |
-          ls -la
-          find . -maxdepth 2 -type f | head -50
+    - name: Show files
+      run: |
+        ls -la
 
-      - name: Find Flutter project
-        run: |
-          if [ -f pubspec.yaml ]; then
-            echo "ROOT_PROJECT=true" >> $GITHUB_ENV
-          elif [ -f OKN_DSP_AUTO_BUILD_PACK.zip ]; then
-            unzip -o OKN_DSP_AUTO_BUILD_PACK.zip -d pack
-            echo "PACK_FOUND=true" >> $GITHUB_ENV
-          else
-            echo "Flutter project not found"
-            exit 1
-          fi
+    - name: Find ZIP and Extract
+      run: |
+        ZIP=$(find . -name "*.zip" | head -1)
+        echo "ZIP=$ZIP"
+        unzip -o "$ZIP" -d extracted
 
-      - name: Extract project
-        if: env.PACK_FOUND == 'true'
-        run: |
-          find pack -name pubspec.yaml
-          PROJECT=$(dirname $(find pack -name pubspec.yaml | head -1))
-          echo "PROJECT=$PROJECT" >> $GITHUB_ENV
+    - name: Find Flutter Project
+      run: |
+        PROJECT=$(find extracted -name pubspec.yaml | head -1 | xargs dirname)
+        echo "PROJECT=$PROJECT" >> $GITHUB_ENV
+        echo $PROJECT
 
-      - name: Setup Flutter
-        uses: subosito/flutter-action@v2
-        with:
-          flutter-version: '3.24.0'
-          channel: stable
+    - uses: subosito/flutter-action@v2
+      with:
+        flutter-version: '3.24.0'
 
-      - name: Flutter Doctor
-        run: flutter doctor -v
+    - name: Build APK
+      run: |
+        cd $PROJECT
+        flutter pub get
+        flutter build apk --release
 
-      - name: Get packages
-        run: |
-          if [ "$ROOT_PROJECT" = "true" ]; then
-            flutter pub get
-          else
-            cd $PROJECT
-            flutter pub get
-          fi
-
-      - name: Build APK
-        run: |
-          if [ "$ROOT_PROJECT" = "true" ]; then
-            flutter build apk --release
-          else
-            cd $PROJECT
-            flutter build apk --release
-          fi
-
-      - name: Upload APK
-        uses: actions/upload-artifact@v4
-        with:
-          name: OKN_DSP_APK_RELEASE
-          path: |
-            **/build/app/outputs/flutter-apk/app-release.apk
+    - name: Upload APK
+      uses: actions/upload-artifact@v4
+      with:
+        name: OKN_DSP_APK
+        path: "**/app-release.apk"
