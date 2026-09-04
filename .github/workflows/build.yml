@@ -1,4 +1,4 @@
-name: OKN_DSP Auto Build APK V3
+name: OKN_DSP Auto Build APK V4
 
 on:
   push:
@@ -6,6 +6,7 @@ on:
 
 jobs:
   build:
+
     runs-on: ubuntu-latest
 
     steps:
@@ -13,29 +14,60 @@ jobs:
     - name: Checkout
       uses: actions/checkout@v4
 
+
     - name: Extract ZIP
       run: |
         unzip -o OKN_DSP_V3_CLEAN_BUILD.zip -d extracted
+        ls -R extracted | head -100
 
-    - name: Find Flutter Project
+
+    - name: Find Correct Flutter Project
       run: |
-        PROJECT=$(find extracted -name pubspec.yaml | head -1 | xargs dirname)
+        PROJECT=$(find extracted -path "*OKN_DSP_PROJECT/pubspec.yaml" | head -1 | xargs dirname)
+
+        if [ -z "$PROJECT" ]; then
+          echo "Flutter project not found"
+          exit 1
+        fi
+
         echo "PROJECT=$PROJECT" >> $GITHUB_ENV
+        echo "FOUND PROJECT:"
         echo $PROJECT
+
+
+    - name: Check Android Embedding
+      run: |
+        cd $PROJECT
+
+        echo "Checking MainActivity"
+
+        find android -name MainActivity.kt -o -name MainActivity.java
+
+        grep -R "FlutterActivity" android || true
+
 
     - name: Setup Flutter
       uses: subosito/flutter-action@v2
       with:
         flutter-version: '3.24.0'
+        channel: stable
+
+
+    - name: Flutter Pub Get
+      run: |
+        cd $PROJECT
+        flutter pub get
+
 
     - name: Build APK
       run: |
         cd $PROJECT
-        flutter pub get
         flutter build apk --release
+
 
     - name: Upload APK
       uses: actions/upload-artifact@v4
       with:
         name: OKN_DSP_APK
-        path: $PROJECT/build/app/outputs/flutter-apk/app-release.apk
+        path: |
+          $PROJECT/build/app/outputs/flutter-apk/app-release.apk
