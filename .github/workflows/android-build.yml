@@ -1,4 +1,4 @@
-name: Build Android APK ZIP AUTO
+name: Build Android APK ZIP AUTO V5.9
 
 on:
   workflow_dispatch:
@@ -8,49 +8,50 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
 
-      - name: Find ZIP
-        run: |
-          ZIP=$(find . -name "*.zip" | head -1)
-          echo ZIP=$ZIP
-          test -n "$ZIP"
+    - name: Checkout
+      uses: actions/checkout@v4
 
-      - name: Extract Project
-        run: |
-          mkdir source
-          unzip -o $(find . -name "*.zip" | head -1) -d source
-          find source -maxdepth 3 -name pubspec.yaml
+    - name: Find ZIP
+      run: |
+        ZIP=$(find . -name "*.zip" | head -1)
+        echo "ZIP=$ZIP"
 
-      - name: Find Flutter Root
-        run: |
-          ROOT=$(find source -name pubspec.yaml | head -1 | xargs dirname)
-          echo ROOT=$ROOT >> $GITHUB_ENV
+    - name: Extract ZIP
+      run: |
+        mkdir project
+        unzip -o *.zip -d project
+        find project -name pubspec.yaml
 
-      - name: Setup Java
-        uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: 17
+    - name: Find Flutter Project
+      id: flutter
+      run: |
+        ROOT=$(find project -name pubspec.yaml | head -1 | xargs dirname)
+        echo "ROOT=$ROOT" >> $GITHUB_ENV
 
-      - name: Setup Flutter
-        uses: subosito/flutter-action@v2
-        with:
-          flutter-version: '3.24.0'
+    - name: Setup Java
+      uses: actions/setup-java@v4
+      with:
+        distribution: temurin
+        java-version: 17
 
-      - name: Get Packages
-        run: |
-          cd $ROOT
-          flutter pub get
+    - name: Setup Flutter
+      uses: subosito/flutter-action@v2
+      with:
+        flutter-version: '3.24.0'
 
-      - name: Build APK
-        run: |
-          cd $ROOT
-          flutter build apk --release
+    - name: Get Packages
+      run: |
+        cd $ROOT
+        flutter pub get
 
-      - name: Upload APK
-        uses: actions/upload-artifact@v4
-        with:
-          name: OKN_DSP_V5.8_APK
-          path: ${{ env.ROOT }}/build/app/outputs/flutter-apk/*.apk
+    - name: Build APK
+      run: |
+        cd $ROOT
+        flutter build apk --release
+
+    - name: Upload APK
+      uses: actions/upload-artifact@v4
+      with:
+        name: OKN_DSP_V5.9_APK
+        path: ${{ env.ROOT }}/build/app/outputs/flutter-apk/*.apk
