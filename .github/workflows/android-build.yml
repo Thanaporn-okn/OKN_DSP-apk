@@ -5,35 +5,128 @@ on:
 
 jobs:
   build:
+    name: Build Android APK
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout source
+
+      # 1. Download source
+      - name: Checkout Source
         uses: actions/checkout@v4
 
+
+      # 2. Setup Java
       - name: Setup Java 17
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: '17'
+          java-version: 17
 
-      - name: Show files
+
+      # 3. Check files
+      - name: Show Repository Files
         run: |
+          echo "===== FILE LIST ====="
           ls -la
+          find . -maxdepth 2 -type f
 
-      - name: Extract Android Project
+
+      # 4. Find ZIP
+      - name: Find ZIP Project
         run: |
-          unzip -o OKN_DSP_AUTO_BUILD_V3.zip -d build_source
-          ls -la build_source
-          ls -la build_source/OKN_DSP_PROJECT
+          ZIP=$(find . -name "*.zip" | head -n 1)
 
-      - name: Build APK
+          if [ -z "$ZIP" ]; then
+            echo "No ZIP project found"
+            exit 1
+          fi
+
+          echo "ZIP=$ZIP" >> $GITHUB_ENV
+
+
+      # 5. Extract project
+      - name: Extract Project
         run: |
-          cd build_source/OKN_DSP_PROJECT
-          gradle assembleDebug
+          mkdir build_project
 
+          unzip -o "$ZIP" -d build_project
+
+          echo "===== Extract Result ====="
+          find build_project -maxdepth 3 -type f
+
+
+      # 6. Locate Android project
+      - name: Locate Android Project
+        run: |
+
+          PROJECT=$(find build_project \
+          -name "settings.gradle" \
+          -o -name "settings.gradle.kts" \
+          | head -n 1)
+
+          if [ -z "$PROJECT" ]; then
+            echo "Android project not found"
+            exit 1
+          fi
+
+          DIR=$(dirname "$PROJECT")
+
+          echo "PROJECT_DIR=$DIR" >> $GITHUB_ENV
+
+          echo "Android Project:"
+          echo $DIR
+
+
+      # 7. Setup Gradle
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+
+      # 8. Build APK
+      - name: Build Debug APK
+        run: |
+
+          cd "$PROJECT_DIR"
+
+          echo "Building in:"
+          pwd
+
+          if [ -f "./gradlew" ]; then
+
+            chmod +x gradlew
+
+            ./gradlew clean assembleDebug
+
+          else
+
+            gradle clean assembleDebug
+
+          fi
+
+
+      # 9. Find APK
+      - name: Locate APK
+        run: |
+
+          APK=$(find "$PROJECT_DIR" \
+          -name "*.apk" \
+          | head -n 1)
+
+          if [ -z "$APK" ]; then
+            echo "APK not found"
+            exit 1
+          fi
+
+
+          echo "APK=$APK" >> $GITHUB_ENV
+
+
+      # 10. Upload APK
       - name: Upload APK
         uses: actions/upload-artifact@v4
+
         with:
+
           name: OKN_DSP_APK
-          path: build_source/OKN_DSP_PROJECT/app/build/outputs/apk/debug/*.apk
+
+          path: ${{ env.APK }}
