@@ -21,11 +21,18 @@ jobs:
         echo "ZIP=$ZIP"
         unzip -o "$ZIP" -d extracted
 
-    - name: Find Flutter Project
-      run: |
-        PROJECT=$(find extracted -name pubspec.yaml | head -1 | xargs dirname)
-        echo "PROJECT=$PROJECT" >> $GITHUB_ENV
-        echo $PROJECT
+    - - name: Find Flutter Project
+  run: |
+    PROJECT=$(find extracted -name pubspec.yaml | while read f; do
+      DIR=$(dirname "$f")
+      if find "$DIR/android" -name "MainActivity.kt" | grep -q .; then
+        echo "$DIR"
+        break
+      fi
+    done)
+
+    echo "PROJECT=$PROJECT" >> $GITHUB_ENV
+    echo $PROJECT
 
     - uses: subosito/flutter-action@v2
       with:
