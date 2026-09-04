@@ -5,35 +5,48 @@ on:
 
 jobs:
   build:
+
     runs-on: ubuntu-latest
 
     steps:
 
-      - name: Checkout
+      - name: Checkout source
         uses: actions/checkout@v4
 
-      - name: Setup Java
+
+      - name: Setup Java 17
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
 
-      - name: List files
+
+      - name: Show files
         run: |
           ls -la
 
-      - name: Extract Project
-        run: |
-          unzip -o OKN_DSP_GITHUB_BUILD.zip -d project
 
-      - name: Build APK
+      - name: Extract Android Project
         run: |
-          cd project/OKN_DSP_GITHUB_BUILD
+          unzip -o OKN_DSP_GITHUB_BUILD.zip -d build_source
+          find build_source -maxdepth 3 -type f | head -50
+
+
+      - name: Locate Gradle Project
+        run: |
+          PROJECT=$(find build_source -name "gradlew" | head -1 | xargs dirname)
+          echo "PROJECT_PATH=$PROJECT" >> $GITHUB_ENV
+
+
+      - name: Build Debug APK
+        run: |
+          cd $PROJECT_PATH
           chmod +x gradlew
           ./gradlew assembleDebug
+
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: OKN_DSP_APK
-          path: project/OKN_DSP_GITHUB_BUILD/app/build/outputs/apk/debug/*.apk
+          path: ${{ env.PROJECT_PATH }}/app/build/outputs/apk/debug/*.apk
