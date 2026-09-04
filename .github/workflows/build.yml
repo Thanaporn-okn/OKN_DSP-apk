@@ -1,10 +1,11 @@
-name: OKN_DSP Auto Build APK V4
+name: OKN_DSP Auto Build APK V5
 
 on:
   push:
   workflow_dispatch:
 
 jobs:
+
   build:
 
     runs-on: ubuntu-latest
@@ -18,32 +19,21 @@ jobs:
     - name: Extract ZIP
       run: |
         unzip -o OKN_DSP_V3_CLEAN_BUILD.zip -d extracted
-        ls -R extracted | head -100
+        echo "ZIP extracted"
 
 
-    - name: Find Correct Flutter Project
+    - name: Find Flutter Project
       run: |
-        PROJECT=$(find extracted -path "*OKN_DSP_PROJECT/pubspec.yaml" | head -1 | xargs dirname)
+        PROJECT=$(find extracted -name pubspec.yaml | head -1 | xargs dirname)
 
         if [ -z "$PROJECT" ]; then
-          echo "Flutter project not found"
+          echo "No Flutter project found"
           exit 1
         fi
 
         echo "PROJECT=$PROJECT" >> $GITHUB_ENV
-        echo "FOUND PROJECT:"
+        echo "Project:"
         echo $PROJECT
-
-
-    - name: Check Android Embedding
-      run: |
-        cd $PROJECT
-
-        echo "Checking MainActivity"
-
-        find android -name MainActivity.kt -o -name MainActivity.java
-
-        grep -R "FlutterActivity" android || true
 
 
     - name: Setup Flutter
@@ -53,10 +43,31 @@ jobs:
         channel: stable
 
 
-    - name: Flutter Pub Get
+    - name: Repair Android Project
+      run: |
+        cd $PROJECT
+
+        echo "Before repair"
+        ls
+
+        rm -rf android
+
+        flutter create .
+
+        echo "Android regenerated"
+
+
+    - name: Get Packages
       run: |
         cd $PROJECT
         flutter pub get
+
+
+    - name: Check MainActivity
+      run: |
+        cd $PROJECT
+        find android -name MainActivity.kt -o -name MainActivity.java
+        grep -R "FlutterActivity" android || true
 
 
     - name: Build APK
@@ -68,6 +79,6 @@ jobs:
     - name: Upload APK
       uses: actions/upload-artifact@v4
       with:
-        name: OKN_DSP_APK
+        name: OKN_DSP_APK_V5
         path: |
           $PROJECT/build/app/outputs/flutter-apk/app-release.apk
