@@ -1,0 +1,51 @@
+name: Build OKN DSP V6 Notify Monitor
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "OKN_DSP_V6_NOTIFY_MONITOR.zip"
+      - ".github/workflows/build-okn-dsp-v6-notify-monitor.yml"
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+      - run: |
+          test -f OKN_DSP_V6_NOTIFY_MONITOR.zip
+          rm -rf payload
+          mkdir payload
+          unzip -q OKN_DSP_V6_NOTIFY_MONITOR.zip -d payload
+      - run: flutter create --platforms=android --org com.okn --project-name okn_dsp temp_app
+      - run: |
+          cp payload/pubspec.yaml temp_app/pubspec.yaml
+          rm -rf temp_app/lib temp_app/test
+          cp -r payload/lib temp_app/lib
+          mkdir -p temp_app/android/app/src/main/kotlin/com/okn/okn_dsp
+          cp payload/android_patch/MainActivity.kt temp_app/android/app/src/main/kotlin/com/okn/okn_dsp/MainActivity.kt
+      - run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path("temp_app/android/app/src/main/AndroidManifest.xml")
+          s=p.read_text()
+          perms='''    <uses-permission android:name="android.permission.BLUETOOTH_SCAN" android:usesPermissionFlags="neverForLocation"/>
+              <uses-permission android:name="android.permission.BLUETOOTH_CONNECT"/>
+              <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" android:maxSdkVersion="30"/>
+          '''
+          if "android.permission.BLUETOOTH_SCAN" not in s:
+              s=s.replace("<application", perms+"\n    <application", 1)
+          p.write_text(s)
+          PY
+      - working-directory: temp_app
+        run: flutter pub get
+      - working-directory: temp_app
+        run: flutter analyze
+      - working-directory: temp_app
+        run: flutter build apk --release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: OKN_DSP_V6_NOTIFY_MONITOR_APK
+          path: temp_app/build/app/outputs/flutter-apk/app-release.apk
