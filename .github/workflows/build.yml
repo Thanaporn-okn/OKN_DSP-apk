@@ -1,11 +1,10 @@
-name: Build Android APK V40.9
+name: Build Android APK V41
 
 on:
   workflow_dispatch:
 
 jobs:
   build:
-
     runs-on: ubuntu-latest
 
     steps:
@@ -17,68 +16,38 @@ jobs:
     - name: Setup Flutter
       uses: subosito/flutter-action@v2
       with:
-        flutter-version: '3.24.5'
+        flutter-version: "3.24.5"
         channel: stable
         cache: true
 
 
-    - name: Locate Flutter Project
-      shell: bash
+    - name: Check files
       run: |
-        echo "Searching Flutter project..."
-
-        PUBSPEC=$(find "$GITHUB_WORKSPACE" -name pubspec.yaml | head -n 1)
-
-        if [ -z "$PUBSPEC" ]; then
-          echo "ERROR: pubspec.yaml not found"
-          exit 1
-        fi
-
-        PROJECT_DIR=$(dirname "$PUBSPEC")
-
-        echo "Found:"
-        echo "$PROJECT_DIR"
-
-        echo "PROJECT_DIR=$PROJECT_DIR" >> $GITHUB_ENV
+        ls
+        echo "----"
+        ls lib
+        echo "----"
+        cat pubspec.yaml
 
 
     - name: Flutter Doctor
-      run: |
-        flutter doctor -v
+      run: flutter doctor -v
 
 
     - name: Flutter Pub Get
-      shell: bash
-      run: |
-        cd "$PROJECT_DIR"
-        echo "Current:"
-        pwd
-        flutter pub get
+      run: flutter pub get
 
 
     - name: Flutter Clean
-      shell: bash
-      run: |
-        cd "$PROJECT_DIR"
-        flutter clean
+      run: flutter clean
 
 
     - name: Build APK
-      shell: bash
-      run: |
-        cd "$PROJECT_DIR"
-        flutter build apk --release
-
-
-    - name: Find APK
-      shell: bash
-      run: |
-        find "$PROJECT_DIR" -name "*.apk"
+      run: flutter build apk --release
 
 
     - name: Upload APK
       uses: actions/upload-artifact@v4
       with:
         name: OKN_DSP_BP1048P4_APK
-        path: |
-          **/app-release.apk
+        path: build/app/outputs/flutter-apk/app-release.apk
