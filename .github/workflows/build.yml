@@ -1,4 +1,4 @@
-name: Build Android APK V42
+name: Build Android APK V43
 
 on:
   workflow_dispatch:
@@ -10,10 +10,12 @@ jobs:
 
     steps:
 
+    # ดึงโค้ดจาก GitHub
     - name: Checkout
       uses: actions/checkout@v4
 
 
+    # ติดตั้ง Flutter
     - name: Setup Flutter
       uses: subosito/flutter-action@v2
       with:
@@ -22,30 +24,61 @@ jobs:
         cache: true
 
 
-    - name: Check Project
+    # ตรวจสอบไฟล์
+    - name: Check Files
       run: |
+        echo "===== ROOT ====="
         ls -la
-        echo "check pubspec"
+        echo "===== PUBSPEC ====="
+        cat pubspec.yaml
+        echo "===== LIB ====="
+        ls -la lib
+
+
+    # แก้ชื่อ package ให้ถูกต้อง
+    - name: Fix Package Name
+      run: |
+        sed -i 's/^name:.*/name: okn_dsp_apk/' pubspec.yaml
         cat pubspec.yaml
 
 
+    # สร้าง Android Folder
     - name: Create Android Project
       run: |
         if [ ! -d android ]; then
-          flutter create .
+          flutter create \
+          --project-name okn_dsp_apk \
+          --platforms android .
         fi
 
 
+    # ตรวจ Flutter
+    - name: Flutter Doctor
+      run: |
+        flutter doctor -v
+
+
+    # โหลด Library
     - name: Flutter Pub Get
-      run: flutter pub get
+      run: |
+        flutter pub get
 
 
+    # ล้างไฟล์เก่า
+    - name: Flutter Clean
+      run: |
+        flutter clean
+
+
+    # Build APK
     - name: Build APK
-      run: flutter build apk --release
+      run: |
+        flutter build apk --release
 
 
+    # เก็บไฟล์ APK
     - name: Upload APK
       uses: actions/upload-artifact@v4
       with:
-        name: OKN_DSP_BP1048P4_APK
+        name: OKN_DSP_BP1048P4_APK_V43
         path: build/app/outputs/flutter-apk/app-release.apk
