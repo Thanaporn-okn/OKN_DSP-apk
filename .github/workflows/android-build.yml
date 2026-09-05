@@ -9,75 +9,55 @@ jobs:
 
     steps:
 
-      # ดึงไฟล์จาก GitHub
-      - name: Checkout
-        uses: actions/checkout@v4
+    - name: Checkout
+      uses: actions/checkout@v4
 
 
-      # ติดตั้ง Flutter
-      - name: Setup Flutter
-        uses: subosito/flutter-action@v2
-        with:
-          flutter-version: '3.24.5'
-          channel: stable
-          cache: true
+    - name: Setup Flutter
+      uses: subosito/flutter-action@v2
+      with:
+        flutter-version: '3.24.5'
+        channel: stable
+        cache: true
 
 
-      # ตรวจสอบ Flutter
-      - name: Flutter Doctor
-        run: |
-          flutter doctor -v
+    - name: Flutter Doctor
+      run: flutter doctor -v
 
 
-      # ค้นหาโปรเจกต์ Flutter
-      - name: Find Flutter Project
-        run: |
-          echo "Searching pubspec.yaml..."
-          find . -name pubspec.yaml
+    - name: Search Flutter Project
+      run: |
+        echo "Searching project..."
+        find . -name pubspec.yaml
 
 
-      # ดึง Library
-      - name: Flutter Pub Get
-        run: |
-          PROJECT=$(dirname "$(find . -name pubspec.yaml | head -1)")
-          echo "Project path = $PROJECT"
-          cd "$PROJECT"
-          flutter pub get
+    - name: Set Project Path
+      run: |
+        PROJECT=$(dirname "$(find . -name pubspec.yaml | head -1)")
+        echo "PROJECT=$PROJECT" >> $GITHUB_ENV
+        echo "Found: $PROJECT"
 
 
-      # แก้ Android embedding ถ้ามีปัญหา
-      - name: Fix Android Embedding
-        run: |
-          PROJECT=$(dirname "$(find . -name pubspec.yaml | head -1)")
-          cd "$PROJECT"
-
-          if grep -r "io.flutter.app.FlutterActivity" android; then
-            echo "Old Android embedding found"
-          else
-            echo "Android embedding OK"
-          fi
+    - name: Flutter Pub Get
+      run: |
+        cd "$PROJECT"
+        flutter pub get
 
 
-      # Clean
-      - name: Flutter Clean
-        run: |
-          PROJECT=$(dirname "$(find . -name pubspec.yaml | head -1)")
-          cd "$PROJECT"
-          flutter clean
+    - name: Flutter Clean
+      run: |
+        cd "$PROJECT"
+        flutter clean
 
 
-      # สร้าง APK
-      - name: Build APK
-        run: |
-          PROJECT=$(dirname "$(find . -name pubspec.yaml | head -1)")
-          echo "Building from $PROJECT"
-          cd "$PROJECT"
-          flutter build apk --release
+    - name: Build APK
+      run: |
+        cd "$PROJECT"
+        flutter build apk --release
 
 
-      # ส่งไฟล์ APK กลับมา
-      - name: Upload APK
-        uses: actions/upload-artifact@v4
-        with:
-          name: OKN_DSP_BP1048P4_V40_8_APK
-          path: "**/app-release.apk"
+    - name: Upload APK
+      uses: actions/upload-artifact@v4
+      with:
+        name: OKN_DSP_BP1048P4_V40_8_APK
+        path: "**/app-release.apk"
