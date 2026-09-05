@@ -1,0 +1,71 @@
+name: Build Android APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ["main"]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.9"
+
+      - name: Select highest DSP ZIP version
+        shell: bash
+        run: |
+          set -e
+          rm -rf android_project
+          mkdir android_project
+
+          ZIP_FILE="$(find . -maxdepth 2 -type f -name 'OKN_DSP_ANDROID_V*.zip' -printf '%f
+' | sort -V | tail -1)"
+
+          if [ -z "$ZIP_FILE" ]; then
+            echo "ERROR: No OKN_DSP_ANDROID_V*.zip found."
+            exit 1
+          fi
+
+          VERSION="$(printf '%s' "$ZIP_FILE" | sed -n 's/^OKN_DSP_ANDROID_V\([0-9][0-9]*\)\.zip$/V/p')"
+          echo "Using: $ZIP_FILE"
+          echo "APP_VERSION=$VERSION" >> "$GITHUB_ENV"
+
+          unzip -q "$ZIP_FILE" -d android_project
+
+          if [ ! -f android_project/settings.gradle.kts ] || [ ! -d android_project/app ]; then
+            echo "ERROR: ZIP does not contain an Android Gradle project at its root."
+            find android_project -maxdepth 3 -type f | sort
+            exit 1
+          fi
+
+      - name: Verify selected version
+        shell: bash
+        run: |
+          echo "Selected ZIP version: $APP_VERSION"
+          grep -R "V[0-9][0-9]* PACKET" -n android_project/app/src/main/java || true
+          grep -R "versionCode\|versionName" -n android_project/app/build.gradle.kts || true
+
+      - name: Build debug APK
+        run: gradle -p android_project :app:assembleDebug --no-daemon
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: OKN-DSP-${{ env.APP_VERSION }}-debug-apk
+          path: android_project/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
