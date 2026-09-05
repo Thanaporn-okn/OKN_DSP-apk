@@ -3,11 +3,13 @@ name: Build Android APK
 on:
   workflow_dispatch:
   push:
-    branches: ["main"]
+    branches:
+      - main
 
 jobs:
   build:
     runs-on: ubuntu-latest
+
     permissions:
       contents: read
 
@@ -30,25 +32,46 @@ jobs:
         shell: bash
         run: |
           set -e
-          rm -rf android_project
-          mkdir android_project
 
-          ZIP_FILE="$(find . -maxdepth 2 -type f -name 'OKN_DSP_ANDROID_V*.zip' -printf '%f
-' | sort -V | tail -1)"
+          rm -rf android_project
+          mkdir -p android_project
+
+          ZIP_FILE="$(
+            find . -maxdepth 2 -type f \
+              -name 'OKN_DSP_ANDROID_V*.zip' \
+              -printf '%f\n' |
+            sort -V |
+            tail -1
+          )"
 
           if [ -z "$ZIP_FILE" ]; then
             echo "ERROR: No OKN_DSP_ANDROID_V*.zip found."
             exit 1
           fi
 
-          VERSION="$(printf '%s' "$ZIP_FILE" | sed -n 's/^OKN_DSP_ANDROID_V\([0-9][0-9]*\)\.zip$/V/p')"
-          echo "Using: $ZIP_FILE"
+          # Extract version safely without sed capture groups
+          VERSION="${ZIP_FILE#OKN_DSP_ANDROID_}"
+          VERSION="${VERSION%.zip}"
+
+          echo "======================================"
+          echo "Selected ZIP : $ZIP_FILE"
+          echo "App Version  : $VERSION"
+          echo "======================================"
+
           echo "APP_VERSION=$VERSION" >> "$GITHUB_ENV"
 
           unzip -q "$ZIP_FILE" -d android_project
 
-          if [ ! -f android_project/settings.gradle.kts ] || [ ! -d android_project/app ]; then
-            echo "ERROR: ZIP does not contain an Android Gradle project at its root."
+          if [ ! -f android_project/settings.gradle.kts ]; then
+            echo "ERROR: settings.gradle.kts not found at project root."
+            echo "ZIP structure:"
+            find android_project -maxdepth 3 -type f | sort
+            exit 1
+          fi
+
+          if [ ! -d android_project/app ]; then
+            echo "ERROR: app directory not found at project root."
+            echo "ZIP structure:"
             find android_project -maxdepth 3 -type f | sort
             exit 1
           fi
@@ -56,12 +79,44 @@ jobs:
       - name: Verify selected version
         shell: bash
         run: |
-          echo "Selected ZIP version: $APP_VERSION"
-          grep -R "V[0-9][0-9]* PACKET" -n android_project/app/src/main/java || true
-          grep -R "versionCode\|versionName" -n android_project/app/build.gradle.kts || true
+          set -e
+
+          echo "======================================"
+          echo "BUILDING VERSION: $APP_VERSION"
+          echo "======================================"
+
+          echo "--- Android version ---"
+          grep -R "versionCode\|versionName" \
+            -n android_project/app/build.gradle.kts || true
+
+          echo "--- Packet Logger version ---"
+          grep -R "V[0-9][0-9]* PACKET LOGGER\|V[0-9][0-9]* PACKET" \
+            -n android_project/app/src/main/java || true
 
       - name: Build debug APK
-        run: gradle -p android_project :app:assembleDebug --no-daemon
+        shell: bash
+        run: |
+          set -e
+
+          gradle \
+            -p android_project \
+            :app:assembleDebug \
+            --no-daemon
+
+      - name: Check APK
+        shell: bash
+        run: |
+          set -e
+
+          APK="android_project/app/build/outputs/apk/debug/app-debug.apk"
+
+          if [ ! -f "$APK" ]; then
+            echo "ERROR: APK was not created."
+            exit 1
+          fi
+
+          echo "APK created successfully:"
+          ls -lh "$APK"
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
