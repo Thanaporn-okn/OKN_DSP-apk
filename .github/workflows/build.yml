@@ -1,4 +1,4 @@
-name: Build Android APK ZIP AUTO FIX
+name: Build Android APK V40.9
 
 on:
   workflow_dispatch:
@@ -12,54 +12,47 @@ jobs:
     - name: Checkout
       uses: actions/checkout@v4
 
-    - name: Find ZIP
-      run: |
-        unzip -o *.zip -d project
-
-    - name: Find Flutter Project
-      run: |
-        PROJECT=$(find project -name pubspec.yaml -exec dirname {} \; | head -1)
-        echo "PROJECT=$PROJECT" >> $GITHUB_ENV
-        echo $PROJECT
-
-    - name: Setup Java
-      uses: actions/setup-java@v4
-      with:
-        distribution: temurin
-        java-version: 17
 
     - name: Setup Flutter
       uses: subosito/flutter-action@v2
       with:
-        flutter-version: '3.24.0'
+        flutter-version: "3.24.5"
+        channel: stable
+        cache: true
 
-    - name: Upgrade Android Embedding
+
+    - name: Find Flutter Project
       run: |
-        cd $PROJECT
+        echo "Finding Flutter project..."
+        PROJECT=$(find . -name pubspec.yaml | head -1 | xargs dirname)
+        echo "PROJECT=$PROJECT" >> $GITHUB_ENV
 
-        mkdir -p android/app/src/main/kotlin
 
-        sed -i 's/io.flutter.app.FlutterActivity/io.flutter.embedding.android.FlutterActivity/g' android/app/src/main/kotlin/*/*.kt || true
+    - name: Flutter Doctor
+      run: |
+        flutter doctor -v
 
-        sed -i '/import io.flutter.app.FlutterActivity/d' android/app/src/main/kotlin/*/*.kt || true
 
-        sed -i 's/FlutterActivity/FlutterActivity/g' android/app/src/main/kotlin/*/*.kt || true
+    - name: Flutter Pub Get
+      run: |
+        cd "$PROJECT"
+        flutter pub get
 
+
+    - name: Flutter Clean
+      run: |
+        cd "$PROJECT"
         flutter clean
 
-    - name: Pub Get
-      run: |
-        cd $PROJECT
-        flutter pub get
 
     - name: Build APK
       run: |
-        cd $PROJECT
+        cd "$PROJECT"
         flutter build apk --release
+
 
     - name: Upload APK
       uses: actions/upload-artifact@v4
       with:
-        name: OKN_DSP_APK
-        path: |
-          $PROJECT/build/app/outputs/flutter-apk/app-release.apk
+        name: OKN_DSP_BP1048P4_V40_9_APK
+        path: ${{ env.PROJECT }}/build/app/outputs/flutter-apk/app-release.apk
