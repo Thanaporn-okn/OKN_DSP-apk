@@ -1,56 +1,129 @@
-name: Build Android APK V48
+name: Build OKN DSP APK
 
 on:
   workflow_dispatch:
 
-
 jobs:
-
   build:
-
     runs-on: ubuntu-latest
-
 
     steps:
 
-    - name: Checkout
-      uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: "3.24.5"
+          channel: stable
+          cache: false
 
-    - name: Setup Flutter
-      uses: subosito/flutter-action@v2
-      with:
-        flutter-version: "3.24.5"
-        channel: stable
+      - name: Extract OKN DSP project
+        run: |
+          echo "======================================"
+          echo " Extracting OKN_DSP_next_step.zip"
+          echo "======================================"
 
+          if [ ! -f "OKN_DSP_next_step.zip" ]; then
+            echo "ERROR: OKN_DSP_next_step.zip not found"
+            exit 1
+          fi
 
-    - name: Create Project
-      run: |
-        flutter create --platforms android temp_app
-        cp -r lib temp_app/
-        cp pubspec.yaml temp_app/
+          unzip -o OKN_DSP_next_step.zip
 
+          echo ""
+          echo "Project files:"
+          find . -maxdepth 3 -type f | sort
 
-    - name: Fix Android SDK
-      run: |
-        cd temp_app
-        sed -i 's/compileSdk = flutter.compileSdkVersion/compileSdk = 35/' android/app/build.gradle
+      - name: Check required files
+        run: |
+          echo "Checking project..."
 
+          test -f pubspec.yaml
+          test -f lib/main.dart
+          test -f android_override/app/src/main/kotlin/com/okn/dsp/MainActivity.kt
+          test -f android_override/app/src/main/AndroidManifest.xml
 
-    - name: Packages
-      run: |
-        cd temp_app
-        flutter pub get
+          echo "All required files found."
 
+      - name: Create clean Flutter Android project
+        run: |
+          rm -rf temp_app
 
-    - name: Build APK
-      run: |
-        cd temp_app
-        flutter build apk --release
+          flutter create \
+            --platforms android \
+            --project-name okn_dsp_apk \
+            temp_app
 
+      - name: Copy OKN DSP application
+        run: |
+          rm -rf temp_app/lib
 
-    - name: Upload APK
-      uses: actions/upload-artifact@v4
-      with:
-        name: OKN_DSP_APK
-        path: temp_app/build/app/outputs/flutter-apk/app-release.apk
+          cp -r lib temp_app/lib
+          cp pubspec.yaml temp_app/pubspec.yaml
+
+      - name: Install native BLE controller
+        run: |
+          mkdir -p temp_app/android/app/src/main/kotlin/com/okn/dsp
+
+          cp \
+            android_override/app/src/main/kotlin/com/okn/dsp/MainActivity.kt \
+            temp_app/android/app/src/main/kotlin/com/okn/dsp/MainActivity.kt
+
+          cp \
+            android_override/app/src/main/AndroidManifest.xml \
+            temp_app/android/app/src/main/AndroidManifest.xml
+
+      - name: Configure Android
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          p = Path("temp_app/android/app/build.gradle")
+          s = p.read_text()
+
+          s = s.replace(
+              'namespace = "com.example.okn_dsp_apk"',
+              'namespace = "com.okn.dsp"'
+          )
+
+          s = s.replace(
+              'applicationId = "com.example.okn_dsp_apk"',
+              'applicationId = "com.okn.dsp"'
+          )
+
+          p.write_text(s)
+
+          print("Android configuration completed.")
+          PY
+
+      - name: Flutter Pub Get
+        working-directory: temp_app
+        run: |
+          flutter pub get
+
+      - name: Flutter Doctor
+        working-directory: temp_app
+        run: |
+          flutter doctor -v
+
+      - name: Build APK
+        working-directory: temp_app
+        run: |
+          flutter clean
+          flutter pub get
+          flutter build apk --release
+
+      - name: Find APK
+        run: |
+          echo "Searching APK..."
+
+          find temp_app/build -type f -name "*.apk" -print
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: OKN_DSP_APK
+          path: temp_app/build/app/outputs/flutter-apk/app-release.apk
+          if-no-files-found: error
