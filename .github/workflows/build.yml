@@ -1,12 +1,15 @@
-name: Build Android APK V44
+name: Build Android APK V45
 
 on:
   workflow_dispatch:
 
+
 jobs:
+
   build:
 
     runs-on: ubuntu-latest
+
 
     steps:
 
@@ -22,13 +25,15 @@ jobs:
         cache: true
 
 
-    - name: Fix pubspec name
+    - name: Check Project
       run: |
-        sed -i 's/^name:.*/name: okn_dsp_apk/' pubspec.yaml
+        echo "FILES"
+        ls -la
+        echo "PUBSPEC"
         cat pubspec.yaml
 
 
-    - name: Create Flutter Android
+    - name: Create Android
       run: |
         if [ ! -d android ]; then
           flutter create \
@@ -37,34 +42,32 @@ jobs:
         fi
 
 
-    - name: Fix Android SDK
+    - name: Fix Android Config
       run: |
-        sed -i 's/compileSdkVersion flutter.compileSdkVersion/compileSdkVersion 35/g' android/app/build.gradle || true
-        sed -i 's/targetSdkVersion flutter.targetSdkVersion/targetSdkVersion 35/g' android/app/build.gradle || true
-        sed -i 's/minSdkVersion flutter.minSdkVersion/minSdkVersion 21/g' android/app/build.gradle || true
+
+        sed -i \
+        's/compileSdkVersion flutter.compileSdkVersion/compileSdkVersion 35/g' \
+        android/app/build.gradle || true
 
 
-    - name: Fix Gradle
-      run: |
-        cd android
-        chmod +x gradlew
-        ./gradlew wrapper --gradle-version 8.7 || true
-        cd ..
+        sed -i \
+        's/targetSdkVersion flutter.targetSdkVersion/targetSdkVersion 35/g' \
+        android/app/build.gradle || true
 
 
-    - name: Flutter Doctor
-      run: |
-        flutter doctor -v
-
-
-    - name: Flutter Pub Get
-      run: |
-        flutter pub get
+        sed -i \
+        's/minSdkVersion flutter.minSdkVersion/minSdkVersion 21/g' \
+        android/app/build.gradle || true
 
 
     - name: Flutter Clean
       run: |
         flutter clean
+
+
+    - name: Flutter Pub Get
+      run: |
+        flutter pub get
 
 
     - name: Build APK
@@ -75,5 +78,8 @@ jobs:
     - name: Upload APK
       uses: actions/upload-artifact@v4
       with:
-        name: OKN_DSP_BP1048P4_APK_V44
-        path: build/app/outputs/flutter-apk/app-release.apk
+
+        name: OKN_DSP_BP1048P4_APK
+
+        path: |
+          build/app/outputs/flutter-apk/app-release.apk
