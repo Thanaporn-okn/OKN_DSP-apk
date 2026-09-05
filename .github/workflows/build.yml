@@ -1,4 +1,4 @@
-name: Build Android APK V43
+name: Build Android APK V44
 
 on:
   workflow_dispatch:
@@ -10,12 +10,10 @@ jobs:
 
     steps:
 
-    # ดึงโค้ดจาก GitHub
     - name: Checkout
       uses: actions/checkout@v4
 
 
-    # ติดตั้ง Flutter
     - name: Setup Flutter
       uses: subosito/flutter-action@v2
       with:
@@ -24,61 +22,58 @@ jobs:
         cache: true
 
 
-    # ตรวจสอบไฟล์
-    - name: Check Files
-      run: |
-        echo "===== ROOT ====="
-        ls -la
-        echo "===== PUBSPEC ====="
-        cat pubspec.yaml
-        echo "===== LIB ====="
-        ls -la lib
-
-
-    # แก้ชื่อ package ให้ถูกต้อง
-    - name: Fix Package Name
+    - name: Fix pubspec name
       run: |
         sed -i 's/^name:.*/name: okn_dsp_apk/' pubspec.yaml
         cat pubspec.yaml
 
 
-    # สร้าง Android Folder
-    - name: Create Android Project
+    - name: Create Flutter Android
       run: |
         if [ ! -d android ]; then
           flutter create \
-          --project-name okn_dsp_apk \
-          --platforms android .
+          --platforms android \
+          --project-name okn_dsp_apk .
         fi
 
 
-    # ตรวจ Flutter
+    - name: Fix Android SDK
+      run: |
+        sed -i 's/compileSdkVersion flutter.compileSdkVersion/compileSdkVersion 35/g' android/app/build.gradle || true
+        sed -i 's/targetSdkVersion flutter.targetSdkVersion/targetSdkVersion 35/g' android/app/build.gradle || true
+        sed -i 's/minSdkVersion flutter.minSdkVersion/minSdkVersion 21/g' android/app/build.gradle || true
+
+
+    - name: Fix Gradle
+      run: |
+        cd android
+        chmod +x gradlew
+        ./gradlew wrapper --gradle-version 8.7 || true
+        cd ..
+
+
     - name: Flutter Doctor
       run: |
         flutter doctor -v
 
 
-    # โหลด Library
     - name: Flutter Pub Get
       run: |
         flutter pub get
 
 
-    # ล้างไฟล์เก่า
     - name: Flutter Clean
       run: |
         flutter clean
 
 
-    # Build APK
     - name: Build APK
       run: |
         flutter build apk --release
 
 
-    # เก็บไฟล์ APK
     - name: Upload APK
       uses: actions/upload-artifact@v4
       with:
-        name: OKN_DSP_BP1048P4_APK_V43
+        name: OKN_DSP_BP1048P4_APK_V44
         path: build/app/outputs/flutter-apk/app-release.apk
