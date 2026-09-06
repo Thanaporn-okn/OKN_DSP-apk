@@ -1,0 +1,116 @@
+name: Build OKN DSP V50 7CH EQ Actuator Map Proof
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'OKN_DSP_ANDROID_V50_7CH_EQ_ACTUATOR_MAP_PROOF.zip'
+      - '.github/workflows/build-okn-dsp-v50.yml'
+
+jobs:
+  build-apk:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Restore and verify V50 source
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/okn_v50
+          mkdir -p /tmp/okn_v50
+          unzip -q OKN_DSP_ANDROID_V50_7CH_EQ_ACTUATOR_MAP_PROOF.zip -d /tmp/okn_v50
+
+          check_file() { test -f "$1" || { echo "ERROR missing $1"; exit 1; }; echo "OK file: $1"; }
+          check_text() { grep -Fq "$1" "$2" || { echo "ERROR missing marker '$1' in $2"; exit 1; }; echo "OK marker: $1"; }
+
+          EQ=/tmp/okn_v50/app/src/main/java/com/okn/dsp/EqProofActivity.kt
+          POLICY=/tmp/okn_v50/app/src/main/java/com/okn/dsp/protocol/SevenChannelEqMapPolicy.kt
+          GATE=/tmp/okn_v50/app/src/main/java/com/okn/dsp/protocol/WriteGate.kt
+          GRADLE=/tmp/okn_v50/app/build.gradle.kts
+
+          check_file "$EQ"
+          check_file "$POLICY"
+          check_file "$GATE"
+          check_file "$GRADLE"
+          check_file /tmp/okn_v50/README_V50.txt
+          check_file /tmp/okn_v50/evidence/OKN_DSP_V50_7CH_EQ_MAP_PLAN.txt
+          check_file /tmp/okn_v50/evidence/OKN_DSP_V50_7CH_EQ_MAP_PLAN.json
+          check_file /tmp/okn_v50/evidence/OKN_DSP_V49_FINAL_EQ_WRITE_RESTORE_SUCCESS_CAPTURE.txt
+
+          check_text 'versionCode = 50' "$GRADLE"
+          check_text '3.2.0-v50-7ch-eq-actuator-map-proof' "$GRADLE"
+          check_text 'sevenChannelEqMapProofEnabled: Boolean = true' "$GATE"
+          check_text 'finalEqWriteRestoreProofEnabled: Boolean = false' "$GATE"
+          check_text 'TARGET_BOOST_DB = -0.25f' "$POLICY"
+          check_text 'actuatorId = 5' "$POLICY"
+          check_text 'actuatorId = 6' "$POLICY"
+          check_text 'actuatorId = 14' "$POLICY"
+          check_text 'actuatorId = 15' "$POLICY"
+          check_text 'actuatorId = 16' "$POLICY"
+          check_text 'actuatorId = 17' "$POLICY"
+          check_text 'V50_EQ_TARGET_WRITE_PLAIN=' "$EQ"
+          check_text 'V50_TARGET_DESCRIPTOR_VERIFY' "$EQ"
+          check_text 'V50_EQ_RESTORE_WRITE_PLAIN=' "$EQ"
+          check_text 'V50_RESTORE_DESCRIPTOR_VERIFY' "$EQ"
+          check_text 'V50_CHANNEL_PROOF_COMPLETE' "$EQ"
+          check_text 'V50_ALL_7CH_ACTUATOR_MAP_COMPLETE' "$EQ"
+          check_text 'targetVerifyDelayMs = 3000L' "$EQ"
+          check_text 'preRestoreSettleMs = 3000L' "$EQ"
+          check_text 'restoreVerifyDelayMs = 3000L' "$EQ"
+          check_text 'V50_FAILSAFE_WINDOW_MS=180000' "$EQ"
+          check_text 'saveParams=false' "$EQ"
+
+          if grep -Fq 'UfeCodec.encodeWrite(7' "$EQ" "$POLICY"; then
+            echo 'ERROR: V50 contains SaveParams ID7 write'
+            exit 1
+          fi
+          echo 'OK: V50 is constrained to guarded CH2..CH7 probe writes and does not send SaveParams ID7'
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK packages
+        shell: bash
+        run: sdkmanager 'platforms;android-35' 'build-tools;35.0.0'
+
+      - name: Set up Gradle 8.9
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: Build debug APK
+        working-directory: /tmp/okn_v50
+        run: gradle :app:assembleDebug --no-daemon --stacktrace
+
+      - name: Verify and package artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          APK=/tmp/okn_v50/app/build/outputs/apk/debug/app-debug.apk
+          test -f "$APK"
+          mkdir -p artifact
+          cp "$APK" artifact/OKN_DSP_V50_7CH_EQ_ACTUATOR_MAP_PROOF-debug.apk
+          cp /tmp/okn_v50/README_V50.txt artifact/
+          cp /tmp/okn_v50/evidence/OKN_DSP_V50_7CH_EQ_MAP_PLAN.txt artifact/
+          cp /tmp/okn_v50/evidence/OKN_DSP_V50_7CH_EQ_MAP_PLAN.json artifact/
+          sha256sum artifact/OKN_DSP_V50_7CH_EQ_ACTUATOR_MAP_PROOF-debug.apk > artifact/OKN_DSP_V50_7CH_EQ_ACTUATOR_MAP_PROOF-debug.sha256
+          ls -lh artifact
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: OKN-DSP-V50-7CH-EQ-ACTUATOR-MAP-PROOF-debug-apk
+          path: artifact/
+          if-no-files-found: error
+          retention-days: 30
