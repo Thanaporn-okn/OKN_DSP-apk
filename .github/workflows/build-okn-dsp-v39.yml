@@ -1,0 +1,158 @@
+name: Build OKN DSP V39 Dart36 AOT RandKey Callsite HostEnvFix
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'OKN_DSP_ANDROID_V39_DART36_AOT_RANDKEY_CALLSITE_HOST_ENV_FIX.zip'
+      - '.github/workflows/build-okn-dsp-v39.yml'
+
+jobs:
+  build-apk:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - name: Restore V39 source
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/okn_v39 && mkdir -p /tmp/okn_v39
+          unzip -q OKN_DSP_ANDROID_V39_DART36_AOT_RANDKEY_CALLSITE_HOST_ENV_FIX.zip -d /tmp/okn_v39
+          test -f /tmp/okn_v39/app/src/main/java/com/okn/dsp/MainActivity.kt
+          test -f /tmp/okn_v39/tools/reference/golopine_250401.apk
+          grep -q '2.4.0-v39-dart36-aot-randkey-callsite-host-env-fix' /tmp/okn_v39/app/build.gradle.kts
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@v3
+      - run: sdkmanager 'platforms;android-35' 'build-tools;35.0.0'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+      - name: Build debug APK
+        working-directory: /tmp/okn_v39
+        run: gradle :app:assembleDebug --no-daemon --stacktrace
+      - name: Package APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p apk_artifact
+          cp /tmp/okn_v39/app/build/outputs/apk/debug/app-debug.apk apk_artifact/OKN_DSP_V39_DART36_AOT_RANDKEY_CALLSITE_HOST_ENV_FIX-debug.apk
+          sha256sum apk_artifact/OKN_DSP_V39_DART36_AOT_RANDKEY_CALLSITE_HOST_ENV_FIX-debug.apk > apk_artifact/OKN_DSP_V39_DART36_AOT_RANDKEY_CALLSITE_HOST_ENV_FIX-debug.sha256
+          cp /tmp/okn_v39/evidence/OKN_DSP_V39_PREAUTH_RANDKEY_BASELINE.* apk_artifact/ || true
+      - uses: actions/upload-artifact@v4
+        with:
+          name: OKN-DSP-V39-DART36-AOT-RANDKEY-CALLSITE-HOST-ENV-FIX-debug-apk
+          path: apk_artifact/
+          if-no-files-found: error
+          retention-days: 30
+
+  aot-randkey-callsite:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Restore V39 and extract reference AOT
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf v39 target blutter_pkg blutter_out artifact
+          mkdir -p v39 target artifact
+          unzip -q OKN_DSP_ANDROID_V39_DART36_AOT_RANDKEY_CALLSITE_HOST_ENV_FIX.zip -d v39
+          APK='v39/tools/reference/golopine_250401.apk'
+          test -f "$APK"
+          unzip -j "$APK" 'lib/arm64-v8a/libapp.so' 'lib/arm64-v8a/libflutter.so' -d target
+          sha256sum target/libapp.so target/libflutter.so | tee target/SHA256SUMS.txt
+          strings target/libflutter.so | grep -E '^[0-9]+\.[0-9]+\.[0-9]+ \(stable\)' | head -n 3 | tee target/dart_runtime.txt || true
+          strings -t x target/libapp.so | grep -Ei 'RandKey|authentication response data length|AES/|cfb8|CFB-8|ENCRYPTED_SIZE|notify_encryption_required|Sent Device Type and software version authentication request data' | tee target/static_string_offsets.txt || true
+
+      - name: Download Blutter standalone ARM64
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fL --retry 4 --retry-delay 3 \
+            'https://github.com/AcE77505/blutter-standalone/releases/download/v1.0/blutter_android.zip' \
+            -o blutter_android.zip
+          mkdir -p blutter_pkg
+          unzip -q blutter_android.zip -d blutter_pkg
+          find blutter_pkg -type f -name 'blutter_dartvm*_android_arm64' -printf '%f\n' | sort | tee target/blutter_supported_versions.txt
+          find blutter_pkg -type f \( -name 'libcapstone.so*' -o -name 'ld-linux-aarch64.so.1' \) -print | sort | tee target/blutter_runtime_files.txt
+
+      - name: Run exact Dart 3.6.x Blutter with isolated bundled runtime libs
+        shell: bash
+        run: |
+          set -euo pipefail
+          DARTVER=$(grep -Eo '[0-9]+\.[0-9]+\.[0-9]+' target/dart_runtime.txt | head -n 1)
+          test -n "$DARTVER"
+          : > target/blutter_run.log
+          echo "Detected Dart runtime=$DARTVER" | tee -a target/blutter_run.log
+
+          BINARY=$(find blutter_pkg -type f -name "blutter_dartvm${DARTVER}_android_arm64" | head -n 1)
+          LOADER=$(find blutter_pkg -type f -path '*/lib/ld-linux-aarch64.so.1' | head -n 1)
+          CAPSTONE=$(find blutter_pkg -type f -name 'libcapstone.so.4' | head -n 1)
+
+          if [ -z "$BINARY" ]; then
+            echo "ERROR: exact Blutter binary for Dart $DARTVER not found" | tee -a target/blutter_run.log
+            exit 2
+          fi
+          if [ -z "$LOADER" ]; then
+            echo 'ERROR: bundled ARM64 loader not found' | tee -a target/blutter_run.log
+            exit 3
+          fi
+          if [ -z "$CAPSTONE" ]; then
+            echo 'ERROR: bundled libcapstone.so.4 not found' | tee -a target/blutter_run.log
+            exit 4
+          fi
+
+          LIBDIR=$(dirname "$LOADER")
+          chmod +x "$BINARY" "$LOADER"
+          echo "BINARY=$BINARY" | tee -a target/blutter_run.log
+          echo "LOADER=$LOADER" | tee -a target/blutter_run.log
+          echo "LIBDIR=$LIBDIR" | tee -a target/blutter_run.log
+          echo "CAPSTONE=$CAPSTONE" | tee -a target/blutter_run.log
+          echo "HOST_LD_LIBRARY_PATH=${LD_LIBRARY_PATH:-<unset>}" | tee -a target/blutter_run.log
+          echo "IMPORTANT: bundled libc is NOT exported through LD_LIBRARY_PATH" | tee -a target/blutter_run.log
+          /usr/bin/ls -lah "$LIBDIR" | tee -a target/blutter_run.log
+
+          set +e
+          env -u LD_LIBRARY_PATH "$LOADER" --library-path "$LIBDIR" "$BINARY" \
+            -i "$GITHUB_WORKSPACE/target/libapp.so" \
+            -o "$GITHUB_WORKSPACE/blutter_out" 2>&1 | tee -a target/blutter_run.log
+          RC=${PIPESTATUS[0]}
+          set -e
+          echo "blutter_rc=$RC" | tee -a target/blutter_run.log
+
+          if [ -f blutter_out/pp.txt ]; then echo 'pp.txt=present' | tee -a target/blutter_run.log; else echo 'pp.txt=missing' | tee -a target/blutter_run.log; fi
+          if [ -f blutter_out/objs.txt ]; then echo 'objs.txt=present' | tee -a target/blutter_run.log; else echo 'objs.txt=missing' | tee -a target/blutter_run.log; fi
+          if [ -d blutter_out/asm ]; then echo 'asm=present' | tee -a target/blutter_run.log; else echo 'asm=missing' | tee -a target/blutter_run.log; fi
+          exit 0
+
+      - name: Extract RandKey call-site evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 v39/tools/analyze_randkey_trace_v39.py --root blutter_out --target target --out artifact
+          cp target/SHA256SUMS.txt artifact/ || true
+          cp target/dart_runtime.txt artifact/ || true
+          cp target/static_string_offsets.txt artifact/ || true
+          cp target/blutter_run.log artifact/ || true
+          cp target/blutter_supported_versions.txt artifact/ || true
+          cp target/blutter_runtime_files.txt artifact/ || true
+          cp v39/evidence/OKN_DSP_V39_PREAUTH_RANDKEY_BASELINE.* artifact/ || true
+          if [ -f blutter_out/pp.txt ]; then cp blutter_out/pp.txt artifact/; fi
+          if [ -f blutter_out/objs.txt ]; then cp blutter_out/objs.txt artifact/; fi
+          if [ -d blutter_out/asm ]; then tar -czf artifact/blutter_asm.tar.gz -C blutter_out asm; fi
+          ls -lh artifact/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: OKN-DSP-V39-DART36-AOT-RANDKEY-CALLSITE
+          path: artifact/
+          if-no-files-found: error
+          retention-days: 14
