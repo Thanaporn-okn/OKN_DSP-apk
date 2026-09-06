@@ -1,0 +1,81 @@
+name: Build OKN DSP APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ["main"]
+    paths:
+      - "OKN_DSP_ANDROID_V*.zip"
+      - ".github/workflows/build-okn-dsp.yml"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Select latest OKN DSP source ZIP
+        id: src
+        shell: bash
+        run: |
+          set -euo pipefail
+          ZIP=$(find . -maxdepth 1 -type f -name 'OKN_DSP_ANDROID_V*.zip' -printf '%f\n' | sort -V | tail -n 1)
+          if [ -z "$ZIP" ]; then
+            echo "No OKN_DSP_ANDROID_V*.zip found in repository root"
+            exit 1
+          fi
+          echo "zip=$ZIP" >> "$GITHUB_OUTPUT"
+          echo "Using $ZIP"
+
+      - name: Extract source
+        shell: bash
+        run: |
+          rm -rf build_src
+          mkdir build_src
+          unzip -q "${{ steps.src.outputs.zip }}" -d build_src
+          PROJECT_DIR=$(dirname "$(find build_src -name settings.gradle.kts -print -quit)")
+          if [ -z "$PROJECT_DIR" ] || [ ! -f "$PROJECT_DIR/settings.gradle.kts" ]; then
+            echo "Android project not found in ZIP"
+            exit 1
+          fi
+          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+          echo "Android project: $PROJECT_DIR"
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Gradle 8.9
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.9"
+
+      - name: Build debug APK
+        shell: bash
+        run: |
+          cd "$PROJECT_DIR"
+          gradle :app:assembleDebug --no-daemon --stacktrace
+
+      - name: Rename APK
+        shell: bash
+        run: |
+          mkdir -p out
+          BASE="${{ steps.src.outputs.zip }}"
+          BASE="${BASE%.zip}"
+          APK_NAME="${BASE}-debug.apk"
+          cp "$PROJECT_DIR/app/build/outputs/apk/debug/app-debug.apk" "out/$APK_NAME"
+          echo "APK_NAME=$APK_NAME" >> "$GITHUB_ENV"
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: OKN-DSP-APK
+          path: out/${{ env.APK_NAME }}
+          if-no-files-found: error
+          retention-days: 30
