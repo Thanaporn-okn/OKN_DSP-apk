@@ -1,0 +1,128 @@
+name: Build OKN DSP V52 SaveParams Persistence Proof
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'OKN_DSP_ANDROID_V52_SAVEPARAMS_PERSISTENCE_PROOF.zip'
+      - '.github/workflows/build-okn-dsp-v52.yml'
+
+jobs:
+  build-apk:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Restore and verify V52 source
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/okn_v52
+          mkdir -p /tmp/okn_v52
+          unzip -q OKN_DSP_ANDROID_V52_SAVEPARAMS_PERSISTENCE_PROOF.zip -d /tmp/okn_v52
+
+          check_file() { test -f "$1" || { echo "ERROR missing $1"; exit 1; }; echo "OK file: $1"; }
+          check_text() { grep -Fq "$1" "$2" || { echo "ERROR missing marker '$1' in $2"; exit 1; }; echo "OK marker: $1"; }
+
+          ACT=/tmp/okn_v52/app/src/main/java/com/okn/dsp/SaveParamsProofActivity.kt
+          POLICY=/tmp/okn_v52/app/src/main/java/com/okn/dsp/protocol/SaveParamsPolicy.kt
+          GATE=/tmp/okn_v52/app/src/main/java/com/okn/dsp/protocol/WriteGate.kt
+          UFE=/tmp/okn_v52/app/src/main/java/com/okn/dsp/protocol/UfeCodec.kt
+          LIVE=/tmp/okn_v52/app/src/main/java/com/okn/dsp/LiveEqActivity.kt
+          MANIFEST=/tmp/okn_v52/app/src/main/AndroidManifest.xml
+          GRADLE=/tmp/okn_v52/app/build.gradle.kts
+
+          check_file "$ACT"
+          check_file "$POLICY"
+          check_file "$GATE"
+          check_file "$UFE"
+          check_file "$LIVE"
+          check_file "$MANIFEST"
+          check_file "$GRADLE"
+          check_file /tmp/okn_v52/README_V52.txt
+          check_file /tmp/okn_v52/evidence/OKN_DSP_V51_LIVE_EQ_SUCCESS_CAPTURE.txt
+          check_file /tmp/okn_v52/evidence/OKN_DSP_V52_SAVEPARAMS_PROOF_PLAN.txt
+          check_file /tmp/okn_v52/evidence/OKN_DSP_V52_SAVEPARAMS_PROOF_PLAN.json
+
+          check_text 'versionCode = 52' "$GRADLE"
+          check_text '3.4.0-v52-saveparams-persistence-proof' "$GRADLE"
+          check_text 'saveParamsPersistenceProofEnabled: Boolean = true' "$GATE"
+          check_text 'const val ACTUATOR_ID = 7' "$POLICY"
+          check_text 'const val TYPE_ID = 2100' "$POLICY"
+          check_text 'const val TEST_ACTUATOR = 4' "$POLICY"
+          check_text 'const val TEST_BAND = 4' "$POLICY"
+          check_text 'const val TEST_OFFSET = 144' "$POLICY"
+          check_text 'const val ORIGINAL_BOOST_DB = 0.0f' "$POLICY"
+          check_text 'const val TEST_BOOST_DB = -0.1f' "$POLICY"
+          check_text 'UfeCodec.encodeWrite(ACTUATOR_ID, 0, byteArrayOf())' "$POLICY"
+          check_text '570000000700000000' "$POLICY"
+          check_text 'V52_TARGET_DESCRIPTOR_VERIFY' "$ACT"
+          check_text 'V52_SAVEPARAMS_TRIGGER_PLAIN=' "$ACT"
+          check_text 'V52_TARGET_POWER_CYCLE_VERIFY' "$ACT"
+          check_text 'V52_RESTORE_DESCRIPTOR_VERIFY' "$ACT"
+          check_text 'V52_RESTORE_POWER_CYCLE_VERIFY' "$ACT"
+          check_text 'V52_SAVEPARAMS_PERSISTENCE_PROOF_COMPLETE' "$ACT"
+          check_text 'saveCommitSettleMs = 3500L' "$ACT"
+          check_text 'WAIT_TARGET_REBOOT' "$ACT"
+          check_text 'WAIT_RESTORE_REBOOT' "$ACT"
+          check_text '.SaveParamsProofActivity' "$MANIFEST"
+
+          # No direct generic ID7 write is allowed outside SaveParamsPolicy.
+          if grep -R -n -F 'UfeCodec.encodeWrite(7' /tmp/okn_v52/app/src/main/java/com/okn/dsp | grep -v 'SaveParamsPolicy.kt'; then
+            echo 'ERROR: direct SaveParams ID7 write exists outside guarded SaveParamsPolicy'
+            exit 1
+          fi
+          # V51 live editor must still contain no SaveParams trigger.
+          if grep -Fq 'SaveParamsPolicy.encodeTrigger' "$LIVE"; then
+            echo 'ERROR: V51 live editor gained SaveParams trigger'
+            exit 1
+          fi
+          echo 'OK: V52 SaveParams is confined to guarded persistence proof activity/policy'
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK packages
+        shell: bash
+        run: sdkmanager 'platforms;android-35' 'build-tools;35.0.0'
+
+      - name: Set up Gradle 8.9
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: Build debug APK
+        working-directory: /tmp/okn_v52
+        run: gradle :app:assembleDebug --no-daemon --stacktrace
+
+      - name: Verify and package artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          APK=/tmp/okn_v52/app/build/outputs/apk/debug/app-debug.apk
+          test -f "$APK"
+          mkdir -p artifact
+          cp "$APK" artifact/OKN_DSP_V52_SAVEPARAMS_PERSISTENCE_PROOF-debug.apk
+          cp /tmp/okn_v52/README_V52.txt artifact/
+          cp /tmp/okn_v52/evidence/OKN_DSP_V52_SAVEPARAMS_PROOF_PLAN.txt artifact/
+          cp /tmp/okn_v52/evidence/OKN_DSP_V52_SAVEPARAMS_PROOF_PLAN.json artifact/
+          sha256sum artifact/OKN_DSP_V52_SAVEPARAMS_PERSISTENCE_PROOF-debug.apk > artifact/OKN_DSP_V52_SAVEPARAMS_PERSISTENCE_PROOF-debug.sha256
+          ls -lh artifact
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: OKN-DSP-V52-SAVEPARAMS-PERSISTENCE-PROOF-debug-apk
+          path: artifact/
+          if-no-files-found: error
+          retention-days: 30
