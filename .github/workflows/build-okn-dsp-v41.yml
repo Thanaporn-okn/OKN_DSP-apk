@@ -1,0 +1,84 @@
+name: Build OKN DSP V41 Controlled MasterVolume Write Proof
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'OKN_DSP_ANDROID_V41_CONTROLLED_MASTERVOLUME_WRITE_PROOF.zip'
+      - '.github/workflows/build-okn-dsp-v41.yml'
+
+jobs:
+  build-apk:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Restore and verify V41 source
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/okn_v41
+          mkdir -p /tmp/okn_v41
+          unzip -q OKN_DSP_ANDROID_V41_CONTROLLED_MASTERVOLUME_WRITE_PROOF.zip -d /tmp/okn_v41
+
+          test -f /tmp/okn_v41/app/src/main/java/com/okn/dsp/EvidenceLabActivity.kt
+          test -f /tmp/okn_v41/app/src/main/java/com/okn/dsp/protocol/ControlledMasterVolumeProof.kt
+          test -f /tmp/okn_v41/evidence/OKN_DSP_V40_LIVE_READONLY_SUCCESS_CAPTURE.txt
+          test -f /tmp/okn_v41/evidence/OKN_DSP_V41_CONTROLLED_WRITE_PROOF_PLAN.txt
+
+          grep -q '2.3.0-v41-controlled-mastervolume-write-proof' /tmp/okn_v41/app/build.gradle.kts
+          grep -q 'controlledMasterVolumeProofEnabled: Boolean = true' /tmp/okn_v41/app/src/main/java/com/okn/dsp/protocol/WriteGate.kt
+          grep -q 'const val enabled: Boolean = false' /tmp/okn_v41/app/src/main/java/com/okn/dsp/protocol/WriteGate.kt
+          grep -q 'V41_CONTROLLED_WRITE_PROOF_COMPLETE' /tmp/okn_v41/app/src/main/java/com/okn/dsp/EvidenceLabActivity.kt
+          grep -q 'TX_WRITE_MASTER_MINUS1DB_V41' /tmp/okn_v41/app/src/main/java/com/okn/dsp/EvidenceLabActivity.kt
+          grep -q 'TX_RESTORE_MASTER_V41' /tmp/okn_v41/app/src/main/java/com/okn/dsp/EvidenceLabActivity.kt
+          grep -q 'SAVE_PARAMS = 7' /tmp/okn_v41/app/src/main/java/com/okn/dsp/protocol/ConfirmedDspMap.kt
+          echo 'V41 source restored and safety gates verified'
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK packages
+        shell: bash
+        run: sdkmanager 'platforms;android-35' 'build-tools;35.0.0'
+
+      - name: Set up Gradle 8.9
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: Build debug APK
+        working-directory: /tmp/okn_v41
+        run: gradle :app:assembleDebug --no-daemon --stacktrace
+
+      - name: Verify and package artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          APK=/tmp/okn_v41/app/build/outputs/apk/debug/app-debug.apk
+          test -f "$APK"
+          mkdir -p artifact
+          cp "$APK" artifact/OKN_DSP_V41_CONTROLLED_MASTERVOLUME_WRITE_PROOF-debug.apk
+          cp /tmp/okn_v41/evidence/OKN_DSP_V41_CONTROLLED_WRITE_PROOF_PLAN.txt artifact/
+          cp /tmp/okn_v41/evidence/OKN_DSP_V41_CONTROLLED_WRITE_PROOF_PLAN.json artifact/
+          cp /tmp/okn_v41/README_V41.txt artifact/
+          sha256sum artifact/OKN_DSP_V41_CONTROLLED_MASTERVOLUME_WRITE_PROOF-debug.apk > artifact/OKN_DSP_V41_CONTROLLED_MASTERVOLUME_WRITE_PROOF-debug.sha256
+          ls -lh artifact
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: OKN-DSP-V41-CONTROLLED-MASTERVOLUME-WRITE-PROOF-debug-apk
+          path: artifact/
+          if-no-files-found: error
+          retention-days: 30
