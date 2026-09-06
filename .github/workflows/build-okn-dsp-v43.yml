@@ -1,0 +1,87 @@
+name: Build OKN DSP V43 MasterVolume Descriptor Verify
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'OKN_DSP_ANDROID_V43_MASTERVOLUME_DESCRIPTOR_VERIFY.zip'
+      - '.github/workflows/build-okn-dsp-v43.yml'
+
+jobs:
+  build-apk:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Restore and verify V43 source
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/okn_v43
+          mkdir -p /tmp/okn_v43
+          unzip -q OKN_DSP_ANDROID_V43_MASTERVOLUME_DESCRIPTOR_VERIFY.zip -d /tmp/okn_v43
+
+          test -f /tmp/okn_v43/app/src/main/java/com/okn/dsp/EvidenceLabActivity.kt
+          test -f /tmp/okn_v43/app/src/main/java/com/okn/dsp/protocol/ControlledMasterVolumeProof.kt
+          test -f /tmp/okn_v43/evidence/OKN_DSP_V43_DESCRIPTOR_VERIFY_PLAN.txt
+
+          grep -q '2.5.0-v43-mastervolume-descriptor-verify' /tmp/okn_v43/app/build.gradle.kts
+          grep -q 'versionCode = 43' /tmp/okn_v43/app/build.gradle.kts
+          grep -q 'V43_BASELINE_DESCRIPTOR' /tmp/okn_v43/app/src/main/java/com/okn/dsp/EvidenceLabActivity.kt
+          grep -q 'TX_WRITE_MASTER_MINUS1DB_V43' /tmp/okn_v43/app/src/main/java/com/okn/dsp/EvidenceLabActivity.kt
+          grep -q 'TX_DEVICE_DESC_REFRESH_TARGET_V43' /tmp/okn_v43/app/src/main/java/com/okn/dsp/EvidenceLabActivity.kt
+          grep -q 'TX_RESTORE_MASTER_V43' /tmp/okn_v43/app/src/main/java/com/okn/dsp/EvidenceLabActivity.kt
+          grep -q 'V43_CONTROLLED_WRITE_PROOF_COMPLETE' /tmp/okn_v43/app/src/main/java/com/okn/dsp/EvidenceLabActivity.kt
+          ! grep -q 'TX_READ_MASTER_BEFORE_V43' /tmp/okn_v43/app/src/main/java/com/okn/dsp/EvidenceLabActivity.kt
+          grep -q 'controlledMasterVolumeProofEnabled: Boolean = true' /tmp/okn_v43/app/src/main/java/com/okn/dsp/protocol/WriteGate.kt
+          grep -q 'const val enabled: Boolean = false' /tmp/okn_v43/app/src/main/java/com/okn/dsp/protocol/WriteGate.kt
+          grep -q 'SAVE_PARAMS = 7' /tmp/okn_v43/app/src/main/java/com/okn/dsp/protocol/ConfirmedDspMap.kt
+          echo 'V43 source restored; descriptor-based controlled write proof and safety gates verified'
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK packages
+        shell: bash
+        run: sdkmanager 'platforms;android-35' 'build-tools;35.0.0'
+
+      - name: Set up Gradle 8.9
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: Build debug APK
+        working-directory: /tmp/okn_v43
+        run: gradle :app:assembleDebug --no-daemon --stacktrace
+
+      - name: Verify and package artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          APK=/tmp/okn_v43/app/build/outputs/apk/debug/app-debug.apk
+          test -f "$APK"
+          mkdir -p artifact
+          cp "$APK" artifact/OKN_DSP_V43_MASTERVOLUME_DESCRIPTOR_VERIFY-debug.apk
+          cp /tmp/okn_v43/evidence/OKN_DSP_V43_DESCRIPTOR_VERIFY_PLAN.txt artifact/
+          cp /tmp/okn_v43/evidence/OKN_DSP_V43_DESCRIPTOR_VERIFY_PLAN.json artifact/
+          cp /tmp/okn_v43/README_V43.txt artifact/
+          sha256sum artifact/OKN_DSP_V43_MASTERVOLUME_DESCRIPTOR_VERIFY-debug.apk > artifact/OKN_DSP_V43_MASTERVOLUME_DESCRIPTOR_VERIFY-debug.sha256
+          ls -lh artifact
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: OKN-DSP-V43-MASTERVOLUME-DESCRIPTOR-VERIFY-debug-apk
+          path: artifact/
+          if-no-files-found: error
+          retention-days: 30
