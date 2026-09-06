@@ -1,0 +1,116 @@
+name: Build OKN DSP V49 Final EQ Write Restore Proof
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'OKN_DSP_ANDROID_V49_FINAL_EQ_WRITE_RESTORE_PROOF.zip'
+      - '.github/workflows/build-okn-dsp-v49.yml'
+
+jobs:
+  build-apk:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Restore and verify V49 source
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/okn_v49
+          mkdir -p /tmp/okn_v49
+          unzip -q OKN_DSP_ANDROID_V49_FINAL_EQ_WRITE_RESTORE_PROOF.zip -d /tmp/okn_v49
+
+          check_file() { test -f "$1" || { echo "ERROR missing $1"; exit 1; }; echo "OK file: $1"; }
+          check_text() { grep -Fq "$1" "$2" || { echo "ERROR missing marker '$1' in $2"; exit 1; }; echo "OK marker: $1"; }
+
+          EQ=/tmp/okn_v49/app/src/main/java/com/okn/dsp/EqProofActivity.kt
+          POLICY=/tmp/okn_v49/app/src/main/java/com/okn/dsp/protocol/FinalEqWriteRestorePolicy.kt
+          GATE=/tmp/okn_v49/app/src/main/java/com/okn/dsp/protocol/WriteGate.kt
+          GRADLE=/tmp/okn_v49/app/build.gradle.kts
+
+          check_file "$EQ"
+          check_file "$POLICY"
+          check_file "$GATE"
+          check_file "$GRADLE"
+          check_file /tmp/okn_v49/README_V49.txt
+          check_file /tmp/okn_v49/evidence/OKN_DSP_V49_FINAL_EQ_PROOF_PLAN.txt
+          check_file /tmp/okn_v49/evidence/OKN_DSP_V49_FINAL_EQ_PROOF_PLAN.json
+          check_file /tmp/okn_v49/evidence/OKN_DSP_V48_RECOVERY_SUCCESS_CAPTURE.txt
+
+          check_text 'versionCode = 49' "$GRADLE"
+          check_text '3.1.0-v49-final-eq-write-restore-proof' "$GRADLE"
+          check_text 'finalEqWriteRestoreProofEnabled: Boolean = true' "$GATE"
+          check_text 'eqBandRecoveryEnabled: Boolean = false' "$GATE"
+          check_text 'controlledEqBandProofEnabled: Boolean = false' "$GATE"
+          check_text 'TARGET_HEX' "$POLICY"
+          check_text 'ORIGINAL_HEX' "$POLICY"
+          check_text '0C0000000000C8420000000052B80E40000000BF0000000000000000FDF37F3F9D22FFBF805E7E3F9D22FFBF7D527E3F' "$POLICY"
+          check_text '0C0000000000C8420000000052B80E400000000000000000000000000000803FAE28FFBF9A5E7E3FAE28FFBF9A5E7E3F' "$POLICY"
+          check_text 'V49_EQ_TARGET_WRITE_PLAIN=' "$EQ"
+          check_text 'TX_EQ_CH1_BAND4_MINUS0P5DB_V49' "$EQ"
+          check_text 'V49_TARGET_DESCRIPTOR_VERIFY' "$EQ"
+          check_text 'V49_EQ_RESTORE_WRITE_PLAIN=' "$EQ"
+          check_text 'TX_EQ_CH1_BAND4_RESTORE_V49_A' "$EQ"
+          check_text 'V49_RESTORE_DESCRIPTOR_VERIFY' "$EQ"
+          check_text 'V49_FINAL_EQ_WRITE_RESTORE_PROOF_COMPLETE' "$EQ"
+          check_text 'targetVerifyDelayMs = 3000L' "$EQ"
+          check_text 'preRestoreSettleMs = 3000L' "$EQ"
+          check_text 'restoreVerifyDelayMs = 3000L' "$EQ"
+          check_text 'restoreRetryDelayMs = 2500L' "$EQ"
+          check_text 'V49_FAILSAFE_WINDOW_MS=60000' "$EQ"
+          check_text 'saveParams=false' "$EQ"
+
+          if grep -Fq 'UfeCodec.encodeWrite(7' "$EQ" "$POLICY"; then
+            echo 'ERROR: V49 contains SaveParams ID7 write'
+            exit 1
+          fi
+          echo 'OK: V49 is constrained to CH1/ID4/Band4 exact target + exact restore and does not send SaveParams ID7'
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK packages
+        shell: bash
+        run: sdkmanager 'platforms;android-35' 'build-tools;35.0.0'
+
+      - name: Set up Gradle 8.9
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: Build debug APK
+        working-directory: /tmp/okn_v49
+        run: gradle :app:assembleDebug --no-daemon --stacktrace
+
+      - name: Verify and package artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          APK=/tmp/okn_v49/app/build/outputs/apk/debug/app-debug.apk
+          test -f "$APK"
+          mkdir -p artifact
+          cp "$APK" artifact/OKN_DSP_V49_FINAL_EQ_WRITE_RESTORE_PROOF-debug.apk
+          cp /tmp/okn_v49/README_V49.txt artifact/
+          cp /tmp/okn_v49/evidence/OKN_DSP_V49_FINAL_EQ_PROOF_PLAN.txt artifact/
+          cp /tmp/okn_v49/evidence/OKN_DSP_V49_FINAL_EQ_PROOF_PLAN.json artifact/
+          sha256sum artifact/OKN_DSP_V49_FINAL_EQ_WRITE_RESTORE_PROOF-debug.apk > artifact/OKN_DSP_V49_FINAL_EQ_WRITE_RESTORE_PROOF-debug.sha256
+          ls -lh artifact
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: OKN-DSP-V49-FINAL-EQ-WRITE-RESTORE-PROOF-debug-apk
+          path: artifact/
+          if-no-files-found: error
+          retention-days: 30
