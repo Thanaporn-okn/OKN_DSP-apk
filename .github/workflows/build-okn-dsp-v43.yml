@@ -25,21 +25,56 @@ jobs:
           mkdir -p /tmp/okn_v43
           unzip -q OKN_DSP_ANDROID_V43_MASTERVOLUME_DESCRIPTOR_VERIFY.zip -d /tmp/okn_v43
 
-          test -f /tmp/okn_v43/app/src/main/java/com/okn/dsp/EvidenceLabActivity.kt
-          test -f /tmp/okn_v43/app/src/main/java/com/okn/dsp/protocol/ControlledMasterVolumeProof.kt
-          test -f /tmp/okn_v43/evidence/OKN_DSP_V43_DESCRIPTOR_VERIFY_PLAN.txt
+          check_file() {
+            if [ ! -f "$1" ]; then
+              echo "ERROR: missing file: $1"
+              exit 1
+            fi
+            echo "OK file: $1"
+          }
 
-          grep -q '2.5.0-v43-mastervolume-descriptor-verify' /tmp/okn_v43/app/build.gradle.kts
-          grep -q 'versionCode = 43' /tmp/okn_v43/app/build.gradle.kts
-          grep -q 'V43_BASELINE_DESCRIPTOR' /tmp/okn_v43/app/src/main/java/com/okn/dsp/EvidenceLabActivity.kt
-          grep -q 'TX_WRITE_MASTER_MINUS1DB_V43' /tmp/okn_v43/app/src/main/java/com/okn/dsp/EvidenceLabActivity.kt
-          grep -q 'TX_DEVICE_DESC_REFRESH_TARGET_V43' /tmp/okn_v43/app/src/main/java/com/okn/dsp/EvidenceLabActivity.kt
-          grep -q 'TX_RESTORE_MASTER_V43' /tmp/okn_v43/app/src/main/java/com/okn/dsp/EvidenceLabActivity.kt
-          grep -q 'V43_CONTROLLED_WRITE_PROOF_COMPLETE' /tmp/okn_v43/app/src/main/java/com/okn/dsp/EvidenceLabActivity.kt
-          ! grep -q 'TX_READ_MASTER_BEFORE_V43' /tmp/okn_v43/app/src/main/java/com/okn/dsp/EvidenceLabActivity.kt
-          grep -q 'controlledMasterVolumeProofEnabled: Boolean = true' /tmp/okn_v43/app/src/main/java/com/okn/dsp/protocol/WriteGate.kt
-          grep -q 'const val enabled: Boolean = false' /tmp/okn_v43/app/src/main/java/com/okn/dsp/protocol/WriteGate.kt
-          grep -q 'SAVE_PARAMS = 7' /tmp/okn_v43/app/src/main/java/com/okn/dsp/protocol/ConfirmedDspMap.kt
+          check_text() {
+            local needle="$1"
+            local file="$2"
+            if ! grep -Fq "$needle" "$file"; then
+              echo "ERROR: missing marker '$needle' in $file"
+              exit 1
+            fi
+            echo "OK marker: $needle"
+          }
+
+          APP=/tmp/okn_v43/app/src/main/java/com/okn/dsp/EvidenceLabActivity.kt
+          GATE=/tmp/okn_v43/app/src/main/java/com/okn/dsp/protocol/WriteGate.kt
+          MAP=/tmp/okn_v43/app/src/main/java/com/okn/dsp/protocol/ConfirmedDspMap.kt
+          GRADLE=/tmp/okn_v43/app/build.gradle.kts
+
+          check_file "$APP"
+          check_file /tmp/okn_v43/app/src/main/java/com/okn/dsp/protocol/ControlledMasterVolumeProof.kt
+          check_file /tmp/okn_v43/evidence/OKN_DSP_V43_DESCRIPTOR_VERIFY_PLAN.txt
+          check_file /tmp/okn_v43/evidence/OKN_DSP_V43_DESCRIPTOR_VERIFY_PLAN.json
+
+          check_text '2.5.0-v43-mastervolume-descriptor-verify' "$GRADLE"
+          check_text 'versionCode = 43' "$GRADLE"
+          check_text 'V43_BASELINE_DESCRIPTOR' "$APP"
+          check_text 'TX_WRITE_MASTER_MINUS1DB_V43' "$APP"
+          # Source builds the label dynamically as TX_DEVICE_DESC_REFRESH_${phase}_V43,
+          # so verify the stable prefix plus the TARGET refresh call separately.
+          check_text 'TX_DEVICE_DESC_REFRESH_' "$APP"
+          check_text 'requestWriteProofDescriptorRefresh(g, "TARGET", 4)' "$APP"
+          check_text 'TX_RESTORE_MASTER_V43' "$APP"
+          check_text 'V43_TARGET_DESCRIPTOR_VERIFY' "$APP"
+          check_text 'V43_RESTORE_DESCRIPTOR_VERIFY' "$APP"
+          check_text 'V43_CONTROLLED_WRITE_PROOF_COMPLETE' "$APP"
+
+          if grep -Fq 'TX_READ_MASTER_BEFORE_V43' "$APP"; then
+            echo 'ERROR: obsolete direct actuator read marker is still present'
+            exit 1
+          fi
+          echo 'OK: obsolete direct actuator read marker absent'
+
+          check_text 'controlledMasterVolumeProofEnabled: Boolean = true' "$GATE"
+          check_text 'const val enabled: Boolean = false' "$GATE"
+          check_text 'SAVE_PARAMS = 7' "$MAP"
           echo 'V43 source restored; descriptor-based controlled write proof and safety gates verified'
 
       - name: Set up JDK 17
