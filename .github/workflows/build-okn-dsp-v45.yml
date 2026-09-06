@@ -1,0 +1,116 @@
+name: Build OKN DSP V45 Verified Live Scalar Controls
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'OKN_DSP_ANDROID_V45_VERIFIED_LIVE_SCALAR_CONTROLS.zip'
+      - '.github/workflows/build-okn-dsp-v45.yml'
+
+jobs:
+  build-apk:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Restore and verify V45 source
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/okn_v45
+          mkdir -p /tmp/okn_v45
+          unzip -q OKN_DSP_ANDROID_V45_VERIFIED_LIVE_SCALAR_CONTROLS.zip -d /tmp/okn_v45
+
+          check_file() {
+            test -f "$1" || { echo "ERROR missing $1"; exit 1; }
+            echo "OK file: $1"
+          }
+          check_text() {
+            grep -Fq "$1" "$2" || { echo "ERROR missing marker '$1' in $2"; exit 1; }
+            echo "OK marker: $1"
+          }
+
+          SCALAR=/tmp/okn_v45/app/src/main/java/com/okn/dsp/ScalarControlActivity.kt
+          POLICY=/tmp/okn_v45/app/src/main/java/com/okn/dsp/protocol/VerifiedScalarControls.kt
+          GATE=/tmp/okn_v45/app/src/main/java/com/okn/dsp/protocol/WriteGate.kt
+          GRADLE=/tmp/okn_v45/app/build.gradle.kts
+          MANIFEST=/tmp/okn_v45/app/src/main/AndroidManifest.xml
+
+          check_file "$SCALAR"
+          check_file "$POLICY"
+          check_file "$GATE"
+          check_file "$GRADLE"
+          check_file "$MANIFEST"
+          check_file /tmp/okn_v45/README_V45.txt
+          check_file /tmp/okn_v45/evidence/OKN_DSP_V45_SCALAR_CONTROL_POLICY.txt
+          check_file /tmp/okn_v45/evidence/OKN_DSP_V45_V44_RUNTIME_PROOF.txt
+          check_file /tmp/okn_v45/evidence/OKN_DSP_V45_V44_RUNTIME_PROOF.json
+
+          check_text 'versionCode = 45' "$GRADLE"
+          check_text '2.7.0-v45-verified-live-scalar-controls' "$GRADLE"
+          check_text '.ScalarControlActivity' "$MANIFEST"
+          check_text 'V45_SCALAR_WRITE_PLAIN=' "$SCALAR"
+          check_text 'V45_TARGET_DESCRIPTOR_VERIFY' "$SCALAR"
+          check_text 'V45_SCALAR_WRITE_COMPLETE' "$SCALAR"
+          check_text 'V45_FAILSAFE_RESTORE_PLAIN=' "$SCALAR"
+          check_text 'V45_RESTORE_DESCRIPTOR_VERIFY' "$SCALAR"
+          check_text 'saveParams=false' "$SCALAR"
+          check_text 'VerifiedScalarControl(2, "MasterVolume", -70f, 6f, "dB")' "$POLICY"
+          check_text 'VerifiedScalarControl(8, "BassVolume", -70f, 6f, "dB")' "$POLICY"
+          check_text 'VerifiedScalarControl(9, "BassCutoff", 20f, 250f, "Hz")' "$POLICY"
+          check_text 'VerifiedScalarControl(10, "BassBoost", -12f, 12f, "dB")' "$POLICY"
+          check_text 'VerifiedScalarControl(13, "MiddleBoost", -12f, 12f, "dB")' "$POLICY"
+          check_text 'VerifiedScalarControl(11, "TrebleBoost", -12f, 12f, "dB")' "$POLICY"
+          check_text 'verifiedScalarControlsEnabled: Boolean = true' "$GATE"
+          check_text 'const val enabled: Boolean = false' "$GATE"
+
+          echo 'V45 source restored and verified: scalar allow-list + descriptor verification + restore failsafe'
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK packages
+        shell: bash
+        run: sdkmanager 'platforms;android-35' 'build-tools;35.0.0'
+
+      - name: Set up Gradle 8.9
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: Build debug APK
+        working-directory: /tmp/okn_v45
+        run: gradle :app:assembleDebug --no-daemon --stacktrace
+
+      - name: Verify and package artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          APK=/tmp/okn_v45/app/build/outputs/apk/debug/app-debug.apk
+          test -f "$APK"
+          mkdir -p artifact
+          cp "$APK" artifact/OKN_DSP_V45_VERIFIED_LIVE_SCALAR_CONTROLS-debug.apk
+          cp /tmp/okn_v45/README_V45.txt artifact/
+          cp /tmp/okn_v45/evidence/OKN_DSP_V45_SCALAR_CONTROL_POLICY.txt artifact/
+          cp /tmp/okn_v45/evidence/OKN_DSP_V45_V44_RUNTIME_PROOF.txt artifact/
+          cp /tmp/okn_v45/evidence/OKN_DSP_V45_V44_RUNTIME_PROOF.json artifact/
+          sha256sum artifact/OKN_DSP_V45_VERIFIED_LIVE_SCALAR_CONTROLS-debug.apk > artifact/OKN_DSP_V45_VERIFIED_LIVE_SCALAR_CONTROLS-debug.sha256
+          ls -lh artifact
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: OKN-DSP-V45-VERIFIED-LIVE-SCALAR-CONTROLS-debug-apk
+          path: artifact/
+          if-no-files-found: error
+          retention-days: 30
