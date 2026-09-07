@@ -1,0 +1,234 @@
+name: Build OKN DSP V69 Production Save State Hardening
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'OKN_DSP_ANDROID_V69_PRODUCTION_SAVE_STATE_HARDENING.zip'
+      - '.github/workflows/build-okn-dsp-v69.yml'
+
+jobs:
+  build-apk:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Restore and verify V69 source
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo 'b761c9ffbb4bdf0609ec944d0939fb934887a79a940d362e619dd2e7e7acf3e5  OKN_DSP_ANDROID_V69_PRODUCTION_SAVE_STATE_HARDENING.zip' | sha256sum -c -
+          rm -rf /tmp/okn_v69
+          mkdir -p /tmp/okn_v69
+          unzip -q OKN_DSP_ANDROID_V69_PRODUCTION_SAVE_STATE_HARDENING.zip -d /tmp/okn_v69
+
+          check_file() { test -f "$1" || { echo "ERROR missing $1"; exit 1; }; echo "OK file: $1"; }
+          check_text() { grep -Fq "$1" "$2" || { echo "ERROR missing marker '$1' in $2"; exit 1; }; echo "OK marker: $1"; }
+
+          MAIN=/tmp/okn_v69/app/src/main/java/com/okn/dsp/MainActivity.kt
+          UNIFIED=/tmp/okn_v69/app/src/main/java/com/okn/dsp/UnifiedControlActivity.kt
+          SCALAR=/tmp/okn_v69/app/src/main/java/com/okn/dsp/ScalarControlActivity.kt
+          LIVE=/tmp/okn_v69/app/src/main/java/com/okn/dsp/LiveEqActivity.kt
+          SAVEPOL=/tmp/okn_v69/app/src/main/java/com/okn/dsp/protocol/SaveParamsPolicy.kt
+          EQPOL=/tmp/okn_v69/app/src/main/java/com/okn/dsp/protocol/LiveEqPolicy.kt
+          EQCODEC=/tmp/okn_v69/app/src/main/java/com/okn/dsp/protocol/EqBandCodec.kt
+          SCALARPOL=/tmp/okn_v69/app/src/main/java/com/okn/dsp/protocol/VerifiedScalarControls.kt
+          GATE=/tmp/okn_v69/app/src/main/java/com/okn/dsp/protocol/WriteGate.kt
+          GRADLE=/tmp/okn_v69/app/build.gradle.kts
+          MANIFEST=/tmp/okn_v69/app/src/main/AndroidManifest.xml
+          V68CAP=/tmp/okn_v69/evidence/OKN_DSP_V68_UNIFIED_LIVE_EQ_RUNTIME_SUCCESS_CAPTURE.txt
+
+          for f in "$MAIN" "$UNIFIED" "$SCALAR" "$LIVE" "$SAVEPOL" "$EQPOL" "$EQCODEC" "$SCALARPOL" "$GATE" "$GRADLE" "$MANIFEST" "$V68CAP"; do check_file "$f"; done
+          check_file /tmp/okn_v69/README_V69.txt
+          check_file /tmp/okn_v69/evidence/OKN_DSP_V69_PRODUCTION_SAVE_STATE_HARDENING_PLAN.txt
+          check_file /tmp/okn_v69/evidence/OKN_DSP_V69_PRODUCTION_SAVE_STATE_HARDENING_PLAN.json
+
+          # V69 identity.
+          check_text 'versionCode = 69' "$GRADLE"
+          check_text '5.0.0-v69-production-save-state-hardening' "$GRADLE"
+          check_text 'OKN DSP V69 — PRODUCTION HARDENED CONTROL HUB' "$MAIN"
+          check_text 'UNIFIED V69 • V68 VERIFIED WRITES + SAVE STATE HARDENING' "$MAIN"
+          check_text 'UnifiedControlActivity::class.java' "$MAIN"
+          check_text '.UnifiedControlActivity' "$MANIFEST"
+
+          # Exact seven-scalar allow-list. Generic writes must remain locked.
+          check_text 'const val enabled: Boolean = false' "$GATE"
+          check_text 'const val unifiedVerifiedScalarWritesEnabled: Boolean = true' "$GATE"
+          check_text 'const val unifiedVerifiedEqWritesEnabled: Boolean = true' "$GATE"
+          python3 - <<'PY'
+          import re
+          from pathlib import Path
+          s=Path('/tmp/okn_v69/app/src/main/java/com/okn/dsp/protocol/VerifiedScalarControls.kt').read_text()
+          ids=[int(x) for x in re.findall(r'VerifiedScalarControl\((\d+),', s)]
+          assert ids == [2,3,8,9,10,13,11], ids
+          print('OK: scalar allow-list exactly [2,3,8,9,10,13,11]')
+          PY
+
+          # V68 runtime-qualified base evidence is embedded byte-for-byte.
+          echo '5b9d18cbb93b8769d84339660c3c63b97bf97a3953764e5fdbae71060f034a5d  '"$V68CAP" | sha256sum -c -
+          check_text 'V68_UNIFIED_EQ_TARGET_DESCRIPTOR_VERIFY ch=1 actuator=4 band=4 expectedBoost=-0.2 actualBoost=-0.2 verified=true' "$V68CAP"
+          check_text 'V68_UNIFIED_EQ_TARGET_DESCRIPTOR_VERIFY ch=1 actuator=4 band=4 expectedBoost=-0.1 actualBoost=-0.1 verified=true' "$V68CAP"
+          check_text 'V68_UNIFIED_PERSISTENT_SAVE_COMPLETE' "$V68CAP"
+
+          # Existing separately-qualified production paths/policies must not regress.
+          echo '01f6aca6f2131bd41ca4fd1d674d879cade425ccc7ddef77e63718e8e124ffed  '"$SCALAR" | sha256sum -c -
+          echo '3240ca56c81b7960098ae9fb6ea7421d32e74b11e42810ce4c5b71b35d7ab8d0  '"$LIVE" | sha256sum -c -
+          echo '88005dba77d2b84597f5bd5e23eaaacec7d25b59dc0f38b8affbde2d2cfbeb85  '"$SAVEPOL" | sha256sum -c -
+          echo 'cfb046aa09acaf8429176a9b99e988ea06347f3daeea988b7c118d056400d2bc  '"$EQPOL" | sha256sum -c -
+          echo '4f033a406e363b2418af9b39fa2e42a13674b09f9de2bb7acf1eb6ff1918cd58  '"$EQCODEC" | sha256sum -c -
+
+          # V69 keeps the complete V67 scalar pipeline.
+          check_text 'WRITE_PREFLIGHT' "$UNIFIED"
+          check_text 'VERIFY_TARGET' "$UNIFIED"
+          check_text 'VERIFY_RESTORE' "$UNIFIED"
+          check_text 'V69_UNIFIED_SCALAR_PREFLIGHT_START' "$UNIFIED"
+          check_text 'V69_UNIFIED_SCALAR_PREFLIGHT_OK' "$UNIFIED"
+          check_text 'UfeCodec.encodeFloat32Write(id, target)' "$UNIFIED"
+          check_text 'PendingGattPurpose.SCALAR_TARGET' "$UNIFIED"
+          check_text 'V69_UNIFIED_TARGET_DESCRIPTOR_VERIFY' "$UNIFIED"
+          check_text 'UfeCodec.encodeFloat32Write(id, original)' "$UNIFIED"
+          check_text 'PendingGattPurpose.SCALAR_RESTORE' "$UNIFIED"
+          check_text 'V69_UNIFIED_RESTORE_DESCRIPTOR_VERIFY' "$UNIFIED"
+          check_text 'RESTORE VERIFY FAILED — STOP CONTROL • DO NOT SAVE' "$UNIFIED"
+
+          # V69 preserves V68 safe LIVE EQ migration exactly.
+          check_text 'EQ_WRITE_PREFLIGHT' "$UNIFIED"
+          check_text 'EQ_VERIFY_TARGET' "$UNIFIED"
+          check_text 'EQ_VERIFY_RESTORE' "$UNIFIED"
+          check_text 'V69_UNIFIED_EQ_PREFLIGHT_START' "$UNIFIED"
+          check_text 'V69_UNIFIED_EQ_PREFLIGHT_OK' "$UNIFIED"
+          check_text 'LiveEqPolicy.isWritable(original)' "$UNIFIED"
+          check_text 'LiveEqPolicy.encodeWrite(ch, band1, target)' "$UNIFIED"
+          check_text 'V69_UNIFIED_EQ_WRITE_PLAIN=' "$UNIFIED"
+          check_text 'payloadBytes=48' "$UNIFIED"
+          check_text 'PendingGattPurpose.EQ_TARGET' "$UNIFIED"
+          check_text 'V69_UNIFIED_EQ_TARGET_DESCRIPTOR_VERIFY' "$UNIFIED"
+          check_text 'LiveEqPolicy.encodeRestore(ch, band1, original)' "$UNIFIED"
+          check_text 'V69_UNIFIED_EQ_FAILSAFE_RESTORE_PLAIN=' "$UNIFIED"
+          check_text 'PendingGattPurpose.EQ_RESTORE' "$UNIFIED"
+          check_text 'V69_UNIFIED_EQ_RESTORE_DESCRIPTOR_VERIFY' "$UNIFIED"
+          check_text 'EQ RESTORE VERIFY FAILED — STOP CONTROL • DO NOT SAVE' "$UNIFIED"
+          check_text 'eqTargetVerifyDelayMs = 3000L' "$UNIFIED"
+          check_text 'eqRestoreVerifyDelayMs = 3000L' "$UNIFIED"
+          check_text 'val writable = LiveEqPolicy.isWritable(b)' "$UNIFIED"
+          check_text 'LOCKED • non-standard/unsafe EQ shape • V69 ไม่ส่ง write' "$UNIFIED"
+          check_text 'b.type == EqBandCodec.PEAKING_TYPE' "$EQPOL"
+          check_text 'EqBandCodec.encode(previous)' "$EQPOL"
+
+          # Same-session refresh, complete read coverage and sensor read-only policy remain intact.
+          check_text 'REFRESH ALL • SAME SESSION' "$UNIFIED"
+          check_text 'REFRESHING #$refreshCount • PLEASE WAIT' "$UNIFIED"
+          check_text 'V69_UNIFIED_REFRESH_TAP' "$UNIFIED"
+          check_text 'V69_UNIFIED_REFRESH_COMPLETE' "$UNIFIED"
+          check_text 'NO VALUE CHANGES • refresh สำเร็จ แต่ DSP ส่งค่าชุดเดิม' "$UNIFIED"
+          check_text 'scalarChanged=$scalarChanged' "$UNIFIED"
+          check_text 'eqChanged=$eqChanged' "$UNIFIED"
+          check_text 'sensorChanged=$sensorChanged' "$UNIFIED"
+          check_text 'sameSession=true' "$UNIFIED"
+          check_text 'expectedScalars=7' "$UNIFIED"
+          check_text 'expectedEqBands=105' "$UNIFIED"
+          check_text 'expectedSensors=4' "$UNIFIED"
+          check_text 'sensorReadOnly=true' "$UNIFIED"
+          check_text 'genericWrites=false' "$UNIFIED"
+
+          # Manual guarded SaveParams only. No auto-save or direct ID7 writer.
+          check_text 'SaveParamsPolicy.encodeTrigger()' "$UNIFIED"
+          check_text '570000000700000000' "$UNIFIED"
+          check_text 'V69_UNIFIED_SAVEPARAMS_TRIGGER_PLAIN=' "$UNIFIED"
+          check_text 'V69_UNIFIED_PERSISTENT_SAVE_COMPLETE' "$UNIFIED"
+          check_text 'DO NOT RETRY' "$UNIFIED"
+          check_text 'UfeCodec.encodeWrite(ACTUATOR_ID, 0, byteArrayOf())' "$SAVEPOL"
+          check_text '570000000700000000' "$SAVEPOL"
+
+          # V69 Phase 3: save-state hardening. No new protocol writer is introduced.
+          check_text 'SAVE_PRECHECK' "$UNIFIED"
+          check_text 'SAVE_POSTCHECK' "$UNIFIED"
+          check_text 'verifiedScalarExpected' "$UNIFIED"
+          check_text 'verifiedEqExpected' "$UNIFIED"
+          check_text 'V69_UNIFIED_SAVE_PRECHECK_START' "$UNIFIED"
+          check_text 'V69_UNIFIED_SAVE_PRECHECK_RESULT' "$UNIFIED"
+          check_text 'V69_UNIFIED_SAVE_POSTCHECK_START' "$UNIFIED"
+          check_text 'V69_UNIFIED_SAVE_POSTCHECK_RESULT' "$UNIFIED"
+          check_text 'precheckPassed=true' "$UNIFIED"
+          check_text 'precheck=true postcheck=true' "$UNIFIED"
+          check_text 'V69 SAVE UNCONFIRMED/BLOCKED' "$UNIFIED"
+
+          # Queue failure must stop/re-auth rather than continue on an uncertain TX stream.
+          check_text 'V69_UNIFIED_TX_STREAM_UNCERTAIN' "$UNIFIED"
+          check_text 'STOP_REAUTH' "$UNIFIED"
+          check_text 'STOP_NO_RETRY' "$UNIFIED"
+
+          python3 - <<'PY'
+          from pathlib import Path
+          u=Path('/tmp/okn_v69/app/src/main/java/com/okn/dsp/UnifiedControlActivity.kt').read_text()
+          assert u.count('UfeCodec.encodeFloat32Write') == 2, u.count('UfeCodec.encodeFloat32Write')
+          assert u.count('LiveEqPolicy.encodeWrite') == 1, u.count('LiveEqPolicy.encodeWrite')
+          assert u.count('LiveEqPolicy.encodeRestore') == 1, u.count('LiveEqPolicy.encodeRestore')
+          assert u.count('SaveParamsPolicy.encodeTrigger()') == 1, u.count('SaveParamsPolicy.encodeTrigger()')
+          assert 'EqBandCodec.encode' not in u
+          assert 'UfeCodec.encodeWrite(' not in u
+          assert 'LiveEqPolicy.isWritable(original)' in u
+          assert 'val writable = LiveEqPolicy.isWritable(b)' in u
+          assert 'sensorReadOnly=true' in u
+          assert 'genericWrites=false' in u
+          assert 'SAVE_PRECHECK' in u and 'SAVE_POSTCHECK' in u
+          assert 'V69_UNIFIED_SAVE_PRECHECK_RESULT' in u
+          assert 'V69_UNIFIED_SAVE_POSTCHECK_RESULT' in u
+          assert 'precheck=true postcheck=true' in u
+          print('OK: V69 keeps V68 writer surface and adds PRE/POST save-state verification only')
+          PY
+
+          if grep -R -n -F 'UfeCodec.encodeWrite(7' /tmp/okn_v69/app/src/main/java/com/okn/dsp | grep -v 'SaveParamsPolicy.kt'; then
+            echo 'ERROR: direct SaveParams ID7 write exists outside SaveParamsPolicy'
+            exit 1
+          fi
+
+          echo 'OK: V69 static preflight passed'
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK packages
+        shell: bash
+        run: sdkmanager 'platforms;android-35' 'build-tools;35.0.0'
+
+      - name: Set up Gradle 8.9
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: Build debug APK
+        working-directory: /tmp/okn_v69
+        run: gradle :app:assembleDebug --no-daemon --stacktrace
+
+      - name: Verify and package artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          APK=/tmp/okn_v69/app/build/outputs/apk/debug/app-debug.apk
+          test -f "$APK"
+          mkdir -p artifact
+          cp "$APK" artifact/OKN_DSP_V69_PRODUCTION_SAVE_STATE_HARDENING-debug.apk
+          cp /tmp/okn_v69/README_V69.txt artifact/
+          cp /tmp/okn_v69/evidence/OKN_DSP_V69_PRODUCTION_SAVE_STATE_HARDENING_PLAN.txt artifact/
+          cp /tmp/okn_v69/evidence/OKN_DSP_V69_PRODUCTION_SAVE_STATE_HARDENING_PLAN.json artifact/
+          sha256sum artifact/OKN_DSP_V69_PRODUCTION_SAVE_STATE_HARDENING-debug.apk > artifact/OKN_DSP_V69_PRODUCTION_SAVE_STATE_HARDENING-debug.sha256
+          ls -lh artifact
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: OKN-DSP-V69-PRODUCTION-SAVE-STATE-HARDENING-debug-apk
+          path: artifact/
+          if-no-files-found: error
+          retention-days: 30
