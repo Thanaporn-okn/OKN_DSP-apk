@@ -1,0 +1,141 @@
+name: Build OKN DSP V58 Live EQ 7CH Permanent Save
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'OKN_DSP_ANDROID_V58_LIVE_EQ_7CH_PERMANENT_SAVE.zip'
+      - '.github/workflows/build-okn-dsp-v58.yml'
+
+jobs:
+  build-apk:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Restore and verify V58 source
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/okn_v58
+          mkdir -p /tmp/okn_v58
+          unzip -q OKN_DSP_ANDROID_V58_LIVE_EQ_7CH_PERMANENT_SAVE.zip -d /tmp/okn_v58
+
+          check_file() { test -f "$1" || { echo "ERROR missing $1"; exit 1; }; echo "OK file: $1"; }
+          check_text() { grep -Fq "$1" "$2" || { echo "ERROR missing marker '$1' in $2"; exit 1; }; echo "OK marker: $1"; }
+
+          LIVE=/tmp/okn_v58/app/src/main/java/com/okn/dsp/LiveEqActivity.kt
+          POLICY=/tmp/okn_v58/app/src/main/java/com/okn/dsp/protocol/SaveParamsPolicy.kt
+          LIVEPOL=/tmp/okn_v58/app/src/main/java/com/okn/dsp/protocol/LiveEqPolicy.kt
+          GATE=/tmp/okn_v58/app/src/main/java/com/okn/dsp/protocol/WriteGate.kt
+          MAIN=/tmp/okn_v58/app/src/main/java/com/okn/dsp/MainActivity.kt
+          GRADLE=/tmp/okn_v58/app/build.gradle.kts
+
+          check_file "$LIVE"
+          check_file "$POLICY"
+          check_file "$LIVEPOL"
+          check_file "$GATE"
+          check_file "$MAIN"
+          check_file "$GRADLE"
+          check_file /tmp/okn_v58/README_V58.txt
+          check_file /tmp/okn_v58/evidence/OKN_DSP_V58_LIVE_EQ_PERMANENT_SAVE_PLAN.txt
+          check_file /tmp/okn_v58/evidence/OKN_DSP_V58_LIVE_EQ_PERMANENT_SAVE_PLAN.json
+          check_file /tmp/okn_v58/evidence/OKN_DSP_V57_SAVEPARAMS_PERSISTENCE_COMPLETE_CAPTURE.txt
+          check_file /tmp/okn_v58/evidence/OKN_DSP_V51_LIVE_EQ_SUCCESS_CAPTURE.txt
+
+          check_text 'versionCode = 58' "$GRADLE"
+          check_text '4.0.0-v58-live-eq-7ch-permanent-save' "$GRADLE"
+          check_text 'liveEqEditorEnabled: Boolean = true' "$GATE"
+          check_text 'liveEqPersistentSaveEnabled: Boolean = true' "$GATE"
+          check_text 'const val ACTUATOR_ID = 7' "$POLICY"
+          check_text 'UfeCodec.encodeWrite(ACTUATOR_ID, 0, byteArrayOf())' "$POLICY"
+          check_text '570000000700000000' "$POLICY"
+
+          # V58 live EQ remains guarded/readback-verified with rollback.
+          check_text 'SAVE TO DSP (PERMANENT) • GUARDED' "$LIVE"
+          check_text 'V58_LIVE_EQ_WRITE_PLAIN=' "$LIVE"
+          check_text 'V58_TARGET_DESCRIPTOR_VERIFY' "$LIVE"
+          check_text 'V58_EQ_ROLLBACK_WRITE_PLAIN=' "$LIVE"
+          check_text 'V58_ROLLBACK_DESCRIPTOR_VERIFY' "$LIVE"
+          check_text 'verifiedChangeCount += 1' "$LIVE"
+          check_text 'persistence=RAM_DIRTY' "$LIVE"
+
+          # Permanent SAVE is explicit and requires a verified dirty V58 change + idle protocol.
+          check_text 'SaveParamsPolicy.triggerIsExact()' "$LIVE"
+          check_text 'verifiedChangeCount <= 0' "$LIVE"
+          check_text '!unsavedVerifiedChanges' "$LIVE"
+          check_text 'saveInFlight || pendingPrevious != null || descMode != null || waitingAuth' "$LIVE"
+          check_text 'V58_SAVEPARAMS_TRIGGER_PLAIN=' "$LIVE"
+          check_text 'TX_SAVEPARAMS_ID7_V58' "$LIVE"
+          check_text 'V58_SAVEPARAMS_GATT_RESULT' "$LIVE"
+          check_text 'saveCommitSettleMs = 5000L' "$LIVE"
+          check_text 'V58_PERSISTENT_SAVE_COMPLETE' "$LIVE"
+          check_text 'V58_PERSISTENT_SAVE_UNCONFIRMED' "$LIVE"
+          check_text 'persistenceBasis=V57_TWO_POWER_CYCLE_PROOF' "$LIVE"
+          check_text 'เปิด V58 LIVE EQ 7CH + PERMANENT SAVE' "$MAIN"
+
+          # SaveParams ID7 encoding remains centralized in SaveParamsPolicy.
+          if grep -R -n -F 'UfeCodec.encodeWrite(7' /tmp/okn_v58/app/src/main/java/com/okn/dsp | grep -v 'SaveParamsPolicy.kt'; then
+            echo 'ERROR: direct SaveParams ID7 write exists outside SaveParamsPolicy'
+            exit 1
+          fi
+
+          # Verify-target path must not auto-save; SAVE stays user-triggered only.
+          python3 - <<'PY'
+          from pathlib import Path
+          s = Path('/tmp/okn_v58/app/src/main/java/com/okn/dsp/LiveEqActivity.kt').read_text()
+          seg = s[s.index('private fun verifyTarget'):s.index('private fun restorePrevious')]
+          assert 'SaveParamsPolicy.encodeTrigger()' not in seg
+          assert 'sendPermanentSave()' not in seg
+          print('OK: no auto-save in verifyTarget')
+          PY
+
+          echo 'OK: V58 combines proven live EQ + proven SaveParams only behind explicit guarded permanent SAVE'
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK packages
+        shell: bash
+        run: sdkmanager 'platforms;android-35' 'build-tools;35.0.0'
+
+      - name: Set up Gradle 8.9
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: Build debug APK
+        working-directory: /tmp/okn_v58
+        run: gradle :app:assembleDebug --no-daemon --stacktrace
+
+      - name: Verify and package artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          APK=/tmp/okn_v58/app/build/outputs/apk/debug/app-debug.apk
+          test -f "$APK"
+          mkdir -p artifact
+          cp "$APK" artifact/OKN_DSP_V58_LIVE_EQ_7CH_PERMANENT_SAVE-debug.apk
+          cp /tmp/okn_v58/README_V58.txt artifact/
+          cp /tmp/okn_v58/evidence/OKN_DSP_V58_LIVE_EQ_PERMANENT_SAVE_PLAN.txt artifact/
+          cp /tmp/okn_v58/evidence/OKN_DSP_V58_LIVE_EQ_PERMANENT_SAVE_PLAN.json artifact/
+          sha256sum artifact/OKN_DSP_V58_LIVE_EQ_7CH_PERMANENT_SAVE-debug.apk > artifact/OKN_DSP_V58_LIVE_EQ_7CH_PERMANENT_SAVE-debug.sha256
+          ls -lh artifact
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: OKN-DSP-V58-LIVE-EQ-7CH-PERMANENT-SAVE-debug-apk
+          path: artifact/
+          if-no-files-found: error
+          retention-days: 30
