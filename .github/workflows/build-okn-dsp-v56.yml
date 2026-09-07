@@ -1,0 +1,141 @@
+name: Build OKN DSP V56 SaveParams Restore Button Race Fix
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'OKN_DSP_ANDROID_V56_SAVEPARAMS_RESTORE_BUTTON_RACE_FIX.zip'
+      - '.github/workflows/build-okn-dsp-v56.yml'
+
+jobs:
+  build-apk:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Restore and verify V56 source
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/okn_v56
+          mkdir -p /tmp/okn_v56
+          unzip -q OKN_DSP_ANDROID_V56_SAVEPARAMS_RESTORE_BUTTON_RACE_FIX.zip -d /tmp/okn_v56
+
+          check_file() { test -f "$1" || { echo "ERROR missing $1"; exit 1; }; echo "OK file: $1"; }
+          check_text() { grep -Fq "$1" "$2" || { echo "ERROR missing marker '$1' in $2"; exit 1; }; echo "OK marker: $1"; }
+
+          ACT=/tmp/okn_v56/app/src/main/java/com/okn/dsp/SaveParamsProofActivity.kt
+          POLICY=/tmp/okn_v56/app/src/main/java/com/okn/dsp/protocol/SaveParamsPolicy.kt
+          GATE=/tmp/okn_v56/app/src/main/java/com/okn/dsp/protocol/WriteGate.kt
+          LIVE=/tmp/okn_v56/app/src/main/java/com/okn/dsp/LiveEqActivity.kt
+          MANIFEST=/tmp/okn_v56/app/src/main/AndroidManifest.xml
+          GRADLE=/tmp/okn_v56/app/build.gradle.kts
+
+          check_file "$ACT"
+          check_file "$POLICY"
+          check_file "$GATE"
+          check_file "$LIVE"
+          check_file "$MANIFEST"
+          check_file "$GRADLE"
+          check_file /tmp/okn_v56/README_V56.txt
+          check_file /tmp/okn_v56/evidence/OKN_DSP_V56_STALE_GATT_UI_RACE_FIX_PLAN.txt
+          check_file /tmp/okn_v56/evidence/OKN_DSP_V56_STALE_GATT_UI_RACE_FIX_PLAN.json
+          check_file /tmp/okn_v56/evidence/OKN_DSP_V51_LIVE_EQ_SUCCESS_CAPTURE.txt
+
+          check_text 'versionCode = 56' "$GRADLE"
+          check_text '3.8.0-v56-saveparams-stale-gatt-ui-race-fix' "$GRADLE"
+          check_text 'saveParamsPersistenceProofEnabled: Boolean = true' "$GATE"
+          check_text 'const val ACTUATOR_ID = 7' "$POLICY"
+          check_text 'const val TEST_ACTUATOR = 4' "$POLICY"
+          check_text 'const val TEST_BAND = 4' "$POLICY"
+          check_text 'const val TEST_OFFSET = 144' "$POLICY"
+          check_text 'const val TEST_BOOST_DB = -0.1f' "$POLICY"
+          check_text 'UfeCodec.encodeWrite(ACTUATOR_ID, 0, byteArrayOf())' "$POLICY"
+          check_text '570000000700000000' "$POLICY"
+
+          # V56 root race fix: callbacks from a replaced BluetoothGatt cannot mutate UI/protocol state.
+          check_text 'private fun staleGatt(callbackGatt: BluetoothGatt, where: String): Boolean' "$ACT"
+          check_text 'callbackGatt !== active' "$ACT"
+          check_text 'V56_STALE_GATT_CALLBACK_IGNORED' "$ACT"
+          check_text 'staleGatt(g, "onConnectionStateChange:$newState")' "$ACT"
+          check_text 'staleGatt(g, "onServicesDiscovered")' "$ACT"
+          check_text 'staleGatt(g, "onDescriptorWrite")' "$ACT"
+          check_text 'staleGatt(g, "onCharacteristicWrite")' "$ACT"
+          check_text 'staleGatt(g, "onCharacteristicChanged33")' "$ACT"
+          check_text 'V56_RESTORE_UI_BACKGROUND_REASSERT' "$ACT"
+          check_text 'reassertRestoreUiFromBackground(reason)' "$ACT"
+
+          # Phase must carry from the already-proven V55 first power-cycle.
+          check_text 'getSharedPreferences("okn_v52_saveparams", MODE_PRIVATE)' "$ACT"
+          check_text 'Phase.TARGET_PERSISTED' "$ACT"
+          check_text 'V56 TARGET PERSISTED VERIFIED' "$ACT"
+          check_text 'RESTORE ORIGINAL 0.0 dB + VERIFY + SAVEPARAMS' "$ACT"
+
+          # Persistence proof and V55 settle recovery remain intact.
+          check_text 'saveCommitSettleMs = 5000L' "$ACT"
+          check_text 'V56_SAVE_PHASE_PERSISTED_IMMEDIATELY' "$ACT"
+          check_text 'V56_TARGET_POWER_CYCLE_VERIFY' "$ACT"
+          check_text 'V56_RESTORE_DESCRIPTOR_VERIFY' "$ACT"
+          check_text 'V56_RESTORE_POWER_CYCLE_VERIFY' "$ACT"
+          check_text 'V56_SAVEPARAMS_PERSISTENCE_PROOF_COMPLETE' "$ACT"
+          check_text 'WAIT_RESTORE_REBOOT' "$ACT"
+          check_text '.SaveParamsProofActivity' "$MANIFEST"
+
+          # No direct generic ID7 write is allowed outside SaveParamsPolicy.
+          if grep -R -n -F 'UfeCodec.encodeWrite(7' /tmp/okn_v56/app/src/main/java/com/okn/dsp | grep -v 'SaveParamsPolicy.kt'; then
+            echo 'ERROR: direct SaveParams ID7 write exists outside guarded SaveParamsPolicy'
+            exit 1
+          fi
+          if grep -Fq 'SaveParamsPolicy.encodeTrigger' "$LIVE"; then
+            echo 'ERROR: live EQ editor gained SaveParams trigger'
+            exit 1
+          fi
+          echo 'OK: V56 stale-GATT race protection is present; SaveParams remains confined to guarded persistence proof'
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK packages
+        shell: bash
+        run: sdkmanager 'platforms;android-35' 'build-tools;35.0.0'
+
+      - name: Set up Gradle 8.9
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: Build debug APK
+        working-directory: /tmp/okn_v56
+        run: gradle :app:assembleDebug --no-daemon --stacktrace
+
+      - name: Verify and package artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          APK=/tmp/okn_v56/app/build/outputs/apk/debug/app-debug.apk
+          test -f "$APK"
+          mkdir -p artifact
+          cp "$APK" artifact/OKN_DSP_V56_SAVEPARAMS_RESTORE_BUTTON_RACE_FIX-debug.apk
+          cp /tmp/okn_v56/README_V56.txt artifact/
+          cp /tmp/okn_v56/evidence/OKN_DSP_V56_STALE_GATT_UI_RACE_FIX_PLAN.txt artifact/
+          cp /tmp/okn_v56/evidence/OKN_DSP_V56_STALE_GATT_UI_RACE_FIX_PLAN.json artifact/
+          sha256sum artifact/OKN_DSP_V56_SAVEPARAMS_RESTORE_BUTTON_RACE_FIX-debug.apk > artifact/OKN_DSP_V56_SAVEPARAMS_RESTORE_BUTTON_RACE_FIX-debug.sha256
+          ls -lh artifact
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: OKN-DSP-V56-SAVEPARAMS-RESTORE-BUTTON-RACE-FIX-debug-apk
+          path: artifact/
+          if-no-files-found: error
+          retention-days: 30
