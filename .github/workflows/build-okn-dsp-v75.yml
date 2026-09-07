@@ -1,0 +1,73 @@
+name: Build OKN DSP V75 Production Release Field Self Check
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'OKN_DSP_ANDROID_V75_PRODUCTION_RELEASE_FIELD_SELF_CHECK.zip'
+      - '.github/workflows/build-okn-dsp-v75.yml'
+
+jobs:
+  build-apk:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Restore and verify V75 source
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo 'e847b5021324172feec10a731f7b259f4c0b9d9061b939b14100025200b39f1a  OKN_DSP_ANDROID_V75_PRODUCTION_RELEASE_FIELD_SELF_CHECK.zip' | sha256sum -c -
+          rm -rf /tmp/okn_v75
+          mkdir -p /tmp/okn_v75
+          unzip -q OKN_DSP_ANDROID_V75_PRODUCTION_RELEASE_FIELD_SELF_CHECK.zip -d /tmp/okn_v75
+          cd /tmp/okn_v75
+          python3 preflight_v75.py
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK packages
+        shell: bash
+        run: sdkmanager 'platforms;android-35' 'build-tools;35.0.0'
+
+      - name: Set up Gradle 8.9
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: Build debug APK
+        working-directory: /tmp/okn_v75
+        run: gradle :app:assembleDebug --no-daemon --stacktrace
+
+      - name: Verify and package artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          APK=/tmp/okn_v75/app/build/outputs/apk/debug/app-debug.apk
+          test -f "$APK"
+          mkdir -p artifact
+          cp "$APK" artifact/OKN_DSP_V75_PRODUCTION_RELEASE_FIELD_SELF_CHECK-debug.apk
+          cp /tmp/okn_v75/README_V75.txt artifact/
+          cp /tmp/okn_v75/evidence/OKN_DSP_V75_PRODUCTION_RELEASE_FIELD_SELF_CHECK_PLAN.txt artifact/
+          cp /tmp/okn_v75/evidence/OKN_DSP_V75_PRODUCTION_RELEASE_FIELD_SELF_CHECK_PLAN.json artifact/
+          sha256sum artifact/OKN_DSP_V75_PRODUCTION_RELEASE_FIELD_SELF_CHECK-debug.apk > artifact/OKN_DSP_V75_PRODUCTION_RELEASE_FIELD_SELF_CHECK-debug.sha256
+          ls -lh artifact
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: OKN-DSP-V75-PRODUCTION-RELEASE-FIELD-SELF-CHECK-debug-apk
+          path: artifact/
+          if-no-files-found: error
+          retention-days: 30
