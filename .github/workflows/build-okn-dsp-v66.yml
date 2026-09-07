@@ -1,0 +1,180 @@
+name: Build OKN DSP V66 Unified Refresh Feedback Fix
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'OKN_DSP_ANDROID_V66_UNIFIED_REFRESH_FEEDBACK_FIX.zip'
+      - '.github/workflows/build-okn-dsp-v66.yml'
+
+jobs:
+  build-apk:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Restore and verify V66 source
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo 'fe37bb24213c6235446b33d5cc9068a916790a0baf6093d8d92a23769bc3d603  OKN_DSP_ANDROID_V66_UNIFIED_REFRESH_FEEDBACK_FIX.zip' | sha256sum -c -
+          rm -rf /tmp/okn_v66
+          mkdir -p /tmp/okn_v66
+          unzip -q OKN_DSP_ANDROID_V66_UNIFIED_REFRESH_FEEDBACK_FIX.zip -d /tmp/okn_v66
+
+          check_file() { test -f "$1" || { echo "ERROR missing $1"; exit 1; }; echo "OK file: $1"; }
+          check_text() { grep -Fq "$1" "$2" || { echo "ERROR missing marker '$1' in $2"; exit 1; }; echo "OK marker: $1"; }
+
+          MAIN=/tmp/okn_v66/app/src/main/java/com/okn/dsp/MainActivity.kt
+          UNIFIED=/tmp/okn_v66/app/src/main/java/com/okn/dsp/UnifiedControlActivity.kt
+          SCALAR=/tmp/okn_v66/app/src/main/java/com/okn/dsp/ScalarControlActivity.kt
+          LIVE=/tmp/okn_v66/app/src/main/java/com/okn/dsp/LiveEqActivity.kt
+          POLICY=/tmp/okn_v66/app/src/main/java/com/okn/dsp/protocol/SaveParamsPolicy.kt
+          SCALARPOL=/tmp/okn_v66/app/src/main/java/com/okn/dsp/protocol/VerifiedScalarControls.kt
+          GATE=/tmp/okn_v66/app/src/main/java/com/okn/dsp/protocol/WriteGate.kt
+          MANIFEST=/tmp/okn_v66/app/src/main/AndroidManifest.xml
+          GRADLE=/tmp/okn_v66/app/build.gradle.kts
+
+          for f in "$MAIN" "$UNIFIED" "$SCALAR" "$LIVE" "$POLICY" "$SCALARPOL" "$GATE" "$MANIFEST" "$GRADLE"; do check_file "$f"; done
+          check_file /tmp/okn_v66/README_V66.txt
+          check_file /tmp/okn_v66/evidence/OKN_DSP_V66_UNIFIED_REFRESH_FEEDBACK_FIX_PLAN.txt
+          check_file /tmp/okn_v66/evidence/OKN_DSP_V66_UNIFIED_REFRESH_FEEDBACK_FIX_PLAN.json
+          check_file /tmp/okn_v66/evidence/OKN_DSP_V64_ID3_PRODUCTION_SUCCESS_CAPTURE.txt
+
+          check_text 'versionCode = 66' "$GRADLE"
+          check_text '4.7.0-v66-unified-refresh-feedback-fix' "$GRADLE"
+
+          check_text 'OKN DSP V66 — PRODUCTION VERIFIED CONTROL HUB' "$MAIN"
+          check_text 'UNIFIED SINGLE-SESSION DASHBOARD • GLOBAL + EQ + SENSORS • READ ONLY PROOF' "$MAIN"
+          check_text 'REFRESH ALL now visibly reports START/COMPLETE' "$MAIN"
+          check_text 'UnifiedControlActivity::class.java' "$MAIN"
+          check_text '.UnifiedControlActivity' "$MANIFEST"
+
+          # V66 refresh feedback must be explicit and observable even when values are identical.
+          check_text 'REFRESH ALL • SAME SESSION • READ ONLY' "$UNIFIED"
+          check_text 'REFRESHING #$refreshCount • PLEASE WAIT' "$UNIFIED"
+          check_text 'V66_UNIFIED_REFRESH_TAP' "$UNIFIED"
+          check_text 'V66_UNIFIED_REFRESH_COMPLETE' "$UNIFIED"
+          check_text 'NO VALUE CHANGES • refresh สำเร็จ แต่ DSP ส่งค่าชุดเดิม' "$UNIFIED"
+          check_text 'scalarChanged=$scalarChanged' "$UNIFIED"
+          check_text 'eqChanged=$eqChanged' "$UNIFIED"
+          check_text 'sensorChanged=$sensorChanged' "$UNIFIED"
+          check_text 'sameSession=true readOnly=true' "$UNIFIED"
+          check_text 'V66_UNIFIED_DESC_REQUEST mode=$mode' "$UNIFIED"
+          check_text 'V66_UNIFIED_LOAD mode=$mode' "$UNIFIED"
+          check_text 'V66 UNIFIED READY • REFRESH #$refreshCount COMPLETE' "$UNIFIED"
+
+          # One-session unified read-only coverage remains 7 scalar + 105 EQ + 4 sensors.
+          check_text 'scalarIds=2,3,8,9,10,13,11' "$UNIFIED"
+          check_text 'expectedScalars=7' "$UNIFIED"
+          check_text 'expectedEqBands=105' "$UNIFIED"
+          check_text 'expectedSensors=4' "$UNIFIED"
+          check_text 'genericWrites=false saveParams=false' "$UNIFIED"
+
+          # Unified screen must remain parameter-write free and SaveParams free.
+          python3 - <<'PY'
+          from pathlib import Path
+          u=Path('/tmp/okn_v66/app/src/main/java/com/okn/dsp/UnifiedControlActivity.kt').read_text()
+          forbidden=[
+              'SaveParamsPolicy.encodeTrigger()',
+              'UfeCodec.encodeFloat32Write',
+              'LiveEqPolicy.encodeWrite',
+              'LiveEqPolicy.encodeRestore',
+              'UfeCodec.encodeWrite(',
+              'WRITE LIVE + VERIFY',
+              'APPLY + VERIFY',
+              'SAVE TO DSP (PERMANENT)'
+          ]
+          for x in forbidden:
+              assert x not in u, x
+          assert u.count('SessionCryptoFacts.DEVICE_DESCRIPTION_REQUEST') == 1
+          assert 'startupProbe16' in u
+          assert 'beginRefresh()' in u
+          assert 'snapshotEqSignatures()' in u
+          print('OK: V66 unified refresh is same-session read-only and visibly instrumented')
+          PY
+
+          # Generic writes remain locked and scalar production allow-list stays exactly 7 verified IDs.
+          check_text 'const val enabled: Boolean = false' "$GATE"
+          python3 - <<'PY'
+          import re
+          from pathlib import Path
+          s=Path('/tmp/okn_v66/app/src/main/java/com/okn/dsp/protocol/VerifiedScalarControls.kt').read_text()
+          ids=[int(x) for x in re.findall(r'VerifiedScalarControl\((\d+),', s)]
+          assert ids == [2,3,8,9,10,13,11], ids
+          print('OK: V66 scalar allow-list exactly seven verified controls')
+          PY
+
+          # Existing production write/readback/rollback/permanent-save paths are preserved.
+          check_text 'V66_SCALAR_WRITE_PLAIN=' "$SCALAR"
+          check_text 'V66_TARGET_DESCRIPTOR_VERIFY' "$SCALAR"
+          check_text 'V66_FAILSAFE_RESTORE_PLAIN=' "$SCALAR"
+          check_text 'V66_RESTORE_DESCRIPTOR_VERIFY' "$SCALAR"
+          check_text 'V66_SCALAR_SAVEPARAMS_TRIGGER_PLAIN=' "$SCALAR"
+          check_text 'V66_SCALAR_PERSISTENT_SAVE_COMPLETE' "$SCALAR"
+          check_text 'V66 GLOBAL CONTROLS READY • seven verified scalar controls loaded' "$SCALAR"
+
+          check_text 'V66_LIVE_EQ_WRITE_PLAIN=' "$LIVE"
+          check_text 'V66_TARGET_DESCRIPTOR_VERIFY' "$LIVE"
+          check_text 'V66_EQ_ROLLBACK_WRITE_PLAIN=' "$LIVE"
+          check_text 'V66_ROLLBACK_DESCRIPTOR_VERIFY' "$LIVE"
+          check_text 'V66_SAVEPARAMS_TRIGGER_PLAIN=' "$LIVE"
+          check_text 'V66_PERSISTENT_SAVE_COMPLETE' "$LIVE"
+
+          check_text 'const val ACTUATOR_ID = 7' "$POLICY"
+          check_text 'UfeCodec.encodeWrite(ACTUATOR_ID, 0, byteArrayOf())' "$POLICY"
+          check_text '570000000700000000' "$POLICY"
+          if grep -R -n -F 'UfeCodec.encodeWrite(7' /tmp/okn_v66/app/src/main/java/com/okn/dsp | grep -v 'SaveParamsPolicy.kt'; then
+            echo 'ERROR: direct SaveParams ID7 write exists outside SaveParamsPolicy'
+            exit 1
+          fi
+
+          echo 'OK: V66 unified refresh feedback fix invariants verified'
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK packages
+        shell: bash
+        run: sdkmanager 'platforms;android-35' 'build-tools;35.0.0'
+
+      - name: Set up Gradle 8.9
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: Build debug APK
+        working-directory: /tmp/okn_v66
+        run: gradle :app:assembleDebug --no-daemon --stacktrace
+
+      - name: Verify and package artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          APK=/tmp/okn_v66/app/build/outputs/apk/debug/app-debug.apk
+          test -f "$APK"
+          mkdir -p artifact
+          cp "$APK" artifact/OKN_DSP_V66_UNIFIED_REFRESH_FEEDBACK_FIX-debug.apk
+          cp /tmp/okn_v66/README_V66.txt artifact/
+          cp /tmp/okn_v66/evidence/OKN_DSP_V66_UNIFIED_REFRESH_FEEDBACK_FIX_PLAN.txt artifact/
+          cp /tmp/okn_v66/evidence/OKN_DSP_V66_UNIFIED_REFRESH_FEEDBACK_FIX_PLAN.json artifact/
+          sha256sum artifact/OKN_DSP_V66_UNIFIED_REFRESH_FEEDBACK_FIX-debug.apk > artifact/OKN_DSP_V66_UNIFIED_REFRESH_FEEDBACK_FIX-debug.sha256
+          ls -lh artifact
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: OKN-DSP-V66-UNIFIED-REFRESH-FEEDBACK-FIX-debug-apk
+          path: artifact/
+          if-no-files-found: error
+          retention-days: 30
