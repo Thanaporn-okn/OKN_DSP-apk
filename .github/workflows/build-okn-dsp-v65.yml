@@ -1,0 +1,184 @@
+name: Build OKN DSP V65 Unified Single Session Readonly
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'OKN_DSP_ANDROID_V65_UNIFIED_SINGLE_SESSION_READONLY.zip'
+      - '.github/workflows/build-okn-dsp-v65.yml'
+
+jobs:
+  build-apk:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Restore and verify V65 source
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo '9947d2e2f87b3e7e2c16b13e32d70bf8241d00578315b543a6ae05e7669b4cf3  OKN_DSP_ANDROID_V65_UNIFIED_SINGLE_SESSION_READONLY.zip' | sha256sum -c -
+          rm -rf /tmp/okn_v65
+          mkdir -p /tmp/okn_v65
+          unzip -q OKN_DSP_ANDROID_V65_UNIFIED_SINGLE_SESSION_READONLY.zip -d /tmp/okn_v65
+
+          check_file() { test -f "$1" || { echo "ERROR missing $1"; exit 1; }; echo "OK file: $1"; }
+          check_text() { grep -Fq "$1" "$2" || { echo "ERROR missing marker '$1' in $2"; exit 1; }; echo "OK marker: $1"; }
+
+          MAIN=/tmp/okn_v65/app/src/main/java/com/okn/dsp/MainActivity.kt
+          UNIFIED=/tmp/okn_v65/app/src/main/java/com/okn/dsp/UnifiedControlActivity.kt
+          SCALAR=/tmp/okn_v65/app/src/main/java/com/okn/dsp/ScalarControlActivity.kt
+          LIVE=/tmp/okn_v65/app/src/main/java/com/okn/dsp/LiveEqActivity.kt
+          POLICY=/tmp/okn_v65/app/src/main/java/com/okn/dsp/protocol/SaveParamsPolicy.kt
+          SCALARPOL=/tmp/okn_v65/app/src/main/java/com/okn/dsp/protocol/VerifiedScalarControls.kt
+          GATE=/tmp/okn_v65/app/src/main/java/com/okn/dsp/protocol/WriteGate.kt
+          MANIFEST=/tmp/okn_v65/app/src/main/AndroidManifest.xml
+          GRADLE=/tmp/okn_v65/app/build.gradle.kts
+
+          for f in "$MAIN" "$UNIFIED" "$SCALAR" "$LIVE" "$POLICY" "$SCALARPOL" "$GATE" "$MANIFEST" "$GRADLE"; do check_file "$f"; done
+          check_file /tmp/okn_v65/README_V65.txt
+          check_file /tmp/okn_v65/evidence/OKN_DSP_V65_UNIFIED_SINGLE_SESSION_PLAN.txt
+          check_file /tmp/okn_v65/evidence/OKN_DSP_V65_UNIFIED_SINGLE_SESSION_PLAN.json
+          check_file /tmp/okn_v65/evidence/OKN_DSP_V64_ID3_PRODUCTION_SUCCESS_CAPTURE.txt
+
+          check_text 'versionCode = 65' "$GRADLE"
+          check_text '4.6.0-v65-unified-single-session-readonly-integration' "$GRADLE"
+
+          # Launcher exposes unified read-only integration plus the already-proved production write modules.
+          check_text 'OKN DSP V65 — PRODUCTION VERIFIED CONTROL HUB' "$MAIN"
+          check_text 'UNIFIED SINGLE-SESSION DASHBOARD • GLOBAL + EQ + SENSORS • READ ONLY PROOF' "$MAIN"
+          check_text 'UnifiedControlActivity::class.java' "$MAIN"
+          check_text 'ScalarControlActivity::class.java' "$MAIN"
+          check_text 'LiveEqActivity::class.java' "$MAIN"
+          check_text 'EvidenceLabActivity::class.java' "$MAIN"
+          check_text '.UnifiedControlActivity' "$MANIFEST"
+
+          # Unified activity must be one-session READ ONLY architecture proof.
+          check_text 'V65_UNIFIED_ACTIVITY_START' "$UNIFIED"
+          check_text 'V65_UNIFIED_SESSION_START' "$UNIFIED"
+          check_text 'V65_UNIFIED_RANDKEY_DERIVED' "$UNIFIED"
+          check_text 'V65_UNIFIED_DESC_COMPLETE' "$UNIFIED"
+          check_text 'V65_UNIFIED_LOAD mode=' "$UNIFIED"
+          check_text 'scalarCount=${scalarValues.size} expectedScalars=7' "$UNIFIED"
+          check_text 'eqBands=$eqCount expectedEqBands=105' "$UNIFIED"
+          check_text 'sensors=${sensors.size} expectedSensors=4' "$UNIFIED"
+          check_text 'ready=$sessionReady genericWrites=false saveParamsSent=false' "$UNIFIED"
+          check_text 'V65 UNIFIED READY • one session • 7 scalars + 105 EQ bands + 4 sensors • READ ONLY' "$UNIFIED"
+          check_text 'SAVE V65 UNIFIED CAPTURE TO DOWNLOADS' "$UNIFIED"
+
+          # No parameter write / SaveParams path is allowed in the unified proof activity.
+          python3 - <<'PY'
+          from pathlib import Path
+          u=Path('/tmp/okn_v65/app/src/main/java/com/okn/dsp/UnifiedControlActivity.kt').read_text()
+          forbidden=[
+              'SaveParamsPolicy.encodeTrigger()',
+              'UfeCodec.encodeFloat32Write',
+              'LiveEqPolicy.encodeWrite',
+              'LiveEqPolicy.encodeRestore',
+              'UfeCodec.encodeWrite(',
+              'WRITE LIVE + VERIFY',
+              'APPLY + VERIFY',
+              'SAVE TO DSP (PERMANENT)'
+          ]
+          for x in forbidden:
+              assert x not in u, x
+          assert u.count('SessionCryptoFacts.DEVICE_DESCRIPTION_REQUEST') == 1
+          assert 'startupProbe16' in u
+          print('OK: V65 unified activity is read-only except AUTH + Device Description request transport')
+          PY
+
+          # Generic writes stay locked and the production scalar allow-list is exactly seven verified IDs.
+          check_text 'const val enabled: Boolean = false' "$GATE"
+          for marker in \
+            'VerifiedScalarControl(2, "MasterVolume"' \
+            'VerifiedScalarControl(3, "RemindSoundVolume"' \
+            'VerifiedScalarControl(8, "BassVolume"' \
+            'VerifiedScalarControl(9, "BassCutoff"' \
+            'VerifiedScalarControl(10, "BassBoost"' \
+            'VerifiedScalarControl(13, "MiddleBoost"' \
+            'VerifiedScalarControl(11, "TrebleBoost"'; do
+            check_text "$marker" "$SCALARPOL"
+          done
+          python3 - <<'PY'
+          import re
+          from pathlib import Path
+          s=Path('/tmp/okn_v65/app/src/main/java/com/okn/dsp/protocol/VerifiedScalarControls.kt').read_text()
+          ids=[int(x) for x in re.findall(r'VerifiedScalarControl\((\d+),', s)]
+          assert ids == [2,3,8,9,10,13,11], ids
+          print('OK: V65 production scalar allow-list exactly seven verified controls')
+          PY
+
+          # Existing production write/save semantics remain intact and explicit-only.
+          check_text 'V65_SCALAR_WRITE_PLAIN=' "$SCALAR"
+          check_text 'V65_TARGET_DESCRIPTOR_VERIFY' "$SCALAR"
+          check_text 'V65_FAILSAFE_RESTORE_PLAIN=' "$SCALAR"
+          check_text 'V65_RESTORE_DESCRIPTOR_VERIFY' "$SCALAR"
+          check_text 'V65_SCALAR_SAVEPARAMS_TRIGGER_PLAIN=' "$SCALAR"
+          check_text 'V65_SCALAR_PERSISTENT_SAVE_COMPLETE' "$SCALAR"
+          check_text 'V65 GLOBAL CONTROLS READY • seven verified scalar controls loaded' "$SCALAR"
+
+          check_text 'V65_LIVE_EQ_WRITE_PLAIN=' "$LIVE"
+          check_text 'V65_TARGET_DESCRIPTOR_VERIFY' "$LIVE"
+          check_text 'V65_EQ_ROLLBACK_WRITE_PLAIN=' "$LIVE"
+          check_text 'V65_ROLLBACK_DESCRIPTOR_VERIFY' "$LIVE"
+          check_text 'V65_SAVEPARAMS_TRIGGER_PLAIN=' "$LIVE"
+          check_text 'V65_PERSISTENT_SAVE_COMPLETE' "$LIVE"
+
+          # Exact SaveParams trigger remains centralized.
+          check_text 'const val ACTUATOR_ID = 7' "$POLICY"
+          check_text 'UfeCodec.encodeWrite(ACTUATOR_ID, 0, byteArrayOf())' "$POLICY"
+          check_text '570000000700000000' "$POLICY"
+          if grep -R -n -F 'UfeCodec.encodeWrite(7' /tmp/okn_v65/app/src/main/java/com/okn/dsp | grep -v 'SaveParamsPolicy.kt'; then
+            echo 'ERROR: direct SaveParams ID7 write exists outside SaveParamsPolicy'
+            exit 1
+          fi
+
+          echo 'OK: V65 unified single-session read-only integration invariants verified'
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK packages
+        shell: bash
+        run: sdkmanager 'platforms;android-35' 'build-tools;35.0.0'
+
+      - name: Set up Gradle 8.9
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: Build debug APK
+        working-directory: /tmp/okn_v65
+        run: gradle :app:assembleDebug --no-daemon --stacktrace
+
+      - name: Verify and package artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          APK=/tmp/okn_v65/app/build/outputs/apk/debug/app-debug.apk
+          test -f "$APK"
+          mkdir -p artifact
+          cp "$APK" artifact/OKN_DSP_V65_UNIFIED_SINGLE_SESSION_READONLY-debug.apk
+          cp /tmp/okn_v65/README_V65.txt artifact/
+          cp /tmp/okn_v65/evidence/OKN_DSP_V65_UNIFIED_SINGLE_SESSION_PLAN.txt artifact/
+          cp /tmp/okn_v65/evidence/OKN_DSP_V65_UNIFIED_SINGLE_SESSION_PLAN.json artifact/
+          sha256sum artifact/OKN_DSP_V65_UNIFIED_SINGLE_SESSION_READONLY-debug.apk > artifact/OKN_DSP_V65_UNIFIED_SINGLE_SESSION_READONLY-debug.sha256
+          ls -lh artifact
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: OKN-DSP-V65-UNIFIED-SINGLE-SESSION-READONLY-debug-apk
+          path: artifact/
+          if-no-files-found: error
+          retention-days: 30
