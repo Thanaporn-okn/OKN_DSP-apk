@@ -1,0 +1,87 @@
+name: Build OKN DSP V82 Stable Upgrade Signing Cache State
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'OKN_DSP_ANDROID_V82_STABLE_UPGRADE_SIGNING_CACHE_STATE.zip'
+      - '.github/workflows/build-okn-dsp-v82.yml'
+
+jobs:
+  build-apk:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Restore and verify V82 source
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo '8a158180a11d25a25c3cb5a353faf7ff2d8cdcade61ededd1db62b0a081f3103  OKN_DSP_ANDROID_V82_STABLE_UPGRADE_SIGNING_CACHE_STATE.zip' | sha256sum -c -
+          rm -rf /tmp/okn_v82
+          mkdir -p /tmp/okn_v82
+          unzip -q OKN_DSP_ANDROID_V82_STABLE_UPGRADE_SIGNING_CACHE_STATE.zip -d /tmp/okn_v82
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Run V82 preflight and verify stable signing certificate
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /tmp/okn_v82
+          python3 preflight_v82.py
+          echo 'ba1c52f2607c09953c52fdd79c5f72026aaf0adb8aa44bcba277f7d9b49d9511  app/okn_dsp_stable_debug.keystore' | sha256sum -c -
+          CERT=$(keytool -list -v -keystore app/okn_dsp_stable_debug.keystore -storepass android -alias androiddebugkey | awk '/SHA256:/{print $2; exit}' | tr -d ':' | tr 'A-F' 'a-f')
+          test "$CERT" = 'c3da85af2e978dbd0ed9bb695e5c79a263189595c116ad93a1ded75a2eb98397'
+          echo "Stable signing certificate SHA-256: $CERT"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK packages
+        shell: bash
+        run: sdkmanager 'platforms;android-35' 'build-tools;35.0.0'
+
+      - name: Set up Gradle 8.9
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: Build stable-signed debug APK
+        working-directory: /tmp/okn_v82
+        run: gradle :app:assembleDebug --no-daemon --stacktrace
+
+      - name: Verify APK signing identity and package artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          APK=/tmp/okn_v82/app/build/outputs/apk/debug/app-debug.apk
+          test -f "$APK"
+          APKSIGNER="$ANDROID_HOME/build-tools/35.0.0/apksigner"
+          "$APKSIGNER" verify --verbose "$APK"
+          CERT=$($APKSIGNER verify --print-certs "$APK" | awk -F': ' '/Signer #1 certificate SHA-256 digest:/{print $2; exit}' | tr 'A-F' 'a-f')
+          test "$CERT" = 'c3da85af2e978dbd0ed9bb695e5c79a263189595c116ad93a1ded75a2eb98397'
+          mkdir -p artifact
+          cp "$APK" artifact/OKN_DSP_V82_STABLE_UPGRADE_SIGNING_CACHE_STATE-debug.apk
+          cp /tmp/okn_v82/README_V82.txt artifact/
+          cp /tmp/okn_v82/evidence/OKN_DSP_V82_STABLE_UPGRADE_SIGNING_PLAN.txt artifact/
+          cp /tmp/okn_v82/evidence/OKN_DSP_V82_STABLE_UPGRADE_SIGNING_PLAN.json artifact/
+          printf '%s\n' "$CERT" > artifact/OKN_DSP_V82_APK_CERT_SHA256.txt
+          sha256sum artifact/OKN_DSP_V82_STABLE_UPGRADE_SIGNING_CACHE_STATE-debug.apk > artifact/OKN_DSP_V82_STABLE_UPGRADE_SIGNING_CACHE_STATE-debug.sha256
+          ls -lh artifact
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: OKN-DSP-V82-STABLE-UPGRADE-SIGNING-CACHE-STATE-debug-apk
+          path: artifact/
+          if-no-files-found: error
+          retention-days: 30
