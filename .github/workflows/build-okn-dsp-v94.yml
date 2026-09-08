@@ -1,0 +1,94 @@
+name: Build OKN DSP V94 Exact Reference UI Realtime Safe
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'OKN_DSP_ANDROID_V94_EXACT_REFERENCE_UI_REALTIME_SAFE.zip'
+      - 'OKN_DSP_V94_SHA256.txt'
+      - '.github/workflows/build-okn-dsp-v94.yml'
+
+jobs:
+  build-apk:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Restore and verify V94 source
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo '290277eabd9e07f2bff696a2a188810aa8b5e7a5ad0e112979328d3bfa468d5b  OKN_DSP_ANDROID_V94_EXACT_REFERENCE_UI_REALTIME_SAFE.zip' | sha256sum -c -
+          rm -rf /tmp/okn_v94
+          mkdir -p /tmp/okn_v94
+          unzip -q OKN_DSP_ANDROID_V94_EXACT_REFERENCE_UI_REALTIME_SAFE.zip -d /tmp/okn_v94
+          test -f /tmp/okn_v94/preflight_v94.py
+          test -f /tmp/okn_v94/evidence/OKN_DSP_V94_UI_REFERENCE.png
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Run V94 preflight and verify stable signing certificate
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /tmp/okn_v94
+          python3 preflight_v94.py
+          echo 'ba1c52f2607c09953c52fdd79c5f72026aaf0adb8aa44bcba277f7d9b49d9511  app/okn_dsp_stable_debug.keystore' | sha256sum -c -
+          CERT=$(keytool -list -v -keystore app/okn_dsp_stable_debug.keystore -storepass android -alias androiddebugkey | awk '/SHA256:/{print $2; exit}' | tr -d ':' | tr 'A-F' 'a-f')
+          test "$CERT" = 'c3da85af2e978dbd0ed9bb695e5c79a263189595c116ad93a1ded75a2eb98397'
+          echo "Stable signing certificate SHA-256: $CERT"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK packages
+        shell: bash
+        run: sdkmanager 'platforms;android-35' 'build-tools;35.0.0'
+
+      - name: Set up Gradle 8.9
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: Build stable-signed V94 APK
+        working-directory: /tmp/okn_v94
+        run: gradle :app:assembleDebug --no-daemon --stacktrace
+
+      - name: Verify APK signing identity and package V94 artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          APK=/tmp/okn_v94/app/build/outputs/apk/debug/app-debug.apk
+          ARTIFACT_DIR=/tmp/okn_v94/artifact
+          test -f "$APK"
+          APKSIGNER="$ANDROID_HOME/build-tools/35.0.0/apksigner"
+          "$APKSIGNER" verify --verbose "$APK"
+          CERT=$("$APKSIGNER" verify --print-certs "$APK" | awk -F': ' '/Signer #1 certificate SHA-256 digest:/{print $2; exit}' | tr 'A-F' 'a-f')
+          test "$CERT" = 'c3da85af2e978dbd0ed9bb695e5c79a263189595c116ad93a1ded75a2eb98397'
+
+          rm -rf "$ARTIFACT_DIR"
+          mkdir -p "$ARTIFACT_DIR"
+          cp "$APK" "$ARTIFACT_DIR/OKN_DSP_V94_EXACT_REFERENCE_UI_REALTIME_SAFE-debug.apk"
+          cp /tmp/okn_v94/README_V94.txt "$ARTIFACT_DIR/"
+          cp /tmp/okn_v94/evidence/OKN_DSP_V94_EXACT_REFERENCE_UI_REALTIME_SAFE.txt "$ARTIFACT_DIR/"
+          cp /tmp/okn_v94/evidence/OKN_DSP_V94_EXACT_REFERENCE_UI_REALTIME_SAFE.json "$ARTIFACT_DIR/"
+          cp /tmp/okn_v94/evidence/OKN_DSP_V94_UI_REFERENCE.png "$ARTIFACT_DIR/"
+          printf '%s\n' "$CERT" > "$ARTIFACT_DIR/OKN_DSP_V94_APK_CERT_SHA256.txt"
+          sha256sum "$ARTIFACT_DIR/OKN_DSP_V94_EXACT_REFERENCE_UI_REALTIME_SAFE-debug.apk" > "$ARTIFACT_DIR/OKN_DSP_V94_EXACT_REFERENCE_UI_REALTIME_SAFE-debug.sha256"
+          ls -lah "$ARTIFACT_DIR"
+
+      - name: Upload V94 artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: OKN_DSP_V94_EXACT_REFERENCE_UI_REALTIME_SAFE
+          path: /tmp/okn_v94/artifact/
+          if-no-files-found: error
+          retention-days: 30
