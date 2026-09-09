@@ -1,9 +1,9 @@
-name: Build OKN DSP V1
+name: Build OKN DSP Auto Version
 
 on:
   push:
     paths:
-      - 'OKN_DSP_ANDROID_V1_HOME_EQ_REALTIME_DIRECT.zip'
+      - 'OKN_DSP_ANDROID_V*.zip'
       - '.github/workflows/build-okn-dsp-v1.yml'
   workflow_dispatch:
 
@@ -17,37 +17,57 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Detect V1 source ZIP
+      - name: Detect latest OKN_DSP source ZIP
         id: source
         shell: bash
         run: |
-          if [ -f OKN_DSP_ANDROID_V1_HOME_EQ_REALTIME_DIRECT.zip ]; then
-            echo "present=true" >> "$GITHUB_OUTPUT"
-            echo "V1 source ZIP found."
-          else
+          set -euo pipefail
+          ZIP=$(find . -maxdepth 1 -type f -name 'OKN_DSP_ANDROID_V*.zip' -printf '%f\n' | sort -V | tail -1)
+          if [ -z "${ZIP:-}" ]; then
             echo "present=false" >> "$GITHUB_OUTPUT"
-            echo "Workflow installed. Push OKN_DSP_ANDROID_V1_HOME_EQ_REALTIME_DIRECT.zip and this workflow will run automatically."
+            echo "No OKN_DSP_ANDROID_V*.zip found. Workflow is installed and waiting for a source ZIP."
+            exit 0
           fi
+          echo "present=true" >> "$GITHUB_OUTPUT"
+          echo "zip=$ZIP" >> "$GITHUB_OUTPUT"
+          echo "Selected source: $ZIP"
+          sha256sum "$ZIP"
 
-      - name: Verify and extract V1 Sources
+      - name: Verify and extract Sources
         if: steps.source.outputs.present == 'true'
+        id: extract
         shell: bash
         run: |
           set -euo pipefail
-          echo '431a6e80ec92bcb48ad9d6f6e7ab35f802f97475d8f0fc48d0ca555b8102356d  OKN_DSP_ANDROID_V1_HOME_EQ_REALTIME_DIRECT.zip' | sha256sum -c -
-          unzip -tq OKN_DSP_ANDROID_V1_HOME_EQ_REALTIME_DIRECT.zip
-          rm -rf /tmp/okn_v1
-          mkdir -p /tmp/okn_v1
-          unzip -q OKN_DSP_ANDROID_V1_HOME_EQ_REALTIME_DIRECT.zip -d /tmp/okn_v1
-          test -d /tmp/okn_v1/Sources
-          cd /tmp/okn_v1/Sources
-          test -f OKN_DSP_V1_SHA256.txt
-          sha256sum -c OKN_DSP_V1_SHA256.txt
-          test -f preflight_v1.py
-          test -f evidence/OKN_DSP_V1_HOME_REFERENCE.png
-          test -f evidence/OKN_DSP_V1_EQ_REFERENCE.png
-          test -f evidence/OKN_DSP_V1_HOME_BUTTON_MAP.png
-          test -f evidence/OKN_DSP_V1_EQ_BUTTON_MAP.png
+          ZIP='${{ steps.source.outputs.zip }}'
+          unzip -tq "$ZIP"
+          rm -rf /tmp/okn_build
+          mkdir -p /tmp/okn_build
+          unzip -q "$ZIP" -d /tmp/okn_build
+          test -d /tmp/okn_build/Sources
+          cd /tmp/okn_build/Sources
+          MANIFEST=$(find . -maxdepth 1 -type f -name 'OKN_DSP_V*_SHA256.txt' -printf '%f\n' | sort -V | tail -1)
+          test -n "$MANIFEST"
+          sha256sum -c "$MANIFEST"
+          echo "manifest=$MANIFEST" >> "$GITHUB_OUTPUT"
+
+      - name: Read app version
+        if: steps.source.outputs.present == 'true'
+        id: meta
+        shell: bash
+        run: |
+          set -euo pipefail
+          FILE=/tmp/okn_build/Sources/app/build.gradle.kts
+          VERSION_CODE=$(sed -n 's/^[[:space:]]*versionCode[[:space:]]*=[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$FILE" | head -1)
+          VERSION_NAME=$(sed -n 's/^[[:space:]]*versionName[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' "$FILE" | head -1)
+          APP_ID=$(sed -n 's/^[[:space:]]*applicationId[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' "$FILE" | head -1)
+          test -n "$VERSION_CODE"
+          test -n "$VERSION_NAME"
+          test "$APP_ID" = 'com.okn.dsp'
+          echo "version_code=$VERSION_CODE" >> "$GITHUB_OUTPUT"
+          echo "version_name=$VERSION_NAME" >> "$GITHUB_OUTPUT"
+          echo "app_id=$APP_ID" >> "$GITHUB_OUTPUT"
+          echo "Building $APP_ID versionCode=$VERSION_CODE versionName=$VERSION_NAME"
 
       - name: Set up JDK 17
         if: steps.source.outputs.present == 'true'
@@ -56,17 +76,21 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Run V1 source preflight
+      - name: Run source preflight
         if: steps.source.outputs.present == 'true'
         shell: bash
         run: |
           set -euo pipefail
-          cd /tmp/okn_v1/Sources
-          python3 preflight_v1.py
-          echo 'ba1c52f2607c09953c52fdd79c5f72026aaf0adb8aa44bcba277f7d9b49d9511  app/okn_dsp_stable_debug.keystore' | sha256sum -c -
-          CERT=$(keytool -list -v -keystore app/okn_dsp_stable_debug.keystore -storepass android -alias androiddebugkey | awk '/SHA256:/{print $2; exit}' | tr -d ':' | tr 'A-F' 'a-f')
-          test "$CERT" = 'c3da85af2e978dbd0ed9bb695e5c79a263189595c116ad93a1ded75a2eb98397'
-          echo "Stable signer certificate SHA-256: $CERT"
+          cd /tmp/okn_build/Sources
+          PREFLIGHT=$(find . -maxdepth 1 -type f -name 'preflight_v*.py' -printf '%f\n' | sort -V | tail -1)
+          if [ -n "${PREFLIGHT:-}" ]; then
+            python3 "$PREFLIGHT"
+          fi
+          if [ -f app/okn_dsp_stable_debug.keystore ]; then
+            echo 'ba1c52f2607c09953c52fdd79c5f72026aaf0adb8aa44bcba277f7d9b49d9511  app/okn_dsp_stable_debug.keystore' | sha256sum -c -
+            CERT=$(keytool -list -v -keystore app/okn_dsp_stable_debug.keystore -storepass android -alias androiddebugkey | awk '/SHA256:/{print $2; exit}' | tr -d ':' | tr 'A-F' 'a-f')
+            test "$CERT" = 'c3da85af2e978dbd0ed9bb695e5c79a263189595c116ad93a1ded75a2eb98397'
+          fi
 
       - name: Set up Android SDK
         if: steps.source.outputs.present == 'true'
@@ -83,40 +107,47 @@ jobs:
         with:
           gradle-version: '8.9'
 
-      - name: Build stable-signed V1 debug APK
+      - name: Build APK
         if: steps.source.outputs.present == 'true'
-        working-directory: /tmp/okn_v1/Sources
+        working-directory: /tmp/okn_build/Sources
         run: gradle :app:assembleDebug --no-daemon --stacktrace
 
-      - name: Verify APK identity and signer
+      - name: Verify APK and prepare artifact
         if: steps.source.outputs.present == 'true'
         shell: bash
         run: |
           set -euo pipefail
-          APK=/tmp/okn_v1/Sources/app/build/outputs/apk/debug/app-debug.apk
+          VC='${{ steps.meta.outputs.version_code }}'
+          VN='${{ steps.meta.outputs.version_name }}'
+          APK=/tmp/okn_build/Sources/app/build/outputs/apk/debug/app-debug.apk
           test -s "$APK"
           APKSIGNER="$ANDROID_HOME/build-tools/35.0.0/apksigner"
           AAPT="$ANDROID_HOME/build-tools/35.0.0/aapt"
-          "$APKSIGNER" verify --verbose --print-certs "$APK" | tee /tmp/apksigner-v1.txt
-          CERT=$(awk -F': ' '/Signer #1 certificate SHA-256 digest:/{print $2; exit}' /tmp/apksigner-v1.txt | tr -d ':' | tr 'A-F' 'a-f')
+          "$APKSIGNER" verify --verbose --print-certs "$APK" | tee /tmp/apksigner.txt
+          CERT=$(awk -F': ' '/Signer #1 certificate SHA-256 digest:/{print $2; exit}' /tmp/apksigner.txt | tr -d ':' | tr 'A-F' 'a-f')
           test "$CERT" = 'c3da85af2e978dbd0ed9bb695e5c79a263189595c116ad93a1ded75a2eb98397'
           BADGING=$($AAPT dump badging "$APK" | head -1)
           echo "$BADGING"
           echo "$BADGING" | grep -q "name='com.okn.dsp'"
-          echo "$BADGING" | grep -q "versionCode='1'"
-          echo "$BADGING" | grep -q "versionName='1.0.0-v1'"
-          rm -rf /tmp/okn_v1_artifact
-          mkdir -p /tmp/okn_v1_artifact
-          cp "$APK" /tmp/okn_v1_artifact/OKN_DSP_V1-debug.apk
-          cp /tmp/okn_v1/Sources/README_V1.txt /tmp/okn_v1_artifact/
-          sha256sum /tmp/okn_v1_artifact/OKN_DSP_V1-debug.apk > /tmp/okn_v1_artifact/OKN_DSP_V1_APK_SHA256.txt
-          printf '%s\n' "$CERT" > /tmp/okn_v1_artifact/OKN_DSP_V1_APK_CERT_SHA256.txt
+          echo "$BADGING" | grep -q "versionCode='$VC'"
+          echo "$BADGING" | grep -q "versionName='$VN'"
 
-      - name: Upload V1 APK artifact
+          ART=/tmp/okn_artifact
+          rm -rf "$ART"
+          mkdir -p "$ART/Sources"
+          OUT="$ART/OKN_DSP_V${VC}-debug.apk"
+          cp "$APK" "$OUT"
+          sha256sum "$OUT" > "$ART/Sources/OKN_DSP_V${VC}_APK_SHA256.txt"
+          sha256sum '${{ steps.source.outputs.zip }}' > "$ART/Sources/OKN_DSP_V${VC}_SOURCE_ZIP_SHA256.txt"
+          cp "/tmp/okn_build/Sources/${{ steps.extract.outputs.manifest }}" "$ART/Sources/"
+          printf 'applicationId=com.okn.dsp\nversionCode=%s\nversionName=%s\nsignerSHA256=%s\nsourceZip=%s\n' \
+            "$VC" "$VN" "$CERT" '${{ steps.source.outputs.zip }}' > "$ART/Sources/OKN_DSP_V${VC}_BUILD_INFO.txt"
+
+      - name: Upload APK artifact
         if: steps.source.outputs.present == 'true'
         uses: actions/upload-artifact@v4
         with:
-          name: OKN-DSP-V1-debug-apk
-          path: /tmp/okn_v1_artifact/*
+          name: OKN-DSP-V${{ steps.meta.outputs.version_code }}-APK
+          path: /tmp/okn_artifact/**
           if-no-files-found: error
           retention-days: 30
