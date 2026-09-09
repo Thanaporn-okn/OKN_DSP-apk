@@ -1,0 +1,122 @@
+name: Build OKN DSP V1
+
+on:
+  push:
+    paths:
+      - 'OKN_DSP_ANDROID_V1_HOME_EQ_REALTIME_DIRECT.zip'
+      - '.github/workflows/build-okn-dsp-v1.yml'
+  workflow_dispatch:
+
+jobs:
+  build-apk:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Detect V1 source ZIP
+        id: source
+        shell: bash
+        run: |
+          if [ -f OKN_DSP_ANDROID_V1_HOME_EQ_REALTIME_DIRECT.zip ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+            echo "V1 source ZIP found."
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "Workflow installed. Push OKN_DSP_ANDROID_V1_HOME_EQ_REALTIME_DIRECT.zip and this workflow will run automatically."
+          fi
+
+      - name: Verify and extract V1 Sources
+        if: steps.source.outputs.present == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo '431a6e80ec92bcb48ad9d6f6e7ab35f802f97475d8f0fc48d0ca555b8102356d  OKN_DSP_ANDROID_V1_HOME_EQ_REALTIME_DIRECT.zip' | sha256sum -c -
+          unzip -tq OKN_DSP_ANDROID_V1_HOME_EQ_REALTIME_DIRECT.zip
+          rm -rf /tmp/okn_v1
+          mkdir -p /tmp/okn_v1
+          unzip -q OKN_DSP_ANDROID_V1_HOME_EQ_REALTIME_DIRECT.zip -d /tmp/okn_v1
+          test -d /tmp/okn_v1/Sources
+          cd /tmp/okn_v1/Sources
+          test -f OKN_DSP_V1_SHA256.txt
+          sha256sum -c OKN_DSP_V1_SHA256.txt
+          test -f preflight_v1.py
+          test -f evidence/OKN_DSP_V1_HOME_REFERENCE.png
+          test -f evidence/OKN_DSP_V1_EQ_REFERENCE.png
+          test -f evidence/OKN_DSP_V1_HOME_BUTTON_MAP.png
+          test -f evidence/OKN_DSP_V1_EQ_BUTTON_MAP.png
+
+      - name: Set up JDK 17
+        if: steps.source.outputs.present == 'true'
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Run V1 source preflight
+        if: steps.source.outputs.present == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /tmp/okn_v1/Sources
+          python3 preflight_v1.py
+          echo 'ba1c52f2607c09953c52fdd79c5f72026aaf0adb8aa44bcba277f7d9b49d9511  app/okn_dsp_stable_debug.keystore' | sha256sum -c -
+          CERT=$(keytool -list -v -keystore app/okn_dsp_stable_debug.keystore -storepass android -alias androiddebugkey | awk '/SHA256:/{print $2; exit}' | tr -d ':' | tr 'A-F' 'a-f')
+          test "$CERT" = 'c3da85af2e978dbd0ed9bb695e5c79a263189595c116ad93a1ded75a2eb98397'
+          echo "Stable signer certificate SHA-256: $CERT"
+
+      - name: Set up Android SDK
+        if: steps.source.outputs.present == 'true'
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android 35 packages
+        if: steps.source.outputs.present == 'true'
+        shell: bash
+        run: sdkmanager 'platforms;android-35' 'build-tools;35.0.0'
+
+      - name: Set up Gradle 8.9
+        if: steps.source.outputs.present == 'true'
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: Build stable-signed V1 debug APK
+        if: steps.source.outputs.present == 'true'
+        working-directory: /tmp/okn_v1/Sources
+        run: gradle :app:assembleDebug --no-daemon --stacktrace
+
+      - name: Verify APK identity and signer
+        if: steps.source.outputs.present == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          APK=/tmp/okn_v1/Sources/app/build/outputs/apk/debug/app-debug.apk
+          test -s "$APK"
+          APKSIGNER="$ANDROID_HOME/build-tools/35.0.0/apksigner"
+          AAPT="$ANDROID_HOME/build-tools/35.0.0/aapt"
+          "$APKSIGNER" verify --verbose --print-certs "$APK" | tee /tmp/apksigner-v1.txt
+          CERT=$(awk -F': ' '/Signer #1 certificate SHA-256 digest:/{print $2; exit}' /tmp/apksigner-v1.txt | tr -d ':' | tr 'A-F' 'a-f')
+          test "$CERT" = 'c3da85af2e978dbd0ed9bb695e5c79a263189595c116ad93a1ded75a2eb98397'
+          BADGING=$($AAPT dump badging "$APK" | head -1)
+          echo "$BADGING"
+          echo "$BADGING" | grep -q "name='com.okn.dsp'"
+          echo "$BADGING" | grep -q "versionCode='1'"
+          echo "$BADGING" | grep -q "versionName='1.0.0-v1'"
+          rm -rf /tmp/okn_v1_artifact
+          mkdir -p /tmp/okn_v1_artifact
+          cp "$APK" /tmp/okn_v1_artifact/OKN_DSP_V1-debug.apk
+          cp /tmp/okn_v1/Sources/README_V1.txt /tmp/okn_v1_artifact/
+          sha256sum /tmp/okn_v1_artifact/OKN_DSP_V1-debug.apk > /tmp/okn_v1_artifact/OKN_DSP_V1_APK_SHA256.txt
+          printf '%s\n' "$CERT" > /tmp/okn_v1_artifact/OKN_DSP_V1_APK_CERT_SHA256.txt
+
+      - name: Upload V1 APK artifact
+        if: steps.source.outputs.present == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: OKN-DSP-V1-debug-apk
+          path: /tmp/okn_v1_artifact/*
+          if-no-files-found: error
+          retention-days: 30
