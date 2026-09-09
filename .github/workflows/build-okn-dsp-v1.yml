@@ -7,6 +7,10 @@ on:
       - '.github/workflows/build-okn-dsp-v1.yml'
   workflow_dispatch:
 
+concurrency:
+  group: okn-dsp-auto-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build-apk:
     runs-on: ubuntu-latest
@@ -16,16 +20,28 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-      - name: Detect latest OKN_DSP source ZIP
+      - name: Detect source ZIP from this push / latest source commit
         id: source
         shell: bash
         run: |
           set -euo pipefail
-          ZIP=$(find . -maxdepth 1 -type f -name 'OKN_DSP_ANDROID_V*.zip' -printf '%f\n' | sort -V | tail -1)
+          ZIP=''
+          if [ "${{ github.event_name }}" = 'push' ]; then
+            ZIP=$(git diff-tree --no-commit-id --name-only -r "$GITHUB_SHA" \
+              | grep -E '^OKN_DSP_ANDROID_V[^/]*\.zip$' \
+              | tail -1 || true)
+          fi
           if [ -z "${ZIP:-}" ]; then
+            ZIP=$(git log --name-only --pretty=format: --diff-filter=AM -- 'OKN_DSP_ANDROID_V*.zip' \
+              | awk 'NF' \
+              | head -1 || true)
+          fi
+          if [ -z "${ZIP:-}" ] || [ ! -f "$ZIP" ]; then
             echo "present=false" >> "$GITHUB_OUTPUT"
-            echo "No OKN_DSP_ANDROID_V*.zip found. Workflow is installed and waiting for a source ZIP."
+            echo 'No OKN_DSP source ZIP was found.'
             exit 0
           fi
           echo "present=true" >> "$GITHUB_OUTPUT"
@@ -83,14 +99,11 @@ jobs:
           set -euo pipefail
           cd /tmp/okn_build/Sources
           PREFLIGHT=$(find . -maxdepth 1 -type f -name 'preflight_v*.py' -printf '%f\n' | sort -V | tail -1)
-          if [ -n "${PREFLIGHT:-}" ]; then
-            python3 "$PREFLIGHT"
-          fi
-          if [ -f app/okn_dsp_stable_debug.keystore ]; then
-            echo 'ba1c52f2607c09953c52fdd79c5f72026aaf0adb8aa44bcba277f7d9b49d9511  app/okn_dsp_stable_debug.keystore' | sha256sum -c -
-            CERT=$(keytool -list -v -keystore app/okn_dsp_stable_debug.keystore -storepass android -alias androiddebugkey | awk '/SHA256:/{print $2; exit}' | tr -d ':' | tr 'A-F' 'a-f')
-            test "$CERT" = 'c3da85af2e978dbd0ed9bb695e5c79a263189595c116ad93a1ded75a2eb98397'
-          fi
+          test -n "$PREFLIGHT"
+          python3 "$PREFLIGHT"
+          echo 'ba1c52f2607c09953c52fdd79c5f72026aaf0adb8aa44bcba277f7d9b49d9511  app/okn_dsp_stable_debug.keystore' | sha256sum -c -
+          CERT=$(keytool -list -v -keystore app/okn_dsp_stable_debug.keystore -storepass android -alias androiddebugkey | awk '/SHA256:/{print $2; exit}' | tr -d ':' | tr 'A-F' 'a-f')
+          test "$CERT" = 'c3da85af2e978dbd0ed9bb695e5c79a263189595c116ad93a1ded75a2eb98397'
 
       - name: Set up Android SDK
         if: steps.source.outputs.present == 'true'
