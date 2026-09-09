@@ -1,0 +1,86 @@
+name: Build OKN DSP V95 Verified Scope UI Realtime Persistent
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'OKN_DSP_ANDROID_V95_VERIFIED_SCOPE_UI_REALTIME_PERSISTENT.zip'
+      - 'OKN_DSP_V95_SHA256.txt'
+      - '.github/workflows/build-okn-dsp-v95-fixed.yml'
+
+jobs:
+  build-apk:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Restore and verify V95 source
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo '9908f31a1acf587bae67893f4b8bb8c425bdcec9c6e0681a5cbec795a47ad947  OKN_DSP_ANDROID_V95_VERIFIED_SCOPE_UI_REALTIME_PERSISTENT.zip' | sha256sum -c -
+          rm -rf /tmp/okn_v95
+          mkdir -p /tmp/okn_v95
+          unzip -q OKN_DSP_ANDROID_V95_VERIFIED_SCOPE_UI_REALTIME_PERSISTENT.zip -d /tmp/okn_v95
+          test -f /tmp/okn_v95/preflight_v95.py
+          test -f /tmp/okn_v95/evidence/OKN_DSP_V95_UI_REFERENCE.png
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Run V95 preflight and verify stable signing certificate
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /tmp/okn_v95
+          python3 preflight_v95.py
+          echo 'ba1c52f2607c09953c52fdd79c5f72026aaf0adb8aa44bcba277f7d9b49d9511  app/okn_dsp_stable_debug.keystore' | sha256sum -c -
+          CERT=$(keytool -list -v -keystore app/okn_dsp_stable_debug.keystore -storepass android -alias androiddebugkey | awk '/SHA256:/{print $2; exit}' | tr -d ':' | tr 'A-F' 'a-f')
+          test "$CERT" = 'c3da85af2e978dbd0ed9bb695e5c79a263189595c116ad93a1ded75a2eb98397'
+          echo "Stable signing certificate SHA-256: $CERT"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK packages
+        shell: bash
+        run: sdkmanager 'platforms;android-35' 'build-tools;35.0.0'
+
+      - name: Set up Gradle 8.9
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: Build stable-signed V95 APK
+        working-directory: /tmp/okn_v95
+        run: gradle :app:assembleDebug --no-daemon --stacktrace
+
+      - name: Verify APK signer
+        shell: bash
+        run: |
+          set -euo pipefail
+          APK=$(find /tmp/okn_v95/app/build/outputs/apk/debug -name '*.apk' -type f | head -n 1)
+          test -n "$APK"
+          SDK_ROOT="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
+          APKSIGNER="$SDK_ROOT/build-tools/35.0.0/apksigner"
+          test -x "$APKSIGNER"
+          CERT=$("$APKSIGNER" verify --print-certs "$APK" | awk -F': ' '/Signer #1 certificate SHA-256 digest:/{print $2; exit}' | tr 'A-F' 'a-f')
+          test "$CERT" = 'c3da85af2e978dbd0ed9bb695e5c79a263189595c116ad93a1ded75a2eb98397'
+          cp "$APK" /tmp/OKN_DSP_V95_VERIFIED_SCOPE_UI_REALTIME_PERSISTENT-debug.apk
+          echo "APK=$APK"
+          echo "Signer SHA-256=$CERT"
+
+      - name: Upload V95 APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: OKN-DSP-V95-VERIFIED-SCOPE-UI-REALTIME-PERSISTENT-debug-apk
+          path: /tmp/OKN_DSP_V95_VERIFIED_SCOPE_UI_REALTIME_PERSISTENT-debug.apk
+          if-no-files-found: error
+          retention-days: 30
