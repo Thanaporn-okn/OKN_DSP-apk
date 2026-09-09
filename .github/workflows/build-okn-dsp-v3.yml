@@ -1,0 +1,98 @@
+name: Build OKN DSP V3
+
+on:
+  push:
+    paths:
+      - 'OKN_DSP_ANDROID_V3_UI_REFERENCE_REAL.zip'
+  workflow_dispatch:
+
+jobs:
+  build-apk:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Verify and extract V3 Sources
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo 'edd3596aa6e28999899d3cb52e9092300a4e8b312b8a0e70ec2ad39c60ee4ddc  OKN_DSP_ANDROID_V3_UI_REFERENCE_REAL.zip' | sha256sum -c -
+          unzip -tq OKN_DSP_ANDROID_V3_UI_REFERENCE_REAL.zip
+          rm -rf /tmp/okn_v3
+          mkdir -p /tmp/okn_v3
+          unzip -q OKN_DSP_ANDROID_V3_UI_REFERENCE_REAL.zip -d /tmp/okn_v3
+          test -d /tmp/okn_v3/Sources
+          cd /tmp/okn_v3/Sources
+          test -f OKN_DSP_V3_SHA256.txt
+          sha256sum -c OKN_DSP_V3_SHA256.txt
+          test -f preflight_v3.py
+          test -f evidence/OKN_DSP_V3_HOME_REFERENCE.png
+          test -f evidence/OKN_DSP_V3_EQ_REFERENCE.png
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Run V3 source preflight
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /tmp/okn_v3/Sources
+          python3 preflight_v3.py
+          echo 'ba1c52f2607c09953c52fdd79c5f72026aaf0adb8aa44bcba277f7d9b49d9511  app/okn_dsp_stable_debug.keystore' | sha256sum -c -
+          CERT=$(keytool -list -v -keystore app/okn_dsp_stable_debug.keystore -storepass android -alias androiddebugkey | awk '/SHA256:/{print $2; exit}' | tr -d ':' | tr 'A-F' 'a-f')
+          test "$CERT" = 'c3da85af2e978dbd0ed9bb695e5c79a263189595c116ad93a1ded75a2eb98397'
+          echo "Stable signer certificate SHA-256: $CERT"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android 35 packages
+        shell: bash
+        run: sdkmanager 'platforms;android-35' 'build-tools;35.0.0'
+
+      - name: Set up Gradle 8.9
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: Build stable-signed V3 debug APK
+        working-directory: /tmp/okn_v3/Sources
+        run: gradle :app:assembleDebug --no-daemon --stacktrace
+
+      - name: Verify APK identity and signer
+        shell: bash
+        run: |
+          set -euo pipefail
+          APK=/tmp/okn_v3/Sources/app/build/outputs/apk/debug/app-debug.apk
+          test -s "$APK"
+          APKSIGNER="$ANDROID_HOME/build-tools/35.0.0/apksigner"
+          AAPT="$ANDROID_HOME/build-tools/35.0.0/aapt"
+          "$APKSIGNER" verify --verbose --print-certs "$APK" | tee /tmp/apksigner-v3.txt
+          CERT=$(awk -F': ' '/Signer #1 certificate SHA-256 digest:/{print $2; exit}' /tmp/apksigner-v3.txt | tr -d ':' | tr 'A-F' 'a-f')
+          test "$CERT" = 'c3da85af2e978dbd0ed9bb695e5c79a263189595c116ad93a1ded75a2eb98397'
+          BADGING=$("$AAPT" dump badging "$APK" | head -1)
+          echo "$BADGING"
+          echo "$BADGING" | grep -q "name='com.okn.dsp'"
+          echo "$BADGING" | grep -q "versionCode='3'"
+          echo "$BADGING" | grep -q "versionName='1.0.2-v3'"
+          rm -rf /tmp/okn_v3_artifact
+          mkdir -p /tmp/okn_v3_artifact
+          cp "$APK" /tmp/okn_v3_artifact/OKN_DSP_V3-debug.apk
+          cp /tmp/okn_v3/Sources/README_V3.txt /tmp/okn_v3_artifact/
+          sha256sum /tmp/okn_v3_artifact/OKN_DSP_V3-debug.apk > /tmp/okn_v3_artifact/OKN_DSP_V3_APK_SHA256.txt
+          printf '%s\n' "$CERT" > /tmp/okn_v3_artifact/OKN_DSP_V3_APK_CERT_SHA256.txt
+
+      - name: Upload V3 APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: OKN-DSP-V3-debug-apk
+          path: /tmp/okn_v3_artifact/*
+          if-no-files-found: error
+          retention-days: 30
