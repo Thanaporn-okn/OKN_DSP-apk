@@ -1,0 +1,129 @@
+name: OKN DSP V1+ Auto Build
+
+on:
+  push:
+    paths:
+      - 'OKN_DSP_V*_Sources.zip'
+      - '.github/workflows/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-uploaded-source:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Select source ZIP from this reset series
+        id: src
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ZIP_FILE=""
+          if [ "${{ github.event_name }}" = "push" ]; then
+            BEFORE="${{ github.event.before }}"
+            if [[ "$BEFORE" =~ ^0+$ ]]; then
+              CANDIDATES="$(git show --pretty='' --name-only "$GITHUB_SHA" | grep -E '^OKN_DSP_V[0-9]+_Sources\.zip$' || true)"
+            else
+              CANDIDATES="$(git diff --name-only "$BEFORE" "$GITHUB_SHA" | grep -E '^OKN_DSP_V[0-9]+_Sources\.zip$' || true)"
+            fi
+            ZIP_FILE="$(printf '%s\n' "$CANDIDATES" | sed '/^$/d' | tail -n 1)"
+          fi
+
+          if [ -z "$ZIP_FILE" ]; then
+            ZIP_FILE="$({
+              for f in OKN_DSP_V*_Sources.zip; do
+                [ -f "$f" ] || continue
+                ts="$(git log -1 --format=%ct -- "$f" 2>/dev/null || echo 0)"
+                printf '%s %s\n' "$ts" "$f"
+              done
+            } | sort -nr | head -n 1 | awk '{print $2}')"
+          fi
+
+          if [ -z "$ZIP_FILE" ] || [ ! -f "$ZIP_FILE" ]; then
+            echo "No OKN_DSP_V*_Sources.zip found."
+            exit 1
+          fi
+
+          VERSION="$(echo "$ZIP_FILE" | sed -E 's/^OKN_DSP_(V[0-9]+)_Sources\.zip$/\1/')"
+          echo "zip=$ZIP_FILE" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Selected: $ZIP_FILE ($VERSION)"
+
+      - name: Extract source
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf buildsrc
+          mkdir buildsrc
+          unzip -q "${{ steps.src.outputs.zip }}" -d buildsrc
+          SRC_DIR="$(find buildsrc -mindepth 1 -maxdepth 1 -type d | head -n 1)"
+          test -n "$SRC_DIR"
+          test -f "$SRC_DIR/settings.gradle"
+          test -f "$SRC_DIR/app/build.gradle"
+          echo "SRC_DIR=$SRC_DIR" >> "$GITHUB_ENV"
+
+      - name: Verify source SHA256
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$SRC_DIR"
+          test -f Sources/SHA256SUMS.txt
+          sha256sum -c Sources/SHA256SUMS.txt
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android 35 packages
+        shell: bash
+        run: |
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager "platform-tools" "platforms;android-35" "build-tools;35.0.0"
+
+      - name: Set up Gradle 8.9
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: Build signed Debug APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          gradle --no-daemon -p "$SRC_DIR" :app:assembleDebug
+
+      - name: Package APK and checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          APK="$SRC_DIR/app/build/outputs/apk/debug/app-debug.apk"
+          test -f "$APK"
+          OUT="dist/OKN_DSP_${{ steps.src.outputs.version }}-debug.apk"
+          cp "$APK" "$OUT"
+          sha256sum "$OUT" > "$OUT.sha256"
+          printf 'Built %s\n' "$OUT" >> "$GITHUB_STEP_SUMMARY"
+          cat "$OUT.sha256" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: OKN_DSP_${{ steps.src.outputs.version }}_APK
+          path: |
+            dist/OKN_DSP_${{ steps.src.outputs.version }}-debug.apk
+            dist/OKN_DSP_${{ steps.src.outputs.version }}-debug.apk.sha256
+          if-no-files-found: error
+          retention-days: 30
