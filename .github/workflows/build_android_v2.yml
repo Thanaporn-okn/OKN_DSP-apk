@@ -1,0 +1,237 @@
+name: Build OKN_DSP Android v2
+
+on:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-apk:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Find and expand newest OKN_DSP source package
+        id: source
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ZIP="$(find . -maxdepth 1 -type f -name 'OKN_DSP_v*.zip' -printf '%f\n' | sort -V | tail -n 1)"
+          if [ -n "$ZIP" ]; then
+            echo "Expanding newest source package: $ZIP"
+            rm -rf /tmp/okn_zip
+            mkdir -p /tmp/okn_zip
+            unzip -q "$ZIP" -d /tmp/okn_zip
+
+            ROOT="$(find /tmp/okn_zip -maxdepth 3 -type f -name pubspec.yaml -printf '%h\n' | head -n 1)"
+            if [ -z "$ROOT" ]; then
+              echo "ERROR: $ZIP does not contain pubspec.yaml"
+              exit 1
+            fi
+
+            rm -rf lib test assets Sources android build .dart_tool
+            rm -f pubspec.yaml pubspec.lock analysis_options.yaml BUILD_VERSION.txt README.md .gitignore
+            cp -a "$ROOT"/. .
+            test -f pubspec.yaml
+            echo "has_source=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if [ -f pubspec.yaml ]; then
+            echo "No version ZIP found; using Flutter source already present at repository root."
+            echo "has_source=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "No pubspec.yaml or OKN_DSP_v*.zip found. Nothing to build on this push."
+          echo "has_source=false" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Java 17
+        if: steps.source.outputs.has_source == 'true'
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Flutter 3.44.8
+        if: steps.source.outputs.has_source == 'true'
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.44.8'
+          channel: stable
+          cache: true
+
+      - name: Show build tool versions
+        if: steps.source.outputs.has_source == 'true'
+        shell: bash
+        run: |
+          set -euxo pipefail
+          flutter --version
+          java -version
+          flutter doctor -v
+
+      - name: Preserve OKN_DSP source
+        if: steps.source.outputs.has_source == 'true'
+        shell: bash
+        run: |
+          set -euxo pipefail
+          rm -rf /tmp/okn_dsp_source
+          mkdir -p /tmp/okn_dsp_source
+          for item in lib test assets Sources pubspec.yaml analysis_options.yaml BUILD_VERSION.txt README.md .gitignore; do
+            if [ -e "$item" ]; then
+              cp -a "$item" /tmp/okn_dsp_source/
+            fi
+          done
+
+      - name: Generate Android platform project
+        if: steps.source.outputs.has_source == 'true'
+        shell: bash
+        run: |
+          set -euxo pipefail
+          rm -rf android
+          flutter create \
+            --platforms=android \
+            --org com.okn \
+            --project-name okn_dsp \
+            .
+
+      - name: Restore OKN_DSP source
+        if: steps.source.outputs.has_source == 'true'
+        shell: bash
+        run: |
+          set -euxo pipefail
+          rm -rf lib test assets Sources
+          cp -a /tmp/okn_dsp_source/lib ./lib
+          cp -a /tmp/okn_dsp_source/test ./test
+          cp -a /tmp/okn_dsp_source/assets ./assets
+          cp -a /tmp/okn_dsp_source/Sources ./Sources
+          cp -a /tmp/okn_dsp_source/pubspec.yaml ./pubspec.yaml
+          cp -a /tmp/okn_dsp_source/analysis_options.yaml ./analysis_options.yaml
+          cp -a /tmp/okn_dsp_source/BUILD_VERSION.txt ./BUILD_VERSION.txt
+          cp -a /tmp/okn_dsp_source/README.md ./README.md
+          cp -a /tmp/okn_dsp_source/.gitignore ./.gitignore
+
+      - name: Configure Android API 36, BLE permissions, and CI Gradle
+        if: steps.source.outputs.has_source == 'true'
+        shell: bash
+        run: |
+          set -euxo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          manifest = Path('android/app/src/main/AndroidManifest.xml')
+          text = manifest.read_text()
+          permissions = '''
+              <uses-feature android:name="android.hardware.bluetooth_le" android:required="false" />
+              <uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30" />
+              <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" android:maxSdkVersion="30" />
+              <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" android:maxSdkVersion="30" />
+              <uses-permission android:name="android.permission.BLUETOOTH_SCAN" android:usesPermissionFlags="neverForLocation" />
+              <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+          '''
+          if 'android.permission.BLUETOOTH_SCAN' not in text:
+              text = text.replace(
+                  '<manifest xmlns:android="http://schemas.android.com/apk/res/android">',
+                  '<manifest xmlns:android="http://schemas.android.com/apk/res/android">' + permissions,
+              )
+          text = re.sub(r'android:label="[^"]+"', 'android:label="OKN_DSP"', text, count=1)
+          manifest.write_text(text)
+
+          candidates = [Path('android/app/build.gradle.kts'), Path('android/app/build.gradle')]
+          build_file = next((p for p in candidates if p.exists()), None)
+          if build_file is None:
+              raise SystemExit('ERROR: Android app Gradle file not found')
+
+          g = build_file.read_text()
+          original = g
+          replacements = [
+              (r'compileSdk\s*=\s*flutter\.compileSdkVersion', 'compileSdk = 36'),
+              (r'compileSdkVersion\s+flutter\.compileSdkVersion', 'compileSdkVersion 36'),
+              (r'compileSdk\s+flutter\.compileSdkVersion', 'compileSdk 36'),
+              (r'targetSdk\s*=\s*flutter\.targetSdkVersion', 'targetSdk = 36'),
+              (r'targetSdkVersion\s+flutter\.targetSdkVersion', 'targetSdkVersion 36'),
+              (r'targetSdk\s+flutter\.targetSdkVersion', 'targetSdk 36'),
+          ]
+          for pattern, replacement in replacements:
+              g = re.sub(pattern, replacement, g)
+
+          if not re.search(r'compileSdk(?:Version)?\s*(?:=\s*)?36\b', g):
+              raise SystemExit(f'ERROR: could not set compileSdk 36 in {build_file}')
+          if not re.search(r'targetSdk(?:Version)?\s*(?:=\s*)?36\b', g):
+              raise SystemExit(f'ERROR: could not set targetSdk 36 in {build_file}')
+          build_file.write_text(g)
+          print(f'Patched {build_file}: Android API 36')
+
+          gp = Path('android/gradle.properties')
+          props = gp.read_text() if gp.exists() else ''
+          if 'org.gradle.vfs.watch=false' not in props:
+              if props and not props.endswith('\n'):
+                  props += '\n'
+              props += 'org.gradle.vfs.watch=false\n'
+          gp.write_text(props)
+          PY
+
+          echo '--- Android SDK lines ---'
+          grep -R -n -E 'compileSdk|targetSdk' android/app/build.gradle* || true
+          echo '--- Gradle VFS ---'
+          grep -n 'org.gradle.vfs.watch' android/gradle.properties
+
+      - name: Install dependencies
+        if: steps.source.outputs.has_source == 'true'
+        run: flutter pub get
+
+      - name: Show resolved BLE packages
+        if: steps.source.outputs.has_source == 'true'
+        shell: bash
+        run: |
+          set -euxo pipefail
+          flutter pub deps | grep -E 'flutter_blue_plus|permission_handler' || true
+
+      - name: Generate launcher icons
+        if: steps.source.outputs.has_source == 'true'
+        run: dart run flutter_launcher_icons
+
+      - name: Analyze
+        if: steps.source.outputs.has_source == 'true'
+        run: flutter analyze --no-fatal-infos
+
+      - name: Test
+        if: steps.source.outputs.has_source == 'true'
+        run: flutter test
+
+      - name: Build release APK
+        if: steps.source.outputs.has_source == 'true'
+        run: flutter build apk --release --no-pub
+
+      - name: Package APK and SHA256
+        if: steps.source.outputs.has_source == 'true'
+        id: package
+        shell: bash
+        run: |
+          set -euxo pipefail
+          VERSION="$(awk '/^version:/ {print $2}' pubspec.yaml | tr '+.' '_')"
+          NAME="OKN_DSP_${VERSION}"
+          mkdir -p release Sources
+          cp build/app/outputs/flutter-apk/app-release.apk "release/${NAME}.apk"
+          sha256sum "release/${NAME}.apk" > Sources/APK_SHA256.txt
+          cp Sources/APK_SHA256.txt release/APK_SHA256.txt
+          echo "artifact_name=${NAME}" >> "$GITHUB_OUTPUT"
+          cat release/APK_SHA256.txt
+
+      - name: Upload APK artifact
+        if: steps.source.outputs.has_source == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.package.outputs.artifact_name }}
+          path: |
+            release/*.apk
+            release/APK_SHA256.txt
+          if-no-files-found: error
+          retention-days: 30
