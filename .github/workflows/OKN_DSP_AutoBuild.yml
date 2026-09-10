@@ -2,89 +2,91 @@ name: OKN_DSP Auto Build
 
 on:
   push:
-    branches: [ main, master ]
     paths:
-      - 'OKN_DSP_V*.zip'
+      - 'OKN_DSP_V*_Sources.zip'
+      - '.github/workflows/OKN_DSP_AutoBuild.yml'
   workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
-  build:
+  build-android:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 35
 
     steps:
-      - name: Checkout
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Select newest Version ZIP
-        id: src
+      - name: Select newest OKN_DSP source archive
         shell: bash
         run: |
           set -euo pipefail
-          ZIP="$(ls -1v OKN_DSP_V*.zip 2>/dev/null | tail -n 1)"
-          test -n "$ZIP"
-          BASENAME="${ZIP%.zip}"
-          echo "zip=$ZIP" >> "$GITHUB_OUTPUT"
-          echo "name=$BASENAME" >> "$GITHUB_OUTPUT"
+          SOURCE_ZIP="$(find . -maxdepth 1 -type f -name 'OKN_DSP_V*_Sources.zip' -printf '%f\n' | sort -V | tail -n 1)"
+          if [ -z "$SOURCE_ZIP" ]; then
+            echo "No OKN_DSP_V*_Sources.zip file was found in the repository root."
+            exit 1
+          fi
+          VERSION="$(basename "$SOURCE_ZIP" | sed -E 's/^OKN_DSP_(V[0-9]+)_Sources\.zip$/\1/')"
+          APP_DIR="$RUNNER_TEMP/okn_dsp_${VERSION}"
+          mkdir -p "$APP_DIR"
+          unzip -q -o "$SOURCE_ZIP" -d "$APP_DIR"
+          echo "SOURCE_ZIP=$SOURCE_ZIP" >> "$GITHUB_ENV"
+          echo "APP_VERSION=$VERSION" >> "$GITHUB_ENV"
+          echo "APP_DIR=$APP_DIR" >> "$GITHUB_ENV"
 
-      - name: Unpack Sources
-        shell: bash
-        run: |
-          set -euo pipefail
-          rm -rf _okn_build
-          mkdir -p _okn_build
-          unzip -q "${{ steps.src.outputs.zip }}" -d _okn_build
-          PROJECT="$(find _okn_build -maxdepth 3 -name settings.gradle -printf '%h\n' | head -n 1)"
-          test -n "$PROJECT"
-          echo "PROJECT=$PROJECT" >> "$GITHUB_ENV"
-
-      - name: Set up JDK 17
+      - name: Set up Java 17
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
 
-      - name: Set up Gradle 8.9
-        uses: gradle/actions/setup-gradle@v4
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
         with:
-          gradle-version: '8.9'
+          channel: stable
+          cache: true
 
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
-
-      - name: Install Android SDK 35
+      - name: Create Android/iOS platform files and install packages
         shell: bash
         run: |
           set -euo pipefail
-          yes | sdkmanager --licenses >/dev/null || true
-          sdkmanager 'platforms;android-35' 'build-tools;35.0.0'
+          cd "$APP_DIR"
+          flutter --version
+          chmod +x tool/bootstrap_platforms.sh
+          ./tool/bootstrap_platforms.sh
 
-      - name: Build Debug APK
+      - name: Analyze Dart code
         shell: bash
         run: |
           set -euo pipefail
-          cd "$PROJECT"
-          gradle --no-daemon clean :app:assembleDebug
+          cd "$APP_DIR"
+          flutter analyze --no-fatal-warnings --no-fatal-infos
 
-      - name: Create APK SHA256 inside Sources
+      - name: Run tests
         shell: bash
         run: |
           set -euo pipefail
-          APK="$PROJECT/app/build/outputs/apk/debug/app-debug.apk"
-          test -f "$APK"
-          mkdir -p "$PROJECT/Sources"
-          sha256sum "$APK" > "$PROJECT/Sources/${{ steps.src.outputs.name }}_APK_SHA256.txt"
-          mkdir -p _okn_artifact/Sources
-          cp "$APK" "_okn_artifact/${{ steps.src.outputs.name }}.apk"
-          cp "$PROJECT/Sources/${{ steps.src.outputs.name }}_APK_SHA256.txt" _okn_artifact/Sources/
-          find "$PROJECT/Sources" -maxdepth 1 -type f -name '*SHA256*.txt' -exec cp {} _okn_artifact/Sources/ \;
+          cd "$APP_DIR"
+          flutter test
 
-      - name: Upload APK
+      - name: Build release APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$APP_DIR"
+          flutter build apk --release
+          mkdir -p release
+          cp build/app/outputs/flutter-apk/app-release.apk "release/OKN_DSP_${APP_VERSION}.apk"
+          sha256sum "release/OKN_DSP_${APP_VERSION}.apk" > "release/OKN_DSP_${APP_VERSION}.apk.sha256"
+
+      - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ steps.src.outputs.name }}
-          path: _okn_artifact/
+          name: OKN_DSP_${{ env.APP_VERSION }}_APK
+          path: |
+            ${{ env.APP_DIR }}/release/OKN_DSP_${{ env.APP_VERSION }}.apk
+            ${{ env.APP_DIR }}/release/OKN_DSP_${{ env.APP_VERSION }}.apk.sha256
           if-no-files-found: error
+          retention-days: 30
