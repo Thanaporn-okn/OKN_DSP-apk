@@ -10,26 +10,52 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: okn-dsp-build-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
-  build-latest-version:
+  build-uploaded-version:
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
 
-      - name: Find latest OKN_DSP source ZIP
+      - name: Select source ZIP from this push
         id: src
         shell: bash
         run: |
           set -euo pipefail
-          ZIP_FILE="$(find . -maxdepth 1 -type f -name 'OKN_DSP_V*_Sources.zip' -printf '%f\n' | sort -V | tail -n 1)"
+
+          ZIP_FILE=""
+          if [ "${{ github.event_name }}" = "push" ] && git rev-parse HEAD^ >/dev/null 2>&1; then
+            ZIP_FILE="$(git diff --name-only HEAD^ HEAD \
+              | grep -E '^OKN_DSP_V[0-9]+_Sources\.zip$' \
+              | sort -V \
+              | tail -n 1 || true)"
+          fi
+
+          # Manual-run fallback: choose the highest numbered source ZIP in repo root.
           if [ -z "$ZIP_FILE" ]; then
-            echo "No OKN_DSP_V*_Sources.zip found in repository root."
+            ZIP_FILE="$(find . -maxdepth 1 -type f -name 'OKN_DSP_V*_Sources.zip' \
+              -printf '%f\n' | sort -V | tail -n 1)"
+          fi
+
+          if [ -z "$ZIP_FILE" ] || [ ! -f "$ZIP_FILE" ]; then
+            echo "No OKN_DSP_V*_Sources.zip found."
             exit 1
           fi
+
           VERSION="$(echo "$ZIP_FILE" | sed -E 's/^OKN_DSP_(V[0-9]+)_Sources\.zip$/\1/')"
+          if [ -z "$VERSION" ]; then
+            echo "Could not parse version from $ZIP_FILE"
+            exit 1
+          fi
+
           echo "zip=$ZIP_FILE" >> "$GITHUB_OUTPUT"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "Building $ZIP_FILE ($VERSION)"
@@ -39,14 +65,12 @@ jobs:
         run: |
           set -euo pipefail
           rm -rf buildsrc
-          mkdir buildsrc
+          mkdir -p buildsrc
           unzip -q "${{ steps.src.outputs.zip }}" -d buildsrc
           SRC_DIR="$(find buildsrc -mindepth 1 -maxdepth 1 -type d | head -n 1)"
-          if [ -z "$SRC_DIR" ] || [ ! -f "$SRC_DIR/settings.gradle" ]; then
-            echo "settings.gradle not found after unzip"
-            find buildsrc -maxdepth 3 -type f | sort | head -100
-            exit 1
-          fi
+          test -n "$SRC_DIR"
+          test -f "$SRC_DIR/settings.gradle"
+          test -f "$SRC_DIR/app/build.gradle"
           echo "SRC_DIR=$SRC_DIR" >> "$GITHUB_ENV"
 
       - name: Verify source SHA256 manifest
@@ -78,7 +102,7 @@ jobs:
         with:
           gradle-version: '8.9'
 
-      - name: Build Debug APK
+      - name: Build debug APK
         shell: bash
         run: |
           set -euo pipefail
@@ -93,8 +117,8 @@ jobs:
           test -f "$APK"
           OUT="dist/OKN_DSP_${{ steps.src.outputs.version }}-debug.apk"
           cp "$APK" "$OUT"
-          sha256sum "$OUT" > "dist/OKN_DSP_${{ steps.src.outputs.version }}-debug.apk.sha256"
-          cat "dist/OKN_DSP_${{ steps.src.outputs.version }}-debug.apk.sha256"
+          sha256sum "$OUT" > "$OUT.sha256"
+          cat "$OUT.sha256"
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
