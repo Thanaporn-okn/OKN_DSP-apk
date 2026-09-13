@@ -1,0 +1,40 @@
+name: Clear All Actions History
+
+on:
+  push:
+    paths:
+      - ".github/workflows/clear-actions.yml"
+  workflow_dispatch:
+
+permissions:
+  actions: write
+  contents: read
+
+jobs:
+  clear:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Delete all old workflow runs
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          CURRENT_RUN: ${{ github.run_id }}
+        run: |
+          echo "Deleting workflow runs..."
+
+          gh api \
+            --paginate \
+            "repos/$REPO/actions/runs?per_page=100" \
+            --jq '.workflow_runs[].id' |
+          while read RUN_ID
+          do
+            if [ "$RUN_ID" != "$CURRENT_RUN" ]; then
+              echo "Deleting run $RUN_ID"
+              gh api \
+                --method DELETE \
+                "repos/$REPO/actions/runs/$RUN_ID" || true
+            fi
+          done
+
+          echo "Finished"
