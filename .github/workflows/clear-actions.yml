@@ -13,54 +13,104 @@ permissions:
 jobs:
   clear:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 15
 
     steps:
-      - name: Delete ALL workflow runs
+      - name: Force cancel and delete ALL old runs
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
           CURRENT_RUN: ${{ github.run_id }}
+        shell: bash
         run: |
           set +e
 
           echo "Current cleanup run: $CURRENT_RUN"
 
-          while true
+          for ROUND in $(seq 1 20)
           do
-            RUNS=$(gh api \
-              "repos/$REPO/actions/runs?per_page=100" \
-              --jq ".workflow_runs[] |
-              select(.id != $CURRENT_RUN) |
-              [.id,.status] |
-              @tsv")
+            echo "===== ROUND $ROUND ====="
 
-            if [ -z "$RUNS" ]; then
+            mapfile -t RUN_IDS < <(
+              gh api \
+                "repos/$REPO/actions/runs?per_page=100" \
+                --jq ".workflow_runs[] |
+                select(.id != $CURRENT_RUN) |
+                .id"
+            )
+
+            if [ "${#RUN_IDS[@]}" -eq 0 ]; then
               echo "ALL OLD RUNS DELETED"
-              break
+              exit 0
             fi
 
-            echo "$RUNS" |
-            while IFS=$'\t' read -r RUN_ID STATUS
-            do
-              [ -z "$RUN_ID" ] && continue
+            echo "Remaining: ${#RUN_IDS[@]}"
 
-              echo "Processing $RUN_ID - $STATUS"
+            for RUN_ID in "${RUN_IDS[@]}"
+            do
+              STATUS=$(gh api \
+                "repos/$REPO/actions/runs/$RUN_ID" \
+                --jq '.status' 2>/dev/null)
+
+              if [ -z "$STATUS" ]; then
+                continue
+              fi
+
+              echo "Run $RUN_ID status=$STATUS"
 
               if [ "$STATUS" != "completed" ]; then
+                echo "Force cancelling $RUN_ID"
+
+                gh api \
+                  --method POST \
+                  "repos/$REPO/actions/runs/$RUN_ID/force-cancel" \
+                  >/dev/null 2>&1 || \
                 gh api \
                   --method POST \
                   "repos/$REPO/actions/runs/$RUN_ID/cancel" \
                   >/dev/null 2>&1 || true
+
+                for WAIT in $(seq 1 15)
+                do
+                  sleep 2
+
+                  NEW_STATUS=$(gh api \
+                    "repos/$REPO/actions/runs/$RUN_ID" \
+                    --jq '.status' 2>/dev/null)
+
+                  if [ -z "$NEW_STATUS" ] || [ "$NEW_STATUS" = "completed" ]; then
+                    break
+                  fi
+                done
               fi
 
-              gh api \
-                --method DELETE \
-                "repos/$REPO/actions/runs/$RUN_ID" \
-                >/dev/null 2>&1 || true
+              echo "Deleting $RUN_ID"
+
+              for TRY in $(seq 1 5)
+              do
+                gh api \
+                  --method DELETE \
+                  "repos/$REPO/actions/runs/$RUN_ID" \
+                  >/dev/null 2>&1
+
+                if [ $? -eq 0 ]; then
+                  echo "Deleted $RUN_ID"
+                  break
+                fi
+
+                sleep 2
+              done
             done
 
             sleep 3
           done
 
-          echo "DONE"
+          echo "Cleanup stopped with remaining runs:"
+          gh api \
+            "repos/$REPO/actions/runs?per_page=100" \
+            --jq ".workflow_runs[] |
+            select(.id != $CURRENT_RUN) |
+            [.id,.name,.status] |
+            @tsv"
+
+          exit 1
