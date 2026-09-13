@@ -13,28 +13,54 @@ permissions:
 jobs:
   clear:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
 
     steps:
-      - name: Delete all old workflow runs
+      - name: Delete ALL workflow runs
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
           CURRENT_RUN: ${{ github.run_id }}
         run: |
-          echo "Deleting workflow runs..."
+          set +e
 
-          gh api \
-            --paginate \
-            "repos/$REPO/actions/runs?per_page=100" \
-            --jq '.workflow_runs[].id' |
-          while read RUN_ID
+          echo "Current cleanup run: $CURRENT_RUN"
+
+          while true
           do
-            if [ "$RUN_ID" != "$CURRENT_RUN" ]; then
-              echo "Deleting run $RUN_ID"
+            RUNS=$(gh api \
+              "repos/$REPO/actions/runs?per_page=100" \
+              --jq ".workflow_runs[] |
+              select(.id != $CURRENT_RUN) |
+              [.id,.status] |
+              @tsv")
+
+            if [ -z "$RUNS" ]; then
+              echo "ALL OLD RUNS DELETED"
+              break
+            fi
+
+            echo "$RUNS" |
+            while IFS=$'\t' read -r RUN_ID STATUS
+            do
+              [ -z "$RUN_ID" ] && continue
+
+              echo "Processing $RUN_ID - $STATUS"
+
+              if [ "$STATUS" != "completed" ]; then
+                gh api \
+                  --method POST \
+                  "repos/$REPO/actions/runs/$RUN_ID/cancel" \
+                  >/dev/null 2>&1 || true
+              fi
+
               gh api \
                 --method DELETE \
-                "repos/$REPO/actions/runs/$RUN_ID" || true
-            fi
+                "repos/$REPO/actions/runs/$RUN_ID" \
+                >/dev/null 2>&1 || true
+            done
+
+            sleep 3
           done
 
-          echo "Finished"
+          echo "DONE"
