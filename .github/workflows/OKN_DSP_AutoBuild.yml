@@ -11,53 +11,28 @@ permissions:
   contents: read
 
 jobs:
-  build-source-zip:
+  build-latest-version:
     runs-on: ubuntu-latest
-    timeout-minutes: 35
+    timeout-minutes: 30
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
-      - name: Select source ZIP from this update
+      - name: Find latest OKN_DSP source ZIP
         id: src
         shell: bash
         run: |
           set -euo pipefail
-
-          ZIP_FILE=""
-
-          # Automatic push: prefer the source ZIP changed in this commit.
-          if [ "${{ github.event_name }}" = "push" ]; then
-            ZIP_FILE="$(git diff-tree --no-commit-id --name-only -r "${GITHUB_SHA}" \
-              | grep -E '^OKN_DSP_V[0-9]+_Sources\.zip$' \
-              | tail -n 1 || true)"
-          fi
-
-          # Workflow-only commit or manual run: use the most recently committed source ZIP,
-          # not the numerically highest one. This allows a clean restart from V1 even if V17 exists.
+          ZIP_FILE="$(find . -maxdepth 1 -type f -name 'OKN_DSP_V*_Sources.zip' -printf '%f\n' | sort -V | tail -n 1)"
           if [ -z "$ZIP_FILE" ]; then
-            ZIP_FILE="$(git log --name-only --pretty=format: -- 'OKN_DSP_V*_Sources.zip' \
-              | grep -E '^OKN_DSP_V[0-9]+_Sources\.zip$' \
-              | head -n 1 || true)"
-          fi
-
-          if [ -z "$ZIP_FILE" ] || [ ! -f "$ZIP_FILE" ]; then
-            echo "No committed OKN_DSP_V*_Sources.zip found."
+            echo "No OKN_DSP_V*_Sources.zip found in repository root."
             exit 1
           fi
-
           VERSION="$(echo "$ZIP_FILE" | sed -E 's/^OKN_DSP_(V[0-9]+)_Sources\.zip$/\1/')"
-          if [ -z "$VERSION" ] || [ "$VERSION" = "$ZIP_FILE" ]; then
-            echo "Could not parse Version from $ZIP_FILE"
-            exit 1
-          fi
-
           echo "zip=$ZIP_FILE" >> "$GITHUB_OUTPUT"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "Selected $ZIP_FILE ($VERSION)"
+          echo "Building $ZIP_FILE ($VERSION)"
 
       - name: Extract source
         shell: bash
@@ -66,13 +41,25 @@ jobs:
           rm -rf buildsrc
           mkdir -p buildsrc
           unzip -q "${{ steps.src.outputs.zip }}" -d buildsrc
-          SRC_DIR="$(find buildsrc -mindepth 1 -maxdepth 1 -type d | head -n 1)"
-          if [ -z "$SRC_DIR" ] || [ ! -f "$SRC_DIR/settings.gradle" ]; then
-            echo "settings.gradle not found after unzip"
-            find buildsrc -maxdepth 4 -type f | sort | head -120
-            exit 1
+
+          # Current OKN_DSP packages place settings.gradle directly at ZIP root.
+          # Also support a future ZIP that contains one wrapper directory.
+          if [ -f "buildsrc/settings.gradle" ]; then
+            SRC_DIR="$GITHUB_WORKSPACE/buildsrc"
+          else
+            SETTINGS_FILE="$(find buildsrc -mindepth 2 -maxdepth 4 -type f -name settings.gradle -print -quit)"
+            if [ -z "$SETTINGS_FILE" ]; then
+              echo "settings.gradle not found after unzip"
+              find buildsrc -maxdepth 4 -type f | sort | head -100
+              exit 1
+            fi
+            SRC_DIR="$GITHUB_WORKSPACE/$(dirname "$SETTINGS_FILE")"
           fi
+
+          test -f "$SRC_DIR/settings.gradle"
+          test -f "$SRC_DIR/app/build.gradle"
           echo "SRC_DIR=$SRC_DIR" >> "$GITHUB_ENV"
+          echo "Android project root: $SRC_DIR"
 
       - name: Verify source SHA256
         shell: bash
@@ -81,6 +68,14 @@ jobs:
           cd "$SRC_DIR"
           test -f Sources/SHA256SUMS.txt
           sha256sum -c Sources/SHA256SUMS.txt
+
+      - name: Run packaged current-version preflight
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$SRC_DIR"
+          test -f Sources/validate_current.py
+          python3 Sources/validate_current.py
 
       - name: Set up JDK 17
         uses: actions/setup-java@v4
@@ -94,7 +89,6 @@ jobs:
       - name: Install Android 35 packages
         shell: bash
         run: |
-          set -euo pipefail
           yes | sdkmanager --licenses >/dev/null || true
           sdkmanager "platform-tools" "platforms;android-35" "build-tools;35.0.0"
 
@@ -103,35 +97,23 @@ jobs:
         with:
           gradle-version: '8.9'
 
-      - name: Build signed Debug and Release APKs
+      - name: Build Debug APK
         shell: bash
         run: |
           set -euo pipefail
-          gradle --no-daemon -p "$SRC_DIR" clean :app:assembleDebug :app:assembleRelease
+          gradle --no-daemon -p "$SRC_DIR" :app:assembleDebug
 
-      - name: Package APKs and SHA256
+      - name: Package APK and SHA256
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p dist
-
-          DEBUG_APK="$SRC_DIR/app/build/outputs/apk/debug/app-debug.apk"
-          RELEASE_APK="$SRC_DIR/app/build/outputs/apk/release/app-release.apk"
-          test -f "$DEBUG_APK"
-          test -f "$RELEASE_APK"
-
-          DEBUG_OUT="dist/OKN_DSP_${{ steps.src.outputs.version }}-debug.apk"
-          RELEASE_OUT="dist/OKN_DSP_${{ steps.src.outputs.version }}-release.apk"
-          cp "$DEBUG_APK" "$DEBUG_OUT"
-          cp "$RELEASE_APK" "$RELEASE_OUT"
-
-          sha256sum "$DEBUG_OUT" > "$DEBUG_OUT.sha256"
-          sha256sum "$RELEASE_OUT" > "$RELEASE_OUT.sha256"
-
-          echo "Debug:"
-          cat "$DEBUG_OUT.sha256"
-          echo "Release:"
-          cat "$RELEASE_OUT.sha256"
+          APK="$SRC_DIR/app/build/outputs/apk/debug/app-debug.apk"
+          test -f "$APK"
+          OUT="dist/OKN_DSP_${{ steps.src.outputs.version }}-debug.apk"
+          cp "$APK" "$OUT"
+          sha256sum "$OUT" > "dist/OKN_DSP_${{ steps.src.outputs.version }}-debug.apk.sha256"
+          cat "dist/OKN_DSP_${{ steps.src.outputs.version }}-debug.apk.sha256"
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
@@ -140,7 +122,5 @@ jobs:
           path: |
             dist/OKN_DSP_${{ steps.src.outputs.version }}-debug.apk
             dist/OKN_DSP_${{ steps.src.outputs.version }}-debug.apk.sha256
-            dist/OKN_DSP_${{ steps.src.outputs.version }}-release.apk
-            dist/OKN_DSP_${{ steps.src.outputs.version }}-release.apk.sha256
           if-no-files-found: error
           retention-days: 30
