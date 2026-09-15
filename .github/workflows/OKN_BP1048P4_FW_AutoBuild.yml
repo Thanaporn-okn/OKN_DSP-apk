@@ -1,0 +1,65 @@
+name: OKN BP1048P4 Firmware Core Validation
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ "main", "master" ]
+    paths:
+      - 'OKN_BP1048P4_FW_V*_Sources.zip'
+      - '.github/workflows/OKN_BP1048P4_FW_AutoBuild.yml'
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Select newest firmware source ZIP
+        id: fw
+        shell: bash
+        run: |
+          set -euo pipefail
+          ZIP="$(find . -maxdepth 1 -type f -name 'OKN_BP1048P4_FW_V*_Sources.zip' -printf '%f\n' | sort -V | tail -n1)"
+          test -n "$ZIP"
+          echo "zip=$ZIP" >> "$GITHUB_OUTPUT"
+          echo "Selected: $ZIP"
+
+      - name: Extract source
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf _fw
+          mkdir _fw
+          unzip -q "${{ steps.fw.outputs.zip }}" -d _fw
+          ROOT="$(find _fw -mindepth 1 -maxdepth 1 -type d | head -n1)"
+          test -f "$ROOT/Makefile"
+          echo "FW_ROOT=$ROOT" >> "$GITHUB_ENV"
+
+      - name: Safety scan - no guessed BP1048P4 MMIO
+        run: make -C "$FW_ROOT" verify
+
+      - name: Compile and run core tests
+        run: make -C "$FW_ROOT" test
+
+      - name: Run host demo
+        run: make -C "$FW_ROOT" demo | tee "$FW_ROOT/host-demo.log"
+
+      - name: Create validation bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="$(basename "$FW_ROOT")"
+          mkdir -p out
+          cp "$FW_ROOT/BUILD_STATUS.txt" out/
+          cp "$FW_ROOT/firmware_manifest.json" out/
+          cp "$FW_ROOT/host-demo.log" out/
+          sha256sum "${{ steps.fw.outputs.zip }}" > out/source-zip.sha256
+          tar -czf "out/${VERSION}_VALIDATION.tar.gz" -C out BUILD_STATUS.txt firmware_manifest.json host-demo.log source-zip.sha256
+
+      - name: Upload validation artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: OKN-BP1048P4-FW-validation
+          path: out/*
+          if-no-files-found: error
