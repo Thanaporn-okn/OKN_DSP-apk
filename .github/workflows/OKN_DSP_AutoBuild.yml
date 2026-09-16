@@ -1,0 +1,181 @@
+name: OKN DSP Auto Build
+
+on:
+  push:
+    paths:
+      - 'OKN_DSP_V*_Sources.zip'
+      - '.github/workflows/OKN_DSP_AutoBuild.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-latest-version:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Find latest OKN DSP source ZIP
+        id: src
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ZIP_FILE="$(find . -maxdepth 1 -type f -name 'OKN_DSP_V*_Sources.zip' -printf '%f\n' | sort -V | tail -n 1)"
+          if [ -z "$ZIP_FILE" ]; then
+            echo "ERROR: No OKN_DSP_V*_Sources.zip found in repository root."
+            exit 1
+          fi
+
+          VERSION="$(echo "$ZIP_FILE" | sed -E 's/^OKN_DSP_(V[0-9]+)_Sources\.zip$/\1/')"
+          if [ -z "$VERSION" ] || [ "$VERSION" = "$ZIP_FILE" ]; then
+            echo "ERROR: Cannot detect version from $ZIP_FILE"
+            exit 1
+          fi
+
+          echo "zip=$ZIP_FILE" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Selected source: $ZIP_FILE"
+          echo "Detected version: $VERSION"
+
+      - name: Extract source automatically
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          rm -rf buildsrc
+          mkdir -p buildsrc
+          unzip -q "${{ steps.src.outputs.zip }}" -d buildsrc
+
+          SETTINGS="$(find buildsrc -maxdepth 4 -type f \( -name 'settings.gradle' -o -name 'settings.gradle.kts' \) | head -n 1)"
+          if [ -z "$SETTINGS" ]; then
+            echo "ERROR: settings.gradle/settings.gradle.kts not found after extraction."
+            find buildsrc -maxdepth 4 -type f | sort | head -200
+            exit 1
+          fi
+
+          SRC_DIR="$(dirname "$SETTINGS")"
+          echo "SRC_DIR=$SRC_DIR" >> "$GITHUB_ENV"
+          echo "Android project root: $SRC_DIR"
+
+      - name: Verify packaged source SHA256
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$SRC_DIR"
+
+          if [ -f Sources/SHA256SUMS.txt ]; then
+            sha256sum -c Sources/SHA256SUMS.txt
+          else
+            echo "ERROR: Sources/SHA256SUMS.txt not found."
+            exit 1
+          fi
+
+      - name: Run latest-version safety validator automatically
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$SRC_DIR"
+
+          VERSION="${{ steps.src.outputs.version }}"
+          VERSION_NUM="${VERSION#V}"
+          VALIDATOR="$(find Sources -maxdepth 1 -type f -name "validate_v${VERSION_NUM}_*.py" -printf '%p\n' | sort -V | tail -n 1)"
+
+          if [ -z "$VALIDATOR" ]; then
+            echo "ERROR: No validator found for $VERSION (expected Sources/validate_v${VERSION_NUM}_*.py)."
+            exit 1
+          fi
+
+          echo "Selected validator: $VALIDATOR"
+          python3 "$VALIDATOR"
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v4
+        with:
+          # Important: do not install the removed legacy SDK package named "tools".
+          packages: ''
+          log-accepted-android-sdk-licenses: false
+
+      - name: Accept Android SDK licenses automatically
+        shell: bash
+        run: |
+          set -euo pipefail
+          set +o pipefail
+          yes | sdkmanager --licenses >/dev/null
+          SDK_STATUS=${PIPESTATUS[1]}
+          set -o pipefail
+
+          if [ "$SDK_STATUS" -ne 0 ]; then
+            echo "ERROR: sdkmanager --licenses failed with exit code $SDK_STATUS"
+            exit "$SDK_STATUS"
+          fi
+
+          echo "Android SDK licenses accepted."
+
+      - name: Install Android SDK packages
+        shell: bash
+        run: |
+          set -euo pipefail
+          sdkmanager --version
+          sdkmanager --install \
+            "platform-tools" \
+            "platforms;android-35" \
+            "build-tools;35.0.0"
+
+      - name: Set up Gradle fallback
+        uses: gradle/actions/setup-gradle@v6
+        with:
+          gradle-version: '8.9'
+          cache-provider: basic
+
+      - name: Build Debug APK automatically
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [ -f "$SRC_DIR/gradlew" ]; then
+            chmod +x "$SRC_DIR/gradlew"
+            "$SRC_DIR/gradlew" --no-daemon -p "$SRC_DIR" :app:assembleDebug
+          else
+            gradle --no-daemon -p "$SRC_DIR" :app:assembleDebug
+          fi
+
+      - name: Locate and package APK automatically
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+
+          APK="$(find "$SRC_DIR/app/build/outputs/apk" -type f -name '*debug*.apk' | sort | head -n 1)"
+          if [ -z "$APK" ] || [ ! -f "$APK" ]; then
+            echo "ERROR: Debug APK not found."
+            find "$SRC_DIR/app/build/outputs" -maxdepth 6 -type f 2>/dev/null | sort || true
+            exit 1
+          fi
+
+          OUT="dist/OKN_DSP_${{ steps.src.outputs.version }}-debug.apk"
+          cp "$APK" "$OUT"
+          sha256sum "$OUT" > "$OUT.sha256"
+
+          echo "APK created: $OUT"
+          cat "$OUT.sha256"
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: OKN_DSP_${{ steps.src.outputs.version }}_APK
+          path: |
+            dist/OKN_DSP_${{ steps.src.outputs.version }}-debug.apk
+            dist/OKN_DSP_${{ steps.src.outputs.version }}-debug.apk.sha256
+          if-no-files-found: error
+          retention-days: 30
