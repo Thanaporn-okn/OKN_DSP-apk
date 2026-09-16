@@ -62,7 +62,7 @@ jobs:
         run: |
           set -euo pipefail
           cd "$SRC_DIR"
-          for CHECK in Sources/validate_v38_gate.py Sources/validate_v39_reset.py Sources/validate_v42_audio_safe.py; do
+          for CHECK in Sources/validate_v38_gate.py Sources/validate_v39_reset.py Sources/validate_v42_audio_guard.py; do
             if [ -f "$CHECK" ]; then
               echo "Running $CHECK"
               python3 "$CHECK"
@@ -76,21 +76,13 @@ jobs:
           java-version: '17'
 
       - name: Set up Android SDK
-        uses: android-actions/setup-android@v4
-        with:
-          # The action defaults to 'tools platform-tools'. The legacy 'tools'
-          # package no longer exists in current Android SDK repositories.
-          packages: ''
-          log-accepted-android-sdk-licenses: 'false'
+        uses: android-actions/setup-android@v3
 
       - name: Install Android 35 packages
         shell: bash
         run: |
-          set -euo pipefail
-          sdkmanager --install \
-            "platform-tools" \
-            "platforms;android-35" \
-            "build-tools;35.0.0"
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager "platform-tools" "platforms;android-35" "build-tools;35.0.0"
 
       - name: Set up Gradle 8.9
         uses: gradle/actions/setup-gradle@v4
