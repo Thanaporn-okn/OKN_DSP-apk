@@ -1,0 +1,135 @@
+name: Build APK from ZIP
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - master
+    paths:
+      - 'facebook-product-tracker-source.zip'
+      - '.github/workflows/Build_APK_From_ZIP.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-apk-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PROJECT_ZIP: facebook-product-tracker-source.zip
+  WEB_APP_URL: ${{ vars.WEB_APP_URL }}
+
+jobs:
+  build-apk:
+    name: Unzip and build Android APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Verify project ZIP
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f "$PROJECT_ZIP" || {
+            echo "ERROR: $PROJECT_ZIP was not found in the repository root."
+            exit 1
+          }
+          unzip -t "$PROJECT_ZIP"
+
+      - name: Extract project ZIP
+        id: extract
+        shell: bash
+        run: |
+          set -euo pipefail
+          EXTRACT_DIR="$RUNNER_TEMP/facebook-product-tracker-src"
+          rm -rf "$EXTRACT_DIR"
+          mkdir -p "$EXTRACT_DIR"
+          unzip -q "$PROJECT_ZIP" -d "$EXTRACT_DIR"
+
+          SETTINGS_FILE="$(find "$EXTRACT_DIR" -type f -path '*/android/settings.gradle' -print -quit)"
+          if [ -z "$SETTINGS_FILE" ]; then
+            echo "ERROR: android/settings.gradle was not found after extracting $PROJECT_ZIP"
+            find "$EXTRACT_DIR" -maxdepth 4 -type f | sort | head -200
+            exit 1
+          fi
+
+          ANDROID_DIR="$(dirname "$SETTINGS_FILE")"
+          echo "android_dir=$ANDROID_DIR" >> "$GITHUB_OUTPUT"
+          echo "Android project: $ANDROID_DIR"
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v4
+        with:
+          accept-android-sdk-licenses: 'true'
+          log-accepted-android-sdk-licenses: 'false'
+          packages: 'platform-tools platforms;android-35 build-tools;35.0.0'
+
+      - name: Set up Gradle 8.11.1
+        uses: gradle/actions/setup-gradle@v6
+        with:
+          gradle-version: '8.11.1'
+          cache-provider: basic
+
+      - name: Build debug APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          gradle \
+            -p "${{ steps.extract.outputs.android_dir }}" \
+            --no-daemon \
+            --stacktrace \
+            clean assembleDebug
+
+      - name: Prepare APK
+        id: apk
+        shell: bash
+        run: |
+          set -euo pipefail
+          ANDROID_DIR="${{ steps.extract.outputs.android_dir }}"
+          APK_SOURCE="$ANDROID_DIR/app/build/outputs/apk/debug/app-debug.apk"
+
+          test -f "$APK_SOURCE" || {
+            echo "ERROR: APK was not produced at $APK_SOURCE"
+            find "$ANDROID_DIR/app/build/outputs" -type f 2>/dev/null | sort || true
+            exit 1
+          }
+
+          mkdir -p "$GITHUB_WORKSPACE/dist"
+          cp "$APK_SOURCE" "$GITHUB_WORKSPACE/dist/FacebookProductTracker.apk"
+          sha256sum "$GITHUB_WORKSPACE/dist/FacebookProductTracker.apk" \
+            | tee "$GITHUB_WORKSPACE/dist/FacebookProductTracker.apk.sha256"
+
+          {
+            echo '## APK build completed'
+            echo ''
+            echo '- Output: `FacebookProductTracker.apk`'
+            echo "- Source ZIP: \`$PROJECT_ZIP\`"
+            if [ -n "${WEB_APP_URL:-}" ]; then
+              echo "- WEB_APP_URL: \`$WEB_APP_URL\`"
+            else
+              echo '- WEB_APP_URL: not set; the app will ask for the URL on first launch.'
+            fi
+            echo '- SHA-256:'
+            echo '```text'
+            cat "$GITHUB_WORKSPACE/dist/FacebookProductTracker.apk.sha256"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload installable APK
+        uses: actions/upload-artifact@v7
+        with:
+          path: dist/FacebookProductTracker.apk
+          archive: false
+          if-no-files-found: error
+          retention-days: 30
