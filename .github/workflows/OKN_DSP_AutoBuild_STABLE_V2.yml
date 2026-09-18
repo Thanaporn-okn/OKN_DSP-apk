@@ -1,0 +1,298 @@
+name: OKN DSP Android AutoBuild Stable V2
+
+on:
+  workflow_dispatch:
+  push:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: okn-dsp-android-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-apk:
+    name: Build Debug APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+
+    env:
+      # V42 ใช้ Android Gradle Plugin 8.7.3 ซึ่งรองรับ Gradle 8.9
+      # ถ้า source รุ่นใหม่มี gradlew ของตัวเอง workflow จะใช้ gradlew และไม่ใช้ค่านี้
+      FALLBACK_GRADLE_VERSION: '8.9'
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      # ต้องหา/แตก source ก่อน setup Gradle เสมอ
+      # เวอร์ชันก่อนแตก ZIP ไป RUNNER_TEMP ทำให้ setup-gradle มองไม่เห็น *.gradle ใน GITHUB_WORKSPACE
+      - name: Find or extract Android project
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          PROJECT_DIR=""
+          EXTRACT_ROOT="$GITHUB_WORKSPACE/okn_autobuild_source"
+
+          find_project() {
+            local base="$1"
+            find "$base" -maxdepth 6 -type f \
+              \( -name settings.gradle -o -name settings.gradle.kts \) \
+              -not -path '*/.git/*' \
+              -printf '%h\n' 2>/dev/null | while read -r d; do
+                if [[ -f "$d/app/build.gradle" || -f "$d/app/build.gradle.kts" ]]; then
+                  printf '%s\n' "$d"
+                fi
+              done | head -n 1
+          }
+
+          # 1) source ถูกแตกไว้ใน repo แล้ว
+          PROJECT_DIR="$(find_project "$GITHUB_WORKSPACE" || true)"
+
+          # 2) repo มี Source.zip ให้เลือกไฟล์ล่าสุดแล้วแตกไว้ใน GITHUB_WORKSPACE
+          #    เพื่อให้ทุก action ที่สแกน workspace มองเห็นไฟล์ Gradle
+          if [[ -z "$PROJECT_DIR" ]]; then
+            ZIP_FILE="$(find "$GITHUB_WORKSPACE" -maxdepth 3 -type f \
+              \( -iname '*DSP*Source*.zip' -o -iname '*Source*.zip' -o -iname '*.zip' \) \
+              -not -path '*/.git/*' \
+              -printf '%T@ %p\n' 2>/dev/null | sort -nr | head -n 1 | cut -d' ' -f2- || true)"
+
+            if [[ -z "$ZIP_FILE" ]]; then
+              echo 'ERROR: ไม่พบ Android project และไม่พบ Source.zip' >&2
+              echo 'ต้องมี settings.gradle(.kts) + app/build.gradle(.kts) หรือไฟล์ Source.zip' >&2
+              exit 2
+            fi
+
+            echo "Extracting source: $ZIP_FILE"
+            rm -rf "$EXTRACT_ROOT"
+            mkdir -p "$EXTRACT_ROOT"
+            unzip -q "$ZIP_FILE" -d "$EXTRACT_ROOT"
+            PROJECT_DIR="$(find_project "$EXTRACT_ROOT" || true)"
+          fi
+
+          if [[ -z "$PROJECT_DIR" ]]; then
+            echo 'ERROR: แตก ZIP แล้วแต่ไม่พบ Android project ที่ build ได้' >&2
+            find "$GITHUB_WORKSPACE" -maxdepth 5 -type f \
+              \( -name settings.gradle -o -name settings.gradle.kts -o -name build.gradle -o -name build.gradle.kts \) \
+              -print || true
+            exit 3
+          fi
+
+          if [[ -f "$PROJECT_DIR/gradlew" && -f "$PROJECT_DIR/gradle/wrapper/gradle-wrapper.properties" ]]; then
+            HAS_WRAPPER=true
+          else
+            HAS_WRAPPER=false
+          fi
+
+          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+          echo "HAS_WRAPPER=$HAS_WRAPPER" >> "$GITHUB_ENV"
+          echo "Android project: $PROJECT_DIR"
+          echo "Gradle wrapper: $HAS_WRAPPER"
+
+      - name: Setup Java 17
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Detect compileSdk
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ -f "$PROJECT_DIR/app/build.gradle" ]]; then
+            BUILD_FILE="$PROJECT_DIR/app/build.gradle"
+          elif [[ -f "$PROJECT_DIR/app/build.gradle.kts" ]]; then
+            BUILD_FILE="$PROJECT_DIR/app/build.gradle.kts"
+          else
+            echo 'ERROR: app/build.gradle(.kts) not found' >&2
+            exit 4
+          fi
+
+          COMPILE_SDK="$(python3 - "$BUILD_FILE" <<'PY'
+          import re, sys
+          text = open(sys.argv[1], encoding='utf-8').read()
+          patterns = [
+              r'\bcompileSdk\s*=\s*["\']?(\d+)',
+              r'\bcompileSdk\s+["\']?(\d+)',
+              r'\bcompileSdkVersion\s*[=( ]\s*["\']?(\d+)',
+          ]
+          for pat in patterns:
+              m = re.search(pat, text)
+              if m:
+                  print(m.group(1))
+                  raise SystemExit(0)
+          raise SystemExit(1)
+          PY
+          )" || true
+
+          if [[ -z "$COMPILE_SDK" ]]; then
+            echo "ERROR: อ่าน compileSdk จาก $BUILD_FILE ไม่ได้" >&2
+            exit 5
+          fi
+
+          echo "COMPILE_SDK=$COMPILE_SDK" >> "$GITHUB_ENV"
+          echo "compileSdk=$COMPILE_SDK"
+
+      # ไม่ใช้ android-actions/setup-android@v3
+      # จึงไม่เกิดปัญหา sdkmanager พยายามติดตั้ง package เก่าชื่อ 'tools'
+      - name: Prepare Android SDK
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          SDK_ROOT="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-/usr/local/lib/android/sdk}}"
+          if [[ ! -d "$SDK_ROOT" ]]; then
+            echo "ERROR: Android SDK not found: $SDK_ROOT" >&2
+            exit 6
+          fi
+
+          echo "ANDROID_SDK_ROOT=$SDK_ROOT" >> "$GITHUB_ENV"
+          echo "ANDROID_HOME=$SDK_ROOT" >> "$GITHUB_ENV"
+
+          PLATFORM_DIR="$SDK_ROOT/platforms/android-$COMPILE_SDK"
+
+          # GitHub ubuntu runner ปกติมี Android SDK/Build Tools อยู่แล้ว
+          # เรียก sdkmanager เฉพาะเมื่อ platform ของ compileSdk ยังไม่มี
+          if [[ -d "$PLATFORM_DIR" ]]; then
+            echo "Android platform android-$COMPILE_SDK already installed"
+            exit 0
+          fi
+
+          SDKMANAGER=""
+          NUMERIC_SDKMANAGER="$(find "$SDK_ROOT/cmdline-tools" -type f -path '*/bin/sdkmanager' 2>/dev/null \
+            | grep -E '/cmdline-tools/[0-9]+([.][0-9]+)*/bin/sdkmanager$' \
+            | sort -V | tail -n 1 || true)"
+
+          if [[ -n "$NUMERIC_SDKMANAGER" ]]; then
+            SDKMANAGER="$NUMERIC_SDKMANAGER"
+          elif [[ -x "$SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" ]]; then
+            SDKMANAGER="$SDK_ROOT/cmdline-tools/latest/bin/sdkmanager"
+          elif command -v sdkmanager >/dev/null 2>&1; then
+            SDKMANAGER="$(command -v sdkmanager)"
+          else
+            echo 'ERROR: sdkmanager not found' >&2
+            exit 7
+          fi
+
+          echo "Using sdkmanager: $SDKMANAGER"
+          yes | "$SDKMANAGER" --licenses >/dev/null 2>&1 || true
+          "$SDKMANAGER" "platforms;android-$COMPILE_SDK" "platform-tools"
+
+      # ไม่ใช้ gradle/actions/setup-gradle@v6 อีกต่อไป
+      # ถ้า project ไม่มี Gradle Wrapper จะดาวน์โหลด Gradle เวอร์ชันที่ล็อกไว้โดยตรงจาก Gradle
+      - name: Install fallback Gradle when wrapper is absent
+        if: env.HAS_WRAPPER != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          VER="$FALLBACK_GRADLE_VERSION"
+          ZIP="$RUNNER_TEMP/gradle-$VER-bin.zip"
+          SHA_FILE="$RUNNER_TEMP/gradle-$VER-bin.zip.sha256"
+          INSTALL_ROOT="$RUNNER_TEMP/gradle-$VER-install"
+          URL="https://services.gradle.org/distributions/gradle-$VER-bin.zip"
+
+          rm -rf "$INSTALL_ROOT"
+          mkdir -p "$INSTALL_ROOT"
+
+          curl -fL --retry 3 --retry-delay 2 "$URL" -o "$ZIP"
+          curl -fL --retry 3 --retry-delay 2 "$URL.sha256" -o "$SHA_FILE"
+
+          EXPECTED="$(tr -d '[:space:]' < "$SHA_FILE")"
+          ACTUAL="$(sha256sum "$ZIP" | awk '{print $1}')"
+          if [[ "$EXPECTED" != "$ACTUAL" ]]; then
+            echo 'ERROR: Gradle ZIP SHA256 mismatch' >&2
+            echo "expected=$EXPECTED" >&2
+            echo "actual=$ACTUAL" >&2
+            exit 8
+          fi
+
+          unzip -q "$ZIP" -d "$INSTALL_ROOT"
+          GRADLE_BIN="$INSTALL_ROOT/gradle-$VER/bin"
+          echo "$GRADLE_BIN" >> "$GITHUB_PATH"
+          echo "GRADLE_BIN=$GRADLE_BIN" >> "$GITHUB_ENV"
+          "$GRADLE_BIN/gradle" --version
+
+      - name: Run OKN validation
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ -d "$PROJECT_DIR/Sources" ]]; then
+            VALIDATOR="$(find "$PROJECT_DIR/Sources" -maxdepth 1 -type f -name 'validate_v*.py' \
+              | sort -V | tail -n 1 || true)"
+            if [[ -n "$VALIDATOR" ]]; then
+              echo "Running validator: $VALIDATOR"
+              python3 "$VALIDATOR"
+            else
+              echo 'No validate_v*.py found; continue build'
+            fi
+          else
+            echo 'No Sources directory; continue build'
+          fi
+
+      - name: Build debug APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$PROJECT_DIR"
+
+          if [[ "$HAS_WRAPPER" == 'true' ]]; then
+            chmod +x ./gradlew
+            ./gradlew --no-daemon --stacktrace :app:assembleDebug
+          else
+            gradle --no-daemon --stacktrace :app:assembleDebug
+          fi
+
+      - name: Collect APK and SHA256
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          DIST="$GITHUB_WORKSPACE/dist"
+          rm -rf "$DIST"
+          mkdir -p "$DIST"
+
+          APK="$(find "$PROJECT_DIR" -type f -path '*/build/outputs/apk/*/*.apk' \
+            -name '*debug*.apk' | sort | head -n 1 || true)"
+
+          if [[ -z "$APK" || ! -f "$APK" ]]; then
+            echo 'ERROR: Debug APK not found' >&2
+            find "$PROJECT_DIR" -type f -name '*.apk' -print || true
+            exit 9
+          fi
+
+          cp "$APK" "$DIST/OKN_DSP-debug.apk"
+          cd "$DIST"
+          sha256sum OKN_DSP-debug.apk > OKN_DSP-debug.apk.sha256
+
+          if [[ "$HAS_WRAPPER" == 'true' ]]; then
+            GRADLE_USED="$(cd "$PROJECT_DIR" && ./gradlew --version | awk '/^Gradle /{print $2; exit}')"
+          else
+            GRADLE_USED="$(gradle --version | awk '/^Gradle /{print $2; exit}')"
+          fi
+
+          {
+            echo 'OKN DSP Android AutoBuild Stable V2'
+            echo "commit=$GITHUB_SHA"
+            echo "ref=$GITHUB_REF"
+            echo "project=$PROJECT_DIR"
+            echo "compileSdk=$COMPILE_SDK"
+            echo "gradle=$GRADLE_USED"
+            echo "java=$(java -version 2>&1 | head -n 1)"
+            echo "built_utc=$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+          } > build-info.txt
+
+          echo 'APK SHA256:'
+          cat OKN_DSP-debug.apk.sha256
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: OKN_DSP-Android-debug-${{ github.run_number }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 30
