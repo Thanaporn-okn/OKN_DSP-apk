@@ -1,0 +1,202 @@
+name: OKN DSP Auto Build
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'OKN_DSP_V*_Sources.zip'
+      - '.github/workflows/OKN_DSP_AUTO.yml'
+  pull_request:
+    paths:
+      - 'OKN_DSP_V*_Sources.zip'
+      - '.github/workflows/OKN_DSP_AUTO.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: okn-dsp-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  JAVA_VERSION: '17'
+  GRADLE_VERSION: '8.10.2'
+  ANDROID_PLATFORM: 'android-35'
+  ANDROID_BUILD_TOOLS: '35.0.0'
+
+jobs:
+  build-latest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Auto-select latest source ZIP
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mapfile -t ZIPS < <(
+            find "$GITHUB_WORKSPACE" -maxdepth 2 -type f \
+              -name 'OKN_DSP_V*_Sources.zip' -print | sort -V
+          )
+
+          if (( ${#ZIPS[@]} == 0 )); then
+            echo 'ERROR: no OKN_DSP_V*_Sources.zip found.'
+            exit 1
+          fi
+
+          SOURCE_ZIP="${ZIPS[$((${#ZIPS[@]} - 1))]}"
+          SOURCE_NAME="$(basename "$SOURCE_ZIP")"
+          VERSION="$(printf '%s' "$SOURCE_NAME" | sed -nE 's/^OKN_DSP_(V[0-9]+)_Sources\.zip$/\1/p')"
+          [[ -n "$VERSION" ]] || VERSION=AUTO
+
+          WORK="$RUNNER_TEMP/okn_dsp_source"
+          rm -rf "$WORK"
+          mkdir -p "$WORK"
+          unzip -q "$SOURCE_ZIP" -d "$WORK"
+
+          PROJECT_ROOT="$(find "$WORK" -type f -name settings.gradle -printf '%h\n' | head -n1)"
+          if [[ -z "$PROJECT_ROOT" || ! -f "$PROJECT_ROOT/app/build.gradle" ]]; then
+            echo 'ERROR: Android project root not found after extraction.'
+            find "$WORK" -maxdepth 4 -type f | sort | head -120
+            exit 1
+          fi
+
+          echo "SOURCE_ZIP=$SOURCE_ZIP" >> "$GITHUB_ENV"
+          echo "SOURCE_NAME=$SOURCE_NAME" >> "$GITHUB_ENV"
+          echo "PROJECT_ROOT=$PROJECT_ROOT" >> "$GITHUB_ENV"
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          echo "Selected: $SOURCE_NAME"
+          echo "Project:  $PROJECT_ROOT"
+
+      - name: Verify packaged SHA256
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$PROJECT_ROOT"
+
+          if [[ ! -f Sources/SHA256SUMS.txt ]]; then
+            echo 'ERROR: Sources/SHA256SUMS.txt is missing.'
+            exit 1
+          fi
+
+          sha256sum -c Sources/SHA256SUMS.txt
+
+      - name: Run version-independent release validation
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$PROJECT_ROOT"
+
+          # IMPORTANT: The workflow NEVER looks for validate_v42_*.py,
+          # validate_v43_*.py, etc. Every release uses this stable entry point.
+          VALIDATOR='Sources/validate_release.py'
+
+          if [[ ! -f "$VALIDATOR" ]]; then
+            echo "ERROR: $VALIDATOR is missing."
+            echo 'The workflow is intentionally version-independent.'
+            echo 'Each source ZIP must provide Sources/validate_release.py.'
+            echo 'Validators present in package:'
+            find Sources -maxdepth 1 -type f -name 'validate*.py' -print | sort -V || true
+            exit 1
+          fi
+
+          echo "Validator: $VALIDATOR"
+          python3 "$VALIDATOR"
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ env.JAVA_VERSION }}
+
+      - name: Prepare Android SDK only when needed
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          SDK="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-}}"
+          if [[ -z "$SDK" || ! -d "$SDK" ]]; then
+            echo 'ERROR: Android SDK not available on runner.'
+            exit 1
+          fi
+
+          NEED_INSTALL=0
+          [[ -d "$SDK/platforms/$ANDROID_PLATFORM" ]] || NEED_INSTALL=1
+          [[ -d "$SDK/build-tools/$ANDROID_BUILD_TOOLS" ]] || NEED_INSTALL=1
+
+          if (( NEED_INSTALL == 1 )); then
+            SDKMANAGER="$(command -v sdkmanager || true)"
+            if [[ -z "$SDKMANAGER" ]]; then
+              SDKMANAGER="$(find "$SDK/cmdline-tools" -type f -name sdkmanager 2>/dev/null | sort -V | tail -n1 || true)"
+            fi
+
+            [[ -n "$SDKMANAGER" && -x "$SDKMANAGER" ]] || {
+              echo 'ERROR: sdkmanager not found.'
+              exit 1
+            }
+
+            echo "Using sdkmanager: $SDKMANAGER"
+            yes | "$SDKMANAGER" --licenses >/dev/null 2>&1 || true
+            "$SDKMANAGER" \
+              'platform-tools' \
+              "platforms;$ANDROID_PLATFORM" \
+              "build-tools;$ANDROID_BUILD_TOOLS"
+          else
+            echo "Android $ANDROID_PLATFORM / build-tools $ANDROID_BUILD_TOOLS already installed."
+          fi
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: ${{ env.GRADLE_VERSION }}
+
+      - name: Build Debug APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          gradle --no-daemon -p "$PROJECT_ROOT" :app:assembleDebug --stacktrace
+
+      - name: Package APK and checksum
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+
+          APK="$PROJECT_ROOT/app/build/outputs/apk/debug/app-debug.apk"
+          if [[ ! -f "$APK" ]]; then
+            echo "ERROR: APK not found: $APK"
+            exit 1
+          fi
+
+          OUT="dist/OKN_DSP_${VERSION}-debug.apk"
+          cp "$APK" "$OUT"
+          sha256sum "$OUT" > "$OUT.sha256"
+          cat "$OUT.sha256"
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: OKN_DSP_${{ env.VERSION }}_APK
+          path: |
+            dist/OKN_DSP_${{ env.VERSION }}-debug.apk
+            dist/OKN_DSP_${{ env.VERSION }}-debug.apk.sha256
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Build summary
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo '## OKN DSP automatic build'
+            echo
+            echo "- Source: \`${SOURCE_NAME:-unknown}\`"
+            echo "- Version: \`${VERSION:-unknown}\`"
+            echo '- Validator entry point: `Sources/validate_release.py` (version-independent).'
+            echo '- No `validate_vXX_*.py` filename is required by the workflow.'
+            echo '- No firmware flash/erase/program operation is performed.'
+          } >> "$GITHUB_STEP_SUMMARY"
