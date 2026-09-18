@@ -1,0 +1,238 @@
+name: Build Android APK v3
+
+on:
+  push:
+    branches:
+      - '**'
+    paths-ignore:
+      - '**/*.md'
+      - 'docs/**'
+  pull_request:
+    paths-ignore:
+      - '**/*.md'
+      - 'docs/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: android-apk-v3-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  GRADLE_VERSION: '9.6.0'
+  ANDROID_API: '36'
+  ANDROID_BUILD_TOOLS: '36.0.0'
+
+jobs:
+  build-apk:
+    name: Build build.apk v3
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Resolve Android project
+        id: project
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ -f "$GITHUB_WORKSPACE/settings.gradle.kts" || -f "$GITHUB_WORKSPACE/settings.gradle" ]]; then
+            PROJECT_DIR="$GITHUB_WORKSPACE"
+            echo "Using Android project already expanded in repository root."
+          else
+            EXTRACT_DIR="$RUNNER_TEMP/android-project-v3"
+            rm -rf "$EXTRACT_DIR"
+            mkdir -p "$EXTRACT_DIR"
+
+            mapfile -t ZIP_FILES < <(
+              find "$GITHUB_WORKSPACE" -maxdepth 4 -type f -name '*.zip' \
+                ! -path '*/.git/*' | sort
+            )
+
+            if (( ${#ZIP_FILES[@]} == 0 )); then
+              echo '::error::No Android project and no ZIP source file were found.'
+              exit 2
+            fi
+
+            SOURCE_ZIP="${ZIP_FILES[${#ZIP_FILES[@]}-1]}"
+            echo "Extracting: $SOURCE_ZIP"
+            unzip -q -o "$SOURCE_ZIP" -d "$EXTRACT_DIR"
+
+            SETTINGS_FILE="$(find "$EXTRACT_DIR" -type f \( -name 'settings.gradle.kts' -o -name 'settings.gradle' \) | head -n 1 || true)"
+            if [[ -z "$SETTINGS_FILE" ]]; then
+              echo '::error::ZIP was extracted, but settings.gradle(.kts) was not found.'
+              exit 3
+            fi
+            PROJECT_DIR="$(dirname "$SETTINGS_FILE")"
+          fi
+
+          echo "Project directory: $PROJECT_DIR"
+          echo "project_dir=$PROJECT_DIR" >> "$GITHUB_OUTPUT"
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK tools
+        uses: android-actions/setup-android@v4
+        with:
+          accept-android-sdk-licenses: true
+          log-accepted-android-sdk-licenses: false
+
+      - name: Install Android API 36
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "Installing Android API ${ANDROID_API} and Build Tools ${ANDROID_BUILD_TOOLS}"
+          sdkmanager --install \
+            "platforms;android-${ANDROID_API}" \
+            "build-tools;${ANDROID_BUILD_TOOLS}"
+
+          echo "Installed Android packages:"
+          sdkmanager --list_installed | grep -E "platform-tools|platforms;android-${ANDROID_API}|build-tools;${ANDROID_BUILD_TOOLS}" || true
+
+          test -d "$ANDROID_HOME/platforms/android-${ANDROID_API}"
+          test -d "$ANDROID_HOME/build-tools/${ANDROID_BUILD_TOOLS}"
+
+      - name: Set up Gradle 9.6.0
+        uses: gradle/actions/setup-gradle@v6
+        with:
+          gradle-version: ${{ env.GRADLE_VERSION }}
+
+      - name: Show build environment
+        shell: bash
+        run: |
+          set -euo pipefail
+          java -version
+          gradle --version
+          sdkmanager --version
+          echo "ANDROID_HOME=$ANDROID_HOME"
+
+      - name: Patch source SDK level to API 36
+        shell: bash
+        working-directory: ${{ steps.project.outputs.project_dir }}
+        run: |
+          set -euo pipefail
+
+          # Safety patch for older ZIPs that still declare API 37.
+          if [[ -f app/build.gradle.kts ]]; then
+            sed -i -E 's/compileSdk = 37/compileSdk = 36/g' app/build.gradle.kts
+            sed -i -E 's/targetSdk = 37/targetSdk = 36/g' app/build.gradle.kts
+          fi
+          if [[ -f app/build.gradle ]]; then
+            sed -i -E 's/compileSdkVersion[[:space:]]+37/compileSdkVersion 36/g' app/build.gradle
+            sed -i -E 's/targetSdkVersion[[:space:]]+37/targetSdkVersion 36/g' app/build.gradle
+            sed -i -E 's/compileSdk[[:space:]]+37/compileSdk 36/g' app/build.gradle
+            sed -i -E 's/targetSdk[[:space:]]+37/targetSdk 36/g' app/build.gradle
+          fi
+
+          echo '--- app SDK configuration ---'
+          grep -nE 'compileSdk|targetSdk|minSdk|versionCode|versionName' app/build.gradle* || true
+
+      - name: Build APK - attempt 1
+        id: build1
+        shell: bash
+        working-directory: ${{ steps.project.outputs.project_dir }}
+        run: |
+          set +e
+          set -o pipefail
+          gradle --no-daemon --stacktrace :app:assembleDebug 2>&1 | tee "$GITHUB_WORKSPACE/build-attempt-1.log"
+          STATUS=${PIPESTATUS[0]}
+          echo "status=$STATUS" >> "$GITHUB_OUTPUT"
+          exit 0
+
+      - name: Build APK - clean retry
+        id: build2
+        if: steps.build1.outputs.status != '0'
+        shell: bash
+        working-directory: ${{ steps.project.outputs.project_dir }}
+        run: |
+          set +e
+          set -o pipefail
+          gradle --stop >/dev/null 2>&1 || true
+          gradle --no-daemon --stacktrace clean :app:assembleDebug 2>&1 | tee "$GITHUB_WORKSPACE/build-attempt-2.log"
+          STATUS=${PIPESTATUS[0]}
+          echo "status=$STATUS" >> "$GITHUB_OUTPUT"
+          exit 0
+
+      - name: Combine diagnostic log
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo '===== FB Market build v3 ====='
+            echo "Run: $GITHUB_RUN_NUMBER"
+            echo "Commit: $GITHUB_SHA"
+            echo "Android API: $ANDROID_API"
+            echo "Build Tools: $ANDROID_BUILD_TOOLS"
+            echo
+            [[ -f build-attempt-1.log ]] && cat build-attempt-1.log
+            if [[ -f build-attempt-2.log ]]; then
+              echo
+              echo '===== CLEAN RETRY ====='
+              cat build-attempt-2.log
+            fi
+          } > build-v3.log
+
+      - name: Verify build succeeded
+        shell: bash
+        run: |
+          set -euo pipefail
+          FIRST='${{ steps.build1.outputs.status }}'
+          SECOND='${{ steps.build2.outputs.status }}'
+
+          if [[ "$FIRST" != '0' && "$SECOND" != '0' ]]; then
+            echo '::error::Both Android build attempts failed. See build-v3.log artifact.'
+            tail -n 200 build-v3.log || true
+            exit 1
+          fi
+
+      - name: Prepare build.apk
+        shell: bash
+        run: |
+          set -euo pipefail
+          PROJECT_DIR='${{ steps.project.outputs.project_dir }}'
+          APK="$(find "$PROJECT_DIR/app/build/outputs/apk" -type f -name '*debug*.apk' | head -n 1 || true)"
+          if [[ -z "$APK" || ! -f "$APK" ]]; then
+            echo '::error::Gradle reported success but no debug APK was found.'
+            exit 4
+          fi
+
+          cp "$APK" "$GITHUB_WORKSPACE/build.apk"
+          sha256sum "$GITHUB_WORKSPACE/build.apk" > "$GITHUB_WORKSPACE/build.apk.sha256"
+          ls -lh "$GITHUB_WORKSPACE/build.apk" "$GITHUB_WORKSPACE/build.apk.sha256"
+
+      - name: Upload build.apk
+        uses: actions/upload-artifact@v7
+        with:
+          name: build-apk-v3
+          path: build.apk
+          archive: false
+          retention-days: 30
+          if-no-files-found: error
+
+      - name: Upload checksum
+        uses: actions/upload-artifact@v7
+        with:
+          name: build-apk-v3-sha256
+          path: build.apk.sha256
+          archive: false
+          retention-days: 30
+          if-no-files-found: error
+
+      - name: Upload build log on failure
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: build-error-v3
+          path: build-v3.log
+          archive: false
+          retention-days: 30
+          if-no-files-found: warn
