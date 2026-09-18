@@ -1,0 +1,36 @@
+name: OKN Phase3 TRUE7CH Verify
+on:
+  workflow_dispatch:
+  push:
+  pull_request:
+
+jobs:
+  host-core:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Host tests + no-EQ-gain guard
+        run: bash tests/run_host_tests.sh
+
+  android-readonly-probe:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@v3
+      - name: Accept Android SDK licenses non-interactively
+        run: yes | sdkmanager --licenses >/dev/null || true
+      - name: Install Android SDK pieces
+        run: sdkmanager "platforms;android-35" "build-tools;35.0.0"
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.10.2'
+      - name: Build read-only USB probe APK
+        run: gradle -p android-usb-probe :app:assembleDebug --stacktrace
+      - uses: actions/upload-artifact@v4
+        with:
+          name: OKN_USB_ReadOnly_Probe_debug
+          path: android-usb-probe/app/build/outputs/apk/debug/*.apk
