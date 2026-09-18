@@ -1,0 +1,80 @@
+name: Build OKN DSP V42 Android APK
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'OKN_DSP_V42/**'
+      - 'OKN_DSP_V42_Source.zip'
+      - '.github/workflows/**'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK 35
+        shell: bash
+        run: |
+          set -euo pipefail
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager "platform-tools" "platforms;android-35" "build-tools;35.0.0"
+
+      - name: Set up Gradle 8.9
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: Prepare source
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -d OKN_DSP_V42 ]; then
+            echo "Using OKN_DSP_V42 directory from repository"
+          elif [ -f OKN_DSP_V42_Source.zip ]; then
+            unzip -q OKN_DSP_V42_Source.zip
+          else
+            echo "ERROR: upload either OKN_DSP_V42/ or OKN_DSP_V42_Source.zip" >&2
+            exit 2
+          fi
+
+      - name: Validate TRUE 7CH safety gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 OKN_DSP_V42/Sources/validate_v42_true7ch.py
+
+      - name: Build debug APK
+        working-directory: OKN_DSP_V42
+        shell: bash
+        run: |
+          set -euo pipefail
+          gradle --no-daemon --stacktrace :app:assembleDebug
+
+      - name: Collect APK and SHA256
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          cp OKN_DSP_V42/app/build/outputs/apk/debug/app-debug.apk dist/OKN_DSP_V42-debug.apk
+          (cd dist && sha256sum OKN_DSP_V42-debug.apk > OKN_DSP_V42-debug.apk.sha256)
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: OKN_DSP_V42-debug
+          path: dist/*
+          if-no-files-found: error
