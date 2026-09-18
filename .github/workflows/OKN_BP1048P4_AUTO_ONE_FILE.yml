@@ -1,0 +1,326 @@
+name: OKN BP1048P4 AUTO V4 One-File Stable Sign
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_zip:
+        description: "Optional source ZIP filename. Leave blank = auto-pick newest OKN...Source*.zip"
+        required: false
+        default: ""
+  push:
+    branches: [ "main" ]
+    paths:
+      - 'OKN_BP1048P4_PHASE3_TRUE7CH_Source*.zip'
+      - 'firmware/**'
+      - 'tests/**'
+      - 'android-usb-probe/**'
+      - '.github/workflows/OKN_BP1048P4_AUTO.yml'
+  schedule:
+    # Touch the private Actions cache weekly so the stable signing key is less likely to expire.
+    - cron: '17 3 * * 3'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: okn-bp1048p4-auto-main
+  cancel-in-progress: false
+
+env:
+  WORK_DIR: .okn_auto_source
+  ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
+  REQUESTED_ZIP: ${{ inputs.source_zip || '' }}
+  OKN_SIGN_DIR: /home/runner/.okn-signing
+  OKN_KEYSTORE: /home/runner/.okn-signing/OKN_ANDROID_UPDATE_KEY.jks
+  OKN_KEYPASS_FILE: /home/runner/.okn-signing/keypass.txt
+  OKN_KEY_ALIAS: okn_probe
+
+jobs:
+  host-core:
+    name: Host core + no-EQ-gain guard
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Resolve newest source automatically
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf "$WORK_DIR"
+          mkdir -p "$WORK_DIR"
+
+          if [ -f "tests/run_host_tests.sh" ] && [ -f "firmware/src/okn_gain7.c" ]; then
+            echo "Using extracted source tree from repository root"
+            echo "SRC_DIR=$GITHUB_WORKSPACE" >> "$GITHUB_ENV"
+            echo "SOURCE_DESC=repository-root" >> "$GITHUB_ENV"
+            exit 0
+          fi
+
+          selected=""
+          if [ -n "${REQUESTED_ZIP:-}" ]; then
+            test -f "$REQUESTED_ZIP"
+            selected="$REQUESTED_ZIP"
+          else
+            mapfile -t candidates < <(
+              find . -maxdepth 1 -type f \
+                -name 'OKN_BP1048P4_PHASE3_TRUE7CH_Source*.zip' \
+                -printf '%f\n' | sort -V
+            )
+            test "${#candidates[@]}" -gt 0
+            selected="${candidates[$((${#candidates[@]} - 1))]}"
+          fi
+
+          echo "Selected source: $selected"
+          sha256sum "$selected"
+          unzip -q "$selected" -d "$WORK_DIR"
+
+          src="$WORK_DIR"
+          if [ ! -f "$src/tests/run_host_tests.sh" ]; then
+            marker="$(find "$WORK_DIR" -mindepth 2 -maxdepth 4 -type f -path '*/tests/run_host_tests.sh' -print -quit || true)"
+            if [ -n "$marker" ]; then
+              src="$(dirname "$(dirname "$marker")")"
+            fi
+          fi
+
+          test -f "$src/tests/run_host_tests.sh"
+          test -f "$src/firmware/src/okn_gain7.c"
+          echo "SRC_DIR=$src" >> "$GITHUB_ENV"
+          echo "SOURCE_DESC=$selected" >> "$GITHUB_ENV"
+
+      - name: Host tests + no-EQ-gain guard
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "Source: $SOURCE_DESC"
+          bash "$SRC_DIR/tests/run_host_tests.sh"
+
+  android-probe:
+    name: Android USB probe APK - stable signed
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Resolve newest source automatically
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf "$WORK_DIR"
+          mkdir -p "$WORK_DIR"
+
+          if [ -f "android-usb-probe/settings.gradle" ]; then
+            echo "Using extracted source tree from repository root"
+            echo "SRC_DIR=$GITHUB_WORKSPACE" >> "$GITHUB_ENV"
+            echo "SOURCE_DESC=repository-root" >> "$GITHUB_ENV"
+          else
+            selected=""
+            if [ -n "${REQUESTED_ZIP:-}" ]; then
+              test -f "$REQUESTED_ZIP"
+              selected="$REQUESTED_ZIP"
+            else
+              mapfile -t candidates < <(
+                find . -maxdepth 1 -type f \
+                  -name 'OKN_BP1048P4_PHASE3_TRUE7CH_Source*.zip' \
+                  -printf '%f\n' | sort -V
+              )
+              test "${#candidates[@]}" -gt 0
+              selected="${candidates[$((${#candidates[@]} - 1))]}"
+            fi
+
+            echo "Selected source: $selected"
+            sha256sum "$selected"
+            unzip -q "$selected" -d "$WORK_DIR"
+
+            src="$WORK_DIR"
+            if [ ! -f "$src/android-usb-probe/settings.gradle" ]; then
+              marker="$(find "$WORK_DIR" -mindepth 2 -maxdepth 5 -type f -path '*/android-usb-probe/settings.gradle' -print -quit || true)"
+              if [ -n "$marker" ]; then
+                src="$(dirname "$(dirname "$marker")")"
+              fi
+            fi
+
+            test -f "$src/android-usb-probe/settings.gradle"
+            echo "SRC_DIR=$src" >> "$GITHUB_ENV"
+            echo "SOURCE_DESC=$selected" >> "$GITHUB_ENV"
+          fi
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Restore stable signing key from private Actions cache
+        id: signing-cache
+        uses: actions/cache@v5
+        with:
+          path: /home/runner/.okn-signing
+          key: okn-android-stable-signing-v1
+
+      - name: Create signing key only on first run
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$OKN_SIGN_DIR"
+
+          if [ ! -f "$OKN_KEYSTORE" ] || [ ! -f "$OKN_KEYPASS_FILE" ]; then
+            echo "No cached signing key found. Creating the ONE persistent project key."
+            umask 077
+            PASS="$(openssl rand -hex 24)"
+            printf '%s' "$PASS" > "$OKN_KEYPASS_FILE"
+
+            keytool -genkeypair \
+              -keystore "$OKN_KEYSTORE" \
+              -storepass "$PASS" \
+              -keypass "$PASS" \
+              -alias "$OKN_KEY_ALIAS" \
+              -keyalg RSA \
+              -keysize 2048 \
+              -validity 10000 \
+              -dname "CN=OKN DSP Android Update,O=OKN,C=TH" \
+              -noprompt
+          else
+            echo "Stable signing key restored from Actions cache."
+          fi
+
+          chmod 600 "$OKN_KEYSTORE" "$OKN_KEYPASS_FILE"
+          PASS="$(cat "$OKN_KEYPASS_FILE")"
+          keytool -list \
+            -keystore "$OKN_KEYSTORE" \
+            -storepass "$PASS" \
+            -alias "$OKN_KEY_ALIAS" >/dev/null
+
+          echo "Signing certificate:"
+          keytool -list -v \
+            -keystore "$OKN_KEYSTORE" \
+            -storepass "$PASS" \
+            -alias "$OKN_KEY_ALIAS" |
+            grep -E 'SHA256:|Alias name:|Valid from:' || true
+
+      - name: Configure Android SDK automatically
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "ANDROID_HOME=$ANDROID_SDK_ROOT" >> "$GITHUB_ENV"
+          echo "$ANDROID_SDK_ROOT/platform-tools" >> "$GITHUB_PATH"
+
+          SDKMANAGER="$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager"
+          if [ ! -x "$SDKMANAGER" ]; then
+            SDKMANAGER="$(find "$ANDROID_SDK_ROOT/cmdline-tools" -type f -name sdkmanager -perm -111 | sort -V | tail -n1)"
+          fi
+          test -n "$SDKMANAGER"
+          test -x "$SDKMANAGER"
+          echo "SDKMANAGER=$SDKMANAGER" >> "$GITHUB_ENV"
+
+          app_gradle="$SRC_DIR/android-usb-probe/app/build.gradle"
+          api="$(grep -Eo 'compileSdk(Version)?[[:space:]=]+[0-9]+' "$app_gradle" | grep -Eo '[0-9]+' | head -n1 || true)"
+          if [ -z "$api" ]; then api=35; fi
+          echo "ANDROID_API=$api" >> "$GITHUB_ENV"
+          echo "Detected compileSdk: $api"
+
+      - name: Install required Android SDK packages
+        shell: bash
+        run: |
+          set -euo pipefail
+          build_tools="$(
+            "$SDKMANAGER" --list 2>/dev/null |
+            awk -F'|' -v api="$ANDROID_API" '
+              $1 ~ "^[[:space:]]*build-tools;" api "\\." {
+                gsub(/^[[:space:]]+|[[:space:]]+$/, "", $1); print $1
+              }' | sort -V | tail -n1
+          )"
+          if [ -z "$build_tools" ]; then
+            build_tools="build-tools;$ANDROID_API.0.0"
+          fi
+
+          set +o pipefail
+          yes | "$SDKMANAGER" \
+            "platform-tools" \
+            "platforms;android-$ANDROID_API" \
+            "$build_tools"
+          rc=${PIPESTATUS[1]}
+          set -o pipefail
+          exit "$rc"
+
+      - name: Build unsigned release APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          project="$SRC_DIR/android-usb-probe"
+          echo "Source: $SOURCE_DESC"
+
+          if [ -f "$project/gradlew" ]; then
+            chmod +x "$project/gradlew"
+            (cd "$project" && ./gradlew :app:assembleRelease --no-daemon --stacktrace)
+          else
+            GRADLE_VERSION="8.10.2"
+            curl -fsSL --retry 3 \
+              "https://services.gradle.org/distributions/gradle-${GRADLE_VERSION}-bin.zip" \
+              -o "/tmp/gradle-${GRADLE_VERSION}-bin.zip"
+            rm -rf "/tmp/gradle-${GRADLE_VERSION}"
+            unzip -q "/tmp/gradle-${GRADLE_VERSION}-bin.zip" -d /tmp
+            "/tmp/gradle-${GRADLE_VERSION}/bin/gradle" \
+              -p "$project" \
+              :app:assembleRelease \
+              --no-daemon \
+              --stacktrace
+          fi
+
+      - name: Stable-sign APK and stage artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          out="$SRC_DIR/android-usb-probe/app/build/outputs/apk/release"
+          unsigned="$(find "$out" -maxdepth 1 -type f -name '*unsigned*.apk' -print -quit || true)"
+          if [ -z "$unsigned" ]; then
+            unsigned="$(find "$out" -maxdepth 1 -type f -name '*.apk' -print -quit || true)"
+          fi
+          test -n "$unsigned"
+
+          ZIPALIGN="$(find "$ANDROID_SDK_ROOT/build-tools" -type f -name zipalign -perm -111 | sort -V | tail -n1)"
+          APKSIGNER="$(find "$ANDROID_SDK_ROOT/build-tools" -type f -name apksigner -perm -111 | sort -V | tail -n1)"
+          test -x "$ZIPALIGN"
+          test -x "$APKSIGNER"
+
+          PASS="$(cat "$OKN_KEYPASS_FILE")"
+          aligned="$RUNNER_TEMP/okn-aligned.apk"
+          signed="$RUNNER_TEMP/OKN_USB_Probe_stable.apk"
+
+          "$ZIPALIGN" -f -p 4 "$unsigned" "$aligned"
+          "$APKSIGNER" sign \
+            --ks "$OKN_KEYSTORE" \
+            --ks-key-alias "$OKN_KEY_ALIAS" \
+            --ks-pass "pass:$PASS" \
+            --key-pass "pass:$PASS" \
+            --out "$signed" \
+            "$aligned"
+
+          "$APKSIGNER" verify --verbose --print-certs "$signed"
+
+          rm -rf "$GITHUB_WORKSPACE/okn_artifact"
+          mkdir -p "$GITHUB_WORKSPACE/okn_artifact"
+          cp "$signed" "$GITHUB_WORKSPACE/okn_artifact/"
+
+          cert_sha="$(
+            "$APKSIGNER" verify --print-certs "$signed" 2>/dev/null |
+            sed -n 's/^Signer #1 certificate SHA-256 digest: //p' |
+            head -n1
+          )"
+
+          {
+            echo "source=$SOURCE_DESC"
+            echo "commit=$GITHUB_SHA"
+            echo "android_api=$ANDROID_API"
+            echo "signing=stable Actions-cache key v1"
+            echo "signer_sha256=$cert_sha"
+            sha256sum "$signed"
+          } > "$GITHUB_WORKSPACE/okn_artifact/OKN_BUILD_META.txt"
+
+          cat "$GITHUB_WORKSPACE/okn_artifact/OKN_BUILD_META.txt"
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: OKN_USB_Probe_STABLE
+          path: okn_artifact/**
+          if-no-files-found: error
+          retention-days: 30
