@@ -159,15 +159,49 @@ jobs:
                   break
           bt = bt or f'{api}.0.0'
 
-          # Gradle: manual dispatch > repository variable > wrapper distribution > 9.6.0.
+          # Gradle: manual dispatch > repository variable > wrapper distribution > AGP-aware fallback.
+          # Gradle 9 uses semantic versions such as 9.6.0. Some old source ZIPs used
+          # gradle-9.6-bin.zip, which setup-gradle rejects as a non-existent version.
           gradle = env('INPUT_GRADLE_VERSION') or env('REPO_GRADLE_VERSION_OVERRIDE')
           wrapper = project_dir / 'gradle' / 'wrapper' / 'gradle-wrapper.properties'
-          if not gradle and wrapper.exists():
-              txt = wrapper.read_text(encoding='utf-8', errors='replace')
-              m = re.search(r'gradle-([0-9][0-9A-Za-z.\-+]*)-(?:all|bin)\.zip', txt)
+          wrapper_text = wrapper.read_text(encoding='utf-8', errors='replace') if wrapper.exists() else ''
+          if not gradle and wrapper_text:
+              m = re.search(r'gradle-([0-9][0-9A-Za-z.\-+]*)-(?:all|bin)\.zip', wrapper_text)
               if m:
                   gradle = m.group(1)
-          gradle = gradle or '9.6.0'
+
+          # Normalize Gradle 9 shorthand x.y -> x.y.0, e.g. 9.6 -> 9.6.0.
+          if gradle and re.fullmatch(r'9\.\d+', gradle):
+              gradle = gradle + '.0'
+
+          # Detect AGP so the fallback stays compatible with the project.
+          root_build = project_dir / 'build.gradle.kts'
+          if not root_build.exists():
+              root_build = project_dir / 'build.gradle'
+          agp_version = ''
+          if root_build.exists():
+              root_text = root_build.read_text(encoding='utf-8', errors='replace')
+              m = re.search(r'com\.android\.(?:application|library)[\s\S]{0,120}?version\s*[\"\']([0-9]+(?:\.[0-9]+){1,2})', root_text)
+              if m:
+                  agp_version = m.group(1)
+
+          if not gradle:
+              if agp_version.startswith('9.4'):
+                  gradle = '9.6.0'
+              else:
+                  gradle = 'current'
+
+          # Patch only the extracted build copy, never the repository ZIP itself.
+          # This keeps old ZIPs with gradle-9.6-bin.zip buildable automatically.
+          if wrapper.exists() and re.fullmatch(r'[0-9]+(?:\.[0-9]+){1,2}', gradle):
+              patched = re.sub(
+                  r'gradle-[0-9][0-9A-Za-z.\-+]*-(all|bin)\.zip',
+                  lambda m: f'gradle-{gradle}-{m.group(1)}.zip',
+                  wrapper_text,
+              )
+              if patched != wrapper_text:
+                  wrapper.write_text(patched, encoding='utf-8')
+                  print(f'Normalized Gradle wrapper distribution to {gradle}')
 
           java = env('INPUT_JAVA_VERSION') or env('REPO_JAVA_VERSION_OVERRIDE') or '17'
 
