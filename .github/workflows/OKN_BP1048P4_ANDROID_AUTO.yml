@@ -161,6 +161,24 @@ jobs:
           distribution: temurin
           java-version: ${{ env.FALLBACK_JAVA_VERSION }}
 
+      - name: Restore stable Android debug signing key
+        shell: bash
+        env:
+          OKN_ANDROID_DEBUG_KEYSTORE_B64: ${{ secrets.OKN_ANDROID_DEBUG_KEYSTORE_B64 }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${OKN_ANDROID_DEBUG_KEYSTORE_B64:-}" ]]; then
+            echo 'ERROR: Missing GitHub Actions secret OKN_ANDROID_DEBUG_KEYSTORE_B64.'
+            echo 'Add it once from OKN_ANDROID_STABLE_DEBUG_KEY_B64.txt.'
+            exit 1
+          fi
+          mkdir -p "$HOME/.android"
+          printf '%s' "$OKN_ANDROID_DEBUG_KEYSTORE_B64" | base64 --decode > "$HOME/.android/debug.keystore"
+          chmod 600 "$HOME/.android/debug.keystore"
+          keytool -list -keystore "$HOME/.android/debug.keystore" \
+            -storepass android -alias androiddebugkey >/dev/null
+          echo 'Stable development signing key restored.'
+
       - name: Ensure required Android platform exists
         shell: bash
         run: |
@@ -263,5 +281,6 @@ jobs:
             echo "- Artifact: \`${ARTIFACT_NAME:-unknown}\`"
             echo '- Mode: Bluetooth/OTA capability discovery, READ-ONLY guard enabled'
             echo '- Workflow auto-selects the highest R-number source ZIP when no project tree is present.'
-            echo '- Gradle wrapper is preferred automatically; fallback Gradle is only for legacy packages without a wrapper.'
+            echo '- Stable debug signing uses repository secret OKN_ANDROID_DEBUG_KEYSTORE_B64 so R27/R28/... can update in place.'
+            echo '- One-time uninstall is required when migrating from older APKs signed by ephemeral GitHub runner keys.'
           } >> "$GITHUB_STEP_SUMMARY"
