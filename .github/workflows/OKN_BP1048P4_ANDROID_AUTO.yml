@@ -1,0 +1,267 @@
+name: OKN BP1048P4 Android Auto Build
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'OKN_BP1048P4_*Source_R*.zip'
+      - '**/android-bt-probe/**'
+      - '**/firmware/**'
+      - '**/tests/**'
+      - '**/tools/**'
+      - '**/config/**'
+      - '.github/workflows/OKN_BP1048P4_ANDROID_AUTO.yml'
+  pull_request:
+    paths:
+      - '**/android-bt-probe/**'
+      - '**/firmware/**'
+      - '**/tests/**'
+      - '**/tools/**'
+      - '**/config/**'
+      - '.github/workflows/OKN_BP1048P4_ANDROID_AUTO.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: okn-bp1048p4-android-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Used only when a source package has no Gradle wrapper.
+  FALLBACK_GRADLE_VERSION: '8.11.1'
+  FALLBACK_JAVA_VERSION: '17'
+  FALLBACK_COMPILE_SDK: '36'
+
+jobs:
+  verify-and-build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Auto-detect newest source/project/revision
+        shell: bash
+        run: |
+          set -euo pipefail
+          ROOT="$GITHUB_WORKSPACE"
+          WORK="$RUNNER_TEMP/okn_auto_source"
+          rm -rf "$WORK"
+          mkdir -p "$WORK"
+
+          # Prefer a checked-out project tree when the repo itself is the project.
+          PROJECT_ROOT=""
+          if [[ -f "$ROOT/tests/run_host_tests.sh" && -d "$ROOT/android-bt-probe" ]]; then
+            PROJECT_ROOT="$ROOT"
+            SOURCE_LABEL="repo-tree"
+          else
+            # Pick the highest version-sorted R source ZIP (R24 < R25 < R26 ...).
+            SOURCE_ZIP="$(find "$ROOT" -maxdepth 3 -type f \
+              -name 'OKN_BP1048P4_*Source_R*.zip' -print \
+              | sort -V | tail -n1)"
+
+            if [[ -z "${SOURCE_ZIP:-}" || ! -f "$SOURCE_ZIP" ]]; then
+              echo 'ERROR: No project tree and no OKN_BP1048P4_*Source_R*.zip found.'
+              exit 1
+            fi
+
+            SOURCE_LABEL="$(basename "$SOURCE_ZIP" .zip)"
+            echo "Selected source ZIP: $SOURCE_ZIP"
+            unzip -q "$SOURCE_ZIP" -d "$WORK"
+
+            PROJECT_ROOT="$(find "$WORK" -type f -path '*/tests/run_host_tests.sh' -printf '%h\n' \
+              | sed 's#/tests$##' \
+              | while read -r p; do
+                  [[ -d "$p/android-bt-probe" ]] && printf '%s\n' "$p"
+                done \
+              | head -n1)"
+
+            if [[ -z "${PROJECT_ROOT:-}" ]]; then
+              echo 'ERROR: ZIP does not contain tests/run_host_tests.sh + android-bt-probe/.'
+              exit 1
+            fi
+          fi
+
+          APP_GRADLE=""
+          for f in \
+            "$PROJECT_ROOT/android-bt-probe/app/build.gradle" \
+            "$PROJECT_ROOT/android-bt-probe/app/build.gradle.kts"; do
+            [[ -f "$f" ]] && APP_GRADLE="$f" && break
+          done
+          if [[ -z "$APP_GRADLE" ]]; then
+            echo 'ERROR: Android app Gradle file not found.'
+            exit 1
+          fi
+
+          # Revision: source label -> settings/app Gradle -> project path -> fallback R0.
+          REVISION="$(printf '%s\n' "$SOURCE_LABEL" "$PROJECT_ROOT" \
+            "$(cat "$PROJECT_ROOT/android-bt-probe/settings.gradle" 2>/dev/null || true)" \
+            "$(cat "$PROJECT_ROOT/android-bt-probe/settings.gradle.kts" 2>/dev/null || true)" \
+            "$(cat "$APP_GRADLE")" \
+            | grep -Eo 'R[0-9]+' | sed 's/^R//' | sort -n | tail -n1 || true)"
+          REVISION="R${REVISION:-0}"
+
+          COMPILE_SDK="$(sed -nE 's/.*compileSdk(Version)?[[:space:]]*[=( ]*["'\'' ]*([0-9]+).*/\2/p' "$APP_GRADLE" | head -n1 || true)"
+          COMPILE_SDK="${COMPILE_SDK:-$FALLBACK_COMPILE_SDK}"
+
+          echo "PROJECT_ROOT=$PROJECT_ROOT" >> "$GITHUB_ENV"
+          echo "SOURCE_LABEL=$SOURCE_LABEL" >> "$GITHUB_ENV"
+          echo "REVISION=$REVISION" >> "$GITHUB_ENV"
+          echo "COMPILE_SDK=$COMPILE_SDK" >> "$GITHUB_ENV"
+          echo "ARTIFACT_NAME=OKN_BT_OTA_Capability_${REVISION}" >> "$GITHUB_ENV"
+
+          echo "PROJECT_ROOT=$PROJECT_ROOT"
+          echo "SOURCE_LABEL=$SOURCE_LABEL"
+          echo "REVISION=$REVISION"
+          echo "COMPILE_SDK=$COMPILE_SDK"
+
+      - name: Verify packaged SHA256 manifest when present
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$PROJECT_ROOT"
+          if [[ -f SHA256SUMS.txt ]]; then
+            sha256sum -c SHA256SUMS.txt
+          else
+            echo 'SHA256SUMS.txt not present; continuing for repository-tree build.'
+          fi
+
+      - name: Host tests / project safety gates
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -x "$PROJECT_ROOT/tests/run_host_tests.sh" || -f "$PROJECT_ROOT/tests/run_host_tests.sh" ]]; then
+            bash "$PROJECT_ROOT/tests/run_host_tests.sh"
+          else
+            echo 'ERROR: tests/run_host_tests.sh missing.'
+            exit 1
+          fi
+
+      - name: Workflow-level Android READ-ONLY guard
+        shell: bash
+        run: |
+          set -euo pipefail
+          SRC="$PROJECT_ROOT/android-bt-probe/app/src"
+          [[ -d "$SRC" ]] || { echo 'ERROR: Android source directory missing.'; exit 1; }
+
+          # Fail closed if the Android probe grows an obvious write/OBEX/USB transport path.
+          # SDK evidence/docs are intentionally excluded from this scan.
+          FORBIDDEN='import[[:space:]]+android\.bluetooth\.BluetoothSocket|create(Insecure)?RfcommSocket|\.writeCharacteristic[[:space:]]*\(|\.writeDescriptor[[:space:]]*\(|import[[:space:]]+android\.bluetooth\.BluetoothGattServer|import[[:space:]]+android\.hardware\.usb\.|ACTION_OPEN_DOCUMENT[[:space:]]*[;)]'
+          if grep -RniE "$FORBIDDEN" "$SRC"; then
+            echo 'ERROR: READ-ONLY guard found a forbidden transport/write token in Android probe source.'
+            exit 1
+          fi
+          echo 'READ-ONLY Android guard: PASS'
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ env.FALLBACK_JAVA_VERSION }}
+
+      - name: Ensure required Android platform exists
+        shell: bash
+        run: |
+          set -euo pipefail
+          SDK="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-}}"
+          if [[ -z "$SDK" || ! -d "$SDK" ]]; then
+            echo 'ERROR: ANDROID_SDK_ROOT/ANDROID_HOME unavailable on runner.'
+            exit 1
+          fi
+
+          PLATFORM="android-${COMPILE_SDK}"
+          if [[ -f "$SDK/platforms/$PLATFORM/android.jar" ]]; then
+            echo "Using preinstalled $PLATFORM."
+            exit 0
+          fi
+
+          SDKMANAGER="$(command -v sdkmanager || true)"
+          if [[ -z "$SDKMANAGER" ]]; then
+            SDKMANAGER="$(find "$SDK/cmdline-tools" -type f -name sdkmanager 2>/dev/null | sort -V | tail -n1 || true)"
+          fi
+          if [[ -z "$SDKMANAGER" || ! -x "$SDKMANAGER" ]]; then
+            echo "ERROR: $PLATFORM missing and sdkmanager not found."
+            exit 1
+          fi
+
+          yes | "$SDKMANAGER" --licenses >/dev/null 2>&1 || true
+          "$SDKMANAGER" "platforms;$PLATFORM" "platform-tools"
+
+      - name: Set up fallback Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: ${{ env.FALLBACK_GRADLE_VERSION }}
+
+      - name: Build debug APK (wrapper preferred)
+        shell: bash
+        run: |
+          set -euo pipefail
+          ANDROID_PROJECT="$PROJECT_ROOT/android-bt-probe"
+          cd "$ANDROID_PROJECT"
+
+          if [[ -x ./gradlew ]]; then
+            echo 'Using project Gradle wrapper.'
+            ./gradlew :app:assembleDebug --stacktrace
+          elif [[ -f ./gradlew ]]; then
+            chmod +x ./gradlew
+            echo 'Using project Gradle wrapper.'
+            ./gradlew :app:assembleDebug --stacktrace
+          else
+            echo "No Gradle wrapper; using fallback Gradle ${FALLBACK_GRADLE_VERSION}."
+            gradle :app:assembleDebug --stacktrace
+          fi
+
+      - name: Collect APK + build metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          OUT="$RUNNER_TEMP/okn_apk_out"
+          rm -rf "$OUT"
+          mkdir -p "$OUT"
+
+          mapfile -t APKS < <(find "$PROJECT_ROOT/android-bt-probe/app/build/outputs/apk" -type f -name '*.apk' -print | sort)
+          if (( ${#APKS[@]} == 0 )); then
+            echo 'ERROR: no APK produced.'
+            exit 1
+          fi
+
+          for apk in "${APKS[@]}"; do
+            base="$(basename "$apk")"
+            cp "$apk" "$OUT/${REVISION}_${base}"
+          done
+
+          {
+            echo "source=${SOURCE_LABEL}"
+            echo "revision=${REVISION}"
+            echo "compileSdk=${COMPILE_SDK}"
+            echo "commit=${GITHUB_SHA}"
+            echo "run=${GITHUB_RUN_ID}"
+          } > "$OUT/BUILD_METADATA.txt"
+
+          (cd "$OUT" && sha256sum *.apk > SHA256SUMS.txt)
+          echo "APK_OUT=$OUT" >> "$GITHUB_ENV"
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ARTIFACT_NAME }}
+          path: ${{ env.APK_OUT }}/*
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Build summary
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo "## OKN BP1048P4 ${REVISION:-auto}"
+            echo
+            echo "- Source: \`${SOURCE_LABEL:-unknown}\`"
+            echo "- compileSdk: \`${COMPILE_SDK:-unknown}\`"
+            echo "- Artifact: \`${ARTIFACT_NAME:-unknown}\`"
+            echo '- Mode: Bluetooth/OTA capability discovery, READ-ONLY guard enabled'
+            echo '- Workflow auto-selects the highest R-number source ZIP when no project tree is present.'
+            echo '- Gradle wrapper is preferred automatically; fallback Gradle is only for legacy packages without a wrapper.'
+          } >> "$GITHUB_STEP_SUMMARY"
