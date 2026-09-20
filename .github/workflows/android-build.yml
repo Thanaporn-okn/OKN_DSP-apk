@@ -76,12 +76,46 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Set up Android SDK and accept licenses
+      - name: Set up Android SDK
         uses: android-actions/setup-android@v4
         with:
+          cmdline-tools-version: '15859902'
           accept-android-sdk-licenses: 'true'
           log-accepted-android-sdk-licenses: 'false'
-          packages: 'platform-tools platforms;android-37 build-tools;36.0.0'
+
+      - name: Detect and install required Android SDK
+        id: android_sdk
+        shell: bash
+        env:
+          PROJECT_DIR: ${{ steps.extract.outputs.project_dir }}
+        run: |
+          set -euo pipefail
+          cd "$PROJECT_DIR"
+
+          BUILD_FILE="app/build.gradle.kts"
+          if [ ! -f "$BUILD_FILE" ]; then
+            BUILD_FILE="app/build.gradle"
+          fi
+
+          COMPILE_SDK="$(sed -nE 's/^[[:space:]]*compileSdk[[:space:]]*=[[:space:]]*([0-9]+).*/\1/p' "$BUILD_FILE" | head -n 1)"
+          if [ -z "$COMPILE_SDK" ]; then
+            COMPILE_SDK="36"
+          fi
+
+          echo "Detected compileSdk=$COMPILE_SDK"
+          echo "compile_sdk=$COMPILE_SDK" >> "$GITHUB_OUTPUT"
+
+          SDKMANAGER="$(find "${ANDROID_SDK_ROOT}/cmdline-tools" -path '*/bin/sdkmanager' -type f | grep -E '/[0-9]+(\.[0-9]+)*/bin/sdkmanager$' | sort -V | tail -n 1 || true)"
+          if [ -z "$SDKMANAGER" ] || [ ! -x "$SDKMANAGER" ]; then
+            SDKMANAGER="${ANDROID_SDK_ROOT}/cmdline-tools/latest/bin/sdkmanager"
+          fi
+          test -n "$SDKMANAGER"
+          test -x "$SDKMANAGER"
+
+          "$SDKMANAGER" --install \
+            "platform-tools" \
+            "platforms;android-${COMPILE_SDK}" \
+            "build-tools;36.0.0"
 
       - name: Validate project files
         shell: bash
@@ -94,6 +128,7 @@ jobs:
           test -f app/build.gradle.kts
           chmod +x gradlew
           echo "GITHUB_RUN_NUMBER=$GITHUB_RUN_NUMBER"
+          echo "compileSdk=${{ steps.android_sdk.outputs.compile_sdk }}"
           find . -maxdepth 2 -type f | sort | head -200
 
       - name: Unit tests and Debug APK
