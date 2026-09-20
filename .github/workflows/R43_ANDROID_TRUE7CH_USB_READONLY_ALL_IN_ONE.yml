@@ -1,0 +1,556 @@
+name: R43 Android TRUE7CH USB read-only discovery
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  r43-usb-readonly:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Restore embedded R43 source
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > /tmp/r43_source.b64 <<'EOF_R43_B64'
+          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
+          AAAAAHI0M19hbmRyb2lkX3NvdXJjZS9SRUFETUVfUjQyX1RILnR4dFBLAQIUAxQAAAAIABxONF1z
+          zjevKAIAAB0DAAAkAAAAAAAAAAAAAACkgaMBAAByNDNfYW5kcm9pZF9zb3VyY2UvUkVBRE1FX1I0
+          M19USC50eHRQSwECFAMUAAAACAAySzRd/Qf6ijkAAABHAAAAKAAAAAAAAAAAAAAApIENBAAAcjQz
+          X2FuZHJvaWRfc291cmNlL2FuYWx5c2lzX29wdGlvbnMueWFtbFBLAQIUAxQAAAAIAFFONF2+ETIh
+          KA0AAB4zAAA2AAAAAAAAAAAAAACkgYwEAAByNDNfYW5kcm9pZF9zb3VyY2UvYW5kcm9pZF90ZW1w
+          bGF0ZS9NYWluQWN0aXZpdHkua3QuaW5QSwECFAMUAAAACAAcTjRdAOq9280NAADnNwAAIAAAAAAA
+          AAAAAAAApIEIEgAAcjQzX2FuZHJvaWRfc291cmNlL2xpYi9tYWluLmRhcnRQSwECFAMUAAAACAAN
+          SzRd7KYHz8wDAADrDQAAKAAAAAAAAAAAAAAApIETIAAAcjQzX2FuZHJvaWRfc291cmNlL2xpYi91
+          ZmVfcHJvdG9jb2wuZGFydFBLAQIUAxQAAAAIABxONF3sk42c6Q0AAPczAAAoAAAAAAAAAAAAAACk
+          gSUkAAByNDNfYW5kcm9pZF9zb3VyY2UvbGliL3VzYl9yZWFkb25seS5kYXJ0UEsBAhQDFAAAAAgA
+          UU40XTl6oNLaAAAAPgEAAB8AAAAAAAAAAAAAAKSBVDIAAHI0M19hbmRyb2lkX3NvdXJjZS9wdWJz
+          cGVjLnlhbWxQSwECFAMUAAAACAAcTjRdtHm3sQsBAAA1AgAAMAAAAAAAAAAAAAAApIFrMwAAcjQz
+          X2FuZHJvaWRfc291cmNlL3Rlc3QvcjQzX3JlZ3Jlc3Npb25fdGVzdC5kYXJ0UEsBAhQDFAAAAAgA
+          UU40XSHBlu3iAgAAAQgAAC4AAAAAAAAAAAAAAKSBxDQAAHI0M19hbmRyb2lkX3NvdXJjZS90ZXN0
+          L3VmZV9wcm90b2NvbF90ZXN0LmRhcnRQSwUGAAAAAAoACgBfAwAA8jcAAAAA
+          EOF_R43_B64
+          tr -d '\n\r ' < /tmp/r43_source.b64 | base64 --decode > /tmp/OKN_DSP_R43_USB_READONLY_Source.zip
+          printf '%s  %s\n' 'a7d8a660fb114a8b2e1c78ffecc35e14f5ebf66c1b80c421bba32c947957efb1' /tmp/OKN_DSP_R43_USB_READONLY_Source.zip | sha256sum -c -
+          rm -rf /tmp/r43src
+          mkdir -p /tmp/r43src
+          unzip -q /tmp/OKN_DSP_R43_USB_READONLY_Source.zip -d /tmp/r43src
+          SRC=/tmp/r43src/r43_android_source
+          test -f "$SRC/lib/main.dart"
+          test -f "$SRC/lib/ufe_protocol.dart"
+          test -f "$SRC/lib/usb_readonly.dart"
+          test -f "$SRC/android_template/MainActivity.kt.in"
+          echo "R43_SRC=$SRC" >> "$GITHUB_ENV"
+
+      - name: Safety gate - USB descriptor reads only
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PYSAFE'
+          from pathlib import Path
+          import re
+
+          root=Path("/tmp/r43src/r43_android_source")
+          k=(root/"android_template/MainActivity.kt.in").read_text()
+          d=(root/"lib/usb_readonly.dart").read_text()
+          main=(root/"lib/main.dart").read_text()
+          proto=(root/"lib/ufe_protocol.dart").read_text()
+
+          forbidden_native=[
+              "USB_DIR_OUT","bulkTransfer","UsbRequest","claimInterface",
+              "releaseInterface","setConfiguration","setInterface",
+              "writeCharacteristic","writeDescriptor","BluetoothGatt",
+              "BluetoothSocket","SpiFlashErase","SpiFlashWrite","SaveParams",
+              "Reset_McuSystem","Communication_Effect_0x11",
+          ]
+          bad=[x for x in forbidden_native if x in k]
+          if bad:
+              raise SystemExit("forbidden native USB/write token(s): "+", ".join(bad))
+
+          if k.count("controlTransfer(") != 1:
+              raise SystemExit("expected exactly one USB controlTransfer read path")
+
+          required=[
+              "UsbConstants.USB_DIR_IN",
+              "UsbConstants.USB_TYPE_STANDARD",
+              "USB_RECIP_INTERFACE = 0x01",
+              "GET_DESCRIPTOR = 0x06",
+              "HID_REPORT_DESCRIPTOR = 0x22",
+              "READ_ONLY_REQUEST_TYPE",
+          ]
+          for token in required:
+              if token not in k:
+                  raise SystemExit("missing read-only proof token: "+token)
+
+          for token in ["0x57","0x58","0x60","gainWriteFrame","eqWriteFrame"]:
+              if token in k:
+                  raise SystemExit("runtime UFE token leaked into native USB transport: "+token)
+
+          allowed_methods={"scanUsb","inspectHid","requestUsbPermission"}
+          calls=set(re.findall(r"invoke(?:List)?Method<[^>]+>\(\s*'([^']+)'", d))
+          if calls != allowed_methods:
+              raise SystemExit(f"unexpected Dart native methods: {sorted(calls)}")
+
+          if "MethodChannel" in main:
+              raise SystemExit("TRUE7CH control UI unexpectedly owns a native transport")
+
+          for token in ["writeControl = 0x57","gainIdFirst = 22","eqIdFirst = 30"]:
+              if token not in proto:
+                  raise SystemExit("R41 protocol regression: "+token)
+
+          print("PASS R43 safety: USB native path is enumeration + permission + GET_DESCRIPTOR IN only")
+          PYSAFE
+
+      - name: HID R30 signature parser fixture
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PYHID'
+          desc=bytes([
+              0x06,0x00,0xFF,
+              0x0A,0xAA,0x55,
+              0xA1,0x01,
+              0x75,0x08,
+              0x96,0x00,0x01, 0x81,0x02,
+              0x96,0x00,0x01, 0x91,0x02,
+              0x95,0x08, 0xB1,0x02,
+              0xC0,
+          ])
+          usage_page=0; report_size=0; report_count=0; report_id=0
+          pages=set(); usages=set(); bits={}
+          signature=False; i=0
+          while i < len(desc):
+              p=desc[i]
+              if p==0xFE:
+                  n=desc[i+1]; i += 3+n; continue
+              sc=p&3; n=(0,1,2,4)[sc]
+              typ=(p>>2)&3; tag=(p>>4)&15
+              v=sum(desc[i+1+j]<<(8*j) for j in range(n))
+              if typ==1:
+                  if tag==0:
+                      usage_page=v; pages.add(v)
+                  elif tag==7:
+                      report_size=v
+                  elif tag==8:
+                      report_id=v
+                  elif tag==9:
+                      report_count=v
+              elif typ==2 and tag==0:
+                  usage=(v & 0xFFFF) if n==4 else v
+                  page=((v>>16)&0xFFFF) if n==4 else usage_page
+                  pages.add(page); usages.add(usage)
+                  signature |= page==0xFF00 and usage==0x55AA
+              elif typ==0 and tag in (8,9,11):
+                  kind={8:"Input",9:"Output",11:"Feature"}[tag]
+                  bits[(kind,report_id)]=bits.get((kind,report_id),0)+report_size*report_count
+              i += 1+n
+          sizes={k:(v+7)//8 for k,v in bits.items()}
+          assert signature
+          assert sizes[("Input",0)]==256
+          assert sizes[("Output",0)]==256
+          assert sizes[("Feature",0)]==8
+          print("PASS synthetic R30 HID fixture: FF00/55AA + Input256B Output256B Feature8B")
+          PYHID
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Flutter stable
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Create Android scaffold and overlay R43 source
+        shell: bash
+        run: |
+          set -euo pipefail
+          flutter --version
+          rm -rf /tmp/okn_r43_app
+          flutter create --platforms=android --org com.okn.dsp --project-name okn_dsp_r43 /tmp/okn_r43_app
+
+          rm -rf /tmp/okn_r43_app/lib /tmp/okn_r43_app/test
+          cp -a "$R43_SRC/lib" /tmp/okn_r43_app/lib
+          cp -a "$R43_SRC/test" /tmp/okn_r43_app/test
+          cp "$R43_SRC/pubspec.yaml" /tmp/okn_r43_app/pubspec.yaml
+          cp "$R43_SRC/analysis_options.yaml" /tmp/okn_r43_app/analysis_options.yaml
+          cp "$R43_SRC/README_R43_TH.txt" /tmp/okn_r43_app/README_R43_TH.txt
+
+          MAIN="$(find /tmp/okn_r43_app/android/app/src/main/kotlin -name MainActivity.kt | head -n1)"
+          test -f "$MAIN"
+          PKG="$(sed -n 's/^package[[:space:]]\+//p' "$MAIN" | head -n1)"
+          test -n "$PKG"
+          sed "s/^package __PACKAGE__$/package $PKG/"             "$R43_SRC/android_template/MainActivity.kt.in" > "$MAIN"
+
+          MANIFEST=/tmp/okn_r43_app/android/app/src/main/AndroidManifest.xml
+          python3 - <<'PYMAN'
+          from pathlib import Path
+          p=Path("/tmp/okn_r43_app/android/app/src/main/AndroidManifest.xml")
+          s=p.read_text()
+          marker="    <application"
+          if marker not in s:
+              raise SystemExit("AndroidManifest application marker missing")
+          feature='    <uses-feature android:name="android.hardware.usb.host" android:required="false" />\n'
+          s=s.replace(marker,feature+marker,1)
+          p.write_text(s)
+          PYMAN
+
+          grep -q 'android.hardware.usb.host' "$MANIFEST"
+          grep -q 'READ_ONLY_REQUEST_TYPE' "$MAIN"
+          grep -q 'controlTransfer' "$MAIN"
+          echo "R43_APP=/tmp/okn_r43_app" >> "$GITHUB_ENV"
+          echo "R43_MAIN_ACTIVITY=$MAIN" >> "$GITHUB_ENV"
+
+      - name: Flutter dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$R43_APP"
+          flutter pub get
+
+      - name: Protocol and regression unit tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$R43_APP"
+          flutter test
+
+      - name: Static analysis
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$R43_APP"
+          flutter analyze
+
+      - name: Build Android debug APK with native USB host bridge
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$R43_APP"
+          flutter build apk --debug
+          test -s build/app/outputs/flutter-apk/app-debug.apk
+
+      - name: Post-build native safety audit
+        shell: bash
+        run: |
+          set -euo pipefail
+          K="$R43_MAIN_ACTIVITY"
+          test "$(grep -c 'controlTransfer(' "$K")" = "1"
+          ! grep -Eq 'USB_DIR_OUT|bulkTransfer|UsbRequest|claimInterface|writeCharacteristic|writeDescriptor|BluetoothGatt|BluetoothSocket' "$K"
+          grep -q 'UsbConstants.USB_DIR_IN' "$K"
+          grep -q 'GET_DESCRIPTOR = 0x06' "$K"
+          grep -q 'HID_REPORT_DESCRIPTOR = 0x22' "$K"
+          echo 'PASS post-build R43 native USB read-only audit'
+
+      - name: Package APK and R43 source evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          OUT=/tmp/r43_out
+          rm -rf "$OUT"
+          mkdir -p "$OUT"
+          cp "$R43_APP/build/app/outputs/flutter-apk/app-debug.apk" "$OUT/OKN_DSP_R43_USB_READONLY_debug.apk"
+          cp /tmp/OKN_DSP_R43_USB_READONLY_Source.zip "$OUT/OKN_DSP_R43_USB_READONLY_Source.zip"
+          cp "$R43_APP/README_R43_TH.txt" "$OUT/README_R43_TH.txt"
+          cp "$R43_MAIN_ACTIVITY" "$OUT/MainActivity_READONLY.kt"
+          cp "$R43_APP/android/app/src/main/AndroidManifest.xml" "$OUT/AndroidManifest.xml"
+          flutter --version > "$OUT/FLUTTER_VERSION.txt"
+          cat > "$OUT/R43_SAFETY_STATE.txt" <<'EOF'
+          USB_ENUMERATION=YES
+          USB_PERMISSION_REQUEST=YES
+          USB_RAW_DESCRIPTORS=READ_ONLY
+          HID_REPORT_DESCRIPTOR=GET_DESCRIPTOR_IN_ONLY
+          HID_USAGE_PAGE_TARGET=0xFF00
+          HID_USAGE_TARGET=0x55AA
+          HID_INTERFACE_TARGET=4
+          HID_INPUT_TARGET_BYTES=256
+          HID_OUTPUT_TARGET_BYTES=256
+          HID_FEATURE_TARGET_BYTES=8
+          UFE_0x57_TRANSMIT=NO
+          BULK_OUT=NO
+          HID_OUTPUT_REPORT_TRANSMIT=NO
+          FLASH_WRITE=NO
+          RESET=NO
+          EOF
+          (cd "$OUT" && sha256sum * > SHA256SUMS.txt)
+
+      - name: Upload R43 APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: OKN_DSP_R43_USB_READONLY_APK
+          path: /tmp/r43_out/*
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Summary
+        shell: bash
+        run: |
+          {
+            echo '## R43 Android TRUE7CH + USB read-only discovery'
+            echo '- Keeps R42.1 TRUE7CH gain/EQ UI'
+            echo '- Enumerates Android USB Host devices/interfaces/endpoints'
+            echo '- Reads HID report descriptor only with standard GET_DESCRIPTOR IN'
+            echo '- Detects R30 signature: IF4 + FF00/55AA + 256B IN/OUT + 8B Feature'
+            echo '- No runtime 0x57 transmit; no USB OUT; no flash/reset path'
+          } >> "$GITHUB_STEP_SUMMARY"
