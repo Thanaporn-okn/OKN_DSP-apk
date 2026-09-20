@@ -76,12 +76,13 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Set up Android SDK
+      - name: Set up Android SDK tools
         uses: android-actions/setup-android@v4
         with:
           cmdline-tools-version: '15859902'
           accept-android-sdk-licenses: 'true'
           log-accepted-android-sdk-licenses: 'false'
+          packages: ''
 
       - name: Detect and install required Android SDK
         id: android_sdk
@@ -98,24 +99,57 @@ jobs:
           fi
 
           COMPILE_SDK="$(sed -nE 's/^[[:space:]]*compileSdk[[:space:]]*=[[:space:]]*([0-9]+).*/\1/p' "$BUILD_FILE" | head -n 1)"
+          COMPILE_SDK_MINOR="$(sed -nE 's/^[[:space:]]*compileSdkMinor[[:space:]]*=[[:space:]]*([0-9]+).*/\1/p' "$BUILD_FILE" | head -n 1)"
+
           if [ -z "$COMPILE_SDK" ]; then
-            COMPILE_SDK="36"
+            echo "ERROR: อ่าน compileSdk จาก $BUILD_FILE ไม่ได้"
+            exit 1
           fi
 
-          echo "Detected compileSdk=$COMPILE_SDK"
-          echo "compile_sdk=$COMPILE_SDK" >> "$GITHUB_OUTPUT"
+          if [ -n "$COMPILE_SDK_MINOR" ]; then
+            PLATFORM_ID="android-${COMPILE_SDK}.${COMPILE_SDK_MINOR}"
+          else
+            PLATFORM_ID="android-${COMPILE_SDK}"
+          fi
+          PLATFORM_PACKAGE="platforms;${PLATFORM_ID}"
 
-          SDKMANAGER="$(find "${ANDROID_SDK_ROOT}/cmdline-tools" -path '*/bin/sdkmanager' -type f | grep -E '/[0-9]+(\.[0-9]+)*/bin/sdkmanager$' | sort -V | tail -n 1 || true)"
-          if [ -z "$SDKMANAGER" ] || [ ! -x "$SDKMANAGER" ]; then
-            SDKMANAGER="${ANDROID_SDK_ROOT}/cmdline-tools/latest/bin/sdkmanager"
+          echo "Detected compileSdk=${COMPILE_SDK}${COMPILE_SDK_MINOR:+.${COMPILE_SDK_MINOR}}"
+          echo "Requested package: $PLATFORM_PACKAGE"
+
+          SDKMANAGER="$(command -v sdkmanager || true)"
+          if [ -z "$SDKMANAGER" ]; then
+            SDKMANAGER="$(find "${ANDROID_SDK_ROOT}/cmdline-tools" -path '*/bin/sdkmanager' -type f | sort -V | tail -n 1 || true)"
           fi
           test -n "$SDKMANAGER"
           test -x "$SDKMANAGER"
 
-          "$SDKMANAGER" --install \
-            "platform-tools" \
-            "platforms;android-${COMPILE_SDK}" \
-            "build-tools;36.0.0"
+          AVAILABLE_PLATFORMS="$($SDKMANAGER --list --channel=0 2>/dev/null | sed -nE 's/^[[:space:]]*(platforms;android-[^[:space:]|]+)[[:space:]]*\|.*/\1/p' | sort -Vu)"
+
+          if ! printf '%s\n' "$AVAILABLE_PLATFORMS" | grep -Fxq "$PLATFORM_PACKAGE"; then
+            echo "ERROR: SDK package $PLATFORM_PACKAGE ไม่มีใน stable repository"
+            echo "Stable platform packages ที่ตรงกับ API ${COMPILE_SDK}:"
+            printf '%s\n' "$AVAILABLE_PLATFORMS" | grep -E "^platforms;android-${COMPILE_SDK}([.]|$)" || true
+            exit 1
+          fi
+
+          AVAILABLE_BUILD_TOOLS="$($SDKMANAGER --list --channel=0 2>/dev/null | sed -nE 's/^[[:space:]]*(build-tools;[0-9][^[:space:]|]*)[[:space:]]*\|.*/\1/p' | grep -E '^build-tools;[0-9]+([.][0-9]+)*$' | sort -Vu)"
+          BUILD_TOOLS_PACKAGE="$(printf '%s\n' "$AVAILABLE_BUILD_TOOLS" | grep -E "^build-tools;${COMPILE_SDK}([.]|$)" | sort -V | tail -n 1 || true)"
+          if [ -z "$BUILD_TOOLS_PACKAGE" ]; then
+            BUILD_TOOLS_PACKAGE="$(printf '%s\n' "$AVAILABLE_BUILD_TOOLS" | sort -V | tail -n 1 || true)"
+          fi
+
+          if [ -n "$BUILD_TOOLS_PACKAGE" ]; then
+            echo "Using build tools: $BUILD_TOOLS_PACKAGE"
+            "$SDKMANAGER" --install "platform-tools" "$PLATFORM_PACKAGE" "$BUILD_TOOLS_PACKAGE"
+          else
+            echo "ไม่พบรายการ Build Tools จาก sdkmanager; ติดตั้งเฉพาะ platform และใช้ Build Tools ที่ runner มีอยู่"
+            "$SDKMANAGER" --install "platform-tools" "$PLATFORM_PACKAGE"
+          fi
+
+          echo "compile_sdk=$COMPILE_SDK" >> "$GITHUB_OUTPUT"
+          echo "compile_sdk_minor=$COMPILE_SDK_MINOR" >> "$GITHUB_OUTPUT"
+          echo "platform_package=$PLATFORM_PACKAGE" >> "$GITHUB_OUTPUT"
+          echo "build_tools_package=$BUILD_TOOLS_PACKAGE" >> "$GITHUB_OUTPUT"
 
       - name: Validate project files
         shell: bash
@@ -128,7 +162,7 @@ jobs:
           test -f app/build.gradle.kts
           chmod +x gradlew
           echo "GITHUB_RUN_NUMBER=$GITHUB_RUN_NUMBER"
-          echo "compileSdk=${{ steps.android_sdk.outputs.compile_sdk }}"
+          echo "Android platform=${{ steps.android_sdk.outputs.platform_package }}"
           find . -maxdepth 2 -type f | sort | head -200
 
       - name: Unit tests and Debug APK
