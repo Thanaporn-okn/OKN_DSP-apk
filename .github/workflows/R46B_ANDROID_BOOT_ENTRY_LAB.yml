@@ -1,0 +1,483 @@
+name: R46B Android Boot Entry Lab
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/R46B_ANDROID_BOOT_ENTRY_LAB.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android
+        uses: android-actions/setup-android@v3
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.10.2'
+
+      - name: Create R46B standalone Android project
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/r46b
+          mkdir -p /tmp/r46b/app/src/main/java/com/okn/r46b
+
+          cat > /tmp/r46b/settings.gradle <<'EOF'
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+          rootProject.name = 'OKN_R46B_Boot_Entry_Lab'
+          include ':app'
+          EOF
+
+          cat > /tmp/r46b/build.gradle <<'EOF'
+          plugins {
+              id 'com.android.application' version '8.7.3' apply false
+          }
+          EOF
+
+          cat > /tmp/r46b/app/build.gradle <<'EOF'
+          plugins {
+              id 'com.android.application'
+          }
+
+          android {
+              namespace 'com.okn.r46b'
+              compileSdk 35
+
+              defaultConfig {
+                  applicationId 'com.okn.r46b'
+                  minSdk 26
+                  targetSdk 35
+                  versionCode 1
+                  versionName '46.2'
+              }
+
+              compileOptions {
+                  sourceCompatibility JavaVersion.VERSION_17
+                  targetCompatibility JavaVersion.VERSION_17
+              }
+          }
+          EOF
+
+          cat > /tmp/r46b/app/src/main/AndroidManifest.xml <<'EOF'
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <uses-feature android:name="android.hardware.usb.host" android:required="true" />
+              <application
+                  android:allowBackup="false"
+                  android:label="OKN R46B Boot Entry Lab"
+                  android:theme="@android:style/Theme.Material.Light.NoActionBar">
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true"
+                      android:screenOrientation="portrait">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+              </application>
+          </manifest>
+          EOF
+
+          cat > /tmp/r46b/app/src/main/java/com/okn/r46b/MainActivity.java <<'EOF'
+          package com.okn.r46b;
+
+          import android.app.Activity;
+          import android.app.PendingIntent;
+          import android.content.BroadcastReceiver;
+          import android.content.Context;
+          import android.content.Intent;
+          import android.content.IntentFilter;
+          import android.hardware.usb.UsbConstants;
+          import android.hardware.usb.UsbDevice;
+          import android.hardware.usb.UsbDeviceConnection;
+          import android.hardware.usb.UsbInterface;
+          import android.hardware.usb.UsbManager;
+          import android.os.Build;
+          import android.os.Bundle;
+          import android.os.Handler;
+          import android.os.Looper;
+          import android.view.ViewGroup;
+          import android.widget.Button;
+          import android.widget.LinearLayout;
+          import android.widget.ScrollView;
+          import android.widget.TextView;
+
+          import java.text.SimpleDateFormat;
+          import java.util.Date;
+          import java.util.HashSet;
+          import java.util.Locale;
+          import java.util.Map;
+          import java.util.Set;
+
+          public class MainActivity extends Activity {
+              private static final String ACTION_USB_PERMISSION = "com.okn.r46b.USB_PERMISSION";
+              private static final int STOCK_VID = 0x18B4;
+              private static final int STOCK_PID = 0x06B7;
+              private static final int TARGET_IF = 4;
+
+              private UsbManager usb;
+              private TextView log;
+              private Button bootButton;
+              private UsbDevice candidate;
+              private int armTap = 0;
+              private final Handler ui = new Handler(Looper.getMainLooper());
+
+              private final BroadcastReceiver usbReceiver = new BroadcastReceiver() {
+                  @Override public void onReceive(Context context, Intent intent) {
+                      if (!ACTION_USB_PERMISSION.equals(intent.getAction())) return;
+                      UsbDevice d;
+                      if (Build.VERSION.SDK_INT >= 33) {
+                          d = intent.getParcelableExtra(UsbManager.EXTRA_DEVICE, UsbDevice.class);
+                      } else {
+                          d = intent.getParcelableExtra(UsbManager.EXTRA_DEVICE);
+                      }
+                      boolean granted = intent.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED, false);
+                      append("USB permission: " + granted + (d == null ? "" : "  " + id(d)));
+                      scan();
+                  }
+              };
+
+              @Override protected void onCreate(Bundle savedInstanceState) {
+                  super.onCreate(savedInstanceState);
+                  usb = (UsbManager) getSystemService(Context.USB_SERVICE);
+
+                  LinearLayout root = new LinearLayout(this);
+                  root.setOrientation(LinearLayout.VERTICAL);
+                  root.setPadding(24, 24, 24, 24);
+
+                  TextView title = new TextView(this);
+                  title.setText("OKN R46B — BP1048P4 Boot Entry Lab\nNO FLASH ERASE / NO PROGRAM");
+                  title.setTextSize(20);
+                  root.addView(title);
+
+                  Button scanButton = new Button(this);
+                  scanButton.setText("SCAN DSP USB");
+                  scanButton.setOnClickListener(v -> scan());
+                  root.addView(scanButton);
+
+                  bootButton = new Button(this);
+                  bootButton.setText("ARM BOOTLOADER TEST");
+                  bootButton.setEnabled(false);
+                  bootButton.setOnClickListener(v -> bootTap());
+                  root.addView(bootButton);
+
+                  ScrollView scroll = new ScrollView(this);
+                  log = new TextView(this);
+                  log.setTextSize(13);
+                  log.setTextIsSelectable(true);
+                  scroll.addView(log);
+                  root.addView(scroll, new LinearLayout.LayoutParams(
+                          ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
+
+                  setContentView(root);
+
+                  IntentFilter f = new IntentFilter(ACTION_USB_PERMISSION);
+                  if (Build.VERSION.SDK_INT >= 33) {
+                      registerReceiver(usbReceiver, f, Context.RECEIVER_NOT_EXPORTED);
+                  } else {
+                      registerReceiver(usbReceiver, f);
+                  }
+
+                  append("R46B starts READ-ONLY. The only write is explicit HID Feature AA after double-tap.");
+                  append("Expected stock identity: VID:PID 18B4:06B7, IF4 HID, 0 endpoints.");
+                  scan();
+              }
+
+              @Override protected void onDestroy() {
+                  try { unregisterReceiver(usbReceiver); } catch (Exception ignored) {}
+                  super.onDestroy();
+              }
+
+              private void scan() {
+                  candidate = null;
+                  append("--- scan ---");
+                  Map<String, UsbDevice> list = usb.getDeviceList();
+                  if (list.isEmpty()) append("No USB device.");
+                  for (UsbDevice d : list.values()) {
+                      append(describe(d));
+                      if (matchesStockRuntime(d)) {
+                          candidate = d;
+                          append("TARGET_RUNTIME_FOUND " + id(d));
+                      }
+                  }
+                  bootButton.setEnabled(candidate != null && usb.hasPermission(candidate));
+                  if (candidate != null && !usb.hasPermission(candidate)) {
+                      append("Requesting Android USB permission...");
+                      requestPermission(candidate);
+                  }
+              }
+
+              private boolean matchesStockRuntime(UsbDevice d) {
+                  if (d.getVendorId() != STOCK_VID || d.getProductId() != STOCK_PID) return false;
+                  if (d.getInterfaceCount() <= TARGET_IF) return false;
+                  UsbInterface f = d.getInterface(TARGET_IF);
+                  return f.getInterfaceClass() == UsbConstants.USB_CLASS_HID && f.getEndpointCount() == 0;
+              }
+
+              private void requestPermission(UsbDevice d) {
+                  int flags = PendingIntent.FLAG_UPDATE_CURRENT;
+                  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) flags |= PendingIntent.FLAG_MUTABLE;
+                  PendingIntent pi = PendingIntent.getBroadcast(
+                          this, 46, new Intent(ACTION_USB_PERMISSION).setPackage(getPackageName()), flags);
+                  usb.requestPermission(d, pi);
+              }
+
+              private void bootTap() {
+                  if (candidate == null || !usb.hasPermission(candidate)) {
+                      append("Target/permission missing. Scan again.");
+                      scan();
+                      return;
+                  }
+                  if (armTap == 0) {
+                      armTap = 1;
+                      bootButton.setText("CONFIRM: SEND FEATURE AA");
+                      append("ARMED. Tap the button once more to send SET_REPORT Feature AA, then GET_REPORT Feature.");
+                      return;
+                  }
+                  armTap = 0;
+                  bootButton.setText("ARM BOOTLOADER TEST");
+                  bootButton.setEnabled(false);
+                  final UsbDevice d = candidate;
+                  new Thread(() -> bootProbe(d), "r46b-usb").start();
+              }
+
+              private void bootProbe(UsbDevice d) {
+                  Set<String> before = snapshot();
+                  UsbDeviceConnection c = null;
+                  boolean claimed = false;
+                  int setRc = Integer.MIN_VALUE;
+                  int getRc = Integer.MIN_VALUE;
+                  byte[] get = new byte[8];
+
+                  try {
+                      if (!matchesStockRuntime(d)) {
+                          append("ABORT: target identity/interface changed before write.");
+                          return;
+                      }
+                      c = usb.openDevice(d);
+                      if (c == null) {
+                          append("ABORT: openDevice returned null.");
+                          return;
+                      }
+                      UsbInterface f = d.getInterface(TARGET_IF);
+                      claimed = c.claimInterface(f, true);
+                      append("claim IF" + TARGET_IF + "=" + claimed);
+                      if (!claimed) {
+                          append("ABORT: claim failed. No write sent.");
+                          return;
+                      }
+
+                      byte[] aa = new byte[8];
+                      aa[0] = (byte) 0xAA;
+
+                      append("WRITE_ONCE: HID SET_REPORT Feature id0, IF" + f.getId() + ", payload=" + hex(aa));
+                      setRc = c.controlTransfer(
+                              0x21,   // Host->Device | Class | Interface
+                              0x09,   // SET_REPORT
+                              0x0300, // Feature report, ID 0
+                              f.getId(),
+                              aa, aa.length, 1500);
+                      append("SET_REPORT rc=" + setRc);
+
+                      try { Thread.sleep(80); } catch (InterruptedException ignored) {}
+
+                      getRc = c.controlTransfer(
+                              0xA1,   // Device->Host | Class | Interface
+                              0x01,   // GET_REPORT
+                              0x0300, // Feature report, ID 0
+                              f.getId(),
+                              get, get.length, 1500);
+                      append("GET_REPORT rc=" + getRc + " data=" + hex(get));
+                  } catch (Throwable t) {
+                      append("USB exception after write: " + t.getClass().getSimpleName() + ": " + t.getMessage());
+                  } finally {
+                      if (c != null) {
+                          try {
+                              if (claimed && d.getInterfaceCount() > TARGET_IF) {
+                                  c.releaseInterface(d.getInterface(TARGET_IF));
+                              }
+                          } catch (Throwable ignored) {}
+                          try { c.close(); } catch (Throwable ignored) {}
+                      }
+                  }
+
+                  if (getRc > 0 && (get[0] & 0xFF) == 0x55) {
+                      append("FEATURE_ACK_55=YES");
+                  } else {
+                      append("FEATURE_ACK_55=NO");
+                  }
+
+                  boolean changed = false;
+                  for (int i = 0; i < 24; i++) {
+                      try { Thread.sleep(250); } catch (InterruptedException ignored) {}
+                      Set<String> now = snapshot();
+                      if (!now.equals(before)) {
+                          changed = true;
+                          append("USB_TOPOLOGY_CHANGED: " + now);
+                          break;
+                      }
+                  }
+
+                  if (!changed) {
+                      append("NO_REENUMERATION_DETECTED.");
+                      append("Do NOT send chip erase/program commands. Runtime has not proven entry into flashboot.");
+                  } else {
+                      append("REENUMERATION_DETECTED. Record the new VID/PID/interfaces before any flash command.");
+                  }
+
+                  ui.post(() -> {
+                      bootButton.setEnabled(true);
+                      scan();
+                  });
+              }
+
+              private Set<String> snapshot() {
+                  Set<String> s = new HashSet<>();
+                  for (UsbDevice d : usb.getDeviceList().values()) {
+                      s.add(id(d) + "/if=" + d.getInterfaceCount());
+                  }
+                  return s;
+              }
+
+              private String describe(UsbDevice d) {
+                  StringBuilder b = new StringBuilder();
+                  b.append(id(d)).append(" if=").append(d.getInterfaceCount());
+                  for (int i = 0; i < d.getInterfaceCount(); i++) {
+                      UsbInterface f = d.getInterface(i);
+                      b.append("\n  IF").append(f.getId())
+                              .append(" cls=").append(f.getInterfaceClass())
+                              .append(" sub=").append(f.getInterfaceSubclass())
+                              .append(" proto=").append(f.getInterfaceProtocol())
+                              .append(" ep=").append(f.getEndpointCount());
+                  }
+                  return b.toString();
+              }
+
+              private String id(UsbDevice d) {
+                  return String.format(Locale.US, "%04X:%04X", d.getVendorId(), d.getProductId());
+              }
+
+              private String hex(byte[] a) {
+                  StringBuilder b = new StringBuilder();
+                  for (byte x : a) b.append(String.format(Locale.US, "%02X ", x & 0xFF));
+                  return b.toString().trim();
+              }
+
+              private void append(String s) {
+                  ui.post(() -> {
+                      String ts = new SimpleDateFormat("HH:mm:ss.SSS", Locale.US).format(new Date());
+                      log.append(ts + "  " + s + "\n");
+                  });
+              }
+          }
+          EOF
+
+          cat > /tmp/r46b/README_R46B_TH.txt <<'EOF'
+          OKN R46B — BP1048P4 Boot Entry Lab
+
+          เป้าหมาย:
+          - Samsung S25+ USB-C -> production board
+          - ยืนยันการเข้า bootloader ก่อน flash
+          - ไม่ erase / ไม่ program / ไม่ส่ง MVA
+
+          เงื่อนไข production runtime ที่ต้องตรง:
+          - VID:PID 18B4:06B7
+          - Interface 4 เป็น HID
+          - IF4 มี 0 endpoints
+
+          write เพียงรายการเดียวเมื่อกดปุ่มยืนยัน 2 ครั้ง:
+          - HID SET_REPORT Feature, report ID 0, IF4, 8 bytes: AA 00 00 00 00 00 00 00
+          จากนั้นอ่าน:
+          - HID GET_REPORT Feature, report ID 0, IF4, 8 bytes
+
+          PASS สำหรับขั้น boot-entry:
+          - USB topology เปลี่ยน / device detach+re-enumerate หลังคำสั่ง
+          - ให้จด VID/PID/interface ใหม่ทั้งหมด
+
+          STOP:
+          - ถ้าได้ 55 แต่ USB ไม่ re-enumerate
+          - ถ้า SET/GET ไม่ได้
+          - ห้ามทดลอง chiperas/codedata/upinfo ต่อใน runtime เดิม
+          EOF
+
+          echo "R46B_PROJECT=/tmp/r46b" >> "$GITHUB_ENV"
+
+      - name: Build APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$R46B_PROJECT"
+          gradle --no-daemon :app:assembleDebug
+          test -s app/build/outputs/apk/debug/app-debug.apk
+
+      - name: Package evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          OUT=/tmp/r46b_out
+          rm -rf "$OUT"
+          mkdir -p "$OUT"
+          cp "$R46B_PROJECT/app/build/outputs/apk/debug/app-debug.apk" "$OUT/OKN_R46B_BOOT_ENTRY_LAB_debug.apk"
+          cp "$R46B_PROJECT/README_R46B_TH.txt" "$OUT/"
+          cp "$R46B_PROJECT/app/src/main/java/com/okn/r46b/MainActivity.java" "$OUT/MainActivity_R46B.java"
+          cat > "$OUT/R46B_SAFETY_STATE.txt" <<'EOF'
+          STOCK_RUNTIME_VID_PID=18B4:06B7
+          TARGET_INTERFACE=4
+          EXPECT_HID_NO_ENDPOINTS=YES
+          FLASH_ERASE=NO
+          FLASH_PROGRAM=NO
+          MVA_SEND=NO
+          UPINFO=NO
+          RUNTIME_WRITE=HID_FEATURE_AA_ONLY
+          DOUBLE_TAP_CONFIRM=YES
+          REENUMERATION_REQUIRED_BEFORE_FLASH_WORK=YES
+          EOF
+          (cd "$OUT" && sha256sum * > SHA256SUMS.txt)
+
+      - name: Upload R46B APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: OKN_R46B_BOOT_ENTRY_LAB_APK
+          path: /tmp/r46b_out/*
+          if-no-files-found: error
+
+      - name: Summary
+        shell: bash
+        run: |
+          {
+            echo '## R46B BP1048P4 boot-entry lab'
+            echo '- Dedicated sacrificial-board boot-entry probe for Samsung S25+ USB host'
+            echo '- The only runtime write is HID Feature AA, after explicit double confirmation'
+            echo '- No erase, no code write, no MVA, no upinfo'
+            echo '- Flash work remains blocked until USB detach/re-enumeration proves flashboot'
+          } >> "$GITHUB_STEP_SUMMARY"
