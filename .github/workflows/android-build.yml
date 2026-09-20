@@ -29,15 +29,19 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          mapfile -t ZIP_FILES < <(find "$GITHUB_WORKSPACE" -maxdepth 1 -type f -iname 'HeavyMarket*.zip' -print | sort -V)
+          mapfile -t VERSIONED_ZIPS < <(find "$GITHUB_WORKSPACE" -maxdepth 1 -type f -regextype posix-extended -regex '.*/HeavyMarket_v[0-9]+\.zip' -print | sort -V)
 
-          if [ "${#ZIP_FILES[@]}" -eq 0 ]; then
-            echo "ERROR: ไม่พบ HeavyMarket*.zip ที่ root ของ repository"
+          if [ "${#VERSIONED_ZIPS[@]}" -gt 0 ]; then
+            ZIP_FILE="${VERSIONED_ZIPS[-1]}"
+          elif [ -f "$GITHUB_WORKSPACE/HeavyMarket_Source.zip" ]; then
+            ZIP_FILE="$GITHUB_WORKSPACE/HeavyMarket_Source.zip"
+          else
+            echo "ERROR: ไม่พบ HeavyMarket_v<number>.zip หรือ HeavyMarket_Source.zip ที่ root ของ repository"
             exit 1
           fi
 
-          ZIP_FILE="${ZIP_FILES[-1]}"
           echo "ใช้ Source ZIP: $ZIP_FILE"
+          sha256sum "$ZIP_FILE"
           echo "zip_file=$ZIP_FILE" >> "$GITHUB_OUTPUT"
 
       - name: Extract source ZIP automatically
@@ -68,6 +72,19 @@ jobs:
           test -d "$PROJECT_DIR/app"
 
           echo "Project directory: $PROJECT_DIR"
+
+          ZIP_BASE="$(basename "$ZIP_FILE")"
+          if [[ "$ZIP_BASE" =~ ^HeavyMarket_v([0-9]+)\.zip$ ]]; then
+            EXPECTED="v${BASH_REMATCH[1]}"
+            test -f "$PROJECT_DIR/PROJECT_VERSION.txt" || { echo "ERROR: versioned ZIP ต้องมี PROJECT_VERSION.txt"; exit 1; }
+            ACTUAL="$(tr -d '[:space:]' < "$PROJECT_DIR/PROJECT_VERSION.txt")"
+            if [ "$ACTUAL" != "$EXPECTED" ]; then
+              echo "ERROR: ZIP name=$EXPECTED แต่ PROJECT_VERSION.txt=$ACTUAL"
+              exit 1
+            fi
+            echo "Project version verified: $ACTUAL"
+          fi
+
           echo "project_dir=$PROJECT_DIR" >> "$GITHUB_OUTPUT"
 
       - name: Set up JDK 17
