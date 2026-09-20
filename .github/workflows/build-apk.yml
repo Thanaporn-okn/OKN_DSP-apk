@@ -1,0 +1,140 @@
+name: Build HeavyMarket APK from ZIP
+
+on:
+  push:
+    branches: [ "main", "master" ]
+    paths:
+      - 'HeavyMarketApp_v*.zip'
+      - '.github/workflows/build-apk.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  JAVA_VERSION: '17'
+  GRADLE_VERSION: '8.9'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Find newest app ZIP
+        id: appzip
+        shell: bash
+        run: |
+          set -euo pipefail
+          ZIP_FILE="$(find . -maxdepth 1 -type f -name 'HeavyMarketApp_v*.zip' -printf '%f\n' | sort -V | tail -n 1)"
+          if [ -z "$ZIP_FILE" ]; then
+            echo "ERROR: No HeavyMarketApp_v*.zip found in repository root"
+            exit 1
+          fi
+          APP_MAJOR="$(printf '%s' "$ZIP_FILE" | sed -nE 's/^HeavyMarketApp_v([0-9]+).*\.zip$/\1/p')"
+          if [ -z "$APP_MAJOR" ]; then
+            APP_MAJOR="1"
+          fi
+          echo "zip=$ZIP_FILE" >> "$GITHUB_OUTPUT"
+          echo "major=$APP_MAJOR" >> "$GITHUB_OUTPUT"
+          echo "Using: $ZIP_FILE (major version $APP_MAJOR)"
+
+      - name: Extract project ZIP
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf extracted
+          mkdir -p extracted
+          unzip -q "${{ steps.appzip.outputs.zip }}" -d extracted
+
+          PROJECT_DIR=""
+          if [ -f extracted/settings.gradle ] || [ -f extracted/settings.gradle.kts ]; then
+            PROJECT_DIR="extracted"
+          else
+            PROJECT_DIR="$(find extracted -mindepth 1 -maxdepth 2 -type f \( -name settings.gradle -o -name settings.gradle.kts \) -printf '%h\n' | head -n 1)"
+          fi
+
+          if [ -z "$PROJECT_DIR" ] || { [ ! -f "$PROJECT_DIR/settings.gradle" ] && [ ! -f "$PROJECT_DIR/settings.gradle.kts" ]; }; then
+            echo "ERROR: Android/Gradle project not found inside ZIP"
+            find extracted -maxdepth 3 -type f | sort | head -n 100
+            exit 1
+          fi
+
+          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+          echo "Project directory: $PROJECT_DIR"
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ env.JAVA_VERSION }}
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: ${{ env.GRADLE_VERSION }}
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK packages
+        shell: bash
+        run: |
+          set -euo pipefail
+          yes | sdkmanager --licenses >/dev/null 2>&1 || true
+          yes | sdkmanager "platform-tools" "platforms;android-35" "build-tools;35.0.0"
+
+      - name: Generate automatic app version
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION_CODE=$((GITHUB_RUN_NUMBER * 100 + GITHUB_RUN_ATTEMPT))
+          VERSION_NAME="${{ steps.appzip.outputs.major }}.0.${GITHUB_RUN_NUMBER}.${GITHUB_RUN_ATTEMPT}"
+          echo "VERSION_CODE=$VERSION_CODE" >> "$GITHUB_ENV"
+          echo "VERSION_NAME=$VERSION_NAME" >> "$GITHUB_ENV"
+          echo "Version: $VERSION_NAME ($VERSION_CODE)"
+
+      - name: Build debug APK
+        shell: bash
+        env:
+          DATA_API_BASE: ${{ vars.DATA_API_BASE }}
+        run: |
+          set -euo pipefail
+          cd "$PROJECT_DIR"
+          gradle --no-daemon clean assembleDebug -PdataApiBase="${DATA_API_BASE:-}"
+
+      - name: Collect APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          APK="$(find "$PROJECT_DIR" -type f -path '*/build/outputs/apk/debug/*.apk' | head -n 1)"
+          if [ -z "$APK" ] || [ ! -f "$APK" ]; then
+            echo "ERROR: APK not found after build"
+            exit 1
+          fi
+          cp "$APK" "dist/build.apk"
+          cp "$APK" "dist/HeavyMarket-v${VERSION_NAME}.apk"
+          ls -lh dist/
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: HeavyMarket-v${{ env.VERSION_NAME }}
+          path: dist/*.apk
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload reports if build fails
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: HeavyMarket-build-error-${{ github.run_number }}-${{ github.run_attempt }}
+          path: |
+            extracted/**/build/reports/**
+            extracted/**/build/*.log
+          if-no-files-found: ignore
+          retention-days: 7
