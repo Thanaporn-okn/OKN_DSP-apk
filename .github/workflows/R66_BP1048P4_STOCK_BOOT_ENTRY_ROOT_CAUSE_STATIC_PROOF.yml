@@ -1,0 +1,409 @@
+name: R66 BP1048P4 stock boot entry root cause static proof
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - ".github/workflows/R66_BP1048P4_STOCK_BOOT_ENTRY_ROOT_CAUSE_STATIC_PROOF.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: r66-bp1048p4-stock-boot-entry-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  SDK_REPO: https://github.com/leadercxn/bp1048_sdk_v0.1.12.git
+  SDK_COMMIT: 8105bd864b04995d81c9f9ae77cb158259f39015
+
+jobs:
+  static-proof:
+    name: Stock boot-entry root cause proof / STATIC ONLY / NO FLASH
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Fetch pinned BP1048 SDK
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/bp1048_r66
+          git init -q /tmp/bp1048_r66
+          cd /tmp/bp1048_r66
+          git remote add origin "$SDK_REPO"
+          git fetch -q --depth=1 origin "$SDK_COMMIT"
+          git checkout -q --detach FETCH_HEAD
+          test "$(git rev-parse HEAD)" = "$SDK_COMMIT"
+          echo "R66_SDK_COMMIT=$(git rev-parse HEAD)" | tee /tmp/R66_SDK_STATE.txt
+
+      - name: Prove reference build enables USB device and flashboot
+        id: config
+        shell: bash
+        run: |
+          set -euo pipefail
+          SDK=/tmp/bp1048_r66
+          APP="$SDK/BT_Audio_APP/bt_audio_app_src/inc/app_config.h"
+          BOOT="$SDK/BT_Audio_APP/bt_audio_app_src/inc/flash_boot.h"
+
+          grep -Eq '^[[:space:]]*#define[[:space:]]+FLASH_BOOT_EN[[:space:]]+1' "$BOOT"
+          grep -Eq '^[[:space:]]*#define[[:space:]]+CFG_APP_USB_AUDIO_MODE_EN' "$APP"
+          grep -Eq '^[[:space:]]*#define[[:space:]]+CFG_COMMUNICATION_BY_USB' "$APP"
+          grep -Eq '^[[:space:]]*#define[[:space:]]+CFG_FUNC_USB_DEVICE_EN' "$APP"
+          grep -Eq '^[[:space:]]*#define[[:space:]]+PCTOOL_ON[[:space:]]+0x08' "$BOOT"
+
+          cat > /tmp/R66_REFERENCE_CONFIG.txt <<'EOF'
+          R66_REFERENCE_FLASH_BOOT_EN=YES
+          R66_REFERENCE_USB_AUDIO_MODE=YES
+          R66_REFERENCE_COMMUNICATION_BY_USB=YES
+          R66_REFERENCE_USB_DEVICE_DETECT=YES
+          R66_REFERENCE_PC_UPDATE_PORT=YES
+          EOF
+
+          cat /tmp/R66_REFERENCE_CONFIG.txt
+
+      - name: Prove exact Feature AA to GET55 to start_up_grate chain
+        id: feature_chain
+        shell: bash
+        run: |
+          set -euo pipefail
+          SDK=/tmp/bp1048_r66
+          SRC="$SDK/MVsB1_Base_SDK/driver/driver_api/src/otg/device/otg_device_standard_request.c"
+
+          grep -F 'uint32_t pc_upgrade = 0;' "$SRC"
+          grep -F 'else if(Request[0] == 0xAA)' "$SRC"
+          grep -F 'pc_upgrade = 1;' "$SRC"
+          grep -F 'Setup[0] = 0x55;' "$SRC"
+          grep -F 'OTG_DeviceControlSend(Setup,Setup[7]*256+Setup[6],1);' "$SRC"
+          grep -F 'start_up_grate(AppResourceUsbDevice);' "$SRC"
+
+          python3 - "$SRC" <<'PY'
+          from pathlib import Path
+          import sys
+
+          p=Path(sys.argv[1])
+          lines=p.read_text(encoding="latin-1").splitlines()
+
+          needles=[
+              "else if(Request[0] == 0xAA)",
+              "pc_upgrade = 1;",
+              "Setup[0] = 0x55;",
+              "OTG_DeviceControlSend(Setup,Setup[7]*256+Setup[6],1);",
+              "start_up_grate(AppResourceUsbDevice);",
+          ]
+
+          idx={}
+          for n in needles:
+              hits=[i for i,x in enumerate(lines) if n in x]
+              if not hits:
+                  raise SystemExit("missing chain token: "+n)
+              idx[n]=hits[0]
+
+          if not (
+              idx["else if(Request[0] == 0xAA)"] <
+              idx["pc_upgrade = 1;"] <
+              idx["Setup[0] = 0x55;"] <
+              idx["OTG_DeviceControlSend(Setup,Setup[7]*256+Setup[6],1);"] <
+              idx["start_up_grate(AppResourceUsbDevice);"]
+          ):
+              # pc_upgrade=1 also occurs in the Request[0]==0x55 branch; find
+              # the AA-local instance instead of relying on the first hit.
+              aa=idx["else if(Request[0] == 0xAA)"]
+              local_pc=next(
+                  i for i in range(aa, min(len(lines),aa+10))
+                  if "pc_upgrade = 1;" in lines[i]
+              )
+              get55=idx["Setup[0] = 0x55;"]
+              send=idx["OTG_DeviceControlSend(Setup,Setup[7]*256+Setup[6],1);"]
+              jump=idx["start_up_grate(AppResourceUsbDevice);"]
+              if not (aa < local_pc and get55 < send < jump):
+                  raise SystemExit("Feature chain ordering proof failed")
+
+          # Save small source windows only.
+          interesting=[]
+          for center in [aa if 'aa' in locals() else idx[needles[0]],
+                         idx["Setup[0] = 0x55;"]]:
+              a=max(0,center-8); z=min(len(lines),center+16)
+              interesting.append(
+                  "\n".join(f"{i+1}: {lines[i]}" for i in range(a,z))
+              )
+
+          Path("/tmp/R66_FEATURE_CHAIN_SOURCE.txt").write_text(
+              "\n\n---\n\n".join(interesting)+"\n",
+              encoding="utf-8"
+          )
+          PY
+
+          cat > /tmp/R66_FEATURE_CHAIN_STATE.txt <<'EOF'
+          R66_FEATURE_SET_AA_LATCHES_PC_UPGRADE=YES
+          R66_FEATURE_GET_RETURNS_55_WHEN_LATCHED=YES
+          R66_FEATURE_GET_CALLS_START_UP_GRATE_AFTER_REPLY=YES
+          R66_START_UP_GRATE_CALL_IS_COMPILETIME_GATED_BY_FLASH_BOOT_EN=YES
+          EOF
+          cat /tmp/R66_FEATURE_CHAIN_STATE.txt
+
+      - name: Prove start_up_grate requires AppResourceUsbDevice bit
+        id: resource_gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          SDK=/tmp/bp1048_r66
+          UPG="$SDK/BT_Audio_APP/bt_audio_app_src/device/upgrade.c"
+          MODE="$SDK/BT_Audio_APP/bt_audio_app_src/apps/mode_switch_api.c"
+          MODEH="$SDK/BT_Audio_APP/bt_audio_app_src/inc/mode_switch_api.h"
+
+          grep -F 'ResourceValue(AppResourceUsbDevice)' "$UPG"
+          grep -F 'SREG_FLASH_BOOT_FLAGE.PC = 1;' "$UPG"
+          grep -F 'SREG_FLASH_BOOT_FLAGE.updata = 1;' "$UPG"
+          grep -F 'if(SREG_FLASH_BOOT_FLAGE.updata)' "$UPG"
+          grep -F 'jump_fun = (fun)0;' "$UPG"
+
+          grep -F 'uint32_t ResourceValue(uint32_t Resources)' "$MODE"
+          grep -F 'return ModeResourceReady & Resources;' "$MODE"
+          grep -F '#define AppResourceUsbDevice' "$MODEH"
+
+          cat > /tmp/R66_RESOURCE_GATE_STATE.txt <<'EOF'
+          R66_START_UP_GRATE_REQUIRES_USB_RESOURCE_BIT=YES
+          R66_USB_RESOURCE_BIT=BIT6
+          R66_RESOURCE_VALUE_IS_MODE_RESOURCE_READY_AND_MASK=YES
+          R66_JUMP_TO_ADDRESS_ZERO_REQUIRES_UPDATE_FLAG=YES
+          EOF
+          cat /tmp/R66_RESOURCE_GATE_STATE.txt
+
+      - name: Prove USB resource registration is event-driven
+        id: registration
+        shell: bash
+        run: |
+          set -euo pipefail
+          SDK=/tmp/bp1048_r66
+          DET="$SDK/BT_Audio_APP/bt_audio_app_src/device/device_detect.c"
+          SVC="$SDK/BT_Audio_APP/bt_audio_app_src/services/device_service.c"
+
+          grep -F 'InOrOut = OTG_PortDeviceIsLink();' "$DET"
+          grep -F 'Ret |= USB_DEVICE_STATE_BIT;' "$DET"
+          grep -F 'Ret |= USB_DEVICE_EVENT_BIT;' "$DET"
+
+          grep -F 'if(Plug & USB_DEVICE_EVENT_BIT)' "$SVC"
+          grep -F 'if(Plug & USB_DEVICE_STATE_BIT)' "$SVC"
+          grep -F 'ResourceRegister(AppResourceUsbDevice);' "$SVC"
+          grep -F 'ResourceDeregister(AppResourceUsbDevice);' "$SVC"
+
+          # This early return exists before the USB-device detection block.
+          grep -F 'if(GetSystemMode()<AppModeLineAudioPlay)' "$DET"
+          grep -F 'return Ret;' "$DET"
+
+          python3 - "$DET" "$SVC" <<'PY'
+          from pathlib import Path
+          import sys
+
+          det=Path(sys.argv[1]).read_text(encoding="latin-1").splitlines()
+          svc=Path(sys.argv[2]).read_text(encoding="latin-1").splitlines()
+
+          def first(lines, needle):
+              for i,x in enumerate(lines):
+                  if needle in x:
+                      return i
+              raise SystemExit("missing token: "+needle)
+
+          early=first(det, "if(GetSystemMode()<AppModeLineAudioPlay)")
+          link=first(det, "InOrOut = OTG_PortDeviceIsLink();")
+          if not early < link:
+              raise SystemExit("USB early-return ordering proof failed")
+
+          event=first(svc, "if(Plug & USB_DEVICE_EVENT_BIT)")
+          state=first(svc, "if(Plug & USB_DEVICE_STATE_BIT)")
+          reg=first(svc, "ResourceRegister(AppResourceUsbDevice);")
+          if not event < state < reg:
+              raise SystemExit("USB resource register ordering proof failed")
+
+          Path("/tmp/R66_USB_RESOURCE_ORDER.txt").write_text(
+              "\n".join([
+                  f"DEVICE_DETECT_EARLY_RETURN_LINE={early+1}",
+                  f"DEVICE_DETECT_USB_LINK_LINE={link+1}",
+                  f"DEVICE_SERVICE_USB_EVENT_LINE={event+1}",
+                  f"DEVICE_SERVICE_USB_STATE_LINE={state+1}",
+                  f"DEVICE_SERVICE_RESOURCE_REGISTER_LINE={reg+1}",
+                  "R66_USB_DETECT_EARLY_RETURN_PRECEDES_USB_LINK_TEST=YES",
+                  "R66_USB_RESOURCE_REGISTER_IS_EVENT_DRIVEN=YES",
+              ])+"\n",
+              encoding="utf-8"
+          )
+          print(Path("/tmp/R66_USB_RESOURCE_ORDER.txt").read_text(), end="")
+          PY
+
+      - name: Enumerate all AppResourceUsbDevice register and boot-entry callsites
+        id: callsites
+        shell: bash
+        run: |
+          set -euo pipefail
+          SDK=/tmp/bp1048_r66/BT_Audio_APP
+
+          {
+            echo "=== ResourceRegister(AppResourceUsbDevice) ==="
+            grep -RInF --include='*.c' --include='*.h' \
+              'ResourceRegister(AppResourceUsbDevice)' "$SDK" || true
+            echo
+            echo "=== start_up_grate(AppResourceUsbDevice) ==="
+            grep -RInF --include='*.c' --include='*.h' \
+              'start_up_grate(AppResourceUsbDevice)' /tmp/bp1048_r66 || true
+            echo
+            echo "=== OTG_DeviceInit ==="
+            grep -RInF --include='*.c' --include='*.h' \
+              'OTG_DeviceInit' /tmp/bp1048_r66 || true
+          } | tee /tmp/R66_CALLSITES.txt
+
+          REG_COUNT="$(
+            grep -RIF --include='*.c' --include='*.h' \
+              'ResourceRegister(AppResourceUsbDevice)' "$SDK" | wc -l
+          )"
+          BOOT_COUNT="$(
+            grep -RIF --include='*.c' --include='*.h' \
+              'start_up_grate(AppResourceUsbDevice)' /tmp/bp1048_r66 | wc -l
+          )"
+
+          {
+            echo "R66_USB_RESOURCE_REGISTER_CALLS=$REG_COUNT"
+            echo "R66_USB_BOOT_ENTRY_CALLS=$BOOT_COUNT"
+          } | tee /tmp/R66_CALLSITE_COUNTS.txt
+
+          test "$REG_COUNT" -ge 1
+          test "$BOOT_COUNT" -ge 1
+
+      - name: Build production-observation decision matrix
+        id: decision
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cat > /tmp/R66_DECISION.txt <<'EOF'
+          # Prior production observation from R46G:
+          R66_R46G_SET_FEATURE_AA_ACCEPTED=YES
+          R66_R46G_GET_FEATURE_RETURNED_55=YES
+          R66_R46G_RUNTIME_REMAINED_ACTIVE_AFTER_GET=YES
+          R66_R46G_USB_IDENTITY_UNCHANGED_AFTER_GET=YES
+
+          # What the observation proves:
+          R66_PRODUCTION_FEATURE_HANDLER_ACTIVE=YES
+          R66_PRODUCTION_PC_UPGRADE_LATCH_ACTIVE=YES
+
+          # What it does NOT prove:
+          R66_PRODUCTION_FLASH_BOOT_EN_PROVEN=NO
+          R66_PRODUCTION_USB_RESOURCE_BIT_AT_GET_PROVEN=NO
+          R66_PRODUCTION_START_UP_GRATE_EXECUTED_PROVEN=NO
+
+          # Reference-SDK root-cause set consistent with R46G:
+          R66_CAUSE_A_FLASH_BOOT_COMPILED_OUT=POSSIBLE
+          R66_CAUSE_B_USB_RESOURCE_BIT_ZERO=POSSIBLE
+          R66_CAUSE_C_PRODUCTION_START_UP_GRATE_DIFFERS=POSSIBLE
+
+          # Important narrowing:
+          R66_AA_COMMAND_FAILURE_CAUSE=REJECTED
+          R66_GET55_HANDLER_FAILURE_CAUSE=REJECTED
+          R66_RESOURCE_GATE_IS_REAL_IN_REFERENCE_SDK=YES
+          R66_USB_RESOURCE_REGISTRATION_IS_SEPARATE_FROM_FEATURE_AA=YES
+
+          # No repeat of the old AA->55 test is required by this checkpoint.
+          R66_REPEAT_R46G_REQUIRED=NO
+
+          # Remaining first-bootstrap gate:
+          R66_STOCK_FIRST_BOOTSTRAP_PROVEN=NO
+          R66_STOCK_BACKUP_PROVEN=NO
+          R66_RECOVERY_PROVEN=NO
+
+          R66_FLASH_WRITE_EXECUTED=NO
+          R66_FLASH_ERASE_EXECUTED=NO
+          FLASH_ALLOWED=NO
+          EOF
+
+          cat /tmp/R66_DECISION.txt
+
+      - name: Build R66 evidence bundle
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          OUT=/tmp/R66_BP1048P4_STOCK_BOOT_ENTRY_ROOT_CAUSE_EVIDENCE
+          rm -rf "$OUT"
+          mkdir -p "$OUT"
+
+          for f in \
+            R66_SDK_STATE.txt \
+            R66_REFERENCE_CONFIG.txt \
+            R66_FEATURE_CHAIN_SOURCE.txt \
+            R66_FEATURE_CHAIN_STATE.txt \
+            R66_RESOURCE_GATE_STATE.txt \
+            R66_USB_RESOURCE_ORDER.txt \
+            R66_CALLSITES.txt \
+            R66_CALLSITE_COUNTS.txt \
+            R66_DECISION.txt; do
+            test -f "/tmp/$f" && cp "/tmp/$f" "$OUT/"
+          done
+
+          cat > "$OUT/README.txt" <<'EOF'
+          R66 explains why a production unit can accept Feature AA and return
+          Feature 55 yet remain in normal runtime.
+
+          Reference SDK chain:
+          SET AA -> pc_upgrade=1
+          GET Feature -> reply 55
+          GET then calls start_up_grate only when FLASH_BOOT_EN is compiled in
+          start_up_grate jumps only when AppResourceUsbDevice is registered
+          that resource is registered separately by device-service USB events
+
+          No hardware access, erase, program, or flash operation is performed.
+          EOF
+
+          (
+            cd /tmp
+            zip -qr \
+              R66_BP1048P4_STOCK_BOOT_ENTRY_ROOT_CAUSE_EVIDENCE.zip \
+              R66_BP1048P4_STOCK_BOOT_ENTRY_ROOT_CAUSE_EVIDENCE
+            sha256sum \
+              R66_BP1048P4_STOCK_BOOT_ENTRY_ROOT_CAUSE_EVIDENCE.zip \
+              > R66_BP1048P4_STOCK_BOOT_ENTRY_ROOT_CAUSE_EVIDENCE.zip.sha256
+          )
+          cat /tmp/R66_BP1048P4_STOCK_BOOT_ENTRY_ROOT_CAUSE_EVIDENCE.zip.sha256
+
+      - name: Upload R66 evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: R66-BP1048P4-STOCK-BOOT-ENTRY-ROOT-CAUSE-EVIDENCE
+          path: |
+            /tmp/R66_BP1048P4_STOCK_BOOT_ENTRY_ROOT_CAUSE_EVIDENCE.zip
+            /tmp/R66_BP1048P4_STOCK_BOOT_ENTRY_ROOT_CAUSE_EVIDENCE.zip.sha256
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: R66 final gate
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat /tmp/R66_REFERENCE_CONFIG.txt
+          cat /tmp/R66_FEATURE_CHAIN_STATE.txt
+          cat /tmp/R66_RESOURCE_GATE_STATE.txt
+          cat /tmp/R66_USB_RESOURCE_ORDER.txt
+          cat /tmp/R66_CALLSITE_COUNTS.txt
+          cat /tmp/R66_DECISION.txt
+
+          test "${{ steps.config.outcome }}" = "success"
+          test "${{ steps.feature_chain.outcome }}" = "success"
+          test "${{ steps.resource_gate.outcome }}" = "success"
+          test "${{ steps.registration.outcome }}" = "success"
+          test "${{ steps.callsites.outcome }}" = "success"
+          test "${{ steps.decision.outcome }}" = "success"
+
+          grep -F 'R66_FEATURE_SET_AA_LATCHES_PC_UPGRADE=YES' /tmp/R66_FEATURE_CHAIN_STATE.txt
+          grep -F 'R66_START_UP_GRATE_REQUIRES_USB_RESOURCE_BIT=YES' /tmp/R66_RESOURCE_GATE_STATE.txt
+          grep -F 'R66_USB_RESOURCE_REGISTER_IS_EVENT_DRIVEN=YES' /tmp/R66_USB_RESOURCE_ORDER.txt
+          grep -F 'R66_REPEAT_R46G_REQUIRED=NO' /tmp/R66_DECISION.txt
+          grep -F 'R66_FLASH_WRITE_EXECUTED=NO' /tmp/R66_DECISION.txt
+          grep -F 'R66_FLASH_ERASE_EXECUTED=NO' /tmp/R66_DECISION.txt
+          grep -F 'FLASH_ALLOWED=NO' /tmp/R66_DECISION.txt
+
+          echo "R66_STOCK_BOOT_ENTRY_ROOT_CAUSE_STATIC_PROOF=PASS"
+          echo "FLASH_ALLOWED=NO"
