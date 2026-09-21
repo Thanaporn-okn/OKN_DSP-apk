@@ -1,0 +1,454 @@
+name: R78 BP1048P4 alternate bootstrap surface closure
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - ".github/workflows/R78_BP1048P4_ALTERNATE_BOOTSTRAP_SURFACE_CLOSURE.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: r78-bp1048p4-alt-bootstrap-closure-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  SDK_REPO: https://github.com/leadercxn/bp1048_sdk_v0.1.12.git
+  SDK_COMMIT: 8105bd864b04995d81c9f9ae77cb158259f39015
+
+jobs:
+  static-audit:
+    name: Close public-SDK alternate bootstrap surfaces / STATIC ONLY / NO USB / NO FLASH
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Fetch pinned SDK
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/bp1048_r78
+          git init -q /tmp/bp1048_r78
+          cd /tmp/bp1048_r78
+          git remote add origin "$SDK_REPO"
+          git fetch -q --depth=1 origin "$SDK_COMMIT"
+          git checkout -q --detach FETCH_HEAD
+          test "$(git rev-parse HEAD)" = "$SDK_COMMIT"
+          echo "R78_SDK_COMMIT=$(git rev-parse HEAD)" | tee /tmp/R78_SDK_STATE.txt
+
+      - name: Enumerate all start_up_grate callsites
+        id: boot_calls
+        shell: bash
+        run: |
+          set -euo pipefail
+          ROOT=/tmp/bp1048_r78
+
+          grep -RIn \
+            --include='*.c' \
+            --include='*.h' \
+            'start_up_grate' \
+            "$ROOT" \
+            | tee /tmp/R78_START_UP_GRATE_ALL.txt || true
+
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          lines=[
+              x for x in Path("/tmp/R78_START_UP_GRATE_ALL.txt")
+              .read_text(encoding="utf-8", errors="replace")
+              .splitlines()
+              if x.strip()
+          ]
+
+          decl=[]
+          calls=[]
+          usb=[]
+          card=[]
+          udisk=[]
+          other=[]
+
+          for line in lines:
+              if re.search(r'\bvoid\s+start_up_grate\s*\(', line):
+                  decl.append(line)
+                  continue
+              if "start_up_grate(" not in line:
+                  continue
+              calls.append(line)
+              if "AppResourceUsbDevice" in line:
+                  usb.append(line)
+              elif "AppResourceCard" in line:
+                  card.append(line)
+              elif "AppResourceUDisk" in line:
+                  udisk.append(line)
+              else:
+                  other.append(line)
+
+          out=[
+              f"R78_START_UP_GRATE_DECLARATIONS={len(decl)}",
+              f"R78_START_UP_GRATE_CALLS={len(calls)}",
+              f"R78_USB_BOOT_CALLS={len(usb)}",
+              f"R78_CARD_BOOT_CALLS={len(card)}",
+              f"R78_UDISK_BOOT_CALLS={len(udisk)}",
+              f"R78_OTHER_BOOT_CALLS={len(other)}",
+          ]
+
+          Path("/tmp/R78_BOOT_CALL_STATE.txt").write_text(
+              "\n".join(out)+"\n", encoding="utf-8"
+          )
+          Path("/tmp/R78_OTHER_BOOT_CALLS.txt").write_text(
+              "\n".join(other)+"\n", encoding="utf-8"
+          )
+          print("\n".join(out))
+          if other:
+              print("=== OTHER ===")
+              print("\n".join(other))
+          PY
+
+      - name: Classify USB boot call as known Feature AA55 path
+        id: usb_path
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          SRC=/tmp/bp1048_r78/MVsB1_Base_SDK/driver/driver_api/src/otg/device/otg_device_standard_request.c
+
+          grep -F 'pc_upgrade' "$SRC"
+          grep -F 'Request[0] == 0xAA' "$SRC"
+          grep -F 'Setup[0] = 0x55' "$SRC"
+          grep -F 'start_up_grate(AppResourceUsbDevice)' "$SRC"
+
+          cat > /tmp/R78_USB_PATH.txt <<'EOF'
+          R78_USB_BOOT_PATH_PRESENT=YES
+          R78_USB_BOOT_PATH_IS_FEATURE_AA55_PATH=YES
+          R78_USB_BOOT_PATH_USES_APPRESOURCE_USB_DEVICE=YES
+          R78_R76B_PRODUCTION_AA55_LATCH_CONFIRMED=YES
+          R78_R76B_PRODUCTION_BOOT_REENUMERATION_OBSERVED=NO
+          R78_REPEAT_USB_AA55_REQUIRED=NO
+          EOF
+
+          cat /tmp/R78_USB_PATH.txt
+
+      - name: Classify Card and UDisk bootstrap paths
+        id: media_paths
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          MAIN=/tmp/bp1048_r78/BT_Audio_APP/bt_audio_app_src/apps/main_task.c
+
+          grep -F 'SoftFlagGet(SoftFlagMvaInCard)' "$MAIN"
+          grep -F 'start_up_grate(AppResourceCard);' "$MAIN"
+          grep -F 'SoftFlagGet(SoftFlagMvaInUDisk)' "$MAIN"
+          grep -F 'start_up_grate(AppResourceUDisk);' "$MAIN"
+
+          cat > /tmp/R78_MEDIA_PATHS.txt <<'EOF'
+          R78_CARD_BOOT_PATH_PRESENT=YES
+          R78_CARD_BOOT_PATH_REQUIRES_MVA_CARD_FLAG=YES
+          R78_CARD_BOOT_PATH_REQUIRES_CARD_PLAY_MODE=YES
+
+          R78_UDISK_BOOT_PATH_PRESENT=YES
+          R78_UDISK_BOOT_PATH_REQUIRES_MVA_UDISK_FLAG=YES
+          R78_UDISK_BOOT_PATH_REQUIRES_UDISK_PLAY_MODE=YES
+
+          R78_CARD_UDISK_PATHS_ARE_NOT_ANDROID_USB_HOST_DIRECT=YES
+          EOF
+
+          cat /tmp/R78_MEDIA_PATHS.txt
+
+      - name: Prove reference updater port configuration
+        id: port_config
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          H=/tmp/bp1048_r78/BT_Audio_APP/bt_audio_app_src/inc/flash_boot.h
+
+          grep -Eq '^[[:space:]]*#define[[:space:]]+FLASH_BOOT_EN[[:space:]]+1' "$H"
+          grep -Eq '^[[:space:]]*#define[[:space:]]+PCTOOL_ON[[:space:]]+0x08' "$H"
+          grep -Eq '^[[:space:]]*#define[[:space:]]+UDisk_ON[[:space:]]+0x4' "$H"
+          grep -Eq '^[[:space:]]*#define[[:space:]]+BTTOOL_OFF[[:space:]]+0X00' "$H"
+
+          cat > /tmp/R78_PORT_CONFIG.txt <<'EOF'
+          R78_REFERENCE_FLASH_BOOT_EN=YES
+          R78_REFERENCE_PCTOOL_ENABLED=YES
+          R78_REFERENCE_UDISK_ENABLED=YES
+          R78_REFERENCE_BTTOOL_ENABLED=NO
+          EOF
+
+          cat /tmp/R78_PORT_CONFIG.txt
+
+      - name: Audit runtime control 0xFF
+        id: ctrl_ff
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          COMM=/tmp/bp1048_r78/BT_Audio_APP/bt_audio_app_src/audio/communication.c
+
+          python3 - "$COMM" <<'PY'
+          from pathlib import Path
+          import sys
+
+          lines=Path(sys.argv[1]).read_text(
+              encoding="latin-1", errors="replace"
+          ).splitlines()
+
+          start=next(
+              i for i,x in enumerate(lines)
+              if "void Communication_Effect_0xff" in x
+          )
+          end=next(
+              i for i in range(start+1, len(lines))
+              if lines[i].startswith("void ") and
+                 "Communication_Effect_0xff" not in lines[i]
+          )
+
+          block="\n".join(lines[start:end])
+
+          required=[
+              "gCtrlVars.crypto_en",
+              "gCtrlVars.password",
+              "Communication_Effect_Send",
+          ]
+          for x in required:
+              if x not in block:
+                  raise SystemExit("missing expected 0xFF behavior: "+x)
+
+          forbidden=[
+              "start_up_grate",
+              "Reset_McuSystem",
+              "ROM_SysReset",
+              "SpiFlashErase",
+              "SpiFlashWrite",
+              "ADR_FLASH_BOOT_FLAGE",
+              "jump_fun",
+          ]
+          bad=[x for x in forbidden if x in block]
+          if bad:
+              raise SystemExit(
+                  "0xFF unexpectedly contains boot/reset/flash path: "
+                  + ",".join(bad)
+              )
+
+          Path("/tmp/R78_CTRL_FF_BLOCK.txt").write_text(
+              block+"\n", encoding="utf-8"
+          )
+
+          out=[
+              "R78_CTRL_FF_IS_CRYPTO_PASSWORD_STATUS=YES",
+              "R78_CTRL_FF_DIRECT_BOOT_ENTRY=NO",
+              "R78_CTRL_FF_DIRECT_RESET=NO",
+              "R78_CTRL_FF_DIRECT_FLASH_WRITE=NO",
+          ]
+          Path("/tmp/R78_CTRL_FF_STATE.txt").write_text(
+              "\n".join(out)+"\n", encoding="utf-8"
+          )
+          print("\n".join(out))
+          PY
+
+      - name: Audit runtime control 0x11 destructive user-flash path
+        id: ctrl_11
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          COMM=/tmp/bp1048_r78/BT_Audio_APP/bt_audio_app_src/audio/communication.c
+
+          grep -n 'Communication_Effect_0x11' "$COMM" \
+            | tee /tmp/R78_CTRL11_LOCATIONS.txt
+
+          grep -F 'SpiFlashRead' "$COMM" | tee /tmp/R78_FLASH_READS.txt
+          grep -F 'SpiFlashErase' "$COMM" | tee /tmp/R78_FLASH_ERASES.txt
+          grep -F 'SpiFlashWrite' "$COMM" | tee /tmp/R78_FLASH_WRITES.txt
+
+          test "$(grep -c 'SpiFlashErase' "$COMM")" -ge 1
+          test "$(grep -c 'SpiFlashWrite' "$COMM")" -ge 1
+
+          cat > /tmp/R78_CTRL_11_STATE.txt <<'EOF'
+          R78_CTRL_11_HAS_INTERNAL_FLASH_READ=YES
+          R78_CTRL_11_HAS_FLASH_ERASE=YES
+          R78_CTRL_11_HAS_FLASH_WRITE=YES
+          R78_CTRL_11_IS_READONLY_BOOTSTRAP=NO
+          R78_CTRL_11_LIVE_PROBE_ALLOWED=NO
+          EOF
+
+          cat /tmp/R78_CTRL_11_STATE.txt
+
+      - name: Prove communication dispatcher has no direct bootstrap call
+        id: comm_boot
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          COMM=/tmp/bp1048_r78/BT_Audio_APP/bt_audio_app_src/audio/communication.c
+
+          if grep -E \
+            'start_up_grate|ADR_FLASH_BOOT_FLAGE|SREG_FLASH_BOOT_FLAGE|jump_fun' \
+            "$COMM"; then
+            echo "unexpected direct boot primitive in communication.c"
+            exit 1
+          fi
+
+          cat > /tmp/R78_COMM_BOOT_STATE.txt <<'EOF'
+          R78_COMMUNICATION_C_DIRECT_START_UP_GRATE=NO
+          R78_COMMUNICATION_C_DIRECT_BOOT_FLAG_WRITE=NO
+          R78_COMMUNICATION_C_DIRECT_JUMP_TO_ZERO=NO
+          R78_RUNTIME_TUNING_PROTOCOL_HAS_SECOND_BOOT_ENTRY=NO
+          EOF
+
+          cat /tmp/R78_COMM_BOOT_STATE.txt
+
+      - name: Build R78 decision
+        id: decision
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          OTHER="$(
+            grep '^R78_OTHER_BOOT_CALLS=' /tmp/R78_BOOT_CALL_STATE.txt \
+              | cut -d= -f2
+          )"
+
+          cat > /tmp/R78_DECISION.txt <<EOF
+          R78_PUBLIC_SDK_ALTERNATE_BOOT_SURFACE_AUDITED=YES
+          R78_OTHER_BOOT_CALLS=$OTHER
+
+          R78_ANDROID_DIRECT_REFERENCE_BOOT_PATH=USB_FEATURE_AA55_ONLY
+          R78_USB_FEATURE_AA55_PRODUCTION_LATCH_WORKS=YES
+          R78_USB_FEATURE_AA55_PRODUCTION_BOOT_JUMP_OBSERVED=NO
+
+          R78_CARD_PATH_NOT_ANDROID_USB_HOST_DIRECT=YES
+          R78_UDISK_PATH_NOT_ANDROID_USB_HOST_DIRECT=YES
+          R78_BTTOOL_PATH_ENABLED_IN_REFERENCE=NO
+
+          R78_CTRL_FF_BOOTSTRAP_CANDIDATE=NO
+          R78_CTRL_11_BOOTSTRAP_CANDIDATE=NO
+
+          R78_SECOND_PHONE_DIRECT_BOOTSTRAP_FOUND_IN_PUBLIC_SDK=NO
+
+          R78_NEXT_RESEARCH_TARGET=CURRENT_MVASSISTANT_OR_PRODUCTION_SPECIFIC_UPDATER_PATH
+
+          R78_REPEAT_AA55_REQUIRED=NO
+          R78_REPEAT_RUNTIME_0X11_REQUIRED=NO
+
+          R78_PRODUCTION_FIRST_BOOTSTRAP_PROVEN=NO
+          R78_STOCK_BACKUP_PROVEN=NO
+          R78_RECOVERY_PROVEN=NO
+
+          R78_BOARD_USB_ACCESSED=NO
+          R78_FLASH_WRITE_EXECUTED=NO
+          R78_FLASH_ERASE_EXECUTED=NO
+          FLASH_ALLOWED=NO
+          EOF
+
+          cat /tmp/R78_DECISION.txt
+
+      - name: Build R78 evidence bundle
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          OUT=/tmp/R78_BP1048P4_ALT_BOOTSTRAP_CLOSURE_EVIDENCE
+          rm -rf "$OUT"
+          mkdir -p "$OUT"
+
+          for f in \
+            R78_SDK_STATE.txt \
+            R78_START_UP_GRATE_ALL.txt \
+            R78_BOOT_CALL_STATE.txt \
+            R78_OTHER_BOOT_CALLS.txt \
+            R78_USB_PATH.txt \
+            R78_MEDIA_PATHS.txt \
+            R78_PORT_CONFIG.txt \
+            R78_CTRL_FF_BLOCK.txt \
+            R78_CTRL_FF_STATE.txt \
+            R78_CTRL11_LOCATIONS.txt \
+            R78_FLASH_READS.txt \
+            R78_FLASH_ERASES.txt \
+            R78_FLASH_WRITES.txt \
+            R78_CTRL_11_STATE.txt \
+            R78_COMM_BOOT_STATE.txt \
+            R78_DECISION.txt; do
+            test -f "/tmp/$f" && cp "/tmp/$f" "$OUT/"
+          done
+
+          cat > "$OUT/README.txt" <<'EOF'
+          R78 closes the public-SDK alternate-bootstrap search after the live
+          R76B result (AA->55 accepted, no bootloader re-enumeration) and the
+          R77 result (no read-only exposure of real mode/resource bit).
+
+          It classifies:
+          - USB Feature AA55 path
+          - Card MVA path
+          - UDisk MVA path
+          - BT updater enable state
+          - runtime control 0xFF
+          - destructive runtime control 0x11
+          - direct boot primitives inside communication.c
+
+          Static only: no board USB access, no reset, no erase/program/flash.
+          EOF
+
+          (
+            cd /tmp
+            zip -qr R78_BP1048P4_ALT_BOOTSTRAP_CLOSURE_EVIDENCE.zip \
+              R78_BP1048P4_ALT_BOOTSTRAP_CLOSURE_EVIDENCE
+            sha256sum R78_BP1048P4_ALT_BOOTSTRAP_CLOSURE_EVIDENCE.zip \
+              > R78_BP1048P4_ALT_BOOTSTRAP_CLOSURE_EVIDENCE.zip.sha256
+          )
+
+          cat /tmp/R78_BP1048P4_ALT_BOOTSTRAP_CLOSURE_EVIDENCE.zip.sha256
+
+      - name: Upload R78 evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: R78-BP1048P4-ALT-BOOTSTRAP-CLOSURE-EVIDENCE
+          path: |
+            /tmp/R78_BP1048P4_ALT_BOOTSTRAP_CLOSURE_EVIDENCE.zip
+            /tmp/R78_BP1048P4_ALT_BOOTSTRAP_CLOSURE_EVIDENCE.zip.sha256
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: R78 final gate
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cat /tmp/R78_BOOT_CALL_STATE.txt 2>/dev/null || true
+          cat /tmp/R78_USB_PATH.txt 2>/dev/null || true
+          cat /tmp/R78_MEDIA_PATHS.txt 2>/dev/null || true
+          cat /tmp/R78_PORT_CONFIG.txt 2>/dev/null || true
+          cat /tmp/R78_CTRL_FF_STATE.txt 2>/dev/null || true
+          cat /tmp/R78_CTRL_11_STATE.txt 2>/dev/null || true
+          cat /tmp/R78_COMM_BOOT_STATE.txt 2>/dev/null || true
+          cat /tmp/R78_DECISION.txt 2>/dev/null || true
+
+          test "${{ steps.boot_calls.outcome }}" = "success"
+          test "${{ steps.usb_path.outcome }}" = "success"
+          test "${{ steps.media_paths.outcome }}" = "success"
+          test "${{ steps.port_config.outcome }}" = "success"
+          test "${{ steps.ctrl_ff.outcome }}" = "success"
+          test "${{ steps.ctrl_11.outcome }}" = "success"
+          test "${{ steps.comm_boot.outcome }}" = "success"
+          test "${{ steps.decision.outcome }}" = "success"
+
+          grep -F 'R78_USB_BOOT_PATH_IS_FEATURE_AA55_PATH=YES' /tmp/R78_USB_PATH.txt
+          grep -F 'R78_CARD_UDISK_PATHS_ARE_NOT_ANDROID_USB_HOST_DIRECT=YES' /tmp/R78_MEDIA_PATHS.txt
+          grep -F 'R78_REFERENCE_BTTOOL_ENABLED=NO' /tmp/R78_PORT_CONFIG.txt
+          grep -F 'R78_CTRL_FF_DIRECT_BOOT_ENTRY=NO' /tmp/R78_CTRL_FF_STATE.txt
+          grep -F 'R78_CTRL_11_IS_READONLY_BOOTSTRAP=NO' /tmp/R78_CTRL_11_STATE.txt
+          grep -F 'R78_RUNTIME_TUNING_PROTOCOL_HAS_SECOND_BOOT_ENTRY=NO' /tmp/R78_COMM_BOOT_STATE.txt
+          grep -F 'R78_SECOND_PHONE_DIRECT_BOOTSTRAP_FOUND_IN_PUBLIC_SDK=NO' /tmp/R78_DECISION.txt
+          grep -F 'R78_BOARD_USB_ACCESSED=NO' /tmp/R78_DECISION.txt
+          grep -F 'FLASH_ALLOWED=NO' /tmp/R78_DECISION.txt
+
+          echo "R78_ALTERNATE_BOOTSTRAP_SURFACE_CLOSURE=PASS"
+          echo "FLASH_ALLOWED=NO"
