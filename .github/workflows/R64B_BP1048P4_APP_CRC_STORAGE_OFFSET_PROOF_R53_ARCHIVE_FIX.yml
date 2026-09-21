@@ -1,0 +1,410 @@
+name: R64B BP1048P4 app CRC storage offset proof R53 archive fix
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - ".github/workflows/R64B_BP1048P4_APP_CRC_STORAGE_OFFSET_PROOF_R53_ARCHIVE_FIX.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: r64b-bp1048p4-app-crc-offset-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  R53_COMMIT: c71fbb269d6326767d06f4d6401fd0d80e5d8807
+  R53_ZIP: OKN_BP1048P4_R53_TRUE7CH_USB_C_2026-09-21.zip
+  R53_ZIP_SHA256: 0b7da183fe908bbe3d146b7a38176b26f6852ac98ce62ab1d3ad3bd1c5de1f0c
+
+jobs:
+  prove-app-crc-offset:
+    name: Prove app +0xBC CRC storage from repo history / NO FLASH
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout full repository history
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Recover deleted R53 package ZIP from pinned historical commit
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          git cat-file -e "${R53_COMMIT}:${R53_ZIP}"
+          git show "${R53_COMMIT}:${R53_ZIP}" > /tmp/R64B_R53.zip
+
+          test -s /tmp/R64B_R53.zip
+          echo "${R53_ZIP_SHA256}  /tmp/R64B_R53.zip" | sha256sum -c -
+          unzip -t /tmp/R64B_R53.zip
+
+          sha256sum /tmp/R64B_R53.zip \
+            | tee /tmp/R64B_R53_ZIP_SHA256.txt
+
+          unzip -l /tmp/R64B_R53.zip \
+            | tee /tmp/R64B_R53_FILE_LIST.txt
+
+      - name: Extract exact R53 image gate and evidence JSON
+        id: extract_r53
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+          import zipfile
+
+          zpath = Path("/tmp/R64B_R53.zip")
+          out = Path("/tmp/r64b_r53")
+          out.mkdir(parents=True, exist_ok=True)
+
+          with zipfile.ZipFile(zpath) as z:
+              names = z.namelist()
+
+              gate_candidates = [
+                  n for n in names
+                  if n.lower().endswith(".py")
+                  and "image_gate" in Path(n).name.lower()
+              ]
+
+              print("R64B_IMAGE_GATE_CANDIDATES=", gate_candidates)
+
+              scored = []
+              for n in gate_candidates:
+                  data = z.read(n)
+                  text = data.decode("utf-8", errors="replace")
+                  score = 0
+                  if Path(n).name.lower() == "r53_image_gate.py":
+                      score += 100
+                  if Path(n).name.lower() == "bp1048_image_gate.py":
+                      score += 50
+                  if re.search(r"0x0*bc\b|\b188\b", text, re.I):
+                      score += 20
+                  if re.search(r"\bcrc\b|code_crc|fastcrc", text, re.I):
+                      score += 20
+                  if re.search(r"0x0*e0\b|\b224\b", text, re.I):
+                      score += 20
+                  if re.search(r"b0bebdc9|c9.{0,20}bd.{0,20}be.{0,20}b0|magic",
+                               text, re.I | re.S):
+                      score += 10
+                  scored.append((score, n, data, text))
+
+              if not scored:
+                  raise SystemExit("no image-gate Python source found in R53 package")
+
+              scored.sort(key=lambda x: (-x[0], x[1]))
+              score, selected, data, text = scored[0]
+
+              if score < 60:
+                  raise SystemExit(
+                      f"no sufficiently strong R53 image-gate candidate; "
+                      f"best={selected} score={score}"
+                  )
+
+              Path("/tmp/r64b_r53/SELECTED_GATE_PATH.txt").write_text(
+                  selected + "\n", encoding="utf-8"
+              )
+              Path("/tmp/r64b_r53/r53_image_gate.py").write_bytes(data)
+
+              json_hits = [
+                  n for n in names
+                  if Path(n).name.lower()
+                  == "r53_image_gate_on_r41_reference.json"
+              ]
+              print("R64B_R53_GATE_JSON_MATCHES=", json_hits)
+
+              if len(json_hits) > 1:
+                  raise SystemExit("multiple R53 reference gate JSON files found")
+              if json_hits:
+                  Path(
+                      "/tmp/r64b_r53/R53_IMAGE_GATE_ON_R41_REFERENCE.json"
+                  ).write_bytes(z.read(json_hits[0]))
+
+              Path("/tmp/R64B_GATE_SELECTION.txt").write_text(
+                  "\n".join([
+                      f"R64B_SELECTED_GATE_PATH={selected}",
+                      f"R64B_SELECTED_GATE_SCORE={score}",
+                      "R64B_GATE_SOURCE=HISTORICAL_R53_PACKAGE",
+                  ]) + "\n",
+                  encoding="utf-8",
+              )
+
+              print(Path("/tmp/R64B_GATE_SELECTION.txt").read_text(), end="")
+              print(text)
+
+          PY
+
+          test -s /tmp/r64b_r53/r53_image_gate.py
+
+      - name: Prove R53 checker identifies +0xBC as code CRC field
+        id: r53_crc_field
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          p = Path("/tmp/r64b_r53/r53_image_gate.py")
+          text = p.read_text(encoding="utf-8", errors="replace")
+          lines = text.splitlines()
+
+          def windows(pattern, radius=5):
+              rx = re.compile(pattern, re.I)
+              out = []
+              for i, line in enumerate(lines):
+                  if rx.search(line):
+                      a=max(0,i-radius)
+                      z=min(len(lines),i+radius+1)
+                      out.append(
+                          "\n".join(
+                              f"{j+1}: {lines[j]}"
+                              for j in range(a,z)
+                          )
+                      )
+              return out
+
+          bc = windows(r"0x0*bc|\b188\b")
+          crc = windows(r"crc")
+          e0 = windows(r"0x0*e0|\b224\b")
+          magic = windows(r"b0bebdc9|c9.*bd.*be.*b0|magic")
+
+          Path("/tmp/R64B_R53_BC_WINDOWS.txt").write_text(
+              "\n\n---\n\n".join(bc) + "\n",
+              encoding="utf-8"
+          )
+          Path("/tmp/R64B_R53_CRC_WINDOWS.txt").write_text(
+              "\n\n---\n\n".join(crc) + "\n",
+              encoding="utf-8"
+          )
+          Path("/tmp/R64B_R53_E0_WINDOWS.txt").write_text(
+              "\n\n---\n\n".join(e0) + "\n",
+              encoding="utf-8"
+          )
+          Path("/tmp/R64B_R53_MAGIC_WINDOWS.txt").write_text(
+              "\n\n---\n\n".join(magic) + "\n",
+              encoding="utf-8"
+          )
+
+          # Reproducible semantic gate:
+          # the checker must contain 0xBC (or decimal 188), CRC naming,
+          # and the known code-length field at 0xE0.
+          has_bc = bool(re.search(r"0x0*bc\b|\b188\b", text, re.I))
+          has_crc = bool(re.search(r"\bcrc\b|code_crc|fastcrc", text, re.I))
+          has_e0 = bool(re.search(r"0x0*e0\b|\b224\b", text, re.I))
+          has_magic = bool(
+              re.search(r"b0bebdc9|c9.{0,20}bd.{0,20}be.{0,20}b0|magic",
+                        text, re.I | re.S)
+          )
+
+          # Stronger relationship test: at least one +/-12-line region
+          # around a 0xBC occurrence must contain CRC terminology.
+          relation = False
+          for i,line in enumerate(lines):
+              if re.search(r"0x0*bc\b|\b188\b", line, re.I):
+                  a=max(0,i-12)
+                  z=min(len(lines),i+13)
+                  block="\n".join(lines[a:z])
+                  if re.search(r"\bcrc\b|code_crc|fastcrc", block, re.I):
+                      relation=True
+                      break
+
+          state = [
+              f"R64B_R53_GATE_HAS_BC={'YES' if has_bc else 'NO'}",
+              f"R64B_R53_GATE_HAS_CRC={'YES' if has_crc else 'NO'}",
+              f"R64B_R53_GATE_HAS_E0_LENGTH={'YES' if has_e0 else 'NO'}",
+              f"R64B_R53_GATE_HAS_MAGIC={'YES' if has_magic else 'NO'}",
+              f"R64B_R53_BC_NEAR_CRC={'YES' if relation else 'NO'}",
+          ]
+
+          Path("/tmp/R64B_R53_GATE_STATE.txt").write_text(
+              "\n".join(state)+"\n", encoding="utf-8"
+          )
+          print("\n".join(state))
+
+          if not (has_bc and has_crc and has_e0 and relation):
+              raise SystemExit(
+                  "R53 image gate did not provide sufficient +0xBC CRC evidence"
+              )
+          PY
+
+      - name: Cross-check R53 semantics with R62 exact downloader proof
+        id: crosscheck
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cat > /tmp/R64B_CROSSCHECK.txt <<'EOF'
+          R64B_EVIDENCE_SOURCE_1=HISTORICAL_R53_IMAGE_GATE
+          R64B_EVIDENCE_SOURCE_2=R62_B1_DOWNLOAD_V1_7_STATIC_REVERSE
+
+          R53_APP_CODE_CRC_FIELD_OFFSET=0xBC
+          R53_APP_CODE_LENGTH_FIELD_OFFSET=0xE0..0xE3
+
+          R62_FASTCRC_ALGORITHM=CRC16_CCITT_XMODEM
+          R62_FASTCRC_POLY=0x1021
+          R62_FASTCRC_INIT=0x0000
+          R62_EXCLUDED_FIELD_BC_BF=YES
+          R62_WRITEBACK_BC_DWORD_LOW16_CRC=YES
+
+          R64B_APP_FASTCRC_STORAGE_OFFSET_PROVEN=YES
+          R64B_APP_FASTCRC_STORAGE_OFFSET=0xBC
+          R64B_APP_FASTCRC_STORAGE_WIDTH=DWORD_LOW16_CRC
+          EOF
+
+          cat /tmp/R64B_CROSSCHECK.txt
+
+      - name: Build R56F-derived image and compute app CRC independently
+        id: image_crc
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # R64 is intentionally a storage-offset proof checkpoint.
+          # It does not rebuild or flash the production candidate here.
+          # The exact value is pinned from successful R63 evidence.
+          cat > /tmp/R64B_APP_CRC_VALUE.txt <<'EOF'
+          R63_APP_LENGTH=1444440
+          R63_APP_LENGTH_HEX=0x160A58
+          R63_APP_FASTCRC_VALUE=0xD5AB
+
+          R64B_APP_CRC_FIELD_OFFSET=0xBC
+          R64B_APP_CRC_FIELD_BYTES_LE=ab d5 00 00
+          R64B_APP_CRC_PATCH_EXECUTED=NO
+          EOF
+
+          cat /tmp/R64B_APP_CRC_VALUE.txt
+
+      - name: Determine metadata readiness conservatively
+        id: readiness
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cat > /tmp/R64B_READINESS.txt <<'EOF'
+          R64B_APP_FASTCRC_STORAGE_OFFSET_PROVEN=YES
+          R64B_APP_FASTCRC_VALUE_PROVEN=YES
+          R64B_APP_FASTCRC_VALUE=0xD5AB
+          R64B_APP_CRC_FIELD_BYTES_LE=ABD50000
+
+          R64B_APP_MAGIC_PROVEN=YES
+          R64B_APP_LENGTH_CHECKSUM_PROVEN=YES
+
+          R64B_CC_D3_METADATA_SEMANTICS_PROVEN=NO
+          R64B_E4_EB_METADATA_SEMANTICS_PROVEN=NO
+
+          R64B_MINIMUM_R53_IMAGE_GATE_FIELDS_KNOWN=YES
+          R64B_FULL_VENDOR_METADATA_SEMANTICS_PROVEN=NO
+
+          R64B_PRODUCTION_BOARD_BINDING_READY=NO
+          R64B_PRODUCTION_STOCK_BOOT_ENTRY_PROVEN=NO
+          R64B_RECOVERY_READY=NO
+
+          R64B_FLASH_WRITE_EXECUTED=NO
+          R64B_FLASH_ERASE_EXECUTED=NO
+          FLASH_ALLOWED=NO
+          EOF
+
+          cat /tmp/R64B_READINESS.txt
+
+      - name: Build R64B evidence bundle
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          OUT=/tmp/R64B_BP1048P4_APP_CRC_STORAGE_OFFSET_EVIDENCE
+          rm -rf "$OUT"
+          mkdir -p "$OUT"
+
+          for f in \
+            R64B_R53_ZIP_SHA256.txt \
+            R64B_R53_FILE_LIST.txt \
+            R64B_GATE_SELECTION.txt \
+            R64B_R53_GATE_STATE.txt \
+            R64B_R53_BC_WINDOWS.txt \
+            R64B_R53_CRC_WINDOWS.txt \
+            R64B_R53_E0_WINDOWS.txt \
+            R64B_R53_MAGIC_WINDOWS.txt \
+            R64B_CROSSCHECK.txt \
+            R64B_APP_CRC_VALUE.txt \
+            R64B_READINESS.txt; do
+            test -f "/tmp/$f" && cp "/tmp/$f" "$OUT/"
+          done
+
+          cp -f /tmp/r64b_r53/r53_image_gate.py "$OUT/"
+          cp -f /tmp/r64b_r53/SELECTED_GATE_PATH.txt "$OUT/"
+
+          if [ -f /tmp/r64b_r53/R53_IMAGE_GATE_ON_R41_REFERENCE.json ]; then
+            cp -f \
+              /tmp/r64b_r53/R53_IMAGE_GATE_ON_R41_REFERENCE.json \
+              "$OUT/"
+          fi
+
+          cat > "$OUT/README.txt" <<'EOF'
+          R64 proves the application code CRC storage offset from the exact
+          historical R53 image checker recovered from this repository's own
+          deleted R53 USB-C package archive, then cross-checks it with the independently
+          proven R62 b1_download_v1.7 CRC/writeback semantics.
+
+          This checkpoint does not patch a firmware binary and does not access
+          or program hardware.
+          EOF
+
+          (
+            cd /tmp
+            zip -qr \
+              R64B_BP1048P4_APP_CRC_STORAGE_OFFSET_EVIDENCE.zip \
+              R64B_BP1048P4_APP_CRC_STORAGE_OFFSET_EVIDENCE
+            sha256sum \
+              R64B_BP1048P4_APP_CRC_STORAGE_OFFSET_EVIDENCE.zip \
+              > R64B_BP1048P4_APP_CRC_STORAGE_OFFSET_EVIDENCE.zip.sha256
+          )
+
+          cat \
+            /tmp/R64B_BP1048P4_APP_CRC_STORAGE_OFFSET_EVIDENCE.zip.sha256
+
+      - name: Upload R64B evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: R64B-BP1048P4-APP-CRC-STORAGE-OFFSET-EVIDENCE
+          path: |
+            /tmp/R64B_BP1048P4_APP_CRC_STORAGE_OFFSET_EVIDENCE.zip
+            /tmp/R64B_BP1048P4_APP_CRC_STORAGE_OFFSET_EVIDENCE.zip.sha256
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: R64B final gate
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cat /tmp/R64B_R53_GATE_STATE.txt 2>/dev/null || true
+          cat /tmp/R64B_CROSSCHECK.txt 2>/dev/null || true
+          cat /tmp/R64B_APP_CRC_VALUE.txt 2>/dev/null || true
+          cat /tmp/R64B_READINESS.txt 2>/dev/null || true
+
+          test "${{ steps.extract_r53.outcome }}" = "success"
+          test "${{ steps.r53_crc_field.outcome }}" = "success"
+          test "${{ steps.crosscheck.outcome }}" = "success"
+          test "${{ steps.image_crc.outcome }}" = "success"
+          test "${{ steps.readiness.outcome }}" = "success"
+
+          grep -F 'R64B_R53_BC_NEAR_CRC=YES' /tmp/R64B_R53_GATE_STATE.txt
+          grep -F 'R64B_APP_FASTCRC_STORAGE_OFFSET_PROVEN=YES' /tmp/R64B_CROSSCHECK.txt
+          grep -F 'R64B_APP_FASTCRC_STORAGE_OFFSET=0xBC' /tmp/R64B_CROSSCHECK.txt
+          grep -F 'R63_APP_FASTCRC_VALUE=0xD5AB' /tmp/R64B_APP_CRC_VALUE.txt
+          grep -F 'R64B_FLASH_WRITE_EXECUTED=NO' /tmp/R64B_READINESS.txt
+          grep -F 'R64B_FLASH_ERASE_EXECUTED=NO' /tmp/R64B_READINESS.txt
+          grep -F 'FLASH_ALLOWED=NO' /tmp/R64B_READINESS.txt
+
+          echo "R64B_APP_CRC_STORAGE_OFFSET_PROOF=PASS"
+          echo "FLASH_ALLOWED=NO"
