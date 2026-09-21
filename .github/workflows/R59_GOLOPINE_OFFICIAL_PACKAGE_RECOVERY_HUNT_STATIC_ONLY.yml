@@ -1,0 +1,479 @@
+name: R59 GoloPine official package recovery hunt static only
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: r59-golopine-official-package-hunt-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  WIN_URL: https://golodsp.com/wp-content/uploads/2026/05/golopine_audio_turning_release_2026-04-08.exe_.zip
+  APK_URL: https://golodsp.com/wp-content/uploads/2026/05/golopine_audio_turning_release_2026-04-01.apk_.zip
+
+jobs:
+  r59-static-official-package-hunt:
+    name: Static scan official GoloPine packages / NO EXECUTION / NO FLASH
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Install static-analysis prerequisites
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            curl unzip zip file binutils python3
+
+      - name: Download official GoloPine packages
+        id: download
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p /tmp/r59/downloads
+
+          curl -fL --retry 3 --retry-delay 2 \
+            "$WIN_URL" \
+            -o /tmp/r59/downloads/golopine_windows_2026-04-08.zip
+
+          curl -fL --retry 3 --retry-delay 2 \
+            "$APK_URL" \
+            -o /tmp/r59/downloads/golopine_android_2026-04-01.zip
+
+          test -s /tmp/r59/downloads/golopine_windows_2026-04-08.zip
+          test -s /tmp/r59/downloads/golopine_android_2026-04-01.zip
+
+          unzip -t /tmp/r59/downloads/golopine_windows_2026-04-08.zip
+          unzip -t /tmp/r59/downloads/golopine_android_2026-04-01.zip
+
+          sha256sum /tmp/r59/downloads/*.zip \
+            | tee /tmp/r59/OFFICIAL_DOWNLOAD_SHA256.txt
+
+          file /tmp/r59/downloads/*.zip \
+            | tee /tmp/r59/OFFICIAL_DOWNLOAD_FILETYPES.txt
+
+      - name: Extract package file lists without executing vendor code
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p /tmp/r59/win /tmp/r59/android
+
+          unzip -q /tmp/r59/downloads/golopine_windows_2026-04-08.zip \
+            -d /tmp/r59/win
+          unzip -q /tmp/r59/downloads/golopine_android_2026-04-01.zip \
+            -d /tmp/r59/android
+
+          {
+            echo "=== WINDOWS ZIP ==="
+            find /tmp/r59/win -type f -printf '%P\t%s\n' | sort
+            echo
+            echo "=== ANDROID ZIP ==="
+            find /tmp/r59/android -type f -printf '%P\t%s\n' | sort
+          } | tee /tmp/r59/OFFICIAL_PACKAGE_FILE_LIST.txt
+
+      - name: Recursively inventory nested archives
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python3 - <<'PY'
+          from pathlib import Path
+          import io
+          import zipfile
+          import hashlib
+
+          roots = [
+              Path("/tmp/r59/win"),
+              Path("/tmp/r59/android"),
+          ]
+
+          out = []
+          max_depth = 4
+
+          def walk_zip(data, label, depth):
+              if depth > max_depth:
+                  return
+              try:
+                  with zipfile.ZipFile(io.BytesIO(data)) as z:
+                      for info in z.infolist():
+                          if info.is_dir():
+                              continue
+                          name = info.filename
+                          out.append(
+                              f"ZIP\tdepth={depth}\t{label}!{name}\t{info.file_size}"
+                          )
+                          lower = name.lower()
+                          if lower.endswith((".zip", ".apk", ".jar")):
+                              try:
+                                  nested = z.read(info)
+                                  walk_zip(nested, f"{label}!{name}", depth + 1)
+                              except Exception as e:
+                                  out.append(
+                                      f"NESTED_READ_ERROR\t{label}!{name}\t{e}"
+                                  )
+              except zipfile.BadZipFile:
+                  pass
+
+          for root in roots:
+              for p in root.rglob("*"):
+                  if not p.is_file():
+                      continue
+                  rel = p.relative_to(root)
+                  label = f"{root.name}/{rel.as_posix()}"
+                  data = p.read_bytes()
+                  out.append(
+                      "FILE\t"
+                      f"{label}\t{len(data)}\t"
+                      f"{hashlib.sha256(data).hexdigest()}"
+                  )
+                  if p.suffix.lower() in {".zip", ".apk", ".jar"}:
+                      walk_zip(data, label, 1)
+
+          Path("/tmp/r59/NESTED_ARCHIVE_INVENTORY.txt").write_text(
+              "\n".join(out) + "\n",
+              encoding="utf-8",
+          )
+          print("\n".join(out[:300]))
+          PY
+
+      - name: Static recovery and firmware candidate scan
+        id: scan
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python3 - <<'PY'
+          from pathlib import Path
+          import io
+          import re
+          import zipfile
+          import hashlib
+          import json
+
+          roots = [
+              ("windows", Path("/tmp/r59/win")),
+              ("android", Path("/tmp/r59/android")),
+          ]
+
+          firmware_exts = {
+              ".mva", ".bin", ".img", ".fw", ".rom",
+              ".ota", ".dfu", ".hex", ".dat"
+          }
+
+          sigs = {
+              "MVA_MAGIC_4D56B158": bytes.fromhex("4d 56 b1 58"),
+              "APP_MAGIC_C9BDBEB0": bytes.fromhex("c9 bd be b0"),
+          }
+
+          ascii_needles = [
+              b"MVB1X",
+              b"FastCRC",
+              b"fastcrc",
+              b"code_crc",
+              b"boot_crc",
+              b"code_len",
+              b"boot_len",
+              b"ActualCode CRC",
+              b"ActualCode",
+              b"01PKG",
+              b"02PKG",
+              b"03PKG",
+              b"04PKG",
+              b"05PKG",
+              b"chiperas",
+              b"codedata",
+              b"bootdat",
+              b"constdat",
+              b"cnfgdat",
+              b"btupdat",
+              b"upinfo",
+              b"cxxx",
+          ]
+
+          findings = []
+          candidates = []
+          seen_sha = set()
+
+          def scan_blob(label, data, depth=0):
+              sha = hashlib.sha256(data).hexdigest()
+              key = (sha, label)
+              # Keep duplicate labels, but avoid exploding on same nested binary.
+              for name, sig in sigs.items():
+                  start = 0
+                  hits = []
+                  while True:
+                      i = data.find(sig, start)
+                      if i < 0:
+                          break
+                      hits.append(i)
+                      start = i + 1
+                      if len(hits) >= 64:
+                          break
+                  if hits:
+                      findings.append({
+                          "kind": "binary_signature",
+                          "label": label,
+                          "signature": name,
+                          "offsets": hits,
+                          "sha256": sha,
+                          "size": len(data),
+                      })
+
+              for needle in ascii_needles:
+                  if needle in data:
+                      findings.append({
+                          "kind": "ascii",
+                          "label": label,
+                          "needle": needle.decode("ascii", errors="replace"),
+                          "sha256": sha,
+                          "size": len(data),
+                      })
+
+              suffix = Path(label.split("!")[-1]).suffix.lower()
+              if suffix in firmware_exts:
+                  candidates.append({
+                      "label": label,
+                      "suffix": suffix,
+                      "size": len(data),
+                      "sha256": sha,
+                  })
+
+              if depth >= 4:
+                  return
+
+              suffix = Path(label.split("!")[-1]).suffix.lower()
+              if suffix in {".zip", ".apk", ".jar"}:
+                  try:
+                      with zipfile.ZipFile(io.BytesIO(data)) as z:
+                          for info in z.infolist():
+                              if info.is_dir():
+                                  continue
+                              try:
+                                  child = z.read(info)
+                              except Exception:
+                                  continue
+                              scan_blob(
+                                  f"{label}!{info.filename}",
+                                  child,
+                                  depth + 1,
+                              )
+                  except zipfile.BadZipFile:
+                      pass
+
+          for root_name, root in roots:
+              for p in root.rglob("*"):
+                  if not p.is_file():
+                      continue
+                  scan_blob(
+                      f"{root_name}/{p.relative_to(root).as_posix()}",
+                      p.read_bytes(),
+                      0,
+                  )
+
+          Path("/tmp/r59/STATIC_SCAN_FINDINGS.json").write_text(
+              json.dumps(findings, indent=2, ensure_ascii=False) + "\n",
+              encoding="utf-8",
+          )
+          Path("/tmp/r59/FIRMWARE_CANDIDATES.json").write_text(
+              json.dumps(candidates, indent=2, ensure_ascii=False) + "\n",
+              encoding="utf-8",
+          )
+
+          with Path("/tmp/r59/STATIC_SCAN_SUMMARY.txt").open(
+              "w", encoding="utf-8"
+          ) as f:
+              f.write(f"FINDINGS={len(findings)}\n")
+              f.write(f"FIRMWARE_CANDIDATES={len(candidates)}\n")
+              f.write(
+                  "MVA_MAGIC_HITS=" +
+                  str(sum(
+                      1 for x in findings
+                      if x.get("signature") == "MVA_MAGIC_4D56B158"
+                  )) + "\n"
+              )
+              f.write(
+                  "APP_MAGIC_HITS=" +
+                  str(sum(
+                      1 for x in findings
+                      if x.get("signature") == "APP_MAGIC_C9BDBEB0"
+                  )) + "\n"
+              )
+
+          print(Path("/tmp/r59/STATIC_SCAN_SUMMARY.txt").read_text(), end="")
+          print("=== candidates ===")
+          for x in candidates[:100]:
+              print(
+                  x["suffix"], x["size"], x["sha256"], x["label"],
+                  sep="\t"
+              )
+          print("=== signature/string findings ===")
+          for x in findings[:200]:
+              print(json.dumps(x, ensure_ascii=False))
+          PY
+
+      - name: Scan EXE and APK printable strings without execution
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          : > /tmp/r59/INTERESTING_STRINGS.txt
+
+          find /tmp/r59/win /tmp/r59/android -type f -print0 |
+          while IFS= read -r -d '' f; do
+            case "${f,,}" in
+              *.exe|*.dll|*.apk|*.dex|*.so|*.dat|*.bin)
+                {
+                  echo "===== $f ====="
+                  strings -a -n 5 "$f" 2>/dev/null |
+                    grep -Eai \
+                      'MVB1X|FastCRC|code_crc|boot_crc|code_len|boot_len|ActualCode|01PKG|02PKG|03PKG|04PKG|05PKG|chiperas|codedata|bootdat|constdat|cnfgdat|btupdat|upinfo|cxxx|\.mva|\.bin|\.img|\.fw|\.rom|\.ota|\.dfu|\.hex' \
+                      | head -n 500 || true
+                } >> /tmp/r59/INTERESTING_STRINGS.txt
+                ;;
+            esac
+          done
+
+          sed -n '1,1200p' /tmp/r59/INTERESTING_STRINGS.txt
+
+      - name: Check whether official packages contain a recovery-capable image
+        id: decision
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python3 - <<'PY'
+          from pathlib import Path
+          import json
+
+          findings = json.loads(
+              Path("/tmp/r59/STATIC_SCAN_FINDINGS.json").read_text(
+                  encoding="utf-8"
+              )
+          )
+          candidates = json.loads(
+              Path("/tmp/r59/FIRMWARE_CANDIDATES.json").read_text(
+                  encoding="utf-8"
+              )
+          )
+
+          mva = [
+              x for x in findings
+              if x.get("signature") == "MVA_MAGIC_4D56B158"
+          ]
+          app = [
+              x for x in findings
+              if x.get("signature") == "APP_MAGIC_C9BDBEB0"
+          ]
+
+          # Discovery only.  Presence is not enough to call anything safe.
+          recovery_candidate = bool(mva or candidates)
+          complete_image_candidate = bool(app)
+
+          lines = [
+              f"R59_MVA_MAGIC_FOUND={'YES' if mva else 'NO'}",
+              f"R59_FIRMWARE_EXTENSION_CANDIDATE_FOUND={'YES' if candidates else 'NO'}",
+              f"R59_APP_MAGIC_FOUND={'YES' if app else 'NO'}",
+              f"R59_RECOVERY_CANDIDATE_DISCOVERED={'YES' if recovery_candidate else 'NO'}",
+              f"R59_COMPLETE_IMAGE_CANDIDATE_DISCOVERED={'YES' if complete_image_candidate else 'NO'}",
+              "R59_RECOVERY_VALIDATED=NO",
+              "R59_PRODUCTION_LAYOUT_PROVEN=NO",
+              "R59_FLASH_COMMAND_EXECUTED=NO",
+              "FLASH_ALLOWED=NO",
+          ]
+
+          Path("/tmp/r59/R59_DECISION.txt").write_text(
+              "\n".join(lines) + "\n",
+              encoding="utf-8",
+          )
+          print("\n".join(lines))
+          PY
+
+      - name: Build R59 evidence bundle
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          OUT=/tmp/R59_GOLOPINE_OFFICIAL_PACKAGE_RECOVERY_HUNT_EVIDENCE
+          rm -rf "$OUT"
+          mkdir -p "$OUT"
+
+          cp -f /tmp/r59/OFFICIAL_DOWNLOAD_SHA256.txt "$OUT/" 2>/dev/null || true
+          cp -f /tmp/r59/OFFICIAL_DOWNLOAD_FILETYPES.txt "$OUT/" 2>/dev/null || true
+          cp -f /tmp/r59/OFFICIAL_PACKAGE_FILE_LIST.txt "$OUT/" 2>/dev/null || true
+          cp -f /tmp/r59/NESTED_ARCHIVE_INVENTORY.txt "$OUT/" 2>/dev/null || true
+          cp -f /tmp/r59/STATIC_SCAN_FINDINGS.json "$OUT/" 2>/dev/null || true
+          cp -f /tmp/r59/FIRMWARE_CANDIDATES.json "$OUT/" 2>/dev/null || true
+          cp -f /tmp/r59/STATIC_SCAN_SUMMARY.txt "$OUT/" 2>/dev/null || true
+          cp -f /tmp/r59/INTERESTING_STRINGS.txt "$OUT/" 2>/dev/null || true
+          cp -f /tmp/r59/R59_DECISION.txt "$OUT/" 2>/dev/null || true
+
+          cat > "$OUT/R59_STATUS.txt" <<'EOF'
+          R59 GOLOPINE OFFICIAL PACKAGE RECOVERY HUNT
+          MODE=STATIC_ONLY
+          VENDOR_BINARY_EXECUTION=NO
+          BOARD_USB_ACCESS=NO
+          FLASH_ERASE_PROGRAM=NO
+
+          Source packages:
+          - official GoloPine Windows tuning package 08-Apr-2026
+          - official GoloPine Android tuning package 01-Apr-2026
+
+          Purpose:
+          - find authentic MVA/full-image/recovery artifacts or metadata evidence
+          - do not infer flash safety merely from finding a candidate
+          EOF
+
+          (
+            cd /tmp
+            zip -qr \
+              R59_GOLOPINE_OFFICIAL_PACKAGE_RECOVERY_HUNT_EVIDENCE.zip \
+              R59_GOLOPINE_OFFICIAL_PACKAGE_RECOVERY_HUNT_EVIDENCE
+            sha256sum \
+              R59_GOLOPINE_OFFICIAL_PACKAGE_RECOVERY_HUNT_EVIDENCE.zip \
+              > R59_GOLOPINE_OFFICIAL_PACKAGE_RECOVERY_HUNT_EVIDENCE.zip.sha256
+          )
+
+          cat \
+            /tmp/R59_GOLOPINE_OFFICIAL_PACKAGE_RECOVERY_HUNT_EVIDENCE.zip.sha256
+
+      - name: Upload R59 evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: R59-GOLOPINE-OFFICIAL-PACKAGE-RECOVERY-HUNT-EVIDENCE
+          path: |
+            /tmp/R59_GOLOPINE_OFFICIAL_PACKAGE_RECOVERY_HUNT_EVIDENCE.zip
+            /tmp/R59_GOLOPINE_OFFICIAL_PACKAGE_RECOVERY_HUNT_EVIDENCE.zip.sha256
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: R59 final gate
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cat /tmp/r59/STATIC_SCAN_SUMMARY.txt 2>/dev/null || true
+          cat /tmp/r59/R59_DECISION.txt 2>/dev/null || true
+
+          test -s /tmp/r59/OFFICIAL_DOWNLOAD_SHA256.txt
+          test -s /tmp/r59/OFFICIAL_PACKAGE_FILE_LIST.txt
+          test -s /tmp/r59/STATIC_SCAN_FINDINGS.json
+          test -s /tmp/r59/FIRMWARE_CANDIDATES.json
+          test -s /tmp/r59/R59_DECISION.txt
+
+          grep -F 'R59_FLASH_COMMAND_EXECUTED=NO' /tmp/r59/R59_DECISION.txt
+          grep -F 'FLASH_ALLOWED=NO' /tmp/r59/R59_DECISION.txt
+
+          echo "R59_STATIC_OFFICIAL_PACKAGE_HUNT=PASS"
+          echo "FLASH_ALLOWED=NO"
