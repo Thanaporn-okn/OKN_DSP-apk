@@ -1,0 +1,522 @@
+name: R54B BP1048P4 R51 NDS32 target link fix proof
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "OKN_BP1048P4_R51_CLEANROOM_FW.zip"
+      - ".github/workflows/R54B_BP1048P4_R51_NDS32_TARGET_LINK_FIX_NOT_FOR_FLASH.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: r54b-bp1048p4-r51-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  R51_ZIP: OKN_BP1048P4_R51_CLEANROOM_FW.zip
+  R51_SHA256: 758d96d0d7d7b5bc4d4c16a94d2f6819040e2da355a7b0fef276dba0387b7059
+  SDK_REPO: https://github.com/leadercxn/bp1048_sdk_v0.1.12.git
+  SDK_COMMIT: 8105bd864b04995d81c9f9ae77cb158259f39015
+  SDK_LD_GIT_BLOB_SHA1: 0ce6fd3e6c50d699c92400f2e9f338e05d9b7c18
+  ANDES_REPO: https://github.com/Ai-Thinker-Open/Andestech.git
+  ANDES_COMMIT: eb189accd6dc601a93272f714e0f959d597ead66
+
+jobs:
+  r54-target-compile:
+    name: NDS32 target compile / retained USB link proof / NOT FOR FLASH
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Install host prerequisites
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            git \
+            unzip \
+            zip \
+            xz-utils \
+            libc6-i386 \
+            lib32z1 \
+            python3
+
+      - name: Verify and unpack pinned R51
+        id: r51
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          test -f "$R51_ZIP"
+          echo "$R51_SHA256  $R51_ZIP" | sha256sum -c -
+
+          rm -rf /tmp/r54_r51
+          mkdir -p /tmp/r54_r51
+          unzip -q "$R51_ZIP" -d /tmp/r54_r51
+
+          ROOT="$(find /tmp/r54_r51 -type f -name Makefile -printf '%h\n' | head -n1)"
+          test -n "$ROOT"
+          test -d "$ROOT/firmware"
+
+          echo "root=$ROOT" >> "$GITHUB_OUTPUT"
+          echo "R51_ROOT=$ROOT" >> "$GITHUB_ENV"
+          echo "R51 root: $ROOT"
+
+      - name: Re-run R51 safety audits
+        shell: bash
+        working-directory: ${{ steps.r51.outputs.root }}
+        run: |
+          set -euo pipefail
+
+          python3 tools/audit_no_eq_gain.py
+
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          p = Path("firmware/control/okn_usb_proto.c")
+          s = p.read_text(encoding="utf-8", errors="replace")
+
+          m = re.search(
+              r"#ifndef\s+OKN_ENABLE_BOOT_JUMP\s*"
+              r"#define\s+OKN_ENABLE_BOOT_JUMP\s+([01])",
+              s,
+              re.S,
+          )
+          if not m:
+              raise SystemExit("FAIL: OKN_ENABLE_BOOT_JUMP definition not found")
+          if m.group(1) != "0":
+              raise SystemExit("FAIL: boot jump must remain disabled")
+          print("PASS: boot jump disabled")
+          PY
+
+      - name: Fetch pinned public BP1048 SDK
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          rm -rf /tmp/bp1048
+          git init -q /tmp/bp1048
+          git -C /tmp/bp1048 remote add origin "$SDK_REPO"
+          git -C /tmp/bp1048 fetch --depth 1 origin "$SDK_COMMIT"
+          git -C /tmp/bp1048 checkout -q --detach FETCH_HEAD
+
+          test "$(git -C /tmp/bp1048 rev-parse HEAD)" = "$SDK_COMMIT"
+          test -f /tmp/bp1048/BT_Audio_APP/nds32-ae210p.ld
+
+      - name: Verify SDK linker fingerprint
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          LD=/tmp/bp1048/BT_Audio_APP/nds32-ae210p.ld
+          GOT="$(git hash-object "$LD")"
+
+          echo "SDK linker blob: $GOT"
+          test "$GOT" = "$SDK_LD_GIT_BLOB_SHA1"
+
+          grep -F 'ENTRY(_start)' "$LD"
+          grep -F 'PROVIDE (__executable_start = 0x000000)' "$LD"
+          grep -F 'PROVIDE (_stack = 0x20004000)' "$LD"
+
+      - name: Fetch pinned Andes NDS32 v3s toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          rm -rf /tmp/andes
+          git init -q /tmp/andes
+          git -C /tmp/andes remote add origin "$ANDES_REPO"
+          git -C /tmp/andes fetch --depth 1 origin "$ANDES_COMMIT"
+          git -C /tmp/andes checkout -q --detach FETCH_HEAD
+
+          test "$(git -C /tmp/andes rev-parse HEAD)" = "$ANDES_COMMIT"
+
+          TC=/tmp/andes/BSPv422/toolchains/nds32le-elf-mculib-v3s
+          test -x "$TC/bin/nds32le-elf-gcc"
+
+          echo "TOOLCHAIN=$TC" >> "$GITHUB_ENV"
+          echo "$TC/bin" >> "$GITHUB_PATH"
+
+      - name: Verify NDS32 toolchain and BP1048 flags
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          nds32le-elf-gcc --version | tee /tmp/R54_TOOLCHAIN_VERSION.txt
+          nds32le-elf-ld --version | head -n2 | tee -a /tmp/R54_TOOLCHAIN_VERSION.txt
+          nds32le-elf-objcopy --version | head -n2 | tee -a /tmp/R54_TOOLCHAIN_VERSION.txt
+
+          test "$(nds32le-elf-gcc -dumpmachine)" = "nds32le-elf"
+
+          cat > /tmp/r54_probe.c <<'EOF'
+          volatile int r54_probe_sink;
+          int r54_probe(int x) { return (x * 3) + 1; }
+          EOF
+
+          nds32le-elf-gcc \
+            -std=gnu11 \
+            -Os \
+            -mcpu=d1088-spu \
+            -mcmodel=medium \
+            -mext-dsp \
+            -mext-zol \
+            -ffunction-sections \
+            -fdata-sections \
+            -c /tmp/r54_probe.c \
+            -o /tmp/r54_probe.o
+
+          nds32le-elf-readelf -h /tmp/r54_probe.o | tee /tmp/R54_PROBE_READELF.txt
+          nds32le-elf-objdump -d /tmp/r54_probe.o > /tmp/R54_PROBE_DISASM.txt
+          test -s /tmp/r54_probe.o
+
+      - name: Cross-compile R51 clean-room core for NDS32
+        shell: bash
+        working-directory: ${{ steps.r51.outputs.root }}
+        run: |
+          set -euo pipefail
+
+          rm -rf /tmp/r54_obj
+          mkdir -p /tmp/r54_obj
+
+          COMMON=(
+            -std=gnu11
+            -Os
+            -g3
+            -mcpu=d1088-spu
+            -mcmodel=medium
+            -mext-dsp
+            -mext-zol
+            -fsingle-precision-constant
+            -ffunction-sections
+            -fdata-sections
+            -ffreestanding
+            -fno-builtin
+            -Wall
+            -Wextra
+            -Werror
+          )
+
+          INC=(
+            -Ifirmware/include
+            -Ifirmware/dsp
+            -Ifirmware/audio
+            -Ifirmware/control
+            -Ifirmware/platform
+          )
+
+          SRCS=(
+            firmware/app/okn_r51.c
+            firmware/dsp/okn_gain7.c
+            firmware/dsp/okn_peq7.c
+            firmware/audio/okn_router7.c
+            firmware/control/okn_usb_proto.c
+            firmware/platform/bp1048p4_port_TEMPLATE.c
+          )
+
+          : > /tmp/R54_COMPILE_COMMANDS.txt
+
+          for src in "${SRCS[@]}"; do
+            base="$(basename "${src%.c}")"
+            obj="/tmp/r54_obj/${base}.o"
+
+            printf 'nds32le-elf-gcc %q ' "${COMMON[@]}" "${INC[@]}" >> /tmp/R54_COMPILE_COMMANDS.txt
+            printf '%q ' -c "$src" -o "$obj" >> /tmp/R54_COMPILE_COMMANDS.txt
+            printf '\n' >> /tmp/R54_COMPILE_COMMANDS.txt
+
+            nds32le-elf-gcc \
+              "${COMMON[@]}" \
+              "${INC[@]}" \
+              -c "$src" \
+              -o "$obj"
+
+            test -s "$obj"
+          done
+
+          nds32le-elf-ar rcs /tmp/libokn_r51_bp1048p4.a /tmp/r54_obj/*.o
+          nds32le-elf-nm -a /tmp/libokn_r51_bp1048p4.a > /tmp/R54_CORE_SYMBOLS.txt
+
+          for sym in \
+            okn_r51_init \
+            okn_r51_process_stereo \
+            okn_gain7_apply \
+            okn_peq7_apply \
+            okn_usb_proto_handle
+          do
+            grep -Eq "[[:space:]]${sym}$" /tmp/R54_CORE_SYMBOLS.txt || {
+              echo "Missing target symbol: $sym" >&2
+              exit 1
+            }
+          done
+
+          sha256sum /tmp/r54_obj/*.o /tmp/libokn_r51_bp1048p4.a \
+            > /tmp/R54_TARGET_OBJECT_SHA256.txt
+
+      - name: Build CI-only NDS32 link harness
+        shell: bash
+        working-directory: ${{ steps.r51.outputs.root }}
+        run: |
+          set -euo pipefail
+
+          mkdir -p /tmp/r54_link
+
+          cat > /tmp/r54_link/r54_start.c <<'EOF'
+          #include <stddef.h>
+          #include <stdint.h>
+          #include "okn_r51.h"
+
+          static volatile okn_r51_frame7_t g_r54_probe_frame;
+
+          void *memcpy(void *dst, const void *src, size_t n)
+          {
+              size_t i;
+              unsigned char *d = (unsigned char *)dst;
+              const unsigned char *s = (const unsigned char *)src;
+              for (i = 0; i < n; ++i) d[i] = s[i];
+              return dst;
+          }
+
+          void *memset(void *dst, int c, size_t n)
+          {
+              size_t i;
+              unsigned char *d = (unsigned char *)dst;
+              for (i = 0; i < n; ++i) d[i] = (unsigned char)c;
+              return dst;
+          }
+
+          __attribute__((section(".startup_section"), noreturn))
+          void _start(void)
+          {
+              okn_r51_init(48000u);
+              okn_r51_process_stereo(0, 0, (okn_r51_frame7_t *)&g_r54_probe_frame);
+              for (;;) {
+                  __asm__ volatile ("nop");
+              }
+          }
+          EOF
+
+          nds32le-elf-gcc \
+            -std=gnu11 \
+            -Os \
+            -g3 \
+            -mcpu=d1088-spu \
+            -mcmodel=medium \
+            -mext-dsp \
+            -mext-zol \
+            -ffunction-sections \
+            -fdata-sections \
+            -ffreestanding \
+            -fno-builtin \
+            -Wall \
+            -Wextra \
+            -Werror \
+            -Ifirmware/include \
+            -c /tmp/r54_link/r54_start.c \
+            -o /tmp/r54_link/r54_start.o
+
+      - name: Link NDS32 analysis ELF and BIN
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ELF=/tmp/R54_BP1048P4_R51_TARGET_COMPILE_NOT_FOR_FLASH.elf
+          BIN=/tmp/R54_BP1048P4_R51_TARGET_COMPILE_NOT_FOR_FLASH.bin
+          MAP=/tmp/R54_BP1048P4_R51_TARGET_COMPILE_NOT_FOR_FLASH.map
+          LD=/tmp/bp1048/BT_Audio_APP/nds32-ae210p.ld
+
+          nds32le-elf-gcc \
+            -static \
+            -nostartfiles \
+            -nostdlib \
+            -g3 \
+            -mcpu=d1088-spu \
+            -mcmodel=medium \
+            -mext-dsp \
+            -mext-zol \
+            -Wl,--gc-sections \
+            -Wl,-u,okn_usb_proto_handle \
+            -Wl,-Map,"$MAP" \
+            -T "$LD" \
+            -o "$ELF" \
+            /tmp/r54_link/r54_start.o \
+            /tmp/libokn_r51_bp1048p4.a \
+            -lgcc
+
+          nds32le-elf-objcopy -O binary "$ELF" "$BIN"
+          nds32le-elf-size "$ELF" | tee /tmp/R54_SIZE.txt
+          nds32le-elf-readelf -h -S -l "$ELF" > /tmp/R54_READELF.txt
+          nds32le-elf-readelf -Ws "$ELF" > /tmp/R54_SYMBOLS_READELF.txt
+          nds32le-elf-readelf -rW "$ELF" > /tmp/R54_RELOCATIONS.txt
+          nds32le-elf-nm -a -C "$ELF" > /tmp/R54_FINAL_SYMBOLS.txt
+          nds32le-elf-objdump -d "$ELF" > /tmp/R54_DISASM.txt
+
+          test -s "$ELF"
+          test -s "$BIN"
+          test -s "$MAP"
+
+          sha256sum "$ELF" "$BIN" "$MAP" \
+            > /tmp/R54_IMAGE_SHA256.txt
+
+      - name: Gate target ELF architecture and symbols
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          grep -Eq 'Machine:.*(Andes|NDS32|nds32)' /tmp/R54_READELF.txt || {
+            echo "ELF is not recognized as NDS32/Andes" >&2
+            sed -n '1,80p' /tmp/R54_READELF.txt >&2
+            exit 1
+          }
+
+          for sym in \
+            _start \
+            okn_r51_init \
+            okn_r51_process_stereo \
+            okn_gain7_apply \
+            okn_peq7_apply \
+            okn_usb_proto_handle
+          do
+            grep -Eq "[[:space:]]${sym}$" /tmp/R54_FINAL_SYMBOLS.txt || {
+              echo "Missing final ELF symbol: $sym" >&2
+              exit 1
+            }
+          done
+
+          awk '$7=="UND" && ($5=="GLOBAL" || $5=="WEAK") {print}' \
+            /tmp/R54_SYMBOLS_READELF.txt \
+            > /tmp/R54_RUNTIME_UNRESOLVED.txt
+
+          if [ -s /tmp/R54_RUNTIME_UNRESOLVED.txt ]; then
+            echo "Runtime GLOBAL/WEAK unresolved symbols:" >&2
+            cat /tmp/R54_RUNTIME_UNRESOLVED.txt >&2
+            exit 1
+          fi
+
+          if grep -Eq '^Relocation section ' /tmp/R54_RELOCATIONS.txt; then
+            echo "Unexpected relocation section in final static ELF" >&2
+            cat /tmp/R54_RELOCATIONS.txt >&2
+            exit 1
+          fi
+
+          echo "PASS: NDS32 target ELF linked with pinned BP1048 SDK linker"
+          echo "PASS: R51 7CH Gain/PEQ/USB core symbols present"
+          echo "PASS: no runtime GLOBAL/WEAK unresolved symbols"
+
+      - name: Create NOT-FOR-FLASH safety manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cat > /tmp/R54_NOT_FOR_FLASH.txt <<'EOF'
+          R54B BP1048P4 / R51 NDS32 TARGET COMPILE/LINK PROOF
+
+          STATUS: NOT FOR FLASH
+
+          What this artifact proves:
+          - R51 clean-room core cross-compiles for nds32le-elf.
+          - Build flags match the BP1048 SDK project family:
+              -mcpu=d1088-spu
+              -mcmodel=medium
+              -mext-dsp
+              -mext-zol
+          - Link uses the pinned public BP1048 SDK nds32-ae210p.ld.
+          - The final analysis ELF has no runtime GLOBAL/WEAK unresolved symbols.
+          - okn_usb_proto_handle is explicitly retained in the final ELF with
+            -Wl,-u,okn_usb_proto_handle so --gc-sections cannot discard the
+            otherwise-unreferenced USB protocol object in this CI-only harness.
+          - Dedicated 7-channel Gain remains separate from PEQ.
+
+          What this artifact DOES NOT prove:
+          - Production board startup contract.
+          - Exact GoloPine board pinmux / clock / DMA ownership.
+          - Real seven-output audio sink binding.
+          - Stock USB descriptor / endpoint integration.
+          - First-flash boot-entry, erase/program protocol, readback, rollback or recovery.
+          - Safe replacement of the production firmware image.
+
+          The generated .bin is an analysis/link proof only.
+          DO NOT write this .bin to a physical board.
+          EOF
+
+          {
+            echo "R54B build metadata"
+            echo "github_sha=$GITHUB_SHA"
+            echo "sdk_commit=$SDK_COMMIT"
+            echo "andes_commit=$ANDES_COMMIT"
+            echo "r51_sha256=$R51_SHA256"
+            echo "sdk_linker_blob_sha1=$SDK_LD_GIT_BLOB_SHA1"
+            echo "utc=$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+          } > /tmp/R54_BUILD_METADATA.txt
+
+      - name: Package R54 evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          OUT=/tmp/R54B_BP1048P4_R51_NDS32_TARGET_LINK_FIX_NOT_FOR_FLASH
+          rm -rf "$OUT"
+          mkdir -p "$OUT/objects"
+
+          cp /tmp/R54_BP1048P4_R51_TARGET_COMPILE_NOT_FOR_FLASH.elf "$OUT/"
+          cp /tmp/R54_BP1048P4_R51_TARGET_COMPILE_NOT_FOR_FLASH.bin "$OUT/"
+          cp /tmp/R54_BP1048P4_R51_TARGET_COMPILE_NOT_FOR_FLASH.map "$OUT/"
+          cp /tmp/libokn_r51_bp1048p4.a "$OUT/"
+
+          cp /tmp/R54_NOT_FOR_FLASH.txt "$OUT/"
+          cp /tmp/R54_BUILD_METADATA.txt "$OUT/"
+          cp /tmp/R54_TOOLCHAIN_VERSION.txt "$OUT/"
+          cp /tmp/R54_PROBE_READELF.txt "$OUT/"
+          cp /tmp/R54_PROBE_DISASM.txt "$OUT/"
+          cp /tmp/R54_COMPILE_COMMANDS.txt "$OUT/"
+          cp /tmp/R54_TARGET_OBJECT_SHA256.txt "$OUT/"
+          cp /tmp/R54_IMAGE_SHA256.txt "$OUT/"
+          cp /tmp/R54_SIZE.txt "$OUT/"
+          cp /tmp/R54_READELF.txt "$OUT/"
+          cp /tmp/R54_SYMBOLS_READELF.txt "$OUT/"
+          cp /tmp/R54_RELOCATIONS.txt "$OUT/"
+          cp /tmp/R54_RUNTIME_UNRESOLVED.txt "$OUT/"
+          cp /tmp/R54_FINAL_SYMBOLS.txt "$OUT/"
+          cp /tmp/R54_DISASM.txt "$OUT/"
+
+          cp /tmp/r54_obj/*.o "$OUT/objects/"
+
+          (
+            cd /tmp
+            zip -qr R54B_BP1048P4_R51_NDS32_TARGET_LINK_FIX_NOT_FOR_FLASH.zip \
+              R54B_BP1048P4_R51_NDS32_TARGET_LINK_FIX_NOT_FOR_FLASH
+            sha256sum R54B_BP1048P4_R51_NDS32_TARGET_LINK_FIX_NOT_FOR_FLASH.zip \
+              > R54B_BP1048P4_R51_NDS32_TARGET_LINK_FIX_NOT_FOR_FLASH.zip.sha256
+          )
+
+          cat /tmp/R54B_BP1048P4_R51_NDS32_TARGET_LINK_FIX_NOT_FOR_FLASH.zip.sha256
+
+      - name: Upload R54 target compile evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: R54B-BP1048P4-R51-NDS32-LINK-FIX-NOT-FOR-FLASH
+          path: |
+            /tmp/R54B_BP1048P4_R51_NDS32_TARGET_LINK_FIX_NOT_FOR_FLASH.zip
+            /tmp/R54B_BP1048P4_R51_NDS32_TARGET_LINK_FIX_NOT_FOR_FLASH.zip.sha256
+            /tmp/R54_NOT_FOR_FLASH.txt
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: R54 final gate
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          test -s /tmp/R54_BP1048P4_R51_TARGET_COMPILE_NOT_FOR_FLASH.elf
+          test -s /tmp/R54_BP1048P4_R51_TARGET_COMPILE_NOT_FOR_FLASH.bin
+          test -s /tmp/R54_BP1048P4_R51_TARGET_COMPILE_NOT_FOR_FLASH.map
+          test -s /tmp/libokn_r51_bp1048p4.a
+          test -s /tmp/R54_NOT_FOR_FLASH.txt
+
+          echo "R54B TARGET COMPILE/LINK: PASS"
+          echo "Artifact remains NOT FOR FLASH."
