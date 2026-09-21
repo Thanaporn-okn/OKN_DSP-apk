@@ -1,0 +1,1666 @@
+name: R56F BP1048P4 R51 real 7CH audio path type header fix proof
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "OKN_BP1048P4_R51_CLEANROOM_FW.zip"
+      - ".github/workflows/R56F_BP1048P4_R51_REAL_7CH_AUDIO_PATH_TYPE_HEADER_FIX_NOT_FOR_FLASH.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: r56f-bp1048p4-r51-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  R51_ZIP: OKN_BP1048P4_R51_CLEANROOM_FW.zip
+  R51_SHA256: 758d96d0d7d7b5bc4d4c16a94d2f6819040e2da355a7b0fef276dba0387b7059
+  SDK_REPO: https://github.com/leadercxn/bp1048_sdk_v0.1.12.git
+  SDK_COMMIT: 8105bd864b04995d81c9f9ae77cb158259f39015
+  ANDES_REPO: https://github.com/Ai-Thinker-Open/Andestech.git
+  ANDES_COMMIT: eb189accd6dc601a93272f714e0f959d597ead66
+
+jobs:
+  r55-vendor-runtime-integration:
+    name: Full vendor link + real 7CH audio path + HID proof / NOT FOR FLASH
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Install host prerequisites
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            git unzip zip python3 libc6-i386 lib32z1
+
+      - name: Verify and unpack pinned R51
+        id: r51
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f "$R51_ZIP"
+          echo "$R51_SHA256  $R51_ZIP" | sha256sum -c -
+
+          rm -rf /tmp/r55_r51
+          mkdir -p /tmp/r55_r51
+          unzip -q "$R51_ZIP" -d /tmp/r55_r51
+
+          ROOT="$(find /tmp/r55_r51 -type f -name Makefile -printf '%h\n' | head -n1)"
+          test -n "$ROOT"
+          test -d "$ROOT/firmware"
+          echo "R51_ROOT=$ROOT" >> "$GITHUB_ENV"
+          echo "root=$ROOT" >> "$GITHUB_OUTPUT"
+
+      - name: Re-run R51 no-EQ-gain and boot safety gates
+        shell: bash
+        working-directory: ${{ steps.r51.outputs.root }}
+        run: |
+          set -euo pipefail
+          python3 tools/audit_no_eq_gain.py
+
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+          s = Path("firmware/control/okn_usb_proto.c").read_text(
+              encoding="utf-8", errors="replace"
+          )
+          m = re.search(
+              r"#ifndef\s+OKN_ENABLE_BOOT_JUMP\s*"
+              r"#define\s+OKN_ENABLE_BOOT_JUMP\s+([01])",
+              s, re.S
+          )
+          if not m or m.group(1) != "0":
+              raise SystemExit("R51 boot jump is not safely disabled")
+          print("PASS: R51 boot jump disabled")
+          PY
+
+      - name: Fetch pinned public BP1048 SDK
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/bp1048
+          git init -q /tmp/bp1048
+          git -C /tmp/bp1048 remote add origin "$SDK_REPO"
+          git -C /tmp/bp1048 fetch --depth 1 origin "$SDK_COMMIT"
+          git -C /tmp/bp1048 checkout -q --detach FETCH_HEAD
+          test "$(git -C /tmp/bp1048 rev-parse HEAD)" = "$SDK_COMMIT"
+          test -f /tmp/bp1048/BT_Audio_APP/nds32-ae210p.ld
+
+      - name: Select BP1048P4 without changing hardware configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          p = Path("/tmp/bp1048/BT_Audio_APP/bt_audio_app_src/inc/app_config.h")
+          s = p.read_text(encoding="latin-1")
+
+          s, n1 = re.subn(
+              r"(?m)^[ \t]*#define[ \t]+CFG_CHIP_BP10128\b.*$",
+              "// R55 disabled original target: CFG_CHIP_BP10128",
+              s,
+              count=1,
+          )
+          s, n2 = re.subn(
+              r"(?m)^[ \t]*//[ \t]*#define[ \t]+CFG_CHIP_BP1048P4\b.*$",
+              "#define  CFG_CHIP_BP1048P4",
+              s,
+              count=1,
+          )
+
+          if n1 != 1 or n2 != 1:
+              raise SystemExit(
+                  f"chip target patch mismatch: BP10128={n1} BP1048P4={n2}"
+              )
+
+          p.write_text(s, encoding="latin-1")
+
+          active = re.findall(
+              r"(?m)^[ \t]*#define[ \t]+(CFG_CHIP_[A-Za-z0-9_]+)\b",
+              s
+          )
+          if active != ["CFG_CHIP_BP1048P4"]:
+              raise SystemExit(f"unexpected active chip macros: {active}")
+
+          if not re.search(
+              r"(?m)^[ \t]*#define[ \t]+CFG_COMMUNICATION_BY_USB\b", s
+          ):
+              raise SystemExit("vendor SDK USB communication path is not enabled")
+
+          print("PASS: target=BP1048P4")
+          print("PASS: vendor CFG_COMMUNICATION_BY_USB is enabled")
+          PY
+
+      - name: Fetch pinned Andes NDS32 toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/andes
+          git init -q /tmp/andes
+          git -C /tmp/andes remote add origin "$ANDES_REPO"
+          git -C /tmp/andes fetch --depth 1 origin "$ANDES_COMMIT"
+          git -C /tmp/andes checkout -q --detach FETCH_HEAD
+          test "$(git -C /tmp/andes rev-parse HEAD)" = "$ANDES_COMMIT"
+
+          TC=/tmp/andes/BSPv422/toolchains/nds32le-elf-mculib-v3s
+          test -x "$TC/bin/nds32le-elf-gcc"
+          echo "$TC/bin" >> "$GITHUB_PATH"
+
+      - name: Verify NDS32 compiler
+        shell: bash
+        run: |
+          set -euo pipefail
+          nds32le-elf-gcc --version | tee /tmp/R55_TOOLCHAIN.txt
+          test "$(nds32le-elf-gcc -dumpmachine)" = "nds32le-elf"
+
+      - name: Repair Windows-origin header case on Linux
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          root = Path("/tmp/bp1048")
+          bases = [
+              root / "BT_Audio_APP",
+              root / "MVsB1_Base_SDK" / "driver",
+              root / "MVsB1_Base_SDK" / "middleware",
+              root / "develop_lib",
+          ]
+
+          headers = []
+          for base in bases:
+              if base.exists():
+                  headers.extend(
+                      p for p in base.rglob("*")
+                      if p.is_file() and p.suffix.lower() in {".h", ".hpp"}
+                  )
+
+          by_lower = {}
+          for p in headers:
+              by_lower.setdefault(p.name.lower(), []).append(p)
+
+          rx = re.compile(r'^\s*#\s*include\s*[<"]([^">]+)[">]', re.M)
+          spellings = set()
+
+          for base in bases:
+              if not base.exists():
+                  continue
+              for p in base.rglob("*"):
+                  if not p.is_file() or p.suffix.lower() not in {
+                      ".c", ".h", ".hpp", ".s"
+                  }:
+                      continue
+                  try:
+                      text = p.read_bytes().decode("latin-1")
+                  except OSError:
+                      continue
+                  for inc in rx.findall(text):
+                      if "/" not in inc and "\\" not in inc:
+                          spellings.add(inc)
+
+          made = 0
+          for inc in sorted(spellings):
+              for target in by_lower.get(inc.lower(), []):
+                  alias = target.with_name(inc)
+                  if alias.name == target.name or alias.exists():
+                      continue
+                  try:
+                      alias.symlink_to(target.name)
+                  except OSError:
+                      alias.write_bytes(target.read_bytes())
+                  made += 1
+
+          must = root / "MVsB1_Base_SDK/middleware/rtos/freertos/inc/freertos.h"
+          if not must.exists():
+              raise SystemExit("freertos.h compatibility alias was not created")
+
+          print("Created case aliases:", made)
+          PY
+
+      - name: Patch vendor HID runtime to dispatch OKN2 while preserving stock protocol
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import re, shutil
+
+          sdk = Path("/tmp/bp1048")
+          r51 = Path(__import__("os").environ["R51_ROOT"])
+          c = sdk / "BT_Audio_APP/bt_audio_app_src/audio/communication.c"
+          before = c.read_text(encoding="latin-1")
+
+          # Keep a byte-for-byte baseline for evidence.
+          Path("/tmp/R55_communication_before.c").write_text(
+              before, encoding="latin-1"
+          )
+
+          include_anchor = '#include "main_task.h"'
+          if before.count(include_anchor) != 1:
+              raise SystemExit("communication include anchor mismatch")
+
+          s = before.replace(
+              include_anchor,
+              include_anchor + '\n#include "okn_r51.h"',
+              1
+          )
+
+          def function_span(text, signature):
+              start = text.find(signature)
+              if start < 0:
+                  raise SystemExit(f"function not found: {signature}")
+              brace = text.find("{", start)
+              if brace < 0:
+                  raise SystemExit(f"open brace not found: {signature}")
+              depth = 0
+              for i in range(brace, len(text)):
+                  ch = text[i]
+                  if ch == "{":
+                      depth += 1
+                  elif ch == "}":
+                      depth -= 1
+                      if depth == 0:
+                          return start, brace, i + 1
+              raise SystemExit(f"unterminated function: {signature}")
+
+          # 1) Runtime initialization hook: initialize only DSP state.
+          # No MMIO, no pinmux, no flash operation.
+          a, b, e = function_span(s, "void Communication_Effect_Init(void)")
+          body = s[a:e]
+          if "okn_r51_init(" in body:
+              raise SystemExit("R51 init hook already present unexpectedly")
+          body = body[:-1] + (
+              "\n\t/* R55 clean-room DSP state init; no hardware writes. */\n"
+              "\tokn_r51_init(gCtrlVars.sample_rate);\n"
+              "}"
+          )
+          s = s[:a] + body + s[e:]
+
+          # 2) Real vendor USB receive hook.
+          a, b, e = function_span(s, "void HIDUsb_Rx(uint8_t *buf,uint16_t len)")
+          old_hid = s[a:e]
+          if "UsbLoadAudioMode(len,buf);" not in old_hid:
+              raise SystemExit("stock HIDUsb_Rx fallback anchor missing")
+
+          new_hid = r'''void HIDUsb_Rx(uint8_t *buf,uint16_t len)
+          {
+          #ifdef CFG_COMMUNICATION_BY_USB
+              static uint8_t okn_r55_reply[OKN_R51_USB_REPORT_BYTES];
+
+              /*
+               * R55: reserve only the OKN2 256-byte namespace.
+               * Every non-OKN2 packet falls through unchanged to the
+               * vendor A5 5A ... 16 protocol.
+               */
+              if ((buf != NULL) &&
+                  (len == OKN_R51_USB_REPORT_BYTES) &&
+                  (buf[0] == 'O') && (buf[1] == 'K') &&
+                  (buf[2] == 'N') && (buf[3] == '2'))
+              {
+                  if (okn_r51_handle_usb_report(buf, okn_r55_reply))
+                  {
+                      /*
+                       * Vendor Communication_Effect_Send already copies
+                       * 256 bytes into hid_tx_buf when USB communication
+                       * is enabled. No endpoint/MMIO is guessed here.
+                       */
+                      Communication_Effect_Send(
+                          okn_r55_reply,
+                          OKN_R51_USB_REPORT_BYTES
+                      );
+                  }
+                  gCtrlVars.IsEffectChangedByPcTool = 1;
+                  return;
+              }
+
+              UsbLoadAudioMode(len,buf);
+          #endif
+          }'''
+          s = s[:a] + new_hid + s[e:]
+
+          c.write_text(s, encoding="latin-1")
+          Path("/tmp/R55_communication_after.c").write_text(
+              s, encoding="latin-1"
+          )
+
+          # Copy R51 source into a dedicated integration tree.
+          dst = Path("/tmp/r55_okn")
+          if dst.exists():
+              shutil.rmtree(dst)
+          shutil.copytree(r51 / "firmware", dst / "firmware")
+
+          # Static gates on the patch itself.
+          after = c.read_text(encoding="latin-1")
+          _, _, hid_end = function_span(
+              after, "void HIDUsb_Rx(uint8_t *buf,uint16_t len)"
+          )
+          hid_start = after.find("void HIDUsb_Rx(uint8_t *buf,uint16_t len)")
+          hid = after[hid_start:hid_end]
+
+          required = [
+              "okn_r51_handle_usb_report",
+              "Communication_Effect_Send",
+              "UsbLoadAudioMode(len,buf);",
+              "OKN_R51_USB_REPORT_BYTES",
+          ]
+          for item in required:
+              if item not in hid:
+                  raise SystemExit(f"patched HID path missing: {item}")
+
+          if after.count("okn_r51_init(gCtrlVars.sample_rate);") != 1:
+              raise SystemExit("R51 init hook count is not exactly one")
+
+          print("PASS: vendor HID path patched")
+          print("PASS: stock UsbLoadAudioMode fallback preserved")
+          print("PASS: R51 init hooked into Communication_Effect_Init")
+          PY
+
+          diff -u \
+            /tmp/R55_communication_before.c \
+            /tmp/R55_communication_after.c \
+            > /tmp/R55_COMMUNICATION_PATCH.diff || true
+
+          test -s /tmp/R55_COMMUNICATION_PATCH.diff
+
+      - name: Patch R56 real seven-output audio sample path
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p /tmp/r56gen
+
+          cat > /tmp/r56gen/okn_r56_audio_bridge.h <<'EOFH'
+          #ifndef OKN_R56_AUDIO_BRIDGE_H
+          #define OKN_R56_AUDIO_BRIDGE_H
+
+          #include <stdint.h>
+
+          void okn_r56_audio_init(uint32_t sample_rate, uint16_t frames);
+          void okn_r56_audio_process(int16_t *dac0_lr,
+                                     int16_t *dacx_mono,
+                                     uint16_t frames);
+          uint8_t okn_r56_audio_space_ok(uint16_t frames);
+          uint8_t okn_r56_audio_push(uint16_t frames);
+
+          #endif
+          EOFH
+
+          cat > /tmp/r56gen/okn_r56_audio_bridge.c <<'EOFC'
+          #include <stddef.h>
+          #include <stdint.h>
+          #include <string.h>
+
+          /*
+           * MVSilicon dma.h uses bool but does not include type.h itself.
+           * Include the SDK type definition explicitly before dma.h.
+           */
+          #include "type.h"
+          #include "dma.h"
+          #include "gpio.h"
+          #include "i2s.h"
+          #include "i2s_interface.h"
+
+          #include "okn_r51.h"
+          #include "okn_r56_audio_bridge.h"
+
+          /*
+           * R56 uses the two I2S pin groups documented by the public BP1048 SDK.
+           * This is still NOT production-board pinout proof.
+           */
+          #define OKN_R56_MAX_FRAMES 512u
+
+          static uint32_t s_i2s0_fifo[OKN_R56_MAX_FRAMES * 2u];
+          static uint32_t s_i2s1_fifo[OKN_R56_MAX_FRAMES * 2u];
+          static int16_t  s_i2s0_out[OKN_R56_MAX_FRAMES * 2u];
+          static int16_t  s_i2s1_out[OKN_R56_MAX_FRAMES * 2u];
+
+          static uint16_t s_frames;
+          static uint8_t  s_ready;
+
+          static int16_t sat16(int32_t x)
+          {
+              if (x > 32767) return 32767;
+              if (x < -32768) return -32768;
+              return (int16_t)x;
+          }
+
+          static void i2s0_reference_pins(void)
+          {
+              GPIO_PortAModeSet(GPIOA0, 9); /* MCLK */
+              GPIO_PortAModeSet(GPIOA1, 6); /* LRCLK */
+              GPIO_PortAModeSet(GPIOA2, 5); /* BCLK */
+              GPIO_PortAModeSet(GPIOA3, 7); /* DOUT */
+              GPIO_PortAModeSet(GPIOA4, 1); /* DIN */
+          }
+
+          static void i2s1_reference_pins(void)
+          {
+              GPIO_PortAModeSet(GPIOA7, 5);  /* MCLK */
+              GPIO_PortAModeSet(GPIOA8, 1);  /* LRCLK */
+              GPIO_PortAModeSet(GPIOA9, 2);  /* BCLK */
+              GPIO_PortAModeSet(GPIOA10, 4); /* DOUT */
+              GPIO_PortAModeSet(GPIOA11, 2); /* DIN */
+          }
+
+          static void init_one(I2S_MODULE module,
+                               uint8_t peripheral,
+                               void *fifo,
+                               uint32_t sample_rate,
+                               uint16_t frames)
+          {
+              I2SParamCt p;
+              memset(&p, 0, sizeof(p));
+              p.IsMasterMode = 0u;
+              p.SampleRate = sample_rate;
+              p.I2sFormat = I2S_FORMAT_I2S;
+              p.I2sBits = I2S_LENGTH_16BITS;
+              p.I2sTxRxEnable = 1u;
+              p.TxPeripheralID = peripheral;
+              p.TxBuf = fifo;
+              p.TxLen = (uint16_t)(frames * 8u);
+              AudioI2S_Init(module, &p);
+          }
+
+          void okn_r56_audio_init(uint32_t sample_rate, uint16_t frames)
+          {
+              if ((sample_rate == 0u) ||
+                  (frames == 0u) ||
+                  (frames > OKN_R56_MAX_FRAMES))
+              {
+                  s_ready = 0u;
+                  return;
+              }
+
+              s_frames = frames;
+              memset(s_i2s0_fifo, 0, sizeof(s_i2s0_fifo));
+              memset(s_i2s1_fifo, 0, sizeof(s_i2s1_fifo));
+              memset(s_i2s0_out, 0, sizeof(s_i2s0_out));
+              memset(s_i2s1_out, 0, sizeof(s_i2s1_out));
+
+              i2s0_reference_pins();
+              i2s1_reference_pins();
+
+              init_one(I2S0_MODULE,
+                       PERIPHERAL_ID_I2S0_TX,
+                       s_i2s0_fifo,
+                       sample_rate,
+                       frames);
+              init_one(I2S1_MODULE,
+                       PERIPHERAL_ID_I2S1_TX,
+                       s_i2s1_fifo,
+                       sample_rate,
+                       frames);
+
+              s_ready = 1u;
+          }
+
+          void okn_r56_audio_process(int16_t *dac0_lr,
+                                     int16_t *dacx_mono,
+                                     uint16_t frames)
+          {
+              uint16_t i;
+
+              if (!s_ready || !dac0_lr || (frames != s_frames))
+              {
+                  return;
+              }
+
+              for (i = 0u; i < frames; ++i)
+              {
+                  okn_r51_frame7_t out;
+
+                  /*
+                   * Input is the vendor DAC0 stereo buffer AFTER vendor sink/master
+                   * volume. R51 then performs, independently for every channel:
+                   *
+                   *   routing -> 15-band PEQ -> dedicated channel Gain
+                   */
+                  okn_r51_process_stereo(
+                      (int32_t)dac0_lr[2u * i + 0u],
+                      (int32_t)dac0_lr[2u * i + 1u],
+                      &out
+                  );
+
+                  /* CH1 / CH2 -> DAC0 L / R */
+                  dac0_lr[2u * i + 0u] = sat16(out.sample[OKN_CH1_DAC0_L]);
+                  dac0_lr[2u * i + 1u] = sat16(out.sample[OKN_CH2_DAC0_R]);
+
+                  /* CH3 -> DACX mono logical lane */
+                  if (dacx_mono != NULL)
+                  {
+                      dacx_mono[i] = sat16(out.sample[OKN_CH3_DACX_MONO]);
+                  }
+
+                  /* CH4 / CH5 -> I2S0 L / R */
+                  s_i2s0_out[2u * i + 0u] =
+                      sat16(out.sample[OKN_CH4_I2S0_L]);
+                  s_i2s0_out[2u * i + 1u] =
+                      sat16(out.sample[OKN_CH5_I2S0_R]);
+
+                  /* CH6 / CH7 -> I2S1 L / R */
+                  s_i2s1_out[2u * i + 0u] =
+                      sat16(out.sample[OKN_CH6_I2S1_L]);
+                  s_i2s1_out[2u * i + 1u] =
+                      sat16(out.sample[OKN_CH7_I2S1_R]);
+              }
+          }
+
+          uint8_t okn_r56_audio_space_ok(uint16_t frames)
+          {
+              if (!s_ready)
+              {
+                  /* Fail open for the vendor DAC path if sidecar is unavailable. */
+                  return 1u;
+              }
+              if (frames != s_frames)
+              {
+                  return 0u;
+              }
+
+              return (uint8_t)(
+                  (AudioI2S0_DataSpaceLenGet() >= frames) &&
+                  (AudioI2S1_DataSpaceLenGet() >= frames)
+              );
+          }
+
+          uint8_t okn_r56_audio_push(uint16_t frames)
+          {
+              if (!s_ready)
+              {
+                  return 1u;
+              }
+              if (!okn_r56_audio_space_ok(frames))
+              {
+                  return 0u;
+              }
+
+              (void)AudioI2S0_DataSet(s_i2s0_out, frames);
+              (void)AudioI2S1_DataSet(s_i2s1_out, frames);
+              return 1u;
+          }
+          EOFC
+
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          sdk = Path("/tmp/bp1048")
+          main = sdk / "BT_Audio_APP/bt_audio_app_src/apps/main_task.c"
+          core = sdk / "BT_Audio_APP/bt_audio_app_src/services/audio_core_api.c"
+          app = sdk / "BT_Audio_APP/bt_audio_app_src/inc/app_config.h"
+
+          app_text = app.read_text(encoding="latin-1")
+
+          if re.search(
+              r"(?m)^[ \t]*#define[ \t]+CFG_COMMUNICATION_BY_UART\b",
+              app_text
+          ):
+              raise SystemExit(
+                  "R56 refuses DMA6/7 dual-I2S while UART tuning is enabled"
+              )
+
+          if re.search(
+              r"(?m)^[ \t]*#define[ \t]+CFG_RES_AUDIO_I2SOUT_EN\b",
+              app_text
+          ):
+              raise SystemExit(
+                  "R56 expects vendor single-I2S sink disabled; dual-I2S sidecar owns both ports"
+              )
+
+          if not re.search(
+              r"(?m)^[ \t]*#define[ \t]+CFG_RES_AUDIO_DAC0_EN\b",
+              app_text
+          ):
+              raise SystemExit("R56 requires DAC0")
+          if not re.search(
+              r"(?m)^[ \t]*#define[ \t]+CFG_RES_AUDIO_DACX_EN\b",
+              app_text
+          ):
+              raise SystemExit("R56 requires DACX logical lane")
+
+          def function_span(text, signature):
+              # Scan every occurrence and accept only a real definition:
+              # after the signature, optional whitespace must lead directly to "{";
+              # a prototype ending in ";" is rejected.
+              matches = []
+              pos = 0
+
+              while True:
+                  start = text.find(signature, pos)
+                  if start < 0:
+                      break
+
+                  j = start + len(signature)
+                  while j < len(text) and text[j].isspace():
+                      j += 1
+
+                  if j < len(text) and text[j] == "{":
+                      matches.append((start, j))
+
+                  pos = start + len(signature)
+
+              if len(matches) != 1:
+                  raise SystemExit(
+                      f"function definition match count for {signature}: "
+                      f"{len(matches)}"
+                  )
+
+              start, brace = matches[0]
+              depth = 0
+              for i in range(brace, len(text)):
+                  if text[i] == "{":
+                      depth += 1
+                  elif text[i] == "}":
+                      depth -= 1
+                      if depth == 0:
+                          return start, brace, i + 1
+
+              raise SystemExit(f"unterminated function: {signature}")
+
+          # ---------------- main_task.c ----------------
+          m_before = main.read_text(encoding="latin-1")
+          m = m_before
+
+          # Evidence for prototype-vs-definition selection.
+          audio_res_occ = []
+          p = 0
+          sig = "void AudioResInit(void)"
+          while True:
+              p = m.find(sig, p)
+              if p < 0:
+                  break
+              tail = m[p + len(sig):p + len(sig) + 32]
+              audio_res_occ.append((p, repr(tail)))
+              p += len(sig)
+          print("AudioResInit occurrences:", audio_res_occ)
+
+          inc = '#include "i2s_interface.h"'
+          if m.count(inc) != 1:
+              raise SystemExit("main_task include anchor mismatch")
+          m = m.replace(
+              inc,
+              inc + '\n#include "okn_r51.h"\n#include "okn_r56_audio_bridge.h"',
+              1
+          )
+
+          # Public SDK allocates only one selected I2S TX channel.
+          # USB HID tuning leaves DMA6/7 available, so R56 reserves both.
+          pat0 = (
+              r'#if[^\n]*CFG_RES_AUDIO_I2SOUT_EN[^\n]*CFG_RES_I2S_PORT==0[^\n]*\n'
+              r'\s*7,//PERIPHERAL_ID_I2S0_TX[^\n]*\n'
+              r'#else[^\n]*\n'
+              r'\s*255,//PERIPHERAL_ID_I2S0_TX[^\n]*\n'
+              r'#endif[^\n]*\n'
+          )
+          m, n0 = re.subn(
+              pat0,
+              '\t6,//PERIPHERAL_ID_I2S0_TX, R56 dual output\n',
+              m,
+              count=1
+          )
+
+          pat1 = (
+              r'#if[^\n]*CFG_RES_AUDIO_I2SOUT_EN[^\n]*CFG_RES_I2S_PORT==1[^\n]*\n'
+              r'\s*7,?\s*//PERIPHERAL_ID_I2S1_TX[^\n]*\n'
+              r'#else[^\n]*\n'
+              r'\s*255,//PERIPHERAL_ID_I2S1_TX[^\n]*\n'
+              r'#endif[^\n]*\n'
+          )
+          m, n1 = re.subn(
+              pat1,
+              '\t7,//PERIPHERAL_ID_I2S1_TX, R56 dual output\n',
+              m,
+              count=1
+          )
+
+          if (n0, n1) != (1, 1):
+              raise SystemExit(
+                  f"R56 DMA map patch mismatch: i2s0={n0} i2s1={n1}"
+              )
+
+          # Initial runtime init after DAC0/DACX sinks exist.
+          sink_marker = (
+              '\tAudioCoreSinkEnable(AUDIO_DACX_SINK_NUM);\n'
+              '#endif\n\n'
+              '#ifdef CFG_RES_AUDIO_I2SOUT_EN'
+          )
+          if m.count(sink_marker) != 1:
+              raise SystemExit("main initial sink marker mismatch")
+
+          sink_repl = (
+              '\tAudioCoreSinkEnable(AUDIO_DACX_SINK_NUM);\n'
+              '#endif\n\n'
+              '\t/* R56: initialize R51 DSP before audio service starts. */\n'
+              '\tokn_r51_init(mainAppCt.SampleRate);\n'
+              '\tokn_r56_audio_init(mainAppCt.SampleRate, '
+              'mainAppCt.SamplesPreFrame);\n\n'
+              '#ifdef CFG_RES_AUDIO_I2SOUT_EN'
+          )
+          m = m.replace(sink_marker, sink_repl, 1)
+
+          # Frame-size resource reinitialization path.
+          a, b, e = function_span(m, "void AudioResInit(void)")
+          body = m[a:e]
+          if "okn_r56_audio_init(" in body:
+              raise SystemExit("AudioResInit hook already present unexpectedly")
+          body = body[:-1] + (
+              "\n\t/* R56: follow vendor frame-size/resource reconfiguration. */\n"
+              "\tokn_r56_audio_init(mainAppCt.SampleRate, "
+              "mainAppCt.SamplesPreFrame);\n"
+              "}"
+          )
+          m = m[:a] + body + m[e:]
+
+          # Structural proof: prototype must remain a semicolon declaration,
+          # while the real definition contains the R56 re-init hook.
+          if "void AudioResInit(void);" not in m:
+              raise SystemExit("AudioResInit prototype was altered")
+
+          da, db, de = function_span(m, "void AudioResInit(void)")
+          audio_res_init_body = m[da:de]
+          if audio_res_init_body.count("okn_r56_audio_init(") != 1:
+              raise SystemExit(
+                  "R56 AudioResInit definition does not contain exactly one "
+                  "okn_r56_audio_init hook"
+              )
+
+          main.write_text(m, encoding="latin-1")
+          Path("/tmp/R56_main_task_before.c").write_text(
+              m_before, encoding="latin-1"
+          )
+          Path("/tmp/R56_main_task_after.c").write_text(
+              m, encoding="latin-1"
+          )
+
+          # ---------------- audio_core_api.c ----------------
+          c_before = core.read_text(encoding="latin-1")
+          c = c_before
+
+          inc = '#include "main_task.h"'
+          if c.count(inc) != 1:
+              raise SystemExit("audio_core include anchor mismatch")
+          c = c.replace(
+              inc,
+              inc + '\n#include "okn_r56_audio_bridge.h"',
+              1
+          )
+
+          a, b, e = function_span(c, "static bool AudioCoreSinkDataSet(void)")
+          block = c[a:e]
+
+          decl = "\tuint32_t i;\n"
+          if block.count(decl) != 1:
+              raise SystemExit("AudioCoreSinkDataSet declaration anchor mismatch")
+          block = block.replace(
+              decl,
+              decl +
+              "\tif(!okn_r56_audio_space_ok(mainAppCt.SamplesPreFrame)) "
+              "return FALSE;\n",
+              1
+          )
+
+          tail = "\treturn TRUE;\n}"
+          if block.count(tail) != 1:
+              raise SystemExit("AudioCoreSinkDataSet return anchor mismatch")
+          block = block.replace(
+              tail,
+              "\tif(!okn_r56_audio_push(mainAppCt.SamplesPreFrame)) "
+              "return FALSE;\n"
+              "\treturn TRUE;\n}",
+              1
+          )
+          c = c[:a] + block + c[e:]
+
+          a, b, e = function_span(c, "void AduioCoreSinkVolSet(void)")
+          block = c[a:e]
+          if "okn_r56_audio_process(" in block:
+              raise SystemExit("R56 audio processing hook already present")
+          block = block[:-1] + (
+              "\n\t/*\n"
+              "\t * R56 real sample hook: vendor master/sink volume has already\n"
+              "\t * been applied. R51 now executes PEQ -> dedicated Gain per CH.\n"
+              "\t */\n"
+              "#ifdef CFG_RES_AUDIO_DACX_EN\n"
+              "\tokn_r56_audio_process(\n"
+              "\t\tAudioCore.AudioSink[AUDIO_DAC0_SINK_NUM].PcmOutBuf,\n"
+              "\t\tAudioCore.AudioSink[AUDIO_DACX_SINK_NUM].PcmOutBuf,\n"
+              "\t\tmainAppCt.SamplesPreFrame);\n"
+              "#else\n"
+              "\tokn_r56_audio_process(\n"
+              "\t\tAudioCore.AudioSink[AUDIO_DAC0_SINK_NUM].PcmOutBuf,\n"
+              "\t\t(int16_t*)0,\n"
+              "\t\tmainAppCt.SamplesPreFrame);\n"
+              "#endif\n"
+              "}"
+          )
+          c = c[:a] + block + c[e:]
+
+          core.write_text(c, encoding="latin-1")
+          Path("/tmp/R56_audio_core_before.c").write_text(
+              c_before, encoding="latin-1"
+          )
+          Path("/tmp/R56_audio_core_after.c").write_text(
+              c, encoding="latin-1"
+          )
+
+          # -------- static assertions --------
+          checks = {
+              "main DMA I2S0": "PERIPHERAL_ID_I2S0_TX, R56 dual output",
+              "main DMA I2S1": "PERIPHERAL_ID_I2S1_TX, R56 dual output",
+              "main initial bridge": "okn_r56_audio_init(mainAppCt.SampleRate",
+              "core process": "okn_r56_audio_process(",
+              "core push": "okn_r56_audio_push(",
+              "core space": "okn_r56_audio_space_ok(",
+          }
+          joined = m + "\n" + c
+          for label, token in checks.items():
+              if token not in joined:
+                  raise SystemExit(f"R56 static patch missing {label}: {token}")
+
+          print("PASS: R56 vendor audio sample hook patched")
+          print("PASS: R56 DMA map reserves I2S0=6 and I2S1=7")
+          print("PASS: R56 route occurs after vendor sink/master volume")
+          PY
+
+          diff -u \
+            /tmp/R56_main_task_before.c \
+            /tmp/R56_main_task_after.c \
+            > /tmp/R56_MAIN_TASK_PATCH.diff || true
+
+          diff -u \
+            /tmp/R56_audio_core_before.c \
+            /tmp/R56_audio_core_after.c \
+            > /tmp/R56_AUDIO_CORE_PATCH.diff || true
+
+          test -s /tmp/R56_MAIN_TASK_PATCH.diff
+          test -s /tmp/R56_AUDIO_CORE_PATCH.diff
+
+          cat > /tmp/R56_AUDIO_PATH_STATE.txt <<'EOF'
+          R56_REAL_AUDIO_SAMPLE_HOOK=YES
+          R56_INPUT=VENDOR_DAC0_STEREO_AFTER_VENDOR_SINK_MASTER_VOLUME
+          R56_SIGNAL_ORDER=ROUTE->PEQ15->DEDICATED_GAIN
+          R56_EQ_AS_GAIN=NO
+          R56_CH1=DAC0_L
+          R56_CH2=DAC0_R
+          R56_CH3=DACX_MONO_LOGICAL
+          R56_CH4=I2S0_L
+          R56_CH5=I2S0_R
+          R56_CH6=I2S1_L
+          R56_CH7=I2S1_R
+          R56_I2S0_DMA=6
+          R56_I2S1_DMA=7
+          R56_I2S0_REFERENCE_PINS=GPIOA0..GPIOA4
+          R56_I2S1_REFERENCE_PINS=GPIOA7..GPIOA11
+          R56_CH3_PHYSICAL_BOARD_MAPPING=UNPROVEN
+          R56_REFERENCE_PINMUX_ON_PRODUCTION_BOARD=UNPROVEN
+          FLASH_ALLOWED=NO
+          EOF
+
+      - name: Build production include response file
+        shell: bash
+        run: |
+          set -euo pipefail
+          SDK=/tmp/bp1048
+          : > /tmp/R55_INCLUDES.rsp
+
+          for d in \
+            "$SDK/BT_Audio_APP/bt_audio_app_src/audio" \
+            "$SDK/develop_lib/util" \
+            "$SDK/develop_lib" \
+            "$SDK/develop_lib/trace" \
+            "$SDK/BT_Audio_APP/bt_audio_app_src/ai/md5" \
+            "$SDK/BT_Audio_APP/bt_audio_app_src/ai/speex/include/speex" \
+            "$SDK/BT_Audio_APP/bt_audio_app_src/ai/speex/include" \
+            "$SDK/BT_Audio_APP/bt_audio_app_src/ai/speex/libspeex" \
+            "$SDK/BT_Audio_APP/bt_audio_app_src/ai/speex" \
+            "$SDK/BT_Audio_APP/bt_audio_app_src/ai" \
+            "$SDK/BT_Audio_APP/bt_audio_app_src/inc" \
+            "$SDK/MVsB1_Base_SDK/driver/driver_api/inc/otg" \
+            "$SDK/MVsB1_Base_SDK/middleware/rtc/inc" \
+            "$SDK/MVsB1_Base_SDK/middleware/fatfs/inc" \
+            "$SDK/MVsB1_Base_SDK/middleware/user/inc" \
+            "$SDK/MVsB1_Base_SDK/middleware/bluetooth/inc" \
+            "$SDK/MVsB1_Base_SDK/middleware/audio/inc" \
+            "$SDK/MVsB1_Base_SDK/driver/driver/inc" \
+            "$SDK/MVsB1_Base_SDK/driver/driver_api/inc" \
+            "$SDK/MVsB1_Base_SDK/middleware/mv_utils/inc" \
+            "$SDK/MVsB1_Base_SDK/middleware/lrc/inc" \
+            "$SDK/MVsB1_Base_SDK/middleware/rtos/rtos_api" \
+            "$SDK/MVsB1_Base_SDK/middleware/rtos/freertos/inc" \
+            "$SDK/MVsB1_Base_SDK/middleware/flashfs/inc" \
+            "$SDK/BT_Audio_APP/bt_audio_app_src/display" \
+            "$SDK/BT_Audio_APP/bt_audio_app_src/user" \
+            "$SDK/MVsB1_Base_SDK/middleware/cec/inc" \
+            "$SDK/BT_Audio_APP/bt_audio_app_src/ble" \
+            "/tmp/r55_okn/firmware/include" \
+            "/tmp/r55_okn/firmware/dsp" \
+            "/tmp/r55_okn/firmware/audio" \
+            "/tmp/r55_okn/firmware/control" \
+            "/tmp/r55_okn/firmware/platform" \
+            "/tmp/r56gen"
+          do
+            test -d "$d" && printf '%s\n' "-I$d" >> /tmp/R55_INCLUDES.rsp
+          done
+
+          find \
+            "$SDK/BT_Audio_APP" \
+            "$SDK/MVsB1_Base_SDK/driver" \
+            "$SDK/MVsB1_Base_SDK/middleware" \
+            "$SDK/develop_lib" \
+            -type f -name '*.h' -printf '%h\n' | sort -u | while read -r d
+          do
+            grep -Fxq -- "-I$d" /tmp/R55_INCLUDES.rsp ||
+              printf '%s\n' "-I$d" >> /tmp/R55_INCLUDES.rsp
+          done
+
+      - name: Build active source graph from vendor Eclipse project
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import xml.etree.ElementTree as ET
+
+          sdk = Path("/tmp/bp1048")
+          app = sdk / "BT_Audio_APP"
+          project = ET.parse(app / ".project").getroot()
+          cproject = ET.parse(app / ".cproject").getroot()
+
+          exclusions = set()
+          for e in cproject.iter("entry"):
+              raw = e.attrib.get("excluding", "")
+              exclusions.update(x for x in raw.split("|") if x)
+
+          sources = {}
+          local = app / "bt_audio_app_src"
+          for p in local.rglob("*"):
+              if p.is_file() and p.suffix.lower() in {".c", ".s"}:
+                  logical = p.relative_to(app).as_posix()
+                  sources[p.resolve()] = logical
+
+          for link in project.iter("link"):
+              name = (link.findtext("name") or "").strip()
+              typ = (link.findtext("type") or "").strip()
+              uri = (link.findtext("locationURI") or "").strip().replace(
+                  "&amp;", "&"
+              )
+              if typ != "1" or not name.lower().endswith((".c", ".s")):
+                  continue
+
+              if uri.startswith("PARENT-1-PROJECT_LOC/"):
+                  p = sdk / uri[len("PARENT-1-PROJECT_LOC/"):]
+              elif uri.startswith("WORKSPACE_LOC/"):
+                  p = sdk / uri[len("WORKSPACE_LOC/"):]
+              else:
+                  continue
+
+              if p.is_file():
+                  sources[p.resolve()] = name
+
+          def norm(x):
+              x = x.replace("\\", "/").lower().replace("_", "")
+              while "//" in x:
+                  x = x.replace("//", "/")
+              return x.strip("/")
+
+          exn = sorted({norm(x) for x in exclusions})
+          active = []
+          excluded = []
+
+          for physical, logical in sorted(
+              sources.items(), key=lambda x: x[1].lower()
+          ):
+              ln = norm(logical)
+              matches = [e for e in exn if ln == e or ln.endswith("/" + e)]
+              if matches:
+                  excluded.append((str(physical), logical, matches[0]))
+              else:
+                  active.append((str(physical), logical))
+
+          Path("/tmp/R55_ACTIVE_SOURCES.tsv").write_text(
+              "".join(f"{p}\t{l}\n" for p, l in active),
+              encoding="utf-8",
+          )
+          Path("/tmp/R55_EXCLUDED_SOURCES.tsv").write_text(
+              "".join(f"{p}\t{l}\t{e}\n" for p, l, e in excluded),
+              encoding="utf-8",
+          )
+          Path("/tmp/R55_SOURCE_GRAPH_SUMMARY.txt").write_text(
+              f"DISCOVERED={len(sources)}\n"
+              f"ACTIVE={len(active)}\n"
+              f"EXCLUDED={len(excluded)}\n",
+              encoding="ascii",
+          )
+
+          if len(active) < 100:
+              raise SystemExit(f"unexpectedly small active graph: {len(active)}")
+
+          print(Path("/tmp/R55_SOURCE_GRAPH_SUMMARY.txt").read_text(), end="")
+          PY
+
+      - name: Compile full vendor source graph
+        id: compile_vendor
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          CC=nds32le-elf-gcc
+          COMMON=(
+            -Os -g3
+            -mcpu=d1088-spu
+            -mcmodel=medium
+            -mext-dsp
+            -mext-zol
+            -fsingle-precision-constant
+            -ffunction-sections
+            -fdata-sections
+          )
+          APP=(-DFUNC_OS_EN=1 -DCFG_APP_CONFIG -DHAVE_CONFIG_H)
+
+          rm -rf /tmp/r55obj /tmp/r55compile
+          mkdir -p /tmp/r55obj /tmp/r55compile
+          : > /tmp/R55_COMPILE_RESULTS.tsv
+
+          pass=0
+          fail=0
+          n=0
+
+          while IFS=$'\t' read -r src logical; do
+            test -n "$src" || continue
+            n=$((n+1))
+            rel="${logical%.*}.o"
+            obj="/tmp/r55obj/$rel"
+            log="/tmp/r55compile/${n}.log"
+            mkdir -p "$(dirname "$obj")"
+
+            set +e
+            "$CC" \
+              "${COMMON[@]}" \
+              @/tmp/R55_INCLUDES.rsp \
+              "${APP[@]}" \
+              -c "$src" \
+              -o "$obj" \
+              >"$log" 2>&1
+            rc=$?
+            set -e
+
+            if [ "$rc" -eq 0 ]; then
+              pass=$((pass+1))
+              printf 'PASS\t%s\t%s\n' "$logical" "$obj" \
+                >> /tmp/R55_COMPILE_RESULTS.tsv
+            else
+              fail=$((fail+1))
+              printf 'FAIL\t%s\t%s\n' "$logical" "$log" \
+                >> /tmp/R55_COMPILE_RESULTS.tsv
+            fi
+          done < /tmp/R55_ACTIVE_SOURCES.tsv
+
+          printf 'TOTAL=%d\nPASS=%d\nFAIL=%d\n' "$n" "$pass" "$fail" \
+            | tee /tmp/R55_COMPILE_SUMMARY.txt
+
+          : > /tmp/R55_FIRST_COMPILE_FAILURES.txt
+          awk -F '\t' '$1=="FAIL" && n<20 {print $2"\t"$3; n++}' \
+            /tmp/R55_COMPILE_RESULTS.tsv |
+            while IFS=$'\t' read -r logical log; do
+              echo "===== $logical =====" \
+                >> /tmp/R55_FIRST_COMPILE_FAILURES.txt
+              sed -n '1,120p' "$log" \
+                >> /tmp/R55_FIRST_COMPILE_FAILURES.txt
+            done
+
+          test "$fail" -eq 0
+
+      - name: Compile R51 core into vendor ABI
+        id: compile_r51
+        if: steps.compile_vendor.outcome == 'success'
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          CC=nds32le-elf-gcc
+          COMMON=(
+            -std=gnu11
+            -Os -g3
+            -mcpu=d1088-spu
+            -mcmodel=medium
+            -mext-dsp
+            -mext-zol
+            -fsingle-precision-constant
+            -ffunction-sections
+            -fdata-sections
+            -Wall
+            -Wextra
+            -Werror
+          )
+
+          mkdir -p /tmp/r55_okn_obj
+
+          SRCS=(
+            /tmp/r55_okn/firmware/app/okn_r51.c
+            /tmp/r55_okn/firmware/dsp/okn_gain7.c
+            /tmp/r55_okn/firmware/dsp/okn_peq7.c
+            /tmp/r55_okn/firmware/audio/okn_router7.c
+            /tmp/r55_okn/firmware/control/okn_usb_proto.c
+          )
+
+          for src in "${SRCS[@]}"; do
+            obj="/tmp/r55_okn_obj/$(basename "${src%.c}").o"
+            "$CC" \
+              "${COMMON[@]}" \
+              @/tmp/R55_INCLUDES.rsp \
+              -c "$src" \
+              -o "$obj"
+          done
+
+          nds32le-elf-nm -a /tmp/r55_okn_obj/*.o \
+            > /tmp/R55_R51_OBJECT_SYMBOLS.txt
+
+          for sym in \
+            okn_r51_init \
+            okn_r51_handle_usb_report \
+            okn_usb_proto_handle \
+            okn_gain7_apply \
+            okn_peq7_apply
+          do
+            grep -Eq "[[:space:]]${sym}$" \
+              /tmp/R55_R51_OBJECT_SYMBOLS.txt || {
+                echo "missing R51 NDS32 object symbol: $sym" >&2
+                exit 1
+              }
+          done
+
+      - name: Compile R56 real audio bridge into vendor ABI
+        id: compile_audio_bridge
+        if: steps.compile_vendor.outcome == 'success' && steps.compile_r51.outcome == 'success'
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # R56E: the bridge must depend only on the driver/API headers it uses.
+          # app_config.h drags vendor trace.h into this standalone translation unit
+          # and is intentionally forbidden here.
+          if grep -F '#include "app_config.h"' /tmp/r56gen/okn_r56_audio_bridge.c; then
+            echo "R56F bridge unexpectedly includes app_config.h" >&2
+            exit 1
+          fi
+
+          grep -F '#include "type.h"' /tmp/r56gen/okn_r56_audio_bridge.c >/dev/null || {
+            echo "R56F bridge missing MVSilicon type.h before dma.h" >&2
+            exit 1
+          }
+
+          nds32le-elf-gcc \
+            -std=gnu11 \
+            -Os -g3 \
+            -mcpu=d1088-spu \
+            -mcmodel=medium \
+            -mext-dsp \
+            -mext-zol \
+            -fsingle-precision-constant \
+            -ffunction-sections \
+            -fdata-sections \
+            -Wall \
+            -Wextra \
+            -Werror \
+            @/tmp/R55_INCLUDES.rsp \
+            -DFUNC_OS_EN=1 \
+            -DCFG_APP_CONFIG \
+            -DHAVE_CONFIG_H \
+            -c /tmp/r56gen/okn_r56_audio_bridge.c \
+            -o /tmp/r56_audio_bridge.o
+
+          nds32le-elf-nm -a /tmp/r56_audio_bridge.o \
+            > /tmp/R56_AUDIO_BRIDGE_SYMBOLS.txt
+          nds32le-elf-readelf -rW /tmp/r56_audio_bridge.o \
+            > /tmp/R56_AUDIO_BRIDGE_RELOCS.txt
+          nds32le-elf-objdump -dr /tmp/r56_audio_bridge.o \
+            > /tmp/R56_AUDIO_BRIDGE_OBJDUMP.txt
+
+          for sym in \
+            okn_r56_audio_init \
+            okn_r56_audio_process \
+            okn_r56_audio_space_ok \
+            okn_r56_audio_push
+          do
+            grep -Eq "[[:space:]]${sym}$" \
+              /tmp/R56_AUDIO_BRIDGE_SYMBOLS.txt || {
+                echo "missing R56 bridge symbol: $sym" >&2
+                exit 1
+              }
+          done
+
+          for dep in \
+            okn_r51_process_stereo \
+            AudioI2S_Init \
+            AudioI2S0_DataSet \
+            AudioI2S1_DataSet \
+            AudioI2S0_DataSpaceLenGet \
+            AudioI2S1_DataSpaceLenGet \
+            GPIO_PortAModeSet
+          do
+            grep -F "$dep" /tmp/R56_AUDIO_BRIDGE_RELOCS.txt >/dev/null || {
+              echo "R56 bridge does not reference: $dep" >&2
+              exit 1
+            }
+          done
+
+          echo "PASS: R56 bridge calls R51 on live stereo samples"
+          echo "PASS: R56 bridge references both I2S output APIs"
+
+      - name: Prove real vendor HID object calls R51 and preserves stock fallback
+        id: hid_callgraph
+        if: steps.compile_vendor.outcome == 'success' && steps.compile_r51.outcome == 'success'
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          COMM_OBJ="$(find /tmp/r55obj -type f -name communication.o | head -n1)"
+          test -n "$COMM_OBJ"
+          test -s "$COMM_OBJ"
+
+          nds32le-elf-readelf -rW "$COMM_OBJ" \
+            > /tmp/R55_COMMUNICATION_RELOCS.txt
+          nds32le-elf-objdump -dr "$COMM_OBJ" \
+            > /tmp/R55_COMMUNICATION_OBJDUMP.txt
+          nds32le-elf-nm -a "$COMM_OBJ" \
+            > /tmp/R55_COMMUNICATION_SYMBOLS.txt
+
+          grep -F "okn_r51_init" \
+            /tmp/R55_COMMUNICATION_RELOCS.txt
+          grep -F "okn_r51_handle_usb_report" \
+            /tmp/R55_COMMUNICATION_RELOCS.txt
+          grep -F "UsbLoadAudioMode" \
+            /tmp/R55_COMMUNICATION_RELOCS.txt
+
+          # Communication_Effect_Send is in the same translation unit, so it
+          # may be a local resolved call instead of an undefined relocation.
+          grep -Eq "[[:space:]][Tt][[:space:]]+Communication_Effect_Send$" \
+            /tmp/R55_COMMUNICATION_SYMBOLS.txt
+
+          echo "PASS: Communication_Effect_Init calls okn_r51_init"
+          echo "PASS: HIDUsb_Rx calls okn_r51_handle_usb_report"
+          echo "PASS: HIDUsb_Rx still calls stock UsbLoadAudioMode fallback"
+
+      - name: Prove vendor audio core calls the R56 bridge
+        id: audio_callgraph
+        if: steps.compile_vendor.outcome == 'success' && steps.compile_audio_bridge.outcome == 'success'
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          CORE_OBJ="$(find /tmp/r55obj -type f -name audio_core_api.o | head -n1)"
+          MAIN_OBJ="$(find /tmp/r55obj -type f -name main_task.o | head -n1)"
+
+          test -s "$CORE_OBJ"
+          test -s "$MAIN_OBJ"
+
+          nds32le-elf-readelf -rW "$CORE_OBJ" \
+            > /tmp/R56_AUDIO_CORE_RELOCS.txt
+          nds32le-elf-readelf -rW "$MAIN_OBJ" \
+            > /tmp/R56_MAIN_TASK_RELOCS.txt
+
+          for sym in \
+            okn_r56_audio_process \
+            okn_r56_audio_space_ok \
+            okn_r56_audio_push
+          do
+            grep -F "$sym" /tmp/R56_AUDIO_CORE_RELOCS.txt >/dev/null || {
+              echo "audio_core_api.o missing R56 relocation: $sym" >&2
+              exit 1
+            }
+          done
+
+          grep -F "okn_r56_audio_init" \
+            /tmp/R56_MAIN_TASK_RELOCS.txt >/dev/null
+          grep -F "okn_r51_init" \
+            /tmp/R56_MAIN_TASK_RELOCS.txt >/dev/null
+
+          echo "PASS: vendor AudioCoreSinkDataSet gates and pushes both I2S paths"
+          echo "PASS: vendor AduioCoreSinkVolSet calls R51 seven-channel processing"
+          echo "PASS: vendor main task initializes R51 + R56 bridge"
+
+      - name: Provide public-SDK UART mutex storage compatibility
+        id: compat
+        if: steps.hid_callgraph.outcome == 'success'
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > /tmp/r55_uart_mutex_compat.c <<'EOF'
+          #include <stddef.h>
+          #include "rtos_api.h"
+          __attribute__((weak)) osMutexId UART0Mutex = NULL;
+          __attribute__((weak)) osMutexId UART1Mutex = NULL;
+          EOF
+
+          nds32le-elf-gcc \
+            -Os -g3 \
+            -mcpu=d1088-spu \
+            -mcmodel=medium \
+            -mext-dsp \
+            -mext-zol \
+            @/tmp/R55_INCLUDES.rsp \
+            -DFUNC_OS_EN=1 \
+            -DCFG_APP_CONFIG \
+            -DHAVE_CONFIG_H \
+            -c /tmp/r55_uart_mutex_compat.c \
+            -o /tmp/r55_uart_mutex_compat.o
+
+      - name: Full-link vendor BT_Audio_APP with R51 USB runtime bridge
+        id: full_link
+        if: steps.compat.outcome == 'success' && steps.compile_audio_bridge.outcome == 'success' && steps.audio_callgraph.outcome == 'success'
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          SDK=/tmp/bp1048
+          ELF=/tmp/R56_BP1048P4_R51_REAL_7CH_AUDIO_PATH_NOT_FOR_FLASH.elf
+          MAP=/tmp/R56_BP1048P4_R51_REAL_7CH_AUDIO_PATH_NOT_FOR_FLASH.map
+
+          mapfile -t OBJS < <(
+            find /tmp/r55obj -type f -name '*.o' | sort
+          )
+          test "${#OBJS[@]}" -gt 100
+
+          mapfile -t OKN_OBJS < <(
+            find /tmp/r55_okn_obj -type f -name '*.o' | sort
+          )
+          test "${#OKN_OBJS[@]}" -ge 5
+
+          LIBS=(
+            "$SDK/MVsB1_Base_SDK/driver/driver/libDriver.a"
+            "$SDK/MVsB1_Base_SDK/middleware/audio/libsra.a"
+            "$SDK/MVsB1_Base_SDK/middleware/cec/libcec.a"
+            "$SDK/MVsB1_Base_SDK/middleware/audio/libsbcenc.a"
+            "$SDK/MVsB1_Base_SDK/middleware/audio/libVocalCut.a"
+            "$SDK/MVsB1_Base_SDK/middleware/audio/libmp3enc.a"
+            "$SDK/MVsB1_Base_SDK/middleware/audio/libAudioEffectLibrary.a"
+            "$SDK/MVsB1_Base_SDK/middleware/audio/libresampler.a"
+            "$SDK/MVsB1_Base_SDK/middleware/audio/libAudioDecoderLibrary.a"
+            "$SDK/MVsB1_Base_SDK/middleware/bluetooth/libBtStack.a"
+            "$SDK/MVsB1_Base_SDK/middleware/flashfs/libFlashFS.a"
+            "$SDK/MVsB1_Base_SDK/middleware/lrc/libLrc.a"
+            "$SDK/MVsB1_Base_SDK/middleware/fatfs/libfatfs.a"
+            "$SDK/MVsB1_Base_SDK/middleware/rtc/libRTC.a"
+            "$SDK/MVsB1_Base_SDK/middleware/audio/libcvsd_plc.a"
+            "$SDK/MVsB1_Base_SDK/middleware/audio/libBlueAEC.a"
+            "$SDK/MVsB1_Base_SDK/middleware/xmai/libxmauth.a"
+            "$SDK/BT_Audio_APP/bt_audio_app_src/libopus/lib/libopus.a"
+          )
+
+          for lib in "${LIBS[@]}"; do
+            test -f "$lib" || {
+              echo "missing library: $lib" >&2
+              exit 1
+            }
+          done
+
+          set +e
+          nds32le-elf-gcc \
+            -static \
+            -nostartfiles \
+            -g3 \
+            -mcpu=d1088-spu \
+            -mcmodel=medium \
+            -mext-dsp \
+            -Wl,--gc-sections \
+            -Wl,-Map,"$MAP" \
+            -T "$SDK/BT_Audio_APP/nds32-ae210p.ld" \
+            -o "$ELF" \
+            "${OBJS[@]}" \
+            "${OKN_OBJS[@]}" \
+            /tmp/r56_audio_bridge.o \
+            /tmp/r55_uart_mutex_compat.o \
+            -Wl,--start-group \
+            "${LIBS[@]}" \
+            -ldsp -lm \
+            -Wl,--end-group \
+            > /tmp/R55_LINK.log 2>&1
+          rc=$?
+          set -e
+
+          echo "$rc" > /tmp/R55_LINK_RC.txt
+
+          if [ "$rc" -ne 0 ]; then
+            sed -n '1,400p' /tmp/R55_LINK.log \
+              > /tmp/R55_LINK_FIRST_ERRORS.txt
+            exit "$rc"
+          fi
+
+          nds32le-elf-size "$ELF" \
+            > /tmp/R55_SIZE.txt
+          nds32le-elf-readelf -h -S -l "$ELF" \
+            > /tmp/R55_READELF.txt
+          nds32le-elf-readelf -Ws "$ELF" \
+            > /tmp/R55_SYMBOLS_READELF.txt
+          nds32le-elf-readelf -rW "$ELF" \
+            > /tmp/R55_RELOCATIONS.txt
+          nds32le-elf-nm -a -C "$ELF" \
+            > /tmp/R55_FINAL_SYMBOLS.txt
+          nds32le-elf-objdump -d "$ELF" \
+            > /tmp/R55_DISASM.txt
+
+          sha256sum "$ELF" "$MAP" \
+            > /tmp/R55_IMAGE_SHA256.txt
+
+      - name: Gate final real 7CH vendor runtime integration
+        id: final_symbol_gate
+        if: steps.full_link.outcome == 'success'
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ELF=/tmp/R56_BP1048P4_R51_REAL_7CH_AUDIO_PATH_NOT_FOR_FLASH.elf
+
+          grep -Eq 'Machine:.*(Andes|NDS32|nds32)' \
+            /tmp/R55_READELF.txt
+
+          for sym in \
+            _start \
+            HIDUsb_Rx \
+            UsbLoadAudioMode \
+            Communication_Effect_Init \
+            Communication_Effect_Send \
+            okn_r51_init \
+            okn_r51_process_stereo \
+            okn_r51_handle_usb_report \
+            okn_router7_process_stereo \
+            okn_peq7_apply \
+            okn_gain7_apply \
+            okn_usb_proto_handle \
+            okn_r56_audio_init \
+            okn_r56_audio_process \
+            okn_r56_audio_space_ok \
+            okn_r56_audio_push \
+            AudioI2S_Init \
+            AudioI2S0_DataSet \
+            AudioI2S1_DataSet \
+            AudioI2S0_DataSpaceLenGet \
+            AudioI2S1_DataSpaceLenGet
+          do
+            grep -Eq "[[:space:]]${sym}$" \
+              /tmp/R55_FINAL_SYMBOLS.txt || {
+                echo "missing final symbol: $sym" >&2
+                exit 1
+              }
+          done
+
+          awk \
+            '$7=="UND" && ($5=="GLOBAL" || $5=="WEAK") {print}' \
+            /tmp/R55_SYMBOLS_READELF.txt \
+            > /tmp/R55_RUNTIME_UNRESOLVED.txt
+
+          if [ -s /tmp/R55_RUNTIME_UNRESOLVED.txt ]; then
+            cat /tmp/R55_RUNTIME_UNRESOLVED.txt >&2
+            exit 1
+          fi
+
+          if grep -Eq '^Relocation section ' /tmp/R55_RELOCATIONS.txt; then
+            echo "unexpected relocation section(s) in final static ELF" >&2
+            cat /tmp/R55_RELOCATIONS.txt >&2
+            exit 1
+          fi
+
+          # We deliberately do NOT objcopy to a raw BIN in R56.
+          test ! -e /tmp/R56_BP1048P4_R51_REAL_7CH_AUDIO_PATH_NOT_FOR_FLASH.bin
+
+          echo "PASS: full vendor BP1048P4 ELF linked with live R51 audio path"
+          echo "PASS: vendor HIDUsb_Rx contains R51 protocol bridge"
+          echo "PASS: stock USB tuning fallback retained"
+          echo "PASS: PEQ and dedicated Gain are retained in final vendor ELF from real audio calls"
+          echo "PASS: CH1/2 DAC0, CH3 DACX logical, CH4/5 I2S0, CH6/7 I2S1 routing retained"
+          echo "PASS: no raw flashable BIN generated by R56"
+
+      - name: Build R56F evidence bundle
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          OUT=/tmp/R56F_BP1048P4_R51_REAL_7CH_AUDIO_PATH_EVIDENCE
+          rm -rf "$OUT"
+          mkdir -p "$OUT"
+
+          cp -f /tmp/R55_TOOLCHAIN.txt "$OUT/" 2>/dev/null || true
+          cp -f /tmp/R55_COMMUNICATION_PATCH.diff "$OUT/" 2>/dev/null || true
+          cp -f /tmp/R55_SOURCE_GRAPH_SUMMARY.txt "$OUT/" 2>/dev/null || true
+          cp -f /tmp/R55_ACTIVE_SOURCES.tsv "$OUT/" 2>/dev/null || true
+          cp -f /tmp/R55_EXCLUDED_SOURCES.tsv "$OUT/" 2>/dev/null || true
+          cp -f /tmp/R55_COMPILE_SUMMARY.txt "$OUT/" 2>/dev/null || true
+          cp -f /tmp/R55_COMPILE_RESULTS.tsv "$OUT/" 2>/dev/null || true
+          cp -f /tmp/R55_FIRST_COMPILE_FAILURES.txt "$OUT/" 2>/dev/null || true
+          cp -f /tmp/R55_R51_OBJECT_SYMBOLS.txt "$OUT/" 2>/dev/null || true
+          cp -f /tmp/R55_COMMUNICATION_RELOCS.txt "$OUT/" 2>/dev/null || true
+          cp -f /tmp/R55_COMMUNICATION_OBJDUMP.txt "$OUT/" 2>/dev/null || true
+          cp -f /tmp/R55_COMMUNICATION_SYMBOLS.txt "$OUT/" 2>/dev/null || true
+          cp -f /tmp/R55_LINK.log "$OUT/" 2>/dev/null || true
+          cp -f /tmp/R55_LINK_RC.txt "$OUT/" 2>/dev/null || true
+          cp -f /tmp/R55_LINK_FIRST_ERRORS.txt "$OUT/" 2>/dev/null || true
+          cp -f /tmp/R55_SIZE.txt "$OUT/" 2>/dev/null || true
+          cp -f /tmp/R55_READELF.txt "$OUT/" 2>/dev/null || true
+          cp -f /tmp/R55_SYMBOLS_READELF.txt "$OUT/" 2>/dev/null || true
+          cp -f /tmp/R55_RUNTIME_UNRESOLVED.txt "$OUT/" 2>/dev/null || true
+          cp -f /tmp/R55_RELOCATIONS.txt "$OUT/" 2>/dev/null || true
+          cp -f /tmp/R55_FINAL_SYMBOLS.txt "$OUT/" 2>/dev/null || true
+          cp -f /tmp/R55_DISASM.txt "$OUT/" 2>/dev/null || true
+          cp -f /tmp/R55_IMAGE_SHA256.txt "$OUT/" 2>/dev/null || true
+          cp -f /tmp/R56_AUDIO_PATH_STATE.txt "$OUT/" 2>/dev/null || true
+          cp -f /tmp/R56_MAIN_TASK_PATCH.diff "$OUT/" 2>/dev/null || true
+          cp -f /tmp/R56_AUDIO_CORE_PATCH.diff "$OUT/" 2>/dev/null || true
+          cp -f /tmp/R56_AUDIO_BRIDGE_SYMBOLS.txt "$OUT/" 2>/dev/null || true
+          cp -f /tmp/R56_AUDIO_BRIDGE_RELOCS.txt "$OUT/" 2>/dev/null || true
+          cp -f /tmp/R56_AUDIO_BRIDGE_OBJDUMP.txt "$OUT/" 2>/dev/null || true
+          cp -f /tmp/R56_AUDIO_CORE_RELOCS.txt "$OUT/" 2>/dev/null || true
+          cp -f /tmp/R56_MAIN_TASK_RELOCS.txt "$OUT/" 2>/dev/null || true
+          cp -f /tmp/r56gen/okn_r56_audio_bridge.h "$OUT/" 2>/dev/null || true
+          cp -f /tmp/r56gen/okn_r56_audio_bridge.c "$OUT/" 2>/dev/null || true
+
+          cp -f \
+            /tmp/R56_BP1048P4_R51_REAL_7CH_AUDIO_PATH_NOT_FOR_FLASH.elf \
+            "$OUT/" 2>/dev/null || true
+          cp -f \
+            /tmp/R56_BP1048P4_R51_REAL_7CH_AUDIO_PATH_NOT_FOR_FLASH.map \
+            "$OUT/" 2>/dev/null || true
+
+          cat > "$OUT/R55_STATUS.txt" <<EOF
+          R56F BP1048P4 R51 REAL 7CH AUDIO PATH INTEGRATION
+
+          compile_vendor=${{ steps.compile_vendor.outcome }}
+          compile_r51=${{ steps.compile_r51.outcome }}
+          compile_audio_bridge=${{ steps.compile_audio_bridge.outcome }}
+          audio_callgraph=${{ steps.audio_callgraph.outcome }}
+          hid_callgraph=${{ steps.hid_callgraph.outcome }}
+          compat=${{ steps.compat.outcome }}
+          full_link=${{ steps.full_link.outcome }}
+          final_symbol_gate=${{ steps.final_symbol_gate.outcome }}
+
+          SAFETY STATUS: NOT FOR FLASH
+
+          R56F intentionally does not create a raw .bin.
+          This stage proves vendor compile/link/call-graph plus real audio-buffer routing.
+
+          Proven in R56:
+          - live vendor DAC0 stereo buffer calls R51 processing
+          - R51 executes PEQ before dedicated Gain
+          - CH1/2 route to DAC0 L/R
+          - CH3 routes to DACX logical mono lane
+          - CH4/5 route to I2S0 L/R
+          - CH6/7 route to I2S1 L/R
+          - dual I2S driver calls are retained by real call graph
+
+          Still NOT proven:
+          - exact production-board I2S pin wiring
+          - physical amplifier/output identity of DACX CH3
+          - first-flash boot entry
+          - stock image readback
+          - rollback/recovery image
+          EOF
+
+          (
+            cd /tmp
+            zip -qr \
+              R56F_BP1048P4_R51_REAL_7CH_AUDIO_PATH_EVIDENCE.zip \
+              R56F_BP1048P4_R51_REAL_7CH_AUDIO_PATH_EVIDENCE
+            sha256sum \
+              R56F_BP1048P4_R51_REAL_7CH_AUDIO_PATH_EVIDENCE.zip \
+              > R56F_BP1048P4_R51_REAL_7CH_AUDIO_PATH_EVIDENCE.zip.sha256
+          )
+
+          cat \
+            /tmp/R56F_BP1048P4_R51_REAL_7CH_AUDIO_PATH_EVIDENCE.zip.sha256
+
+      - name: Upload R56F evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: R56F-BP1048P4-R51-REAL-7CH-AUDIO-PATH-EVIDENCE
+          path: |
+            /tmp/R56F_BP1048P4_R51_REAL_7CH_AUDIO_PATH_EVIDENCE.zip
+            /tmp/R56F_BP1048P4_R51_REAL_7CH_AUDIO_PATH_EVIDENCE.zip.sha256
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: R56F final gate
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cat /tmp/R55_SOURCE_GRAPH_SUMMARY.txt || true
+          cat /tmp/R55_COMPILE_SUMMARY.txt || true
+          cat /tmp/R55_FIRST_COMPILE_FAILURES.txt 2>/dev/null || true
+          cat /tmp/R56_AUDIO_BRIDGE_RELOCS.txt 2>/dev/null | tail -n 120 || true
+          cat /tmp/R55_LINK_FIRST_ERRORS.txt 2>/dev/null || true
+
+          test "${{ steps.compile_vendor.outcome }}" = "success"
+          test "${{ steps.compile_r51.outcome }}" = "success"
+          test "${{ steps.compile_audio_bridge.outcome }}" = "success"
+          test "${{ steps.audio_callgraph.outcome }}" = "success"
+          test "${{ steps.hid_callgraph.outcome }}" = "success"
+          test "${{ steps.compat.outcome }}" = "success"
+          test "${{ steps.full_link.outcome }}" = "success"
+          test "${{ steps.final_symbol_gate.outcome }}" = "success"
+
+          echo "R56F_VENDOR_USB_RUNTIME_INTEGRATION=PASS"
+          echo "R56F_REAL_7CH_AUDIO_PATH=PASS"
+          echo "R56F_PEAKING_EQ_BEFORE_DEDICATED_GAIN=PASS"
+          echo "R56F_RAW_BIN_CREATED=NO"
+          echo "FLASH_ALLOWED=NO"
