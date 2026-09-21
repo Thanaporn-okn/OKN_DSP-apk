@@ -1,0 +1,72 @@
+name: R1 OKN TRUE7CH
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ "main", "master" ]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test-r55:
+    name: Build-Test TRUE7CH
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential python3 zip
+
+      - name: Show environment
+        run: |
+          gcc --version
+          make --version
+          python3 --version
+
+      - name: Verify TRUE7CH does not use EQ as Gain
+        run: |
+          python3 tools/check_no_eq_as_gain.py
+
+      - name: Build and run host tests
+        run: |
+          make clean
+          make test | tee R1_OKN_test.log
+
+      - name: Run ASan and UBSan
+        run: |
+          make sanitize | tee R1_OKN_sanitize.log
+
+      - name: Verify required pass markers
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -q "NO_EQ_AS_GAIN_CHECK_PASS" R1_OKN_test.log
+          grep -q "R55_TRUE7CH_HOST_TEST_PASS" R1_OKN_test.log
+          grep -q "R55_TRUE7CH_HOST_TEST_PASS" R1_OKN_sanitize.log
+          echo "R1_OKN_TRUE7CH_CI_PASS"
+
+      - name: Package validated source
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf out
+          mkdir -p out/R1_OKN_TRUE7CH
+          cp -a firmware android tools tests docs Makefile README_TH.md out/R1_OKN_TRUE7CH/
+          cp R1_OKN_test.log R1_OKN_sanitize.log out/R1_OKN_TRUE7CH/
+          find out/R1_OKN_TRUE7CH -type f -print0 | sort -z | xargs -0 sha256sum > out/R1_OKN_TRUE7CH/SHA256SUMS.txt
+          (cd out && zip -r -9 R1_OKN_TRUE7CH_SOURCE_TESTED.zip R1_OKN_TRUE7CH)
+
+      - name: Upload validated package
+        uses: actions/upload-artifact@v4
+        with:
+          name: R1_OKN_TRUE7CH
+          path: out/R1_OKN_TRUE7CH_SOURCE_TESTED.zip
+          if-no-files-found: error
+          retention-days: 30
