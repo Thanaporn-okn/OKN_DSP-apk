@@ -1,0 +1,656 @@
+name: R2_OKN_NATIVE_UFE_EP0_PROBE
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/R2_OKN_NATIVE_UFE_EP0_PROBE.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+
+    steps:
+      - name: Setup Java 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
+
+      - name: Install Android platform
+        shell: bash
+        run: |
+          set -euo pipefail
+          yes | sdkmanager --licenses >/dev/null 2>&1 || true
+          sdkmanager "platform-tools" "platforms;android-35" "build-tools;35.0.0"
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.10.2'
+
+      - name: Create Android project
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p app/src/main/java/com/okn/dsp/r2
+          mkdir -p app/src/main/cpp
+          mkdir -p app/src/main/jniLibs/arm64-v8a
+
+          cat > settings.gradle <<'EOF'
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+          rootProject.name = "R2_OKN_NATIVE_UFE_EP0_PROBE"
+          include(":app")
+          EOF
+
+          cat > build.gradle <<'EOF'
+          plugins {
+              id 'com.android.application' version '8.7.3' apply false
+          }
+          EOF
+
+          cat > app/build.gradle <<'EOF'
+          plugins {
+              id 'com.android.application'
+          }
+
+          android {
+              namespace 'com.okn.dsp.r2'
+              compileSdk 35
+
+              defaultConfig {
+                  applicationId "com.okn.dsp.r2"
+                  minSdk 26
+                  targetSdk 35
+                  versionCode 2
+                  versionName "2.0-native-ep0"
+              }
+
+              buildTypes {
+                  debug { debuggable true }
+                  release { minifyEnabled false }
+              }
+
+              compileOptions {
+                  sourceCompatibility JavaVersion.VERSION_17
+                  targetCompatibility JavaVersion.VERSION_17
+              }
+          }
+          EOF
+
+          cat > app/src/main/AndroidManifest.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <uses-feature android:name="android.hardware.usb.host" android:required="true"/>
+              <application
+                  android:allowBackup="false"
+                  android:label="R2 OKN Native EP0"
+                  android:theme="@android:style/Theme.Material.Light.NoActionBar">
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN"/>
+                          <category android:name="android.intent.category.LAUNCHER"/>
+                      </intent-filter>
+                  </activity>
+              </application>
+          </manifest>
+          EOF
+
+          cat > app/src/main/cpp/usbfs_diag.cpp <<'EOF'
+          #include <jni.h>
+          #include <cerrno>
+          #include <linux/usbdevice_fs.h>
+          #include <sys/ioctl.h>
+
+          extern "C" JNIEXPORT jint JNICALL
+          Java_com_okn_dsp_r2_MainActivity_nativeUsbfsControlTransfer(
+              JNIEnv* env,
+              jobject,
+              jint fd,
+              jint requestType,
+              jint request,
+              jint value,
+              jint index,
+              jbyteArray buffer,
+              jint length,
+              jint timeoutMs) {
+
+              if (buffer == nullptr || length < 0 ||
+                  length > env->GetArrayLength(buffer)) {
+                  return -EINVAL;
+              }
+
+              jbyte* data = env->GetByteArrayElements(buffer, nullptr);
+              if (data == nullptr) return -ENOMEM;
+
+              usbdevfs_ctrltransfer ctrl{};
+              ctrl.bRequestType = static_cast<__u8>(requestType);
+              ctrl.bRequest = static_cast<__u8>(request);
+              ctrl.wValue = static_cast<__u16>(value);
+              ctrl.wIndex = static_cast<__u16>(index);
+              ctrl.wLength = static_cast<__u16>(length);
+              ctrl.timeout = static_cast<__u32>(timeoutMs);
+              ctrl.data = data;
+
+              const int rc = ioctl(fd, USBDEVFS_CONTROL, &ctrl);
+              const int savedErrno = errno;
+              env->ReleaseByteArrayElements(buffer, data, 0);
+              return rc < 0 ? -savedErrno : rc;
+          }
+          EOF
+
+          cat > app/src/main/java/com/okn/dsp/r2/MainActivity.java <<'EOF'
+          package com.okn.dsp.r2;
+
+          import android.app.Activity;
+          import android.app.PendingIntent;
+          import android.content.BroadcastReceiver;
+          import android.content.ClipData;
+          import android.content.ClipboardManager;
+          import android.content.Context;
+          import android.content.Intent;
+          import android.content.IntentFilter;
+          import android.hardware.usb.UsbConstants;
+          import android.hardware.usb.UsbDevice;
+          import android.hardware.usb.UsbDeviceConnection;
+          import android.hardware.usb.UsbInterface;
+          import android.hardware.usb.UsbManager;
+          import android.os.Build;
+          import android.os.Bundle;
+          import android.text.method.ScrollingMovementMethod;
+          import android.view.ViewGroup;
+          import android.widget.Button;
+          import android.widget.LinearLayout;
+          import android.widget.ScrollView;
+          import android.widget.TextView;
+
+          import java.nio.ByteBuffer;
+          import java.nio.ByteOrder;
+          import java.util.Locale;
+          import java.util.Map;
+
+          public final class MainActivity extends Activity {
+              private static final String ACTION_USB_PERMISSION =
+                      "com.okn.dsp.r2.USB_PERMISSION";
+
+              private static final int TARGET_VID = 0x6324;
+              private static final int TARGET_PID = 0x1719;
+              private static final int IF4 = 4;
+
+              private static final int HID_GET_REPORT = 0x01;
+              private static final int HID_SET_REPORT = 0x09;
+              private static final int REPORT_INPUT = 1;
+              private static final int REPORT_OUTPUT = 2;
+              private static final int REPORT_FEATURE = 3;
+
+              private static final int UFE_READ = 0x58;
+              private static final int ID2 = 2;
+
+              private UsbManager usb;
+              private UsbDevice device;
+              private TextView logView;
+              private final StringBuilder log = new StringBuilder();
+
+              static {
+                  try {
+                      System.loadLibrary("usbfsdiag");
+                  } catch (Throwable ignored) {
+                  }
+              }
+
+              private native int nativeUsbfsControlTransfer(
+                      int fd,
+                      int requestType,
+                      int request,
+                      int value,
+                      int index,
+                      byte[] buffer,
+                      int length,
+                      int timeoutMs);
+
+              private final BroadcastReceiver receiver = new BroadcastReceiver() {
+                  @Override public void onReceive(Context context, Intent intent) {
+                      if (!ACTION_USB_PERMISSION.equals(intent.getAction())) return;
+                      UsbDevice d;
+                      if (Build.VERSION.SDK_INT >= 33) {
+                          d = intent.getParcelableExtra(
+                                  UsbManager.EXTRA_DEVICE, UsbDevice.class);
+                      } else {
+                          @SuppressWarnings("deprecation")
+                          UsbDevice old = intent.getParcelableExtra(
+                                  UsbManager.EXTRA_DEVICE);
+                          d = old;
+                      }
+                      boolean granted = intent.getBooleanExtra(
+                              UsbManager.EXTRA_PERMISSION_GRANTED, false);
+                      append("USB permission=" + granted);
+                      if (granted && d != null && isTarget(d)) {
+                          device = d;
+                          baseline();
+                      }
+                  }
+              };
+
+              @Override protected void onCreate(Bundle state) {
+                  super.onCreate(state);
+                  usb = (UsbManager) getSystemService(Context.USB_SERVICE);
+
+                  IntentFilter f = new IntentFilter(ACTION_USB_PERMISSION);
+                  if (Build.VERSION.SDK_INT >= 33) {
+                      registerReceiver(receiver, f, Context.RECEIVER_NOT_EXPORTED);
+                  } else {
+                      registerReceiver(receiver, f);
+                  }
+
+                  LinearLayout root = new LinearLayout(this);
+                  root.setOrientation(LinearLayout.VERTICAL);
+                  root.setPadding(24,24,24,24);
+
+                  TextView title = new TextView(this);
+                  title.setText("R2 OKN — NATIVE USBFS EP0 UFE READ");
+                  title.setTextSize(20);
+                  root.addView(title);
+
+                  TextView safety = new TextView(this);
+                  safety.setText(
+                          "6324:1719 / IF4 only. One UFE READ 0x58 ID2. " +
+                          "No 0x57 write, no 0x11, no boot arm, no erase/program/reset.");
+                  root.addView(safety);
+
+                  Button scan = new Button(this);
+                  scan.setText("1. SCAN + BASELINE");
+                  scan.setOnClickListener(v -> scan());
+                  root.addView(scan);
+
+                  Button run = new Button(this);
+                  run.setText("2. NATIVE EP0 READ ID2");
+                  run.setOnClickListener(v -> runNative());
+                  root.addView(run);
+
+                  Button copy = new Button(this);
+                  copy.setText("3. COPY LOG");
+                  copy.setOnClickListener(v -> copy());
+                  root.addView(copy);
+
+                  logView = new TextView(this);
+                  logView.setTextIsSelectable(true);
+                  logView.setMovementMethod(new ScrollingMovementMethod());
+
+                  ScrollView sv = new ScrollView(this);
+                  sv.addView(logView);
+                  root.addView(sv, new LinearLayout.LayoutParams(
+                          ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
+
+                  setContentView(root);
+
+                  append("R2 native USBFS probe");
+                  append("Goal: distinguish Android Java transfer behavior from real device EP0 behavior.");
+                  scan();
+              }
+
+              @Override protected void onDestroy() {
+                  try { unregisterReceiver(receiver); } catch (Throwable ignored) {}
+                  super.onDestroy();
+              }
+
+              private boolean isTarget(UsbDevice d) {
+                  return d.getVendorId() == TARGET_VID &&
+                         d.getProductId() == TARGET_PID;
+              }
+
+              private UsbInterface getIf4() {
+                  if (device == null) return null;
+                  for (int i=0; i<device.getInterfaceCount(); i++) {
+                      UsbInterface f = device.getInterface(i);
+                      if (f.getId() == IF4 &&
+                          f.getInterfaceClass() == UsbConstants.USB_CLASS_HID) {
+                          return f;
+                      }
+                  }
+                  return null;
+              }
+
+              private void scan() {
+                  device = null;
+                  append("");
+                  append("=== SCAN ===");
+                  Map<String, UsbDevice> ds = usb.getDeviceList();
+                  for (UsbDevice d: ds.values()) {
+                      append(String.format(Locale.US,
+                              "%04X:%04X ifaces=%d",
+                              d.getVendorId(), d.getProductId(),
+                              d.getInterfaceCount()));
+                      if (isTarget(d)) device = d;
+                  }
+
+                  if (device == null) {
+                      append("Target 6324:1719 not found.");
+                      return;
+                  }
+
+                  append("Exact target found.");
+                  if (!usb.hasPermission(device)) {
+                      requestPermission();
+                  } else {
+                      baseline();
+                  }
+              }
+
+              private void requestPermission() {
+                  int flags = PendingIntent.FLAG_UPDATE_CURRENT;
+                  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                      flags |= PendingIntent.FLAG_MUTABLE;
+                  }
+                  PendingIntent pi = PendingIntent.getBroadcast(
+                          this, 0,
+                          new Intent(ACTION_USB_PERMISSION)
+                                  .setPackage(getPackageName()),
+                          flags);
+                  append("Requesting USB permission...");
+                  usb.requestPermission(device, pi);
+              }
+
+              private void baseline() {
+                  UsbInterface f = getIf4();
+                  if (f == null) {
+                      append("IF4 HID missing.");
+                      return;
+                  }
+
+                  UsbDeviceConnection c = usb.openDevice(device);
+                  if (c == null) {
+                      append("openDevice failed.");
+                      return;
+                  }
+
+                  try {
+                      byte[] feat = new byte[8];
+                      int fr = c.controlTransfer(
+                              0xA1, HID_GET_REPORT,
+                              REPORT_FEATURE << 8, IF4,
+                              feat, feat.length, 1000);
+                      append("Feature8(Java) rc=" + fr +
+                              " data=" + hex(feat, fr));
+
+                      byte[] in = new byte[256];
+                      int nr;
+                      try {
+                          nr = nativeUsbfsControlTransfer(
+                                  c.getFileDescriptor(),
+                                  0xA1, HID_GET_REPORT,
+                                  REPORT_INPUT << 8, IF4,
+                                  in, 256, 1000);
+                      } catch (Throwable t) {
+                          append("Native baseline unavailable: " +
+                                  t.getClass().getSimpleName() + ": " +
+                                  t.getMessage());
+                          return;
+                      }
+                      append("Input256(native baseline) rc=" + nr +
+                              " data=" + hex(in, nr));
+                  } finally {
+                      c.close();
+                  }
+              }
+
+              private void runNative() {
+                  if (device == null) scan();
+                  if (device == null) return;
+                  if (!usb.hasPermission(device)) {
+                      requestPermission();
+                      return;
+                  }
+                  if (!isTarget(device)) {
+                      append("REFUSED: target changed.");
+                      return;
+                  }
+
+                  UsbInterface f = getIf4();
+                  if (f == null) {
+                      append("REFUSED: IF4 HID missing.");
+                      return;
+                  }
+
+                  byte[] frame = makeReadId2();
+                  append("");
+                  append("=== NATIVE ONE-SHOT UFE READ ===");
+                  append("TX=" + hex(frame, 13));
+
+                  if ((frame[0]&0xff) != 0xA5 ||
+                      (frame[1]&0xff) != 0x5A ||
+                      (frame[2]&0xff) != UFE_READ ||
+                      (frame[3]&0xff) != 0x08 ||
+                      (frame[12]&0xff) != 0x16) {
+                      append("REFUSED: safety frame guard failed.");
+                      return;
+                  }
+
+                  UsbDeviceConnection c = usb.openDevice(device);
+                  if (c == null) {
+                      append("openDevice failed.");
+                      return;
+                  }
+
+                  boolean claimed = false;
+                  try {
+                      claimed = c.claimInterface(f, true);
+                      append("claim IF4=" + claimed);
+                      if (!claimed) return;
+
+                      int fd = c.getFileDescriptor();
+
+                      byte[] before = new byte[256];
+                      int b = nativeUsbfsControlTransfer(
+                              fd, 0xA1, HID_GET_REPORT,
+                              REPORT_INPUT << 8, IF4,
+                              before, 256, 1000);
+                      append("PRE native GET_REPORT Input rc=" + b +
+                              " data=" + hex(before, b));
+
+                      int out = nativeUsbfsControlTransfer(
+                              fd, 0x21, HID_SET_REPORT,
+                              REPORT_OUTPUT << 8, IF4,
+                              frame, 256, 1500);
+                      append("NATIVE SET_REPORT Output rc=" + out);
+
+                      if (out != 256) {
+                          append("STOP: native OUT not accepted as 256.");
+                          return;
+                      }
+
+                      try { Thread.sleep(40); }
+                      catch (InterruptedException e) {
+                          Thread.currentThread().interrupt();
+                          return;
+                      }
+
+                      byte[] response = new byte[256];
+                      int in = nativeUsbfsControlTransfer(
+                              fd, 0xA1, HID_GET_REPORT,
+                              REPORT_INPUT << 8, IF4,
+                              response, 256, 1500);
+
+                      append("POST native GET_REPORT Input rc=" + in);
+                      append("RX=" + hex(response, in));
+                      decode(response, in);
+
+                      byte[] feat = new byte[8];
+                      int fr = nativeUsbfsControlTransfer(
+                              fd, 0xA1, HID_GET_REPORT,
+                              REPORT_FEATURE << 8, IF4,
+                              feat, 8, 1000);
+                      append("POST Feature8(native) rc=" + fr +
+                              " data=" + hex(feat, fr));
+
+                  } catch (Throwable t) {
+                      append("EXCEPTION " + t.getClass().getSimpleName() +
+                              ": " + t.getMessage());
+                  } finally {
+                      if (claimed) {
+                          try { c.releaseInterface(f); } catch (Throwable ignored) {}
+                      }
+                      c.close();
+                  }
+              }
+
+              private static byte[] makeReadId2() {
+                  byte[] x = new byte[256];
+                  x[0]=(byte)0xA5;
+                  x[1]=(byte)0x5A;
+                  x[2]=(byte)UFE_READ;
+                  x[3]=0x08;
+                  x[4]=0x00; x[5]=0x00; x[6]=0x00; x[7]=0x02;
+                  x[8]=0x00; x[9]=0x00;
+                  x[10]=0x00; x[11]=0x04;
+                  x[12]=0x16;
+                  return x;
+              }
+
+              private void decode(byte[] r, int n) {
+                  if (n <= 0) {
+                      append("RESULT: native device response is still zero-length.");
+                      return;
+                  }
+                  if (n < 4 || (r[0]&0xff)!=0xA5 || (r[1]&0xff)!=0x5A) {
+                      append("RESULT: non-UFE response returned.");
+                      return;
+                  }
+
+                  int control = r[2]&0xff;
+                  int plen = r[3]&0xff;
+                  append(String.format(Locale.US,
+                          "RX control=0x%02X payloadLen=%d", control, plen));
+
+                  if (control == 0x60 && n >= 16) {
+                      int id = ((r[4]&0xff)<<24) |
+                               ((r[5]&0xff)<<16) |
+                               ((r[6]&0xff)<<8) |
+                               (r[7]&0xff);
+                      int len = ((r[10]&0xff)<<8) | (r[11]&0xff);
+                      append("Decoded id=" + id + " len=" + len);
+                      if (id == ID2 && len == 4) {
+                          float v = ByteBuffer.wrap(r,12,4)
+                                  .order(ByteOrder.LITTLE_ENDIAN)
+                                  .getFloat();
+                          append("ID2 float=" + v);
+                      }
+                  }
+              }
+
+              private void copy() {
+                  ClipboardManager cb =
+                          (ClipboardManager)getSystemService(CLIPBOARD_SERVICE);
+                  cb.setPrimaryClip(
+                          ClipData.newPlainText("R2 OKN log", log.toString()));
+                  append("Log copied.");
+              }
+
+              private void append(String s) {
+                  log.append(s).append('\n');
+                  if (logView != null) logView.setText(log.toString());
+              }
+
+              private static String hex(byte[] a, int n) {
+                  if (n <= 0) return "<none>";
+                  int lim = Math.min(Math.min(n, a.length), 64);
+                  StringBuilder b = new StringBuilder();
+                  for (int i=0; i<lim; i++) {
+                      if (i>0) b.append(' ');
+                      b.append(String.format(Locale.US,
+                              "%02X", a[i]&0xff));
+                  }
+                  return b.toString();
+              }
+          }
+          EOF
+
+      - name: Build native USBFS bridge
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          NDK="$(find "$ANDROID_SDK_ROOT/ndk" -mindepth 1 -maxdepth 1 -type d | sort -V | tail -n1)"
+          test -n "$NDK"
+          CXX="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android26-clang++"
+          test -x "$CXX"
+
+          "$CXX" -std=c++17 -shared -fPIC -O2 -nostdlib++ \
+            -Wl,--no-undefined \
+            -Wl,-z,max-page-size=16384 \
+            -Wl,-z,common-page-size=16384 \
+            app/src/main/cpp/usbfs_diag.cpp \
+            -o app/src/main/jniLibs/arm64-v8a/libusbfsdiag.so
+
+          test -s app/src/main/jniLibs/arm64-v8a/libusbfsdiag.so
+          readelf -Ws app/src/main/jniLibs/arm64-v8a/libusbfsdiag.so \
+            | grep -q nativeUsbfsControlTransfer
+
+      - name: Safety audit
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          J=app/src/main/java/com/okn/dsp/r2/MainActivity.java
+          C=app/src/main/cpp/usbfs_diag.cpp
+
+          grep -q 'TARGET_VID = 0x6324' "$J"
+          grep -q 'TARGET_PID = 0x1719' "$J"
+          grep -q 'UFE_READ = 0x58' "$J"
+          grep -q 'ID2 = 2' "$J"
+          grep -q 'USBDEVFS_CONTROL' "$C"
+
+          ! grep -Eq 'SpiFlashErase|SpiFlashWrite|Reset_McuSystem|chiperas|codedata|bootdat|upinfo|btupdat|cnfgdat|constdat' "$J" "$C"
+          ! grep -Eq 'UFE_WRITE|0x57|0x11' "$J"
+
+          echo "PASS R2: exact target; native USBFS EP0; one 0x58 ID2 read request; no flash/write/reset path"
+
+      - name: Build APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          gradle --no-daemon :app:assembleDebug
+
+      - name: Verify APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          APK=app/build/outputs/apk/debug/app-debug.apk
+          test -s "$APK"
+          unzip -l "$APK" | grep -q 'lib/arm64-v8a/libusbfsdiag.so'
+          cp "$APK" R2_OKN_NATIVE_UFE_EP0_PROBE.apk
+          sha256sum R2_OKN_NATIVE_UFE_EP0_PROBE.apk \
+            | tee R2_OKN_NATIVE_UFE_EP0_PROBE_SHA256.txt
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: R2_OKN_NATIVE_UFE_EP0_PROBE
+          path: |
+            R2_OKN_NATIVE_UFE_EP0_PROBE.apk
+            R2_OKN_NATIVE_UFE_EP0_PROBE_SHA256.txt
+          if-no-files-found: error
+          retention-days: 30
