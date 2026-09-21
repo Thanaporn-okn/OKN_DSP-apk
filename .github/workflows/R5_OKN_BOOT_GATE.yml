@@ -1,0 +1,1172 @@
+name: R5_OKN_BOOT_GATE
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+
+    steps:
+      - name: Setup Java 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
+
+      - name: Install Android platform
+        shell: bash
+        run: |
+          set -euo pipefail
+          yes | sdkmanager --licenses >/dev/null 2>&1 || true
+          sdkmanager "platform-tools" "platforms;android-35" "build-tools;35.0.0"
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.10.2'
+
+      - name: Create R5 project
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p app/src/main/java/com/okn/dsp/r5
+
+          cat > settings.gradle <<'EOF'
+          pluginManagement {
+            repositories {
+              google()
+              mavenCentral()
+              gradlePluginPortal()
+            }
+          }
+          dependencyResolutionManagement {
+            repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+            repositories {
+              google()
+              mavenCentral()
+            }
+          }
+          rootProject.name = "R5_OKN_BOOT_GATE"
+          include(":app")
+          EOF
+
+          cat > build.gradle <<'EOF'
+          plugins {
+            id 'com.android.application' version '8.7.3' apply false
+          }
+          EOF
+
+          cat > app/build.gradle <<'EOF'
+          plugins {
+            id 'com.android.application'
+          }
+
+          android {
+            namespace 'com.okn.dsp.r5'
+            compileSdk 35
+
+            defaultConfig {
+              applicationId "com.okn.dsp.r5"
+              minSdk 26
+              targetSdk 35
+              versionCode 5
+              versionName "5.0-boot-gate"
+            }
+
+            buildTypes {
+              debug { debuggable true }
+              release { minifyEnabled false }
+            }
+
+            compileOptions {
+              sourceCompatibility JavaVersion.VERSION_17
+              targetCompatibility JavaVersion.VERSION_17
+            }
+          }
+          EOF
+
+          cat > app/src/main/AndroidManifest.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+            <uses-feature
+              android:name="android.hardware.usb.host"
+              android:required="true"/>
+
+            <application
+              android:allowBackup="false"
+              android:label="R5 OKN BOOT GATE"
+              android:theme="@android:style/Theme.Material.Light.NoActionBar">
+
+              <activity
+                android:name=".MainActivity"
+                android:exported="true">
+
+                <intent-filter>
+                  <action android:name="android.intent.action.MAIN"/>
+                  <category android:name="android.intent.category.LAUNCHER"/>
+                </intent-filter>
+
+              </activity>
+            </application>
+          </manifest>
+          EOF
+
+          cat > app/src/main/java/com/okn/dsp/r5/MainActivity.java <<'EOF'
+          package com.okn.dsp.r5;
+
+          import android.app.Activity;
+          import android.app.PendingIntent;
+          import android.content.BroadcastReceiver;
+          import android.content.ClipData;
+          import android.content.ClipboardManager;
+          import android.content.Context;
+          import android.content.Intent;
+          import android.content.IntentFilter;
+          import android.hardware.usb.UsbConstants;
+          import android.hardware.usb.UsbDevice;
+          import android.hardware.usb.UsbDeviceConnection;
+          import android.hardware.usb.UsbEndpoint;
+          import android.hardware.usb.UsbInterface;
+          import android.hardware.usb.UsbManager;
+          import android.os.Build;
+          import android.os.Bundle;
+          import android.os.SystemClock;
+          import android.view.ViewGroup;
+          import android.widget.Button;
+          import android.widget.LinearLayout;
+          import android.widget.ScrollView;
+          import android.widget.TextView;
+
+          import java.util.ArrayList;
+          import java.util.Collections;
+          import java.util.List;
+          import java.util.Locale;
+          import java.util.Map;
+
+          public final class MainActivity extends Activity {
+            private static final String ACTION_USB_PERMISSION =
+                "com.okn.dsp.r5.USB_PERMISSION";
+
+            private static final int RUNTIME_VID = 0x6324;
+            private static final int RUNTIME_PID = 0x1719;
+            private static final int RUNTIME_IF = 4;
+
+            // Reference SDK flashboot fingerprint.
+            private static final int REF_BOOT_VID = 0x0000;
+            private static final int REF_BOOT_PID = 0x2244;
+
+            private static final int USB_REQ_GET_CONFIGURATION = 0x08;
+            private static final int USB_REQ_SET_CONFIGURATION = 0x09;
+
+            private static final int HID_GET_REPORT = 0x01;
+            private static final int HID_SET_REPORT = 0x09;
+            private static final int REPORT_FEATURE = 3;
+
+            private UsbManager usb;
+            private UsbDevice runtime;
+            private TextView logView;
+            private Button probeButton;
+            private long armUntilMs = 0L;
+
+            private final StringBuilder log = new StringBuilder();
+
+            private final BroadcastReceiver permissionReceiver =
+                new BroadcastReceiver() {
+                  @Override public void onReceive(Context context, Intent intent) {
+                    if (!ACTION_USB_PERMISSION.equals(intent.getAction())) return;
+
+                    UsbDevice d;
+                    if (Build.VERSION.SDK_INT >= 33) {
+                      d = intent.getParcelableExtra(
+                          UsbManager.EXTRA_DEVICE,
+                          UsbDevice.class);
+                    } else {
+                      @SuppressWarnings("deprecation")
+                      UsbDevice old =
+                          intent.getParcelableExtra(UsbManager.EXTRA_DEVICE);
+                      d = old;
+                    }
+
+                    boolean granted = intent.getBooleanExtra(
+                        UsbManager.EXTRA_PERMISSION_GRANTED,
+                        false);
+
+                    add("USB permission=" + granted);
+
+                    if (granted && d != null && isRuntime(d)) {
+                      runtime = d;
+                      new Thread(
+                          this::baselineAfterPermission,
+                          "r5-baseline").start();
+                    }
+                  }
+
+                  private void baselineAfterPermission() {
+                    baseline();
+                  }
+                };
+
+            @Override protected void onCreate(Bundle state) {
+              super.onCreate(state);
+
+              usb = (UsbManager)getSystemService(Context.USB_SERVICE);
+
+              IntentFilter filter =
+                  new IntentFilter(ACTION_USB_PERMISSION);
+
+              if (Build.VERSION.SDK_INT >= 33) {
+                registerReceiver(
+                    permissionReceiver,
+                    filter,
+                    Context.RECEIVER_NOT_EXPORTED);
+              } else {
+                registerReceiver(
+                    permissionReceiver,
+                    filter);
+              }
+
+              LinearLayout root =
+                  new LinearLayout(this);
+
+              root.setOrientation(
+                  LinearLayout.VERTICAL);
+
+              root.setPadding(
+                  22,22,22,22);
+
+              TextView title =
+                  new TextView(this);
+
+              title.setText(
+                  "R5 OKN — FIRST INSTALL BOOT GATE");
+
+              title.setTextSize(19);
+              root.addView(title);
+
+              TextView safety =
+                  new TextView(this);
+
+              safety.setText(
+                  "NO FLASH / NO ERASE / NO IMAGE SEND\n" +
+                  "Test only: USB configuration re-arm + Feature AA + " +
+                  "15-second re-enumeration watch.");
+
+              root.addView(safety);
+
+              Button scan =
+                  new Button(this);
+
+              scan.setText(
+                  "1. SCAN + BASELINE");
+
+              scan.setOnClickListener(
+                  v -> scan());
+
+              root.addView(scan);
+
+              probeButton =
+                  new Button(this);
+
+              probeButton.setText(
+                  "2. ARM CONFIG RE-ARM + BOOT PROBE");
+
+              probeButton.setOnClickListener(
+                  v -> armOrRun());
+
+              root.addView(probeButton);
+
+              Button copy =
+                  new Button(this);
+
+              copy.setText(
+                  "3. COPY LOG");
+
+              copy.setOnClickListener(
+                  v -> copyLog());
+
+              root.addView(copy);
+
+              logView =
+                  new TextView(this);
+
+              logView.setTextIsSelectable(true);
+
+              ScrollView scroll =
+                  new ScrollView(this);
+
+              scroll.addView(logView);
+
+              root.addView(
+                  scroll,
+                  new LinearLayout.LayoutParams(
+                      ViewGroup.LayoutParams.MATCH_PARENT,
+                      0,
+                      1f));
+
+              setContentView(root);
+
+              add("R5 FIRST-INSTALL BOOT GATE");
+              add("Runtime target 6324:1719 / IF4 HID");
+              add("Reference boot candidate 0000:2244");
+              add("Writes allowed: SET_CONFIGURATION and Feature AA only.");
+              scan();
+            }
+
+            @Override protected void onDestroy() {
+              try {
+                unregisterReceiver(
+                    permissionReceiver);
+              } catch (Throwable ignored) {}
+
+              super.onDestroy();
+            }
+
+            private boolean isRuntime(
+                UsbDevice d) {
+
+              return d.getVendorId() == RUNTIME_VID &&
+                     d.getProductId() == RUNTIME_PID;
+            }
+
+            private boolean isRefBoot(
+                UsbDevice d) {
+
+              return d.getVendorId() == REF_BOOT_VID &&
+                     d.getProductId() == REF_BOOT_PID;
+            }
+
+            private void scan() {
+              runtime = null;
+
+              add("");
+              add("=== SCAN ===");
+
+              List<String> fingerprints =
+                  snapshot();
+
+              for (String s : fingerprints) {
+                add(s);
+              }
+
+              for (Map.Entry<String,UsbDevice> e :
+                  usb.getDeviceList().entrySet()) {
+
+                UsbDevice d =
+                    e.getValue();
+
+                if (isRuntime(d)) {
+                  runtime = d;
+                  break;
+                }
+              }
+
+              if (runtime == null) {
+                add("Runtime 6324:1719 not found.");
+                return;
+              }
+
+              if (!exactRuntimeTopology(runtime)) {
+                add("REFUSED: runtime topology mismatch.");
+                return;
+              }
+
+              add("Exact runtime target found.");
+
+              if (!usb.hasPermission(runtime)) {
+                requestPermission(runtime);
+                return;
+              }
+
+              new Thread(
+                  this::baseline,
+                  "r5-baseline").start();
+            }
+
+            private void requestPermission(
+                UsbDevice d) {
+
+              int flags =
+                  PendingIntent.FLAG_UPDATE_CURRENT;
+
+              if (Build.VERSION.SDK_INT >=
+                  Build.VERSION_CODES.S) {
+                flags |=
+                    PendingIntent.FLAG_MUTABLE;
+              }
+
+              PendingIntent pi =
+                  PendingIntent.getBroadcast(
+                      this,
+                      5,
+                      new Intent(
+                          ACTION_USB_PERMISSION)
+                          .setPackage(
+                              getPackageName()),
+                      flags);
+
+              add("Requesting USB permission...");
+              usb.requestPermission(d, pi);
+            }
+
+            private boolean exactRuntimeTopology(
+                UsbDevice d) {
+
+              if (!isRuntime(d)) return false;
+              if (d.getInterfaceCount() != 7) return false;
+
+              UsbInterface f3 =
+                  findInterface(d, 3);
+
+              UsbInterface f4 =
+                  findInterface(d, 4);
+
+              return f3 != null &&
+                     f4 != null &&
+                     f3.getInterfaceClass() ==
+                         UsbConstants.USB_CLASS_HID &&
+                     f3.getEndpointCount() == 1 &&
+                     f4.getInterfaceClass() ==
+                         UsbConstants.USB_CLASS_HID &&
+                     f4.getEndpointCount() == 0;
+            }
+
+            private UsbInterface findInterface(
+                UsbDevice d,
+                int id) {
+
+              for (int i = 0;
+                   i < d.getInterfaceCount();
+                   i++) {
+
+                UsbInterface f =
+                    d.getInterface(i);
+
+                if (f.getId() == id) {
+                  return f;
+                }
+              }
+
+              return null;
+            }
+
+            private void baseline() {
+              UsbDevice d = runtime;
+
+              if (d == null ||
+                  !isRuntime(d) ||
+                  !usb.hasPermission(d)) {
+                add("BASELINE: runtime/permission missing.");
+                return;
+              }
+
+              UsbDeviceConnection c =
+                  usb.openDevice(d);
+
+              if (c == null) {
+                add("BASELINE: openDevice failed.");
+                return;
+              }
+
+              try {
+                add("");
+                add("=== BASELINE ===");
+                add("deviceId=" + d.getDeviceId());
+                add("deviceName=" + d.getDeviceName());
+
+                int cfg =
+                    getConfiguration(c);
+
+                add(
+                    "GET_CONFIGURATION=" +
+                    cfg);
+
+                byte[] f =
+                    new byte[8];
+
+                int rc =
+                    getFeature(c, f);
+
+                add(
+                    "Feature8 rc=" +
+                    rc +
+                    " data=" +
+                    hex(f, rc));
+
+                if (rc == 8 &&
+                    (f[0] & 0xFF) == 0x00) {
+
+                  add("BOOT_GATE_BASELINE=CLEAN");
+                  add("R5 probe may be armed.");
+                } else if (
+                    rc == 8 &&
+                    (f[0] & 0xFF) == 0x55) {
+
+                  add("BOOT_GATE_BASELINE=ALREADY_ARMED_55");
+                  add("Cold power-cycle board before R5 probe.");
+                } else {
+                  add("BOOT_GATE_BASELINE=UNEXPECTED");
+                }
+
+              } finally {
+                c.close();
+              }
+            }
+
+            private void armOrRun() {
+              long now =
+                  SystemClock.elapsedRealtime();
+
+              if (now > armUntilMs) {
+                armUntilMs =
+                    now + 5000L;
+
+                probeButton.setText(
+                    "CONFIRM WITHIN 5s — RUN R5 PROBE");
+
+                add("");
+                add("R5 armed. Tap again within 5 seconds.");
+                add("No flash/erase/program will be sent.");
+
+                return;
+              }
+
+              armUntilMs = 0L;
+
+              probeButton.setText(
+                  "2. ARM CONFIG RE-ARM + BOOT PROBE");
+
+              new Thread(
+                  this::runProbe,
+                  "r5-probe").start();
+            }
+
+            private void runProbe() {
+              UsbDevice d = runtime;
+
+              if (d == null ||
+                  !exactRuntimeTopology(d) ||
+                  !usb.hasPermission(d)) {
+
+                add("R5 ABORT: exact runtime/permission missing.");
+                return;
+              }
+
+              add("");
+              add("=== R5 PROBE START ===");
+              add("PRE " + fingerprint(d));
+
+              UsbDeviceConnection c =
+                  usb.openDevice(d);
+
+              if (c == null) {
+                add("R5 ABORT: openDevice failed.");
+                return;
+              }
+
+              boolean aaSent = false;
+
+              try {
+                int originalCfg =
+                    getConfiguration(c);
+
+                add(
+                    "PRE GET_CONFIGURATION=" +
+                    originalCfg);
+
+                if (originalCfg <= 0 ||
+                    originalCfg > 255) {
+
+                  add(
+                      "R5 ABORT: invalid configuration value.");
+                  return;
+                }
+
+                byte[] pre =
+                    new byte[8];
+
+                int preRc =
+                    getFeature(c, pre);
+
+                add(
+                    "PRE Feature rc=" +
+                    preRc +
+                    " data=" +
+                    hex(pre, preRc));
+
+                if (preRc != 8 ||
+                    (pre[0] & 0xFF) != 0x00) {
+
+                  add(
+                      "R5 ABORT: Feature baseline must start with 00.");
+                  add(
+                      "If it is 55, cold power-cycle first.");
+                  return;
+                }
+
+                add("");
+                add("=== USB CONFIGURATION RE-ARM ===");
+
+                int rc0 =
+                    setConfiguration(c, 0);
+
+                add(
+                    "SET_CONFIGURATION 0 rc=" +
+                    rc0);
+
+                if (rc0 < 0) {
+                  add(
+                      "R5 ABORT: Android/kernel rejected deconfigure.");
+                  return;
+                }
+
+                SystemClock.sleep(250);
+
+                int rc1 =
+                    setConfiguration(
+                        c,
+                        originalCfg);
+
+                add(
+                    "SET_CONFIGURATION " +
+                    originalCfg +
+                    " rc=" +
+                    rc1);
+
+                if (rc1 < 0) {
+                  add(
+                      "R5 ABORT: failed to restore configuration.");
+                  return;
+                }
+
+                SystemClock.sleep(600);
+
+                int afterCfg =
+                    getConfiguration(c);
+
+                add(
+                    "POST-REARM GET_CONFIGURATION=" +
+                    afterCfg);
+
+                if (afterCfg != originalCfg) {
+                  add(
+                      "R5 ABORT: configuration did not restore.");
+                  return;
+                }
+
+                byte[] rearmFeature =
+                    new byte[8];
+
+                int rearmRc =
+                    getFeature(
+                        c,
+                        rearmFeature);
+
+                add(
+                    "POST-REARM Feature rc=" +
+                    rearmRc +
+                    " data=" +
+                    hex(
+                        rearmFeature,
+                        rearmRc));
+
+                if (rearmRc != 8 ||
+                    (rearmFeature[0] & 0xFF) != 0x00) {
+
+                  add(
+                      "R5 ABORT: Feature state changed before AA.");
+                  return;
+                }
+
+                add("");
+                add("=== FEATURE HANDOFF ===");
+
+                byte[] aa =
+                    new byte[] {
+                      (byte)0xAA,
+                      0,0,0,0,0,0,0
+                    };
+
+                int setAa =
+                    setFeature(
+                        c,
+                        aa);
+
+                add(
+                    "SET Feature AA rc=" +
+                    setAa);
+
+                if (setAa != 8) {
+                  add(
+                      "R5 ABORT: Feature AA not accepted.");
+                  return;
+                }
+
+                aaSent = true;
+
+                SystemClock.sleep(60);
+
+                byte[] post =
+                    new byte[8];
+
+                int postRc =
+                    getFeature(c, post);
+
+                add(
+                    "GET Feature after AA rc=" +
+                    postRc +
+                    " data=" +
+                    hex(post, postRc));
+
+                if (postRc == 8 &&
+                    (post[0] & 0xFF) == 0x55) {
+
+                  add("AA_TO_55=YES");
+                } else {
+                  add("AA_TO_55=NO_OR_DEVICE_LEFT_RUNTIME");
+                }
+
+              } catch (Throwable t) {
+                add(
+                    "R5 transfer exception: " +
+                    t.getClass().getSimpleName() +
+                    ": " +
+                    t.getMessage());
+              } finally {
+                c.close();
+              }
+
+              if (!aaSent) {
+                add(
+                    "R5 STOP: AA was not sent; no watch needed.");
+                return;
+              }
+
+              add("");
+              add("=== 15 SECOND RE-ENUMERATION WATCH ===");
+
+              watchUsb(15000L);
+
+              add("");
+              add("R5 DONE");
+              add("FLASH_WRITE=NO");
+              add("FLASH_ERASE=NO");
+              add("IMAGE_SEND=NO");
+            }
+
+            private int getConfiguration(
+                UsbDeviceConnection c) {
+
+              byte[] b =
+                  new byte[1];
+
+              int rc =
+                  c.controlTransfer(
+                      0x80,
+                      USB_REQ_GET_CONFIGURATION,
+                      0,
+                      0,
+                      b,
+                      1,
+                      1000);
+
+              if (rc != 1) {
+                return -1000 + rc;
+              }
+
+              return b[0] & 0xFF;
+            }
+
+            private int setConfiguration(
+                UsbDeviceConnection c,
+                int value) {
+
+              return c.controlTransfer(
+                  0x00,
+                  USB_REQ_SET_CONFIGURATION,
+                  value,
+                  0,
+                  new byte[0],
+                  0,
+                  1200);
+            }
+
+            private int getFeature(
+                UsbDeviceConnection c,
+                byte[] b) {
+
+              return c.controlTransfer(
+                  0xA1,
+                  HID_GET_REPORT,
+                  REPORT_FEATURE << 8,
+                  RUNTIME_IF,
+                  b,
+                  b.length,
+                  1200);
+            }
+
+            private int setFeature(
+                UsbDeviceConnection c,
+                byte[] b) {
+
+              return c.controlTransfer(
+                  0x21,
+                  HID_SET_REPORT,
+                  REPORT_FEATURE << 8,
+                  RUNTIME_IF,
+                  b,
+                  b.length,
+                  1200);
+            }
+
+            private void watchUsb(
+                long durationMs) {
+
+              long end =
+                  SystemClock.elapsedRealtime() +
+                  durationMs;
+
+              List<String> prev =
+                  snapshot();
+
+              add("WATCH t=0");
+              for (String s : prev) add("  " + s);
+
+              boolean runtimeGone = false;
+              boolean refBootSeen = false;
+              boolean anyChange = false;
+
+              while (
+                  SystemClock.elapsedRealtime() <
+                  end) {
+
+                SystemClock.sleep(200);
+
+                List<String> now =
+                    snapshot();
+
+                if (!now.equals(prev)) {
+                  anyChange = true;
+
+                  long remain =
+                      end -
+                      SystemClock.elapsedRealtime();
+
+                  add(
+                      "USB_CHANGE remainingMs=" +
+                      Math.max(0L, remain));
+
+                  for (String s : now) {
+                    add("  " + s);
+                  }
+
+                  prev = now;
+                }
+
+                boolean hasRuntime = false;
+
+                for (UsbDevice x :
+                    usb.getDeviceList().values()) {
+
+                  if (isRuntime(x)) {
+                    hasRuntime = true;
+                  }
+
+                  if (isRefBoot(x)) {
+                    refBootSeen = true;
+                  }
+                }
+
+                if (!hasRuntime) {
+                  runtimeGone = true;
+                }
+              }
+
+              UsbDevice finalRuntime = null;
+
+              for (UsbDevice x :
+                  usb.getDeviceList().values()) {
+
+                if (isRuntime(x)) {
+                  finalRuntime = x;
+                }
+
+                if (isRefBoot(x)) {
+                  refBootSeen = true;
+                }
+              }
+
+              add(
+                  "USB_CHANGED=" +
+                  anyChange);
+
+              add(
+                  "RUNTIME_DISAPPEARED_AT_LEAST_ONCE=" +
+                  runtimeGone);
+
+              add(
+                  "REFERENCE_0000_2244_SEEN=" +
+                  refBootSeen);
+
+              if (refBootSeen) {
+                add("FLASHBOOT_CANDIDATE=YES");
+              } else if (
+                  runtimeGone &&
+                  finalRuntime == null) {
+
+                add(
+                    "FLASHBOOT_CANDIDATE=UNKNOWN_NEW_STATE");
+              } else {
+                add("FLASHBOOT_CANDIDATE=NO");
+              }
+
+              if (finalRuntime != null) {
+                add(
+                    "FINAL_RUNTIME " +
+                    fingerprint(finalRuntime));
+              }
+            }
+
+            private List<String> snapshot() {
+              List<String> a =
+                  new ArrayList<>();
+
+              for (UsbDevice d :
+                  usb.getDeviceList().values()) {
+
+                a.add(
+                    fingerprint(d));
+              }
+
+              Collections.sort(a);
+              return a;
+            }
+
+            private String fingerprint(
+                UsbDevice d) {
+
+              StringBuilder b =
+                  new StringBuilder();
+
+              b.append(
+                  String.format(
+                      Locale.US,
+                      "%04X:%04X",
+                      d.getVendorId(),
+                      d.getProductId()));
+
+              b.append(
+                  " id=")
+                  .append(
+                      d.getDeviceId());
+
+              b.append(
+                  " ifaces=")
+                  .append(
+                      d.getInterfaceCount());
+
+              for (int i = 0;
+                   i < d.getInterfaceCount();
+                   i++) {
+
+                UsbInterface f =
+                    d.getInterface(i);
+
+                b.append(
+                    " [")
+                  .append(
+                      f.getId())
+                  .append(
+                      ":c")
+                  .append(
+                      f.getInterfaceClass())
+                  .append(
+                      ":a")
+                  .append(
+                      f.getAlternateSetting())
+                  .append(
+                      ":e")
+                  .append(
+                      f.getEndpointCount());
+
+                for (int j = 0;
+                     j < f.getEndpointCount();
+                     j++) {
+
+                  UsbEndpoint ep =
+                      f.getEndpoint(j);
+
+                  b.append(
+                      ":")
+                    .append(
+                        String.format(
+                            Locale.US,
+                            "%02X",
+                            ep.getAddress()));
+                }
+
+                b.append("]");
+              }
+
+              if (isRuntime(d)) {
+                b.append(" <RUNTIME>");
+              }
+
+              if (isRefBoot(d)) {
+                b.append(" <REF_FLASHBOOT>");
+              }
+
+              return b.toString();
+            }
+
+            private void copyLog() {
+              ClipboardManager cb =
+                  (ClipboardManager)
+                  getSystemService(
+                      CLIPBOARD_SERVICE);
+
+              cb.setPrimaryClip(
+                  ClipData.newPlainText(
+                      "R5 OKN boot gate log",
+                      log.toString()));
+
+              add("Log copied.");
+            }
+
+            private void add(String s) {
+              synchronized (log) {
+                log.append(s).append('\n');
+              }
+
+              runOnUiThread(() -> {
+                synchronized (log) {
+                  logView.setText(
+                      log.toString());
+                }
+              });
+            }
+
+            private static String hex(
+                byte[] a,
+                int n) {
+
+              if (a == null ||
+                  n <= 0) {
+
+                return "<none>";
+              }
+
+              int lim =
+                  Math.min(
+                      n,
+                      a.length);
+
+              StringBuilder b =
+                  new StringBuilder();
+
+              for (int i = 0;
+                   i < lim;
+                   i++) {
+
+                if (i > 0) b.append(' ');
+
+                b.append(
+                    String.format(
+                        Locale.US,
+                        "%02X",
+                        a[i] & 0xFF));
+              }
+
+              return b.toString();
+            }
+          }
+          EOF
+
+      - name: R5 safety audit
+        shell: bash
+        run: |
+          set -euo pipefail
+          J=app/src/main/java/com/okn/dsp/r5/MainActivity.java
+
+          grep -q 'RUNTIME_VID = 0x6324' "$J"
+          grep -q 'RUNTIME_PID = 0x1719' "$J"
+          grep -q 'RUNTIME_IF = 4' "$J"
+          grep -q 'REF_BOOT_PID = 0x2244' "$J"
+
+          grep -q 'USB_REQ_SET_CONFIGURATION' "$J"
+          grep -q 'REPORT_FEATURE << 8' "$J"
+          grep -q '(byte)0xAA' "$J"
+
+          # R5 must contain no runtime UFE/output-report transport or flash writer.
+          ! grep -Eq \
+            'bulkTransfer|REPORT_OUTPUT|A5[[:space:]]+5A|0x57|0x58|chiperas|bootdat|codedata|constdat|cnfgdat|btupdat|upinfo|SpiFlashErase|SpiFlashWrite|flashWrite|programFlash' \
+            "$J"
+
+          echo "PASS: R5 writes only USB configuration state and HID Feature AA"
+
+      - name: Build APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          gradle --no-daemon :app:assembleDebug
+
+      - name: Package R5
+        shell: bash
+        run: |
+          set -euo pipefail
+          APK=app/build/outputs/apk/debug/app-debug.apk
+          test -s "$APK"
+
+          cp "$APK" R5_OKN_BOOT_GATE.apk
+
+          sha256sum \
+            R5_OKN_BOOT_GATE.apk \
+            | tee R5_OKN_BOOT_GATE_SHA256.txt
+
+          cat > R5_STATUS.txt <<'EOF'
+          R5 OKN FIRST-INSTALL BOOT GATE
+
+          Exact runtime gate:
+          - VID:PID 6324:1719
+          - 7 interfaces
+          - IF3 HID / 1 endpoint
+          - IF4 HID / 0 endpoints
+
+          Evidence-backed test:
+          1) Require clean Feature baseline first byte 00
+          2) Read current USB configuration
+          3) SET_CONFIGURATION 0
+          4) Restore original SET_CONFIGURATION value
+          5) Confirm Feature still clean
+          6) SET_REPORT Feature AA, 8 bytes
+          7) GET_REPORT Feature
+          8) Close connection and watch all USB devices for 15 seconds
+          9) Flag reference flashboot candidate 0000:2244 if observed
+
+          Runtime UFE write/read: NONE
+          Output-report tuning packets: NONE
+          Flash erase: NONE
+          Flash program: NONE
+          Image/MVA send: NONE
+          Bootloader ASCII/data commands: NONE
+          EOF
+
+      - name: Upload R5 APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: R5_OKN_BOOT_GATE_APK
+          path: |
+            R5_OKN_BOOT_GATE.apk
+            R5_OKN_BOOT_GATE_SHA256.txt
+            R5_STATUS.txt
+          if-no-files-found: error
+          retention-days: 30
