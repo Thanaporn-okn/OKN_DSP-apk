@@ -1,0 +1,471 @@
+name: R75 BP1048P4 pre-USB-gate mode elevation chain proof
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - ".github/workflows/R75_BP1048P4_PRE_USB_GATE_MODE_ELEVATION_CHAIN_PROOF.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: r75-bp1048p4-pre-usb-gate-mode-elevation-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  SDK_REPO: https://github.com/leadercxn/bp1048_sdk_v0.1.12.git
+  SDK_COMMIT: 8105bd864b04995d81c9f9ae77cb158259f39015
+
+jobs:
+  static-proof:
+    name: Pre-USB-gate resource to real app mode chain / STATIC ONLY / NO USB / NO FLASH
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Fetch pinned SDK
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/bp1048_r75
+          git init -q /tmp/bp1048_r75
+          cd /tmp/bp1048_r75
+          git remote add origin "$SDK_REPO"
+          git fetch -q --depth=1 origin "$SDK_COMMIT"
+          git checkout -q --detach FETCH_HEAD
+          test "$(git rev-parse HEAD)" = "$SDK_COMMIT"
+          echo "R75_SDK_COMMIT=$(git rev-parse HEAD)" \
+            | tee /tmp/R75_SDK_STATE.txt
+
+      - name: Prove Line Card HDMI detection occurs before USB mode gate
+        id: detect_order
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          DET=/tmp/bp1048_r75/BT_Audio_APP/bt_audio_app_src/device/device_detect.c
+
+          python3 - "$DET" <<'PY'
+          from pathlib import Path
+          import sys
+
+          lines=Path(sys.argv[1]).read_text(
+              encoding="latin-1", errors="replace"
+          ).splitlines()
+
+          def first(needle):
+              for i,x in enumerate(lines):
+                  if needle in x:
+                      return i
+              raise SystemExit("missing token: "+needle)
+
+          line_det=first("InOrOut = IsLineInLink();")
+          card_det=first("InOrOut = IsCardIn();")
+          usb_gate=first("if(GetSystemMode()<AppModeLineAudioPlay)")
+          usb_link=first("InOrOut = OTG_PortDeviceIsLink();")
+
+          if not (line_det < usb_gate < usb_link):
+              raise SystemExit("LineIn -> USB gate -> USB link order mismatch")
+          if not (card_det < usb_gate):
+              raise SystemExit("Card detect is not before USB gate")
+
+          # HDMI may be conditionally compiled, but in source it also precedes USB.
+          hdmi=[i for i,x in enumerate(lines) if "InOrOut = IsHDMILink();" in x]
+          hdmi_before = bool(hdmi and hdmi[0] < usb_gate)
+
+          out=[
+              f"R75_LINE_DETECT_LINE={line_det+1}",
+              f"R75_CARD_DETECT_LINE={card_det+1}",
+              f"R75_USB_MODE_GATE_LINE={usb_gate+1}",
+              f"R75_USB_LINK_TEST_LINE={usb_link+1}",
+              "R75_LINE_DETECT_PRECEDES_USB_GATE=YES",
+              "R75_CARD_DETECT_PRECEDES_USB_GATE=YES",
+              "R75_HDMI_DETECT_PRECEDES_USB_GATE="
+              + ("YES" if hdmi_before else "NO"),
+              "R75_USB_GATE_PRECEDES_USB_LINK_TEST=YES",
+          ]
+
+          Path("/tmp/R75_DETECT_ORDER.txt").write_text(
+              "\n".join(out)+"\n", encoding="utf-8"
+          )
+          print("\n".join(out))
+          PY
+
+      - name: Prove Line resource registration path
+        id: line_resource
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          SVC=/tmp/bp1048_r75/BT_Audio_APP/bt_audio_app_src/services/device_service.c
+
+          python3 - "$SVC" <<'PY'
+          from pathlib import Path
+          import sys
+
+          lines=Path(sys.argv[1]).read_text(
+              encoding="latin-1", errors="replace"
+          ).splitlines()
+
+          def find(needle, start=0):
+              for i in range(start, len(lines)):
+                  if needle in lines[i]:
+                      return i
+              raise SystemExit("missing token: "+needle)
+
+          ev=find("if(Plug & LINEIN_EVENT_BIT)")
+          st=find("if(Plug & LINEIN_STATE_BIT)", ev)
+          reg=find("ResourceRegister(AppResourceLineIn);", st)
+          msg=find("MSG_DEVICE_SERVICE_LINE_IN", reg)
+          dereg=find("ResourceDeregister(AppResourceLineIn);", msg)
+
+          if not (ev < st < reg < msg < dereg):
+              raise SystemExit("Line resource register/message ordering mismatch")
+
+          out=[
+              f"R75_LINE_EVENT_BRANCH_LINE={ev+1}",
+              f"R75_LINE_STATE_BRANCH_LINE={st+1}",
+              f"R75_LINE_RESOURCE_REGISTER_LINE={reg+1}",
+              f"R75_LINE_IN_MESSAGE_LINE={msg+1}",
+              "R75_LINE_EVENT_REGISTERS_LINE_RESOURCE=YES",
+              "R75_LINE_EVENT_SENDS_LINE_IN_MESSAGE=YES",
+          ]
+
+          Path("/tmp/R75_LINE_RESOURCE.txt").write_text(
+              "\n".join(out)+"\n", encoding="utf-8"
+          )
+          print("\n".join(out))
+          PY
+
+      - name: Prove Line IN message maps to AppModeLineAudioPlay
+        id: line_mode_map
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          MODE=/tmp/bp1048_r75/BT_Audio_APP/bt_audio_app_src/apps/mode_switch_api.c
+
+          python3 - "$MODE" <<'PY'
+          from pathlib import Path
+          import sys
+
+          lines=Path(sys.argv[1]).read_text(
+              encoding="latin-1", errors="replace"
+          ).splitlines()
+
+          def find(needle, start=0):
+              for i in range(start, len(lines)):
+                  if needle in lines[i]:
+                      return i
+              raise SystemExit("missing token: "+needle)
+
+          map_line=find(
+              "{AppModeLineAudioPlay",
+          )
+          plug_case=find("case MSG_DEVICE_SERVICE_LINE_IN:")
+          plug_map=find(
+              "RetMode = FindResourceMode(AppResourceLineIn);",
+              plug_case
+          )
+
+          # Resource table must associate Line mode with Line resource.
+          row=lines[map_line]
+          if "AppResourceLineIn" not in row:
+              raise SystemExit("Line mode resource row mismatch")
+
+          out=[
+              f"R75_LINE_MODE_RESOURCE_ROW={map_line+1}",
+              f"R75_LINE_IN_TRANSLATION_CASE={plug_case+1}",
+              f"R75_LINE_IN_FIND_RESOURCE_MODE_LINE={plug_map+1}",
+              "R75_LINE_RESOURCE_MAPS_TO_APP_MODE_LINE=YES",
+              "R75_LINE_IN_MESSAGE_TRANSLATES_VIA_APP_RESOURCE_LINE=YES",
+          ]
+
+          Path("/tmp/R75_LINE_MODE_MAP.txt").write_text(
+              "\n".join(out)+"\n", encoding="utf-8"
+          )
+          print("\n".join(out))
+          PY
+
+      - name: Prove main task can promote target then current mode
+        id: main_mode
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          MAIN=/tmp/bp1048_r75/BT_Audio_APP/bt_audio_app_src/apps/main_task.c
+
+          python3 - "$MAIN" <<'PY'
+          from pathlib import Path
+          import sys
+
+          lines=Path(sys.argv[1]).read_text(
+              encoding="latin-1", errors="replace"
+          ).splitlines()
+
+          def find(needle, start=0):
+              for i in range(start, len(lines)):
+                  if needle in lines[i]:
+                      return i
+              raise SystemExit("missing token: "+needle)
+
+          usb_case=find("case MSG_DEVICE_SERVICE_USB_DEVICE_IN:")
+          line_case=find("case MSG_DEVICE_SERVICE_LINE_IN:")
+          find_mode=find("AppModes = FindModeByPlugInMsg(msgId);", line_case)
+          target=find("mainAppCt.appTargetMode = AppModes;", find_mode)
+          current=find(
+              "mainAppCt.appCurrentMode = mainAppCt.appTargetMode;",
+              target
+          )
+
+          rest_guard=find(
+              "if(mainAppCt.appCurrentMode == AppModeRestPlay)",
+              line_case
+          )
+
+          if not (line_case <= rest_guard < find_mode < target < current):
+              raise SystemExit("main task mode transition ordering mismatch")
+
+          out=[
+              f"R75_MAIN_LINE_IN_CASE_LINE={line_case+1}",
+              f"R75_MAIN_REST_GUARD_LINE={rest_guard+1}",
+              f"R75_MAIN_FIND_MODE_LINE={find_mode+1}",
+              f"R75_MAIN_TARGET_ASSIGN_LINE={target+1}",
+              f"R75_MAIN_CURRENT_ASSIGN_LINE={current+1}",
+              "R75_LINE_IN_CAN_SET_REAL_APP_TARGET_MODE=YES",
+              "R75_MODE_START_COMMITS_TARGET_TO_APP_CURRENT_MODE=YES",
+              "R75_REST_MODE_BLOCKS_LINE_IN_PROMOTION=YES",
+          ]
+
+          Path("/tmp/R75_MAIN_MODE_CHAIN.txt").write_text(
+              "\n".join(out)+"\n", encoding="utf-8"
+          )
+          print("\n".join(out))
+          PY
+
+      - name: Prove Line mode opens the USB detector threshold
+        id: threshold
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          MODEH=/tmp/bp1048_r75/BT_Audio_APP/bt_audio_app_src/inc/mode_switch_api.h
+
+          python3 - "$MODEH" <<'PY'
+          from pathlib import Path
+          import re, sys
+
+          lines=Path(sys.argv[1]).read_text(
+              encoding="latin-1", errors="replace"
+          ).splitlines()
+
+          vals={}
+          cur=-1
+          inside=False
+          for line in lines:
+              if "typedef enum" in line:
+                  inside=True
+                  continue
+              if inside and "}AppMode" in line.replace(" ",""):
+                  break
+              if inside:
+                  m=re.match(
+                      r"\s*(AppMode[A-Za-z0-9_]+)\s*(?:=\s*([0-9]+))?\s*,?",
+                      line
+                  )
+                  if m:
+                      cur=int(m.group(2)) if m.group(2) is not None else cur+1
+                      vals[m.group(1)]=cur
+
+          required=[
+              "AppModeWaitingPlay",
+              "AppModeRestPlay",
+              "AppModeLineAudioPlay",
+              "AppModeUsbDevicePlay",
+          ]
+          for k in required:
+              if k not in vals:
+                  raise SystemExit("missing enum "+k)
+
+          line=vals["AppModeLineAudioPlay"]
+
+          out=[
+              f"R75_APP_MODE_WAITING={vals['AppModeWaitingPlay']}",
+              f"R75_APP_MODE_REST={vals['AppModeRestPlay']}",
+              f"R75_APP_MODE_LINE={line}",
+              f"R75_APP_MODE_USB_DEVICE={vals['AppModeUsbDevicePlay']}",
+              "R75_LINE_MODE_SATISFIES_USB_GATE="
+              + ("YES" if not (line < vals["AppModeLineAudioPlay"]) else "NO"),
+              "R75_WAITING_MODE_FAILS_USB_GATE="
+              + ("YES" if vals["AppModeWaitingPlay"] < line else "NO"),
+              "R75_REST_MODE_FAILS_USB_GATE="
+              + ("YES" if vals["AppModeRestPlay"] < line else "NO"),
+          ]
+
+          Path("/tmp/R75_THRESHOLD.txt").write_text(
+              "\n".join(out)+"\n", encoding="utf-8"
+          )
+          print("\n".join(out))
+          PY
+
+      - name: Prove USB resource registration becomes reachable after threshold
+        id: usb_resource
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          DET=/tmp/bp1048_r75/BT_Audio_APP/bt_audio_app_src/device/device_detect.c
+          SVC=/tmp/bp1048_r75/BT_Audio_APP/bt_audio_app_src/services/device_service.c
+
+          grep -F 'InOrOut = OTG_PortDeviceIsLink();' "$DET"
+          grep -F 'Ret |= USB_DEVICE_EVENT_BIT;' "$DET"
+          grep -F 'ResourceRegister(AppResourceUsbDevice);' "$SVC"
+
+          cat > /tmp/R75_USB_RESOURCE_CHAIN.txt <<'EOF'
+          R75_USB_LINK_TEST_EXISTS_AFTER_MODE_GATE=YES
+          R75_USB_LINK_CAN_EMIT_USB_DEVICE_EVENT=YES
+          R75_USB_DEVICE_EVENT_REGISTERS_USB_RESOURCE=YES
+          R75_REFERENCE_USB_RESOURCE_CAN_EXIST_AFTER_MODE_ELEVATION=YES
+          EOF
+
+          cat /tmp/R75_USB_RESOURCE_CHAIN.txt
+
+      - name: Build R75 decision
+        id: decision
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cat > /tmp/R75_DECISION.txt <<'EOF'
+          R75_REFERENCE_PRE_USB_GATE_MODE_ELEVATION_CHAIN_PROVEN=YES
+
+          R75_REFERENCE_CHAIN_STEP_1_LINE_DETECT_BEFORE_USB_GATE=YES
+          R75_REFERENCE_CHAIN_STEP_2_LINE_EVENT_REGISTERS_RESOURCE=YES
+          R75_REFERENCE_CHAIN_STEP_3_LINE_MESSAGE_CAN_TARGET_LINE_MODE=YES
+          R75_REFERENCE_CHAIN_STEP_4_TARGET_CAN_BECOME_APP_CURRENT_MODE=YES
+          R75_REFERENCE_CHAIN_STEP_5_LINE_MODE_OPENS_USB_GATE=YES
+          R75_REFERENCE_CHAIN_STEP_6_USB_EVENT_CAN_REGISTER_USB_RESOURCE=YES
+
+          R75_REST_MODE_IS_EXCEPTION=YES
+          R75_REST_MODE_MUST_BE_EXITED_BEFORE_LINE_PROMOTION=YES
+
+          # Production is not assumed identical until tested.
+          R75_PRODUCTION_MODE_ELEVATION_CHAIN_PROVEN=NO
+          R75_PRODUCTION_USB_RESOURCE_AFTER_LINE_MODE_PROVEN=NO
+          R75_PRODUCTION_FLASH_BOOT_EN_PROVEN=NO
+          R75_PRODUCTION_FIRST_BOOTSTRAP_PROVEN=NO
+
+          # A new live probe would be meaningfully different from R46G only
+          # if the real app mode is first elevated to >= AppModeLineAudioPlay.
+          R75_REPEAT_R46G_WITHOUT_MODE_ELEVATION_REQUIRED=NO
+          R75_MODE_ELEVATED_BOOT_PROBE_IS_NEW_HYPOTHESIS=YES
+
+          R75_BOARD_USB_ACCESSED=NO
+          R75_FLASH_WRITE_EXECUTED=NO
+          R75_FLASH_ERASE_EXECUTED=NO
+          FLASH_ALLOWED=NO
+          EOF
+
+          cat /tmp/R75_DECISION.txt
+
+      - name: Build R75 evidence bundle
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          OUT=/tmp/R75_BP1048P4_PRE_USB_GATE_MODE_ELEVATION_EVIDENCE
+          rm -rf "$OUT"
+          mkdir -p "$OUT"
+
+          for f in \
+            R75_SDK_STATE.txt \
+            R75_DETECT_ORDER.txt \
+            R75_LINE_RESOURCE.txt \
+            R75_LINE_MODE_MAP.txt \
+            R75_MAIN_MODE_CHAIN.txt \
+            R75_THRESHOLD.txt \
+            R75_USB_RESOURCE_CHAIN.txt \
+            R75_DECISION.txt; do
+            test -f "/tmp/$f" && cp "/tmp/$f" "$OUT/"
+          done
+
+          cat > "$OUT/README.txt" <<'EOF'
+          R75 proves a reference-SDK chain that is different from the earlier
+          AA->55 probe:
+
+          Line-In detection executes before the USB mode gate.  A Line-In event
+          can register AppResourceLineIn, map to AppModeLineAudioPlay, and
+          promote the real mainAppCt.appCurrentMode.  Line mode is exactly the
+          threshold at which DeviceDetect no longer returns before the USB link
+          test.  A following USB event can then register AppResourceUsbDevice.
+
+          Exception: AppModeRestPlay explicitly blocks resource-driven mode
+          promotion in main_task.c; Rest must be exited first.
+
+          This workflow does not prove production behavior and performs no live
+          USB access, reset, boot jump, erase, program, or flash.
+          EOF
+
+          (
+            cd /tmp
+            zip -qr \
+              R75_BP1048P4_PRE_USB_GATE_MODE_ELEVATION_EVIDENCE.zip \
+              R75_BP1048P4_PRE_USB_GATE_MODE_ELEVATION_EVIDENCE
+            sha256sum \
+              R75_BP1048P4_PRE_USB_GATE_MODE_ELEVATION_EVIDENCE.zip \
+              > R75_BP1048P4_PRE_USB_GATE_MODE_ELEVATION_EVIDENCE.zip.sha256
+          )
+
+          cat /tmp/R75_BP1048P4_PRE_USB_GATE_MODE_ELEVATION_EVIDENCE.zip.sha256
+
+      - name: Upload R75 evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: R75-BP1048P4-PRE-USB-GATE-MODE-ELEVATION-EVIDENCE
+          path: |
+            /tmp/R75_BP1048P4_PRE_USB_GATE_MODE_ELEVATION_EVIDENCE.zip
+            /tmp/R75_BP1048P4_PRE_USB_GATE_MODE_ELEVATION_EVIDENCE.zip.sha256
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: R75 final gate
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cat /tmp/R75_DETECT_ORDER.txt 2>/dev/null || true
+          cat /tmp/R75_LINE_RESOURCE.txt 2>/dev/null || true
+          cat /tmp/R75_LINE_MODE_MAP.txt 2>/dev/null || true
+          cat /tmp/R75_MAIN_MODE_CHAIN.txt 2>/dev/null || true
+          cat /tmp/R75_THRESHOLD.txt 2>/dev/null || true
+          cat /tmp/R75_USB_RESOURCE_CHAIN.txt 2>/dev/null || true
+          cat /tmp/R75_DECISION.txt 2>/dev/null || true
+
+          test "${{ steps.detect_order.outcome }}" = "success"
+          test "${{ steps.line_resource.outcome }}" = "success"
+          test "${{ steps.line_mode_map.outcome }}" = "success"
+          test "${{ steps.main_mode.outcome }}" = "success"
+          test "${{ steps.threshold.outcome }}" = "success"
+          test "${{ steps.usb_resource.outcome }}" = "success"
+          test "${{ steps.decision.outcome }}" = "success"
+
+          grep -F 'R75_LINE_DETECT_PRECEDES_USB_GATE=YES' /tmp/R75_DETECT_ORDER.txt
+          grep -F 'R75_LINE_EVENT_REGISTERS_LINE_RESOURCE=YES' /tmp/R75_LINE_RESOURCE.txt
+          grep -F 'R75_LINE_RESOURCE_MAPS_TO_APP_MODE_LINE=YES' /tmp/R75_LINE_MODE_MAP.txt
+          grep -F 'R75_MODE_START_COMMITS_TARGET_TO_APP_CURRENT_MODE=YES' /tmp/R75_MAIN_MODE_CHAIN.txt
+          grep -F 'R75_REST_MODE_BLOCKS_LINE_IN_PROMOTION=YES' /tmp/R75_MAIN_MODE_CHAIN.txt
+          grep -F 'R75_LINE_MODE_SATISFIES_USB_GATE=YES' /tmp/R75_THRESHOLD.txt
+          grep -F 'R75_REFERENCE_USB_RESOURCE_CAN_EXIST_AFTER_MODE_ELEVATION=YES' /tmp/R75_USB_RESOURCE_CHAIN.txt
+          grep -F 'R75_MODE_ELEVATED_BOOT_PROBE_IS_NEW_HYPOTHESIS=YES' /tmp/R75_DECISION.txt
+          grep -F 'R75_BOARD_USB_ACCESSED=NO' /tmp/R75_DECISION.txt
+          grep -F 'FLASH_ALLOWED=NO' /tmp/R75_DECISION.txt
+
+          echo "R75_PRE_USB_GATE_MODE_ELEVATION_CHAIN_PROOF=PASS"
+          echo "FLASH_ALLOWED=NO"
