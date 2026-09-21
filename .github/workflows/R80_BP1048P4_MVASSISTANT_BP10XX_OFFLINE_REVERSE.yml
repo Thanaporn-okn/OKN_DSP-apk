@@ -1,0 +1,304 @@
+name: R80 BP1048P4 MVAssistant BP10xx offline reverse
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: r80-mvassistant-bp10xx-offline-reverse-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Public third-party candidate linked from the USMI thread on 2025-11-11.
+  # Context is BP1048B2/programmer; it is NOT trusted as BP1048P4 production tooling.
+  MVASSISTANT_DRIVE_FILE_ID: 15hdF2vnnUMVtIFKhZPGLPwBSEZpyqP2H
+  MVASSISTANT_EXPECTED_NAME: MVAssistant_BP10xx_V1.8.11.zip
+
+jobs:
+  static-only:
+    name: Download + static reverse only / NO USB / NO EXECUTION / NO FLASH
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Safety gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat <<'EOF'
+          R80_SCOPE=OFFLINE_STATIC_ONLY
+          BOARD_USB_ACCESS=NO
+          VENDOR_EXE_EXECUTION=NO
+          WINE_MONO_DOTNET_EXECUTION=NO
+          FLASH_ERASE_WRITE=NO
+          FLASH_ALLOWED=NO
+          BP1048B2_TO_BP1048P4_ASSUMPTION=FORBIDDEN
+          EOF
+
+      - name: Install static-analysis prerequisites
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            python3 python3-pip unzip p7zip-full file binutils strings grep findutils zip
+          python3 -m pip install --disable-pip-version-check --no-cache-dir gdown pefile
+
+      - name: Download public MVAssistant candidate without executing it
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/r80/download /tmp/r80/extracted /tmp/r80/evidence
+          python3 -m gdown \
+            "https://drive.google.com/uc?id=${MVASSISTANT_DRIVE_FILE_ID}" \
+            -O "/tmp/r80/download/${MVASSISTANT_EXPECTED_NAME}"
+          test -s "/tmp/r80/download/${MVASSISTANT_EXPECTED_NAME}"
+          file "/tmp/r80/download/${MVASSISTANT_EXPECTED_NAME}" | tee /tmp/r80/evidence/CANDIDATE_FILETYPE.txt
+          sha256sum "/tmp/r80/download/${MVASSISTANT_EXPECTED_NAME}" | tee /tmp/r80/evidence/CANDIDATE_SHA256.txt
+          stat -c 'bytes=%s' "/tmp/r80/download/${MVASSISTANT_EXPECTED_NAME}" | tee /tmp/r80/evidence/CANDIDATE_SIZE.txt
+
+      - name: Extract candidate as data only
+        shell: bash
+        run: |
+          set -euo pipefail
+          unzip -t "/tmp/r80/download/${MVASSISTANT_EXPECTED_NAME}" | tee /tmp/r80/evidence/ZIP_TEST.txt
+          unzip -q "/tmp/r80/download/${MVASSISTANT_EXPECTED_NAME}" -d /tmp/r80/extracted
+          find /tmp/r80/extracted -type f -printf '%P\t%s\n' | sort | tee /tmp/r80/evidence/FILE_LIST.tsv
+          find /tmp/r80/extracted -type f -print0 | sort -z | xargs -0 sha256sum | tee /tmp/r80/evidence/EXTRACTED_SHA256.txt
+          find /tmp/r80/extracted -type f -print0 | xargs -0 file | tee /tmp/r80/evidence/EXTRACTED_FILETYPES.txt
+
+      - name: Recursively inventory nested archives without execution
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import hashlib, io, zipfile
+
+          root = Path('/tmp/r80/extracted')
+          out = []
+          seen = set()
+
+          def walk(data: bytes, label: str, depth: int):
+              sha = hashlib.sha256(data).hexdigest()
+              out.append(f'BLOB\tdepth={depth}\t{label}\t{len(data)}\t{sha}')
+              if depth >= 5:
+                  return
+              suffix = Path(label.split('!')[-1]).suffix.lower()
+              if suffix not in {'.zip', '.jar', '.apk'}:
+                  return
+              key = (sha, depth)
+              if key in seen:
+                  return
+              seen.add(key)
+              try:
+                  with zipfile.ZipFile(io.BytesIO(data)) as z:
+                      for i in z.infolist():
+                          if i.is_dir():
+                              continue
+                          try:
+                              child = z.read(i)
+                          except Exception as e:
+                              out.append(f'READ_ERROR\t{label}!{i.filename}\t{e}')
+                              continue
+                          walk(child, f'{label}!{i.filename}', depth + 1)
+              except zipfile.BadZipFile:
+                  pass
+
+          for p in sorted(root.rglob('*')):
+              if p.is_file():
+                  walk(p.read_bytes(), p.relative_to(root).as_posix(), 0)
+
+          Path('/tmp/r80/evidence/NESTED_INVENTORY.tsv').write_text('\n'.join(out) + '\n', encoding='utf-8')
+          print('\n'.join(out[:250]))
+          PY
+
+      - name: Static PE metadata and imports
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import hashlib, json
+          import pefile
+
+          root = Path('/tmp/r80/extracted')
+          rows = []
+          for p in sorted(root.rglob('*')):
+              if not p.is_file():
+                  continue
+              data = p.read_bytes()
+              if data[:2] != b'MZ':
+                  continue
+              item = {
+                  'path': p.relative_to(root).as_posix(),
+                  'size': len(data),
+                  'sha256': hashlib.sha256(data).hexdigest(),
+                  'imports': [],
+                  'exports': [],
+                  'timestamp': None,
+                  'machine': None,
+                  'subsystem': None,
+                  'error': None,
+              }
+              try:
+                  pe = pefile.PE(data=data, fast_load=False)
+                  item['timestamp'] = pe.FILE_HEADER.TimeDateStamp
+                  item['machine'] = hex(pe.FILE_HEADER.Machine)
+                  item['subsystem'] = hex(pe.OPTIONAL_HEADER.Subsystem)
+                  for entry in getattr(pe, 'DIRECTORY_ENTRY_IMPORT', []):
+                      dll = entry.dll.decode('ascii', 'replace')
+                      for imp in entry.imports:
+                          name = imp.name.decode('ascii', 'replace') if imp.name else f'ordinal:{imp.ordinal}'
+                          item['imports'].append(f'{dll}!{name}')
+                  for sym in getattr(getattr(pe, 'DIRECTORY_ENTRY_EXPORT', None), 'symbols', []) or []:
+                      item['exports'].append(sym.name.decode('ascii','replace') if sym.name else f'ordinal:{sym.ordinal}')
+              except Exception as e:
+                  item['error'] = repr(e)
+              rows.append(item)
+
+          Path('/tmp/r80/evidence/PE_METADATA_IMPORTS.json').write_text(
+              json.dumps(rows, indent=2, ensure_ascii=False), encoding='utf-8')
+          print(json.dumps(rows, indent=2, ensure_ascii=False)[:20000])
+          PY
+
+      - name: Static transport boot-entry and recovery clue scan
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import hashlib, json, re
+
+          root = Path('/tmp/r80/extracted')
+
+          byte_patterns = {
+              'MVA_MAGIC_4D56B158': bytes.fromhex('4d56b158'),
+              'APP_MAGIC_C9BDBEB0': bytes.fromhex('c9bdbeb0'),
+              'VID_6324_LE': bytes.fromhex('2463'),
+              'PID_1719_LE': bytes.fromhex('1917'),
+              'VID_0000_LE': bytes.fromhex('0000'),
+              'PID_2244_LE': bytes.fromhex('4422'),
+          }
+
+          terms = [
+              'MVAssistant','BP1048P4','BP1048P','BP1048B2','BP10xx','BP1048',
+              'PC升级下载','升级下载','recovery','bootloader','boot','upgrade','update',
+              'identify','identity','status','version','device info','chip id','flash id',
+              'HidD_SetFeature','HidD_GetFeature','HidD_GetInputReport','HidD_SetOutputReport',
+              'SetupDiGetClassDevs','SetupDiEnumDeviceInterfaces','CreateFile','ReadFile','WriteFile',
+              'WinUsb_Initialize','WinUsb_ControlTransfer','WinUSB','libusb','HID',
+              'DeviceIoControl','IOCTL','control transfer','feature report','report id',
+              'VID_','PID_','6324','1719','2244','55AA','AA55',
+              'chiperas','codedata','bootdat','constdat','cnfgdat','btupdat','upinfo','cxxx',
+              '.mva','MVA','CRC','FastCRC','password','crypto','read flash','erase flash','write flash',
+              'COM','UART','baud','512000','AICE','Hummingbird','programmer','download dog','upgrade dog'
+          ]
+
+          def decode_strings(data: bytes):
+              vals = []
+              vals.extend(m.group(0).decode('latin1','replace') for m in re.finditer(rb'[ -~]{4,}', data))
+              try:
+                  txt = data.decode('utf-16le', 'ignore')
+                  vals.extend(m.group(0) for m in re.finditer(r'[ -~\u4e00-\u9fff]{4,}', txt))
+              except Exception:
+                  pass
+              return vals
+
+          results = []
+          for p in sorted(root.rglob('*')):
+              if not p.is_file():
+                  continue
+              data = p.read_bytes()
+              rel = p.relative_to(root).as_posix()
+              sha = hashlib.sha256(data).hexdigest()
+              strings = decode_strings(data)
+              string_hits = []
+              for s in strings:
+                  sl = s.lower()
+                  matched = [t for t in terms if t.lower() in sl]
+                  if matched:
+                      string_hits.append({'terms': matched, 'text': s[:500]})
+              byte_hits = {}
+              for name, pat in byte_patterns.items():
+                  offs = []
+                  pos = 0
+                  while True:
+                      pos = data.find(pat, pos)
+                      if pos < 0:
+                          break
+                      offs.append(pos)
+                      pos += 1
+                      if len(offs) >= 128:
+                          break
+                  if offs:
+                      byte_hits[name] = offs
+              if string_hits or byte_hits:
+                  results.append({
+                      'path': rel, 'size': len(data), 'sha256': sha,
+                      'string_hits': string_hits[:4000], 'byte_hits': byte_hits,
+                  })
+
+          Path('/tmp/r80/evidence/STATIC_CLUE_SCAN.json').write_text(
+              json.dumps(results, indent=2, ensure_ascii=False), encoding='utf-8')
+          print(json.dumps(results, indent=2, ensure_ascii=False)[:30000])
+          PY
+
+      - name: Produce fail-closed R80 decision
+        shell: bash
+        run: |
+          set -euo pipefail
+          ZIP_SHA="$(cut -d' ' -f1 /tmp/r80/evidence/CANDIDATE_SHA256.txt)"
+          FILE_COUNT="$(wc -l < /tmp/r80/evidence/FILE_LIST.tsv | tr -d ' ')"
+          PE_COUNT="$(python3 - <<'PY'
+          import json
+          print(len(json.load(open('/tmp/r80/evidence/PE_METADATA_IMPORTS.json'))))
+          PY
+          )"
+          {
+            echo "R80_CANDIDATE_NAME=${MVASSISTANT_EXPECTED_NAME}"
+            echo "R80_CANDIDATE_SOURCE=PUBLIC_THIRD_PARTY_GOOGLE_DRIVE_FROM_USMI_2025_11_11"
+            echo "R80_CANDIDATE_SHA256=${ZIP_SHA}"
+            echo "R80_EXTRACTED_FILE_COUNT=${FILE_COUNT}"
+            echo "R80_PE_FILE_COUNT=${PE_COUNT}"
+            echo "R80_STATIC_ANALYSIS_ONLY=YES"
+            echo "R80_VENDOR_BINARY_EXECUTED=NO"
+            echo "R80_BOARD_USB_ACCESSED=NO"
+            echo "R80_FLASH_COMMAND_SENT=NO"
+            echo "R80_BP1048P4_COMPATIBILITY_PROVEN=NO"
+            echo "R80_PRODUCTION_BOOT_ENTRY_SEQUENCE_PROVEN=NO"
+            echo "R80_PRODUCTION_RECOVERY_USB_IDENTITY_PROVEN=NO"
+            echo "R80_PRODUCTION_TRANSPORT_PROVEN=NO"
+            echo "R80_READONLY_IDENTIFY_STATUS_PROVEN=NO"
+            echo "FLASH_ALLOWED=NO"
+          } | tee /tmp/r80/evidence/R80_DECISION.txt
+
+      - name: Build evidence bundle and exclude vendor binaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > /tmp/r80/evidence/README_R80.txt <<'EOF'
+          R80 scope: static/offline reverse of a public third-party MVAssistant BP10xx candidate.
+          The source discussion is BP1048B2/programmer context, NOT proof for BP1048P4 production.
+          No vendor executable was run. No USB device was accessed. No flash operation occurred.
+          The downloaded ZIP and extracted vendor binaries are deliberately NOT uploaded as artifacts.
+          Use hashes + metadata + static clues only. FLASH_ALLOWED=NO.
+          EOF
+          (cd /tmp/r80/evidence && zip -9 -r /tmp/R80-BP1048P4-MVASSISTANT-BP10XX-OFFLINE-EVIDENCE.zip .)
+          sha256sum /tmp/R80-BP1048P4-MVASSISTANT-BP10XX-OFFLINE-EVIDENCE.zip \
+            | tee /tmp/R80_EVIDENCE_SHA256.txt
+
+      - name: Upload R80 evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: R80-BP1048P4-MVASSISTANT-BP10XX-OFFLINE-EVIDENCE
+          path: |
+            /tmp/R80-BP1048P4-MVASSISTANT-BP10XX-OFFLINE-EVIDENCE.zip
+            /tmp/R80_EVIDENCE_SHA256.txt
+          if-no-files-found: error
+          retention-days: 30
