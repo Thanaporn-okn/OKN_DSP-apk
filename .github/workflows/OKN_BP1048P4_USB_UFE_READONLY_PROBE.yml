@@ -1,0 +1,629 @@
+name: OKN BP1048P4 USB UFE ReadOnly Probe
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/OKN_BP1048P4_USB_UFE_READONLY_PROBE.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  build-readonly-ufe-probe:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+
+    steps:
+      - name: Setup Java 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
+
+      - name: Install Android platform
+        shell: bash
+        run: |
+          set -euo pipefail
+          yes | sdkmanager --licenses >/dev/null 2>&1 || true
+          sdkmanager "platform-tools" "platforms;android-35" "build-tools;35.0.0"
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.10.2'
+
+      - name: Create Android project
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p app/src/main/java/com/okn/dsp/uferead
+
+          cat > settings.gradle <<'EOF'
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+          rootProject.name = "OKN_BP1048P4_UFE_ReadOnly"
+          include(":app")
+          EOF
+
+          cat > build.gradle <<'EOF'
+          plugins {
+              id 'com.android.application' version '8.7.3' apply false
+          }
+          EOF
+
+          cat > app/build.gradle <<'EOF'
+          plugins {
+              id 'com.android.application'
+          }
+
+          android {
+              namespace 'com.okn.dsp.uferead'
+              compileSdk 35
+
+              defaultConfig {
+                  applicationId "com.okn.dsp.uferead"
+                  minSdk 26
+                  targetSdk 35
+                  versionCode 2
+                  versionName "2.0-ufe-readonly"
+              }
+
+              buildTypes {
+                  debug { debuggable true }
+                  release { minifyEnabled false }
+              }
+
+              compileOptions {
+                  sourceCompatibility JavaVersion.VERSION_17
+                  targetCompatibility JavaVersion.VERSION_17
+              }
+          }
+          EOF
+
+          cat > app/src/main/AndroidManifest.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <uses-feature
+                  android:name="android.hardware.usb.host"
+                  android:required="true" />
+              <application
+                  android:allowBackup="false"
+                  android:label="OKN USB UFE ReadOnly"
+                  android:theme="@android:style/Theme.Material.Light.NoActionBar">
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+              </application>
+          </manifest>
+          EOF
+
+          cat > app/src/main/java/com/okn/dsp/uferead/MainActivity.java <<'EOF'
+          package com.okn.dsp.uferead;
+
+          import android.app.Activity;
+          import android.app.PendingIntent;
+          import android.content.BroadcastReceiver;
+          import android.content.ClipData;
+          import android.content.ClipboardManager;
+          import android.content.Context;
+          import android.content.Intent;
+          import android.content.IntentFilter;
+          import android.hardware.usb.UsbConstants;
+          import android.hardware.usb.UsbDevice;
+          import android.hardware.usb.UsbDeviceConnection;
+          import android.hardware.usb.UsbInterface;
+          import android.hardware.usb.UsbManager;
+          import android.os.Build;
+          import android.os.Bundle;
+          import android.text.method.ScrollingMovementMethod;
+          import android.view.ViewGroup;
+          import android.widget.Button;
+          import android.widget.LinearLayout;
+          import android.widget.ScrollView;
+          import android.widget.TextView;
+
+          import java.nio.ByteBuffer;
+          import java.nio.ByteOrder;
+          import java.util.Locale;
+          import java.util.Map;
+
+          public final class MainActivity extends Activity {
+              private static final String ACTION_USB_PERMISSION =
+                      "com.okn.dsp.uferead.USB_PERMISSION";
+
+              // Confirmed from the real board Safe Probe log.
+              private static final int TARGET_VID = 0x6324;
+              private static final int TARGET_PID = 0x1719;
+              private static final int RUNTIME_INTERFACE_ID = 4;
+
+              private static final int HID_GET_REPORT = 0x01;
+              private static final int HID_SET_REPORT = 0x09;
+              private static final int HID_REPORT_TYPE_INPUT = 1;
+              private static final int HID_REPORT_TYPE_OUTPUT = 2;
+              private static final int HID_REPORT_TYPE_FEATURE = 3;
+
+              // Read-only UFE control.
+              private static final int UFE_READ = 0x58;
+              private static final int POSITIVE_CONTROL_ID = 2; // MasterVolume
+              private static final int READ_OFFSET = 0;
+              private static final int READ_LENGTH = 4;
+
+              private UsbManager usbManager;
+              private UsbDevice targetDevice;
+              private TextView logView;
+              private final StringBuilder log = new StringBuilder();
+
+              private final BroadcastReceiver usbReceiver = new BroadcastReceiver() {
+                  @Override
+                  public void onReceive(Context context, Intent intent) {
+                      if (!ACTION_USB_PERMISSION.equals(intent.getAction())) return;
+
+                      UsbDevice device;
+                      if (Build.VERSION.SDK_INT >= 33) {
+                          device = intent.getParcelableExtra(
+                                  UsbManager.EXTRA_DEVICE, UsbDevice.class);
+                      } else {
+                          @SuppressWarnings("deprecation")
+                          UsbDevice old =
+                                  intent.getParcelableExtra(UsbManager.EXTRA_DEVICE);
+                          device = old;
+                      }
+
+                      boolean granted = intent.getBooleanExtra(
+                              UsbManager.EXTRA_PERMISSION_GRANTED, false);
+                      append("USB permission: " + granted);
+                      if (granted && device != null && isTarget(device)) {
+                          targetDevice = device;
+                          safeBaseline(device);
+                      }
+                  }
+              };
+
+              @Override
+              protected void onCreate(Bundle savedInstanceState) {
+                  super.onCreate(savedInstanceState);
+                  usbManager = (UsbManager) getSystemService(Context.USB_SERVICE);
+
+                  IntentFilter filter = new IntentFilter(ACTION_USB_PERMISSION);
+                  if (Build.VERSION.SDK_INT >= 33) {
+                      registerReceiver(
+                              usbReceiver, filter, Context.RECEIVER_NOT_EXPORTED);
+                  } else {
+                      registerReceiver(usbReceiver, filter);
+                  }
+
+                  LinearLayout root = new LinearLayout(this);
+                  root.setOrientation(LinearLayout.VERTICAL);
+                  root.setPadding(24, 24, 24, 24);
+
+                  TextView title = new TextView(this);
+                  title.setText("OKN BP1048P4 — USB UFE READ-ONLY");
+                  title.setTextSize(20);
+                  root.addView(title);
+
+                  TextView safety = new TextView(this);
+                  safety.setText(
+                          "Target locked to 6324:1719. UFE READ 0x58 only. " +
+                          "No UFE write, no boot arm, no flash erase/program/reset.");
+                  safety.setPadding(0, 8, 0, 16);
+                  root.addView(safety);
+
+                  Button scan = new Button(this);
+                  scan.setText("1. Scan + Feature8 Baseline");
+                  scan.setOnClickListener(v -> scanAndBaseline());
+                  root.addView(scan);
+
+                  Button read = new Button(this);
+                  read.setText("2. READ MasterVolume ID2 (one request)");
+                  read.setOnClickListener(v -> requestOrReadId2());
+                  root.addView(read);
+
+                  Button copy = new Button(this);
+                  copy.setText("3. Copy Log");
+                  copy.setOnClickListener(v -> copyLog());
+                  root.addView(copy);
+
+                  logView = new TextView(this);
+                  logView.setTextIsSelectable(true);
+                  logView.setMovementMethod(new ScrollingMovementMethod());
+
+                  ScrollView scroll = new ScrollView(this);
+                  scroll.addView(logView);
+                  root.addView(
+                          scroll,
+                          new LinearLayout.LayoutParams(
+                                  ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
+
+                  setContentView(root);
+
+                  append("UFE READ-ONLY PROBE v2");
+                  append("Expected target VID:PID = 6324:1719");
+                  append("Only command byte emitted by runtime probe: 0x58.");
+                  scanAndBaseline();
+              }
+
+              @Override
+              protected void onDestroy() {
+                  try {
+                      unregisterReceiver(usbReceiver);
+                  } catch (IllegalArgumentException ignored) {
+                  }
+                  super.onDestroy();
+              }
+
+              private boolean isTarget(UsbDevice d) {
+                  return d.getVendorId() == TARGET_VID &&
+                          d.getProductId() == TARGET_PID;
+              }
+
+              private void scanAndBaseline() {
+                  targetDevice = null;
+                  append("");
+                  append("=== TARGET SCAN ===");
+
+                  Map<String, UsbDevice> devices = usbManager.getDeviceList();
+                  for (UsbDevice d : devices.values()) {
+                      append(String.format(
+                              Locale.US,
+                              "USB %04X:%04X name=%s ifaces=%d",
+                              d.getVendorId(), d.getProductId(),
+                              d.getDeviceName(), d.getInterfaceCount()));
+                      if (isTarget(d)) targetDevice = d;
+                  }
+
+                  if (targetDevice == null) {
+                      append("REFUSED: exact 6324:1719 target not found.");
+                      return;
+                  }
+
+                  append("Target matched exactly: 6324:1719");
+                  if (!usbManager.hasPermission(targetDevice)) {
+                      requestPermission(targetDevice);
+                      return;
+                  }
+                  safeBaseline(targetDevice);
+              }
+
+              private void requestPermission(UsbDevice device) {
+                  int flags = PendingIntent.FLAG_UPDATE_CURRENT;
+                  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                      flags |= PendingIntent.FLAG_MUTABLE;
+                  }
+
+                  PendingIntent pi = PendingIntent.getBroadcast(
+                          this, 0,
+                          new Intent(ACTION_USB_PERMISSION)
+                                  .setPackage(getPackageName()),
+                          flags);
+
+                  append("Requesting Android USB permission...");
+                  usbManager.requestPermission(device, pi);
+              }
+
+              private UsbInterface findRuntimeInterface(UsbDevice d) {
+                  for (int i = 0; i < d.getInterfaceCount(); i++) {
+                      UsbInterface intf = d.getInterface(i);
+                      if (intf.getId() == RUNTIME_INTERFACE_ID &&
+                              intf.getInterfaceClass() == UsbConstants.USB_CLASS_HID) {
+                          return intf;
+                      }
+                  }
+                  return null;
+              }
+
+              private void safeBaseline(UsbDevice device) {
+                  append("");
+                  append("=== FEATURE8 BASELINE ===");
+
+                  UsbInterface intf = findRuntimeInterface(device);
+                  if (intf == null) {
+                      append("Runtime IF4 HID not found.");
+                      return;
+                  }
+
+                  UsbDeviceConnection c = usbManager.openDevice(device);
+                  if (c == null) {
+                      append("openDevice failed.");
+                      return;
+                  }
+
+                  try {
+                      byte[] feature = new byte[8]; // EXACT descriptor length.
+                      int n = c.controlTransfer(
+                              0xA1,
+                              HID_GET_REPORT,
+                              HID_REPORT_TYPE_FEATURE << 8,
+                              intf.getId(),
+                              feature,
+                              feature.length,
+                              1500);
+
+                      append("Feature GET_REPORT requested=8 result=" + n);
+                      if (n > 0) append(hex(feature, n));
+
+                      byte[] input = new byte[256];
+                      int m = c.controlTransfer(
+                              0xA1,
+                              HID_GET_REPORT,
+                              HID_REPORT_TYPE_INPUT << 8,
+                              intf.getId(),
+                              input,
+                              input.length,
+                              1000);
+
+                      append("Passive Input GET_REPORT result=" + m);
+                      if (m > 0) append(hex(input, m));
+                  } finally {
+                      c.close();
+                  }
+              }
+
+              private void requestOrReadId2() {
+                  if (targetDevice == null) scanAndBaseline();
+                  if (targetDevice == null) return;
+
+                  if (!usbManager.hasPermission(targetDevice)) {
+                      requestPermission(targetDevice);
+                      return;
+                  }
+                  readId2Once(targetDevice);
+              }
+
+              private void readId2Once(UsbDevice device) {
+                  append("");
+                  append("=== ONE UFE READ REQUEST ===");
+
+                  if (!isTarget(device)) {
+                      append("REFUSED: VID/PID changed.");
+                      return;
+                  }
+
+                  UsbInterface intf = findRuntimeInterface(device);
+                  if (intf == null) {
+                      append("REFUSED: runtime HID IF4 not found.");
+                      return;
+                  }
+
+                  byte[] report = buildReadReport(
+                          POSITIVE_CONTROL_ID, READ_OFFSET, READ_LENGTH);
+
+                  append("TX logical frame (first 13 bytes):");
+                  append(hex(report, 13));
+
+                  // Hard runtime guard: only A5 5A 58 08 is allowed.
+                  if ((report[0] & 0xFF) != 0xA5 ||
+                          (report[1] & 0xFF) != 0x5A ||
+                          (report[2] & 0xFF) != UFE_READ ||
+                          (report[3] & 0xFF) != 0x08 ||
+                          (report[12] & 0xFF) != 0x16) {
+                      append("REFUSED: frame safety guard failed.");
+                      return;
+                  }
+
+                  UsbDeviceConnection c = usbManager.openDevice(device);
+                  if (c == null) {
+                      append("openDevice failed.");
+                      return;
+                  }
+
+                  boolean claimed = false;
+                  try {
+                      claimed = c.claimInterface(intf, true);
+                      append("claim IF4=" + claimed);
+                      if (!claimed) {
+                          append("REFUSED: could not claim IF4.");
+                          return;
+                      }
+
+                      int sent = c.controlTransfer(
+                              0x21,
+                              HID_SET_REPORT,
+                              HID_REPORT_TYPE_OUTPUT << 8,
+                              intf.getId(),
+                              report,
+                              report.length,
+                              1500);
+
+                      append("SET_REPORT Output bytes=" + sent);
+                      if (sent != 256) {
+                          append("STOP: output report was not accepted as 256 bytes.");
+                          return;
+                      }
+
+                      for (int attempt = 1; attempt <= 5; attempt++) {
+                          try {
+                              Thread.sleep(40);
+                          } catch (InterruptedException e) {
+                              Thread.currentThread().interrupt();
+                              append("Interrupted.");
+                              return;
+                          }
+
+                          byte[] response = new byte[256];
+                          int n = c.controlTransfer(
+                                  0xA1,
+                                  HID_GET_REPORT,
+                                  HID_REPORT_TYPE_INPUT << 8,
+                                  intf.getId(),
+                                  response,
+                                  response.length,
+                                  1000);
+
+                          append("GET_REPORT Input attempt " + attempt + " result=" + n);
+                          if (n > 0) {
+                              append(hex(response, Math.min(n, 64)));
+                              decodeResponse(response, n);
+                              return;
+                          }
+                      }
+
+                      append("No Input report returned after one read request.");
+
+                  } finally {
+                      if (claimed) c.releaseInterface(intf);
+                      c.close();
+                  }
+              }
+
+              private static byte[] buildReadReport(int id, int offset, int len) {
+                  byte[] r = new byte[256];
+                  r[0] = (byte) 0xA5;
+                  r[1] = (byte) 0x5A;
+                  r[2] = (byte) UFE_READ;
+                  r[3] = 0x08;
+
+                  r[4] = (byte) ((id >>> 24) & 0xFF);
+                  r[5] = (byte) ((id >>> 16) & 0xFF);
+                  r[6] = (byte) ((id >>> 8) & 0xFF);
+                  r[7] = (byte) (id & 0xFF);
+
+                  r[8] = (byte) ((offset >>> 8) & 0xFF);
+                  r[9] = (byte) (offset & 0xFF);
+
+                  r[10] = (byte) ((len >>> 8) & 0xFF);
+                  r[11] = (byte) (len & 0xFF);
+
+                  r[12] = 0x16;
+                  return r;
+              }
+
+              private void decodeResponse(byte[] r, int n) {
+                  if (n < 4) {
+                      append("Response too short.");
+                      return;
+                  }
+
+                  if ((r[0] & 0xFF) != 0xA5 ||
+                          (r[1] & 0xFF) != 0x5A) {
+                      append("Response does not start with A5 5A.");
+                      return;
+                  }
+
+                  int control = r[2] & 0xFF;
+                  int payloadLength = r[3] & 0xFF;
+                  append(String.format(
+                          Locale.US,
+                          "RX control=0x%02X payloadLen=%d",
+                          control, payloadLength));
+
+                  if (control == 0x60 && n >= 17) {
+                      int id =
+                              ((r[4] & 0xFF) << 24) |
+                              ((r[5] & 0xFF) << 16) |
+                              ((r[6] & 0xFF) << 8) |
+                              (r[7] & 0xFF);
+                      int offset =
+                              ((r[8] & 0xFF) << 8) |
+                              (r[9] & 0xFF);
+                      int len =
+                              ((r[10] & 0xFF) << 8) |
+                              (r[11] & 0xFF);
+
+                      append("Decoded response id=" + id +
+                              " offset=" + offset + " len=" + len);
+
+                      if (id == POSITIVE_CONTROL_ID && len == 4) {
+                          float value = ByteBuffer
+                                  .wrap(r, 12, 4)
+                                  .order(ByteOrder.LITTLE_ENDIAN)
+                                  .getFloat();
+                          append("MasterVolume ID2 value=" + value);
+                      }
+                  }
+              }
+
+              private void copyLog() {
+                  ClipboardManager cb =
+                          (ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
+                  cb.setPrimaryClip(
+                          ClipData.newPlainText(
+                                  "OKN USB UFE ReadOnly Log",
+                                  log.toString()));
+                  append("Log copied.");
+              }
+
+              private void append(String s) {
+                  log.append(s).append('\n');
+                  if (logView != null) logView.setText(log.toString());
+              }
+
+              private static String hex(byte[] data, int count) {
+                  int n = Math.min(count, data.length);
+                  StringBuilder out = new StringBuilder(n * 3);
+                  for (int i = 0; i < n; i++) {
+                      if (i != 0) out.append(' ');
+                      out.append(String.format(
+                              Locale.US, "%02X", data[i] & 0xFF));
+                  }
+                  return out.toString();
+              }
+          }
+          EOF
+
+      - name: Safety audit
+        shell: bash
+        run: |
+          set -euo pipefail
+          SRC=app/src/main/java/com/okn/dsp/uferead/MainActivity.java
+
+          grep -q 'TARGET_VID = 0x6324' "$SRC"
+          grep -q 'TARGET_PID = 0x1719' "$SRC"
+          grep -q 'UFE_READ = 0x58' "$SRC"
+          grep -q 'POSITIVE_CONTROL_ID = 2' "$SRC"
+          grep -q 'byte\[\] feature = new byte\[8\]' "$SRC"
+          grep -q 'HID_REPORT_TYPE_OUTPUT << 8' "$SRC"
+
+          ! grep -Eq 'frame\[2\][[:space:]]*=[[:space:]]*\(byte\)[[:space:]]*0x57' "$SRC"
+          ! grep -Eq 'frame\[2\][[:space:]]*=[[:space:]]*\(byte\)[[:space:]]*0x11' "$SRC"
+          ! grep -Eq 'SpiFlashErase|SpiFlashWrite|Reset_McuSystem|chiperas|codedata|upinfo' "$SRC"
+
+          echo "PASS: exact 6324:1719; Feature8 only; one UFE 0x58 read path; no flash/write/reset tokens"
+
+      - name: Build Debug APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          gradle --no-daemon :app:assembleDebug
+
+      - name: Verify and package
+        shell: bash
+        run: |
+          set -euo pipefail
+          APK="app/build/outputs/apk/debug/app-debug.apk"
+          test -f "$APK"
+          cp "$APK" OKN_BP1048P4_USB_UFE_READONLY_PROBE.apk
+          sha256sum OKN_BP1048P4_USB_UFE_READONLY_PROBE.apk \
+            | tee OKN_BP1048P4_USB_UFE_READONLY_PROBE_SHA256.txt
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: OKN_BP1048P4_USB_UFE_READONLY_PROBE
+          path: |
+            OKN_BP1048P4_USB_UFE_READONLY_PROBE.apk
+            OKN_BP1048P4_USB_UFE_READONLY_PROBE_SHA256.txt
+          if-no-files-found: error
+          retention-days: 30
