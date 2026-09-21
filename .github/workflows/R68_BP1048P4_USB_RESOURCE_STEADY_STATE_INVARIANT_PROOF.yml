@@ -1,0 +1,346 @@
+name: R68 BP1048P4 USB resource steady-state invariant proof
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - ".github/workflows/R68_BP1048P4_USB_RESOURCE_STEADY_STATE_INVARIANT_PROOF.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: r68-bp1048p4-usb-resource-invariant-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  SDK_REPO: https://github.com/leadercxn/bp1048_sdk_v0.1.12.git
+  SDK_COMMIT: 8105bd864b04995d81c9f9ae77cb158259f39015
+
+jobs:
+  invariant-proof:
+    name: USB resource steady-state invariant / STATIC ONLY / NO FLASH
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Fetch pinned SDK
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/bp1048_r68
+          git init -q /tmp/bp1048_r68
+          cd /tmp/bp1048_r68
+          git remote add origin "$SDK_REPO"
+          git fetch -q --depth=1 origin "$SDK_COMMIT"
+          git checkout -q --detach FETCH_HEAD
+          test "$(git rev-parse HEAD)" = "$SDK_COMMIT"
+          echo "R68_SDK_COMMIT=$(git rev-parse HEAD)" | tee /tmp/R68_SDK_STATE.txt
+
+      - name: Prove USB-audio direct init does not bypass later resource registration
+        id: usb_audio_path
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          USB=/tmp/bp1048_r68/BT_Audio_APP/bt_audio_app_src/apps/usb_audio_mode.c
+
+          grep -F 'OTG_DeviceModeSel(CFG_PARA_USB_MODE, USB_VID, USBPID(CFG_PARA_USB_MODE));' "$USB"
+          grep -F 'OTG_DeviceStorInit();' "$USB"
+          grep -F 'OTG_DeviceInit();' "$USB"
+          grep -F 'NVIC_EnableIRQ(Usb_IRQn);' "$USB"
+          grep -F 'sDevice_Inserted_Flag = 1;' "$USB"
+
+          python3 - "$USB" <<'PY'
+          from pathlib import Path
+          import sys
+
+          lines = Path(sys.argv[1]).read_text(encoding="latin-1").splitlines()
+
+          def first(needle):
+              for i,x in enumerate(lines):
+                  if needle in x:
+                      return i
+              raise SystemExit("missing token: "+needle)
+
+          modesel = first("OTG_DeviceModeSel(CFG_PARA_USB_MODE")
+          init = first("OTG_DeviceInit();")
+          irq = first("NVIC_EnableIRQ(Usb_IRQn);")
+          flag = first("sDevice_Inserted_Flag = 1;")
+
+          if not (modesel < init < irq < flag):
+              raise SystemExit(
+                  f"unexpected usb_audio_mode init ordering: "
+                  f"{modesel},{init},{irq},{flag}"
+              )
+
+          a=max(0,modesel-8); z=min(len(lines),flag+8)
+          Path("/tmp/R68_USB_AUDIO_PATH_SOURCE.txt").write_text(
+              "\n".join(f"{i+1}: {lines[i]}" for i in range(a,z))+"\n",
+              encoding="utf-8"
+          )
+
+          print("R68_USB_AUDIO_MODE_SELECTS_CFG_PARA_USB_MODE=YES")
+          print("R68_USB_AUDIO_MODE_DIRECT_OTG_INIT=YES")
+          print("R68_USB_AUDIO_MODE_SETS_INSERTED_FLAG_AFTER_INIT=YES")
+          PY
+
+      - name: Prove ResourceRegister happens before inserted-flag message suppression
+        id: register_order
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          SVC=/tmp/bp1048_r68/BT_Audio_APP/bt_audio_app_src/services/device_service.c
+
+          python3 - "$SVC" <<'PY'
+          from pathlib import Path
+          import sys
+
+          lines = Path(sys.argv[1]).read_text(encoding="latin-1").splitlines()
+
+          def find_after(start, needle):
+              for i in range(start, len(lines)):
+                  if needle in lines[i]:
+                      return i
+              raise SystemExit("missing token: "+needle)
+
+          event = find_after(0, "if(Plug & USB_DEVICE_EVENT_BIT)")
+          state = find_after(event, "if(Plug & USB_DEVICE_STATE_BIT)")
+          reg = find_after(state, "ResourceRegister(AppResourceUsbDevice);")
+          flag = find_after(reg, "if(!sDevice_Inserted_Flag)")
+          msg = find_after(flag, "MSG_DEVICE_SERVICE_USB_DEVICE_IN")
+          dereg = find_after(msg, "ResourceDeregister(AppResourceUsbDevice);")
+
+          if not (event < state < reg < flag < msg < dereg):
+              raise SystemExit(
+                  "unexpected device_service USB register/message/deregister ordering"
+              )
+
+          a=max(0,event-4); z=min(len(lines),dereg+8)
+          Path("/tmp/R68_DEVICE_SERVICE_USB_SOURCE.txt").write_text(
+              "\n".join(f"{i+1}: {lines[i]}" for i in range(a,z))+"\n",
+              encoding="utf-8"
+          )
+
+          state_lines = [
+              f"R68_USB_EVENT_BRANCH_LINE={event+1}",
+              f"R68_USB_STATE_BRANCH_LINE={state+1}",
+              f"R68_RESOURCE_REGISTER_LINE={reg+1}",
+              f"R68_INSERTED_FLAG_CHECK_LINE={flag+1}",
+              f"R68_USB_IN_MESSAGE_LINE={msg+1}",
+              f"R68_RESOURCE_DEREGISTER_LINE={dereg+1}",
+              "R68_RESOURCE_REGISTER_PRECEDES_INSERTED_FLAG_CHECK=YES",
+              "R68_INSERTED_FLAG_SUPPRESSES_MESSAGE_NOT_RESOURCE=YES",
+          ]
+          Path("/tmp/R68_REGISTER_ORDER.txt").write_text(
+              "\n".join(state_lines)+"\n", encoding="utf-8"
+          )
+          print("\n".join(state_lines))
+          PY
+
+      - name: Prove DeviceDetect emits IN event and OUT is the deregistration trigger
+        id: detect_lifecycle
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          DET=/tmp/bp1048_r68/BT_Audio_APP/bt_audio_app_src/device/device_detect.c
+
+          python3 - "$DET" <<'PY'
+          from pathlib import Path
+          import sys
+
+          lines = Path(sys.argv[1]).read_text(encoding="latin-1").splitlines()
+
+          def first(needle, start=0):
+              for i in range(start, len(lines)):
+                  if needle in lines[i]:
+                      return i
+              raise SystemExit("missing token: "+needle)
+
+          early = first("if(GetSystemMode()<AppModeLineAudioPlay)")
+          link = first("InOrOut = OTG_PortDeviceIsLink();", early)
+          statebit = first("Ret |= USB_DEVICE_STATE_BIT;", link)
+          idle = first("case DETECT_STATE_IDLE:", statebit)
+          in_event = first("Ret |= USB_DEVICE_EVENT_BIT;", idle)
+          in_state = first("USB_Device_State = DETECT_STATE_IN;", idle)
+
+          in_case = first("case DETECT_STATE_IN:", in_state)
+          out_event = first("Ret |= USB_DEVICE_EVENT_BIT;", in_case)
+          out_state = first("USB_Device_State = DETECT_STATE_OUT;", in_case)
+
+          if not (early < link < statebit < idle < in_event):
+              raise SystemExit("USB IN lifecycle ordering failed")
+          if not (in_case < out_event < out_state):
+              raise SystemExit("USB OUT lifecycle ordering failed")
+
+          rows = [
+              f"R68_EARLY_RETURN_LINE={early+1}",
+              f"R68_USB_LINK_TEST_LINE={link+1}",
+              f"R68_USB_STATE_BIT_LINE={statebit+1}",
+              f"R68_USB_IN_EVENT_LINE={in_event+1}",
+              f"R68_USB_OUT_EVENT_LINE={out_event+1}",
+              "R68_USB_IN_EVENT_CREATED_ON_LINK_TRANSITION=YES",
+              "R68_USB_OUT_EVENT_CREATED_ON_UNLINK=YES",
+              "R68_STEADY_LINK_HAS_STATE_BIT=YES",
+          ]
+          Path("/tmp/R68_DETECT_LIFECYCLE.txt").write_text(
+              "\n".join(rows)+"\n", encoding="utf-8"
+          )
+          print("\n".join(rows))
+          PY
+
+      - name: Prove ResourceValue remains set absent deregistration
+        id: resource_semantics
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          MODE=/tmp/bp1048_r68/BT_Audio_APP/bt_audio_app_src/apps/mode_switch_api.c
+
+          grep -F 'ModeResourceReady |= Resources;' "$MODE"
+          grep -F 'ModeResourceReady &= ~Resources;' "$MODE"
+          grep -F 'return ModeResourceReady & Resources;' "$MODE"
+
+          cat > /tmp/R68_RESOURCE_SEMANTICS.txt <<'EOF'
+          R68_RESOURCE_REGISTER_SETS_BIT_BY_OR=YES
+          R68_RESOURCE_DEREGISTER_CLEARS_BIT_BY_AND_NOT=YES
+          R68_RESOURCE_VALUE_READS_MODE_RESOURCE_READY_AND_MASK=YES
+          R68_RESOURCE_BIT_PERSISTS_UNTIL_DEREGISTER=YES
+          EOF
+          cat /tmp/R68_RESOURCE_SEMANTICS.txt
+
+      - name: Build reference steady-state invariant and production interpretation
+        id: decision
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cat > /tmp/R68_DECISION.txt <<'EOF'
+          # Reference-SDK invariant:
+          R68_REFERENCE_USB_IN_EVENT_REGISTERS_RESOURCE=YES
+          R68_REFERENCE_REGISTER_PRECEDES_MESSAGE_SUPPRESSION=YES
+          R68_REFERENCE_INSERTED_FLAG_CANNOT_SKIP_RESOURCE_REGISTER=YES
+          R68_REFERENCE_RESOURCE_PERSISTS_UNTIL_USB_OUT=YES
+          R68_REFERENCE_STEADY_DETECTED_LINK_RESOURCE_EXPECTED=YES
+
+          # R46G/R66 production facts:
+          R68_PRODUCTION_FEATURE_AA_ACCEPTED=YES
+          R68_PRODUCTION_GET55_ACTIVE=YES
+          R68_PRODUCTION_USB_IDENTITY_STABLE_AFTER_GET=YES
+          R68_PRODUCTION_RUNTIME_REMAINED_ACTIVE=YES
+
+          # Static evidence cannot read this live internal bit:
+          R68_PRODUCTION_USB_RESOURCE_BIT_AT_GET_PROVEN=NO
+          R68_PRODUCTION_SYSTEM_MODE_AT_GET_PROVEN=NO
+          R68_PRODUCTION_FLASH_BOOT_EN_PROVEN=NO
+
+          # Narrowed interpretation:
+          R68_RESOURCE_ZERO_ON_SETTLED_LINK_MATCHES_REFERENCE_STEADY_STATE=NO
+          R68_PRODUCTION_BUILD_OR_USB_LIFECYCLE_DIVERGENCE_REMAINS_POSSIBLE=YES
+          R68_FLASH_BOOT_COMPILED_OUT_REMAINS_POSSIBLE=YES
+          R68_REPEAT_R46G_REQUIRED=NO
+
+          R68_STOCK_FIRST_BOOTSTRAP_PROVEN=NO
+          R68_STOCK_BACKUP_PROVEN=NO
+          R68_RECOVERY_PROVEN=NO
+
+          R68_FLASH_WRITE_EXECUTED=NO
+          R68_FLASH_ERASE_EXECUTED=NO
+          FLASH_ALLOWED=NO
+          EOF
+
+          cat /tmp/R68_DECISION.txt
+
+      - name: Build R68 evidence bundle
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          OUT=/tmp/R68_BP1048P4_USB_RESOURCE_STEADY_STATE_EVIDENCE
+          rm -rf "$OUT"
+          mkdir -p "$OUT"
+
+          for f in \
+            R68_SDK_STATE.txt \
+            R68_USB_AUDIO_PATH_SOURCE.txt \
+            R68_DEVICE_SERVICE_USB_SOURCE.txt \
+            R68_REGISTER_ORDER.txt \
+            R68_DETECT_LIFECYCLE.txt \
+            R68_RESOURCE_SEMANTICS.txt \
+            R68_DECISION.txt; do
+            test -f "/tmp/$f" && cp "/tmp/$f" "$OUT/"
+          done
+
+          cat > "$OUT/README.txt" <<'EOF'
+          R68 proves the reference-SDK USB resource steady-state invariant.
+
+          Important result:
+          ResourceRegister(AppResourceUsbDevice) occurs before the
+          sDevice_Inserted_Flag check.  The flag suppresses the IN message only;
+          it does not suppress resource registration.
+
+          Once registered, ModeResourceReady retains the USB bit until an OUT
+          event calls ResourceDeregister.
+
+          This does not claim the production firmware is identical to reference.
+          It narrows the production difference consistent with R46G.
+
+          No hardware access. No erase/program/flash.
+          EOF
+
+          (
+            cd /tmp
+            zip -qr \
+              R68_BP1048P4_USB_RESOURCE_STEADY_STATE_EVIDENCE.zip \
+              R68_BP1048P4_USB_RESOURCE_STEADY_STATE_EVIDENCE
+            sha256sum \
+              R68_BP1048P4_USB_RESOURCE_STEADY_STATE_EVIDENCE.zip \
+              > R68_BP1048P4_USB_RESOURCE_STEADY_STATE_EVIDENCE.zip.sha256
+          )
+
+          cat /tmp/R68_BP1048P4_USB_RESOURCE_STEADY_STATE_EVIDENCE.zip.sha256
+
+      - name: Upload R68 evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: R68-BP1048P4-USB-RESOURCE-STEADY-STATE-EVIDENCE
+          path: |
+            /tmp/R68_BP1048P4_USB_RESOURCE_STEADY_STATE_EVIDENCE.zip
+            /tmp/R68_BP1048P4_USB_RESOURCE_STEADY_STATE_EVIDENCE.zip.sha256
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: R68 final gate
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cat /tmp/R68_REGISTER_ORDER.txt
+          cat /tmp/R68_DETECT_LIFECYCLE.txt
+          cat /tmp/R68_RESOURCE_SEMANTICS.txt
+          cat /tmp/R68_DECISION.txt
+
+          test "${{ steps.usb_audio_path.outcome }}" = "success"
+          test "${{ steps.register_order.outcome }}" = "success"
+          test "${{ steps.detect_lifecycle.outcome }}" = "success"
+          test "${{ steps.resource_semantics.outcome }}" = "success"
+          test "${{ steps.decision.outcome }}" = "success"
+
+          grep -F 'R68_RESOURCE_REGISTER_PRECEDES_INSERTED_FLAG_CHECK=YES' /tmp/R68_REGISTER_ORDER.txt
+          grep -F 'R68_INSERTED_FLAG_SUPPRESSES_MESSAGE_NOT_RESOURCE=YES' /tmp/R68_REGISTER_ORDER.txt
+          grep -F 'R68_RESOURCE_BIT_PERSISTS_UNTIL_DEREGISTER=YES' /tmp/R68_RESOURCE_SEMANTICS.txt
+          grep -F 'R68_REFERENCE_STEADY_DETECTED_LINK_RESOURCE_EXPECTED=YES' /tmp/R68_DECISION.txt
+          grep -F 'R68_REPEAT_R46G_REQUIRED=NO' /tmp/R68_DECISION.txt
+          grep -F 'R68_FLASH_WRITE_EXECUTED=NO' /tmp/R68_DECISION.txt
+          grep -F 'FLASH_ALLOWED=NO' /tmp/R68_DECISION.txt
+
+          echo "R68_USB_RESOURCE_STEADY_STATE_INVARIANT_PROOF=PASS"
+          echo "FLASH_ALLOWED=NO"
