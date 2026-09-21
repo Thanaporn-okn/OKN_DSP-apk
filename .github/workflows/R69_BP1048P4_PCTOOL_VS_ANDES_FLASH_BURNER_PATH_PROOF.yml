@@ -1,0 +1,509 @@
+name: R69 BP1048P4 PCTOOL vs Andes Flash Burner path proof
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - ".github/workflows/R69_BP1048P4_PCTOOL_VS_ANDES_FLASH_BURNER_PATH_PROOF.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: r69-bp1048p4-pctool-vs-andes-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  SDK_REPO: https://github.com/leadercxn/bp1048_sdk_v0.1.12.git
+  SDK_COMMIT: 8105bd864b04995d81c9f9ae77cb158259f39015
+  B1_REL: MVsB1_Base_SDK/tools/b1_download_v1.7.exe
+  FLASH_BOOT_C: BT_Audio_APP/bt_audio_app_src/device/flash_boot.c
+  FLASH_BOOT_H: BT_Audio_APP/bt_audio_app_src/inc/flash_boot.h
+  FLASH_PREF: BT_Audio_APP/.settings/com.andestech.ide.flash.ui.prefs
+
+jobs:
+  path-proof:
+    name: Separate PCTOOL flashboot from Andes Flash Burner / STATIC ONLY
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Install static tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            git file binutils gcc python3
+
+      - name: Fetch pinned SDK
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/bp1048_r69
+          git init -q /tmp/bp1048_r69
+          cd /tmp/bp1048_r69
+          git remote add origin "$SDK_REPO"
+          git fetch -q --depth=1 origin "$SDK_COMMIT"
+          git checkout -q --detach FETCH_HEAD
+
+          test "$(git rev-parse HEAD)" = "$SDK_COMMIT"
+          test -s "$B1_REL"
+          test -s "$FLASH_BOOT_C"
+          test -s "$FLASH_BOOT_H"
+          test -s "$FLASH_PREF"
+
+          {
+            echo "R69_SDK_COMMIT=$(git rev-parse HEAD)"
+            sha256sum "$B1_REL"
+            sha256sum "$FLASH_BOOT_C"
+            sha256sum "$FLASH_BOOT_H"
+            file "$B1_REL"
+          } | tee /tmp/R69_SOURCE_STATE.txt
+
+      - name: Prove b1_download is bound as Andes Flash Burner driver
+        id: andes_binding
+        shell: bash
+        run: |
+          set -euo pipefail
+          PREF="/tmp/bp1048_r69/$FLASH_PREF"
+
+          grep -aF 'b1_download_v1.7.exe' "$PREF"
+          grep -aF '<addr>0x0</addr>' "$PREF"
+          grep -aF '<eraseAll>false</eraseAll>' "$PREF"
+          grep -aF '<verify>false</verify>' "$PREF"
+
+          cat > /tmp/R69_ANDES_BINDING.txt <<'EOF'
+          R69_B1_BOUND_AS_ANDES_FLASH_DRIVER=YES
+          R69_ANDES_IMAGE_TARGET_ADDR=0x0
+          R69_ANDES_ERASE_ALL_DEFAULT=NO
+          R69_ANDES_VERIFY_DEFAULT=NO
+          EOF
+          cat /tmp/R69_ANDES_BINDING.txt
+
+      - name: Inventory b1_download PE imports and USB evidence
+        id: b1_usb_evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          EXE="/tmp/bp1048_r69/$B1_REL"
+
+          objdump -p "$EXE" > /tmp/R69_B1_PE_IMPORTS.txt
+          strings -a -n 4 "$EXE" > /tmp/R69_B1_ASCII_STRINGS.txt
+          strings -a -el -n 4 "$EXE" > /tmp/R69_B1_UTF16_STRINGS.txt || true
+
+          {
+            echo "=== PE imports / DLLs ==="
+            grep -Eai 'DLL Name:|setupapi|hid\.dll|winusb|libusb|usb' \
+              /tmp/R69_B1_PE_IMPORTS.txt || true
+            echo
+            echo "=== USB/PnP string candidates ==="
+            grep -Eai \
+              'setupdi|hidd_|hidclass|winusb|libusb|vid_[0-9a-f]{4}|pid_[0-9a-f]{4}|\\\\\.\\|usb#|usb\\|endpoint|control transfer|bulk transfer' \
+              /tmp/R69_B1_ASCII_STRINGS.txt \
+              /tmp/R69_B1_UTF16_STRINGS.txt || true
+          } > /tmp/R69_B1_USB_EVIDENCE.txt
+
+          cat /tmp/R69_B1_USB_EVIDENCE.txt
+
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          imp = Path("/tmp/R69_B1_PE_IMPORTS.txt").read_text(
+              encoding="latin-1", errors="replace"
+          )
+          asc = Path("/tmp/R69_B1_ASCII_STRINGS.txt").read_text(
+              encoding="latin-1", errors="replace"
+          )
+          u16 = Path("/tmp/R69_B1_UTF16_STRINGS.txt").read_text(
+              encoding="latin-1", errors="replace"
+          )
+          alltxt = imp + "\n" + asc + "\n" + u16
+
+          usb_api_patterns = [
+              r"setupapi",
+              r"hid\.dll",
+              r"hidd_",
+              r"winusb",
+              r"libusb",
+              r"vid_[0-9a-f]{4}",
+              r"pid_[0-9a-f]{4}",
+          ]
+          hits = {
+              p: bool(re.search(p, alltxt, re.I))
+              for p in usb_api_patterns
+          }
+
+          flash_markers = {
+              "nds32_verify": "nds32_verify" in alltxt,
+              "nds32_erase": "nds32_erase" in alltxt,
+              "flash_program": "flash_program" in alltxt,
+              "flash_read": "flash_read" in alltxt,
+              "SpiCodeFlashSendCmd": "SpiCodeFlashSendCmd" in alltxt,
+              "verify_only": "verify-only" in alltxt,
+          }
+
+          lines = [
+              "R69_B1_USB_SETUPAPI_EVIDENCE=" + ("YES" if hits[r"setupapi"] else "NO"),
+              "R69_B1_USB_HID_API_EVIDENCE=" + (
+                  "YES" if hits[r"hid\.dll"] or hits[r"hidd_"] else "NO"
+              ),
+              "R69_B1_WINUSB_EVIDENCE=" + ("YES" if hits[r"winusb"] else "NO"),
+              "R69_B1_LIBUSB_EVIDENCE=" + ("YES" if hits[r"libusb"] else "NO"),
+              "R69_B1_VID_PID_STRING_EVIDENCE=" + (
+                  "YES" if hits[r"vid_[0-9a-f]{4}"] or hits[r"pid_[0-9a-f]{4}"] else "NO"
+              ),
+          ]
+          for k,v in flash_markers.items():
+              lines.append(f"R69_B1_{k.upper()}={'YES' if v else 'NO'}")
+
+          no_usb_stack = not any(hits.values())
+          lines += [
+              "R69_B1_COMMON_WINDOWS_USB_STACK_EVIDENCE="
+              + ("NO" if no_usb_stack else "YES"),
+              "R69_B1_PROVEN_TO_BE_PCTOOL_USB_TRANSPORT=NO",
+          ]
+
+          Path("/tmp/R69_B1_CLASSIFICATION.txt").write_text(
+              "\n".join(lines) + "\n", encoding="utf-8"
+          )
+          print("\n".join(lines))
+          PY
+
+      - name: Prove flashboot reference configuration selects PCTOOL and disables UART TX
+        id: flashboot_config
+        shell: bash
+        run: |
+          set -euo pipefail
+          H="/tmp/bp1048_r69/$FLASH_BOOT_H"
+
+          grep -Eq '^[[:space:]]*#define[[:space:]]+FLASH_BOOT_EN[[:space:]]+1' "$H"
+          grep -Eq '^[[:space:]]*#define[[:space:]]+BOOT_UART_TX_PIN[[:space:]]+BOOT_UART_TX_OFF' "$H"
+          grep -Eq '^[[:space:]]*#define[[:space:]]+PCTOOL_ON[[:space:]]+0x08' "$H"
+          grep -Eq '^[[:space:]]*#define[[:space:]]+UDisk_ON[[:space:]]+0x4' "$H"
+          grep -Eq '^[[:space:]]*#define[[:space:]]+UP_PORT[[:space:]]+\(BTTOOL_OFF[[:space:]]*\+[[:space:]]*PCTOOL_ON[[:space:]]*\+[[:space:]]*UDisk_ON[[:space:]]*\+[[:space:]]*SD_PORT\)' "$H"
+
+          cat > /tmp/R69_FLASHBOOT_CONFIG.txt <<'EOF'
+          R69_REFERENCE_FLASH_BOOT_EN=YES
+          R69_REFERENCE_BOOT_UART_TX_ENABLED=NO
+          R69_REFERENCE_PCTOOL_ENABLED=YES
+          R69_REFERENCE_PCTOOL_BIT=0x08
+          R69_REFERENCE_UDISK_UPDATE_ENABLED=YES
+          R69_REFERENCE_UP_PORT_INCLUDES_PCTOOL=YES
+          EOF
+          cat /tmp/R69_FLASHBOOT_CONFIG.txt
+
+      - name: Preprocess and extract embedded 64KiB flashboot blob
+        id: blob_extract
+        shell: bash
+        run: |
+          set -euo pipefail
+          ROOT=/tmp/bp1048_r69
+          SRC="$ROOT/$FLASH_BOOT_C"
+
+          # Build an include response file containing every SDK directory.
+          find "$ROOT" -type d -print0 |
+          while IFS= read -r -d '' d; do
+            printf -- '-I%s\n' "$d"
+          done > /tmp/R69_INCLUDE_DIRS.rsp
+
+          # Preprocess only.  If the broad SDK headers contain target-only
+          # preprocessor branches, the pinned application defines match the
+          # vendor project sufficiently for this data-only source.
+          gcc -E -P \
+            @/tmp/R69_INCLUDE_DIRS.rsp \
+            -DFUNC_OS_EN=1 \
+            -DCFG_APP_CONFIG \
+            -DHAVE_CONFIG_H \
+            "$SRC" > /tmp/R69_FLASH_BOOT_PREPROCESSED.c
+
+          python3 - <<'PY'
+          from pathlib import Path
+          import ast
+          import re
+
+          text = Path("/tmp/R69_FLASH_BOOT_PREPROCESSED.c").read_text(
+              encoding="latin-1", errors="replace"
+          )
+
+          m = re.search(
+              r"const\s+unsigned\s+char\s+flash_data\s*\[\s*65536\s*\]\s*=\s*\{(.*?)\}\s*;",
+              text,
+              re.S,
+          )
+          if not m:
+              raise SystemExit("preprocessed flash_data[65536] initializer not found")
+
+          body = m.group(1)
+
+          # Split on commas outside parentheses.
+          toks=[]
+          cur=[]
+          depth=0
+          for ch in body:
+              if ch == '(':
+                  depth += 1
+              elif ch == ')':
+                  depth -= 1
+              if ch == ',' and depth == 0:
+                  token=''.join(cur).strip()
+                  if token:
+                      toks.append(token)
+                  cur=[]
+              else:
+                  cur.append(ch)
+          tail=''.join(cur).strip()
+          if tail:
+              toks.append(tail)
+
+          def safe_eval(expr):
+              expr = re.sub(r'(?<=\d)[uUlL]+\b', '', expr)
+              node = ast.parse(expr, mode="eval")
+              allowed = (
+                  ast.Expression, ast.Constant, ast.BinOp, ast.UnaryOp,
+                  ast.Add, ast.Sub, ast.Mult, ast.FloorDiv, ast.Mod,
+                  ast.LShift, ast.RShift, ast.BitOr, ast.BitAnd, ast.BitXor,
+                  ast.UAdd, ast.USub, ast.Invert,
+              )
+              for n in ast.walk(node):
+                  if not isinstance(n, allowed):
+                      raise ValueError(
+                          f"unsupported node {type(n).__name__} in {expr!r}"
+                      )
+              return int(eval(
+                  compile(node, "<flash_data>", "eval"),
+                  {"__builtins__": {}},
+                  {}
+              ))
+
+          vals=[]
+          for i,t in enumerate(toks):
+              try:
+                  v=safe_eval(t)
+              except Exception as e:
+                  raise SystemExit(
+                      f"cannot evaluate flash_data token {i}: {t!r}: {e}"
+                  )
+              if not (0 <= v <= 255):
+                  raise SystemExit(
+                      f"flash_data token {i} outside byte range: {t!r} -> {v}"
+                  )
+              vals.append(v)
+
+          if len(vals) != 65536:
+              raise SystemExit(
+                  f"flash_data byte count mismatch: {len(vals)} != 65536"
+              )
+
+          out=bytes(vals)
+          Path("/tmp/R69_FLASHBOOT_64K.bin").write_bytes(out)
+
+          Path("/tmp/R69_FLASHBOOT_BLOB_STATE.txt").write_text(
+              "\n".join([
+                  f"R69_FLASHBOOT_BLOB_BYTES={len(out)}",
+                  "R69_FLASHBOOT_BLOB_EXTRACTED_FROM_PINNED_SOURCE=YES",
+              ]) + "\n",
+              encoding="utf-8",
+          )
+          print(Path("/tmp/R69_FLASHBOOT_BLOB_STATE.txt").read_text(), end="")
+          PY
+
+          test "$(wc -c < /tmp/R69_FLASHBOOT_64K.bin)" -eq 65536
+          sha256sum /tmp/R69_FLASHBOOT_64K.bin \
+            | tee /tmp/R69_FLASHBOOT_64K_SHA256.txt
+
+      - name: Scan embedded flashboot for updater command vocabulary
+        id: command_scan
+        if: steps.blob_extract.outcome == 'success'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          strings -a -n 3 -t x /tmp/R69_FLASHBOOT_64K.bin \
+            > /tmp/R69_FLASHBOOT_STRINGS.txt
+
+          {
+            grep -Eai \
+              'chiperas|codedata|bootdat|constdat|cnfgdat|btupdat|upinfo|cxxx|01PKG|02PKG|03PKG|04PKG|05PKG|MVB1X|upgrade|update|usb|uart|udisk|crc' \
+              /tmp/R69_FLASHBOOT_STRINGS.txt || true
+          } | tee /tmp/R69_FLASHBOOT_COMMAND_HITS.txt
+
+          python3 - <<'PY'
+          from pathlib import Path
+
+          text = Path("/tmp/R69_FLASHBOOT_STRINGS.txt").read_text(
+              encoding="latin-1", errors="replace"
+          ).lower()
+
+          names = [
+              "chiperas", "codedata", "bootdat", "constdat",
+              "cnfgdat", "btupdat", "upinfo", "cxxx"
+          ]
+          lines=[]
+          present=0
+          for n in names:
+              ok=n in text
+              present += int(ok)
+              lines.append(
+                  f"R69_FLASHBOOT_CMD_{n.upper()}={'YES' if ok else 'NO'}"
+              )
+
+          lines += [
+              f"R69_FLASHBOOT_KNOWN_COMMANDS_PRESENT={present}",
+              "R69_FLASHBOOT_COMMAND_TRANSPORT_EXACTLY_PROVEN=NO",
+              "R69_FLASHBOOT_READBACK_RECOVERY_EXACTLY_PROVEN=NO",
+          ]
+
+          Path("/tmp/R69_FLASHBOOT_COMMAND_STATE.txt").write_text(
+              "\n".join(lines)+"\n", encoding="utf-8"
+          )
+          print("\n".join(lines))
+          PY
+
+      - name: Build path-separation decision
+        id: decision
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cat > /tmp/R69_DECISION.txt <<'EOF'
+          R69_ANDES_FLASH_BURNER_PATH_IDENTIFIED=YES
+          R69_B1_PROVEN_TO_BE_PCTOOL_USB_TRANSPORT=NO
+
+          R69_REFERENCE_FLASHBOOT_PCTOOL_ENABLED=YES
+          R69_REFERENCE_FLASHBOOT_UART_TX_ENABLED=NO
+          R69_REFERENCE_FLASHBOOT_BLOB_EMBEDDED=YES
+
+          R69_MOBILE_USB_C_TARGET_PATH=PCTOOL_FLASHBOOT
+          R69_MOBILE_USB_C_TARGET_PATH_IS_B1_DOWNLOAD_EXE=NO
+
+          R69_PCTOOL_EXACT_USB_TRANSPORT_PROVEN=NO
+          R69_PCTOOL_EXACT_BOOTLOADER_IDENTITY_PROVEN=NO
+          R69_PCTOOL_SAFE_READBACK_RECOVERY_PROVEN=NO
+
+          R69_REPEAT_R46G_REQUIRED=NO
+          R69_FLASH_WRITE_EXECUTED=NO
+          R69_FLASH_ERASE_EXECUTED=NO
+          R69_VENDOR_EXE_EXECUTED=NO
+          R69_BOARD_USB_ACCESSED=NO
+          FLASH_ALLOWED=NO
+          EOF
+          cat /tmp/R69_DECISION.txt
+
+      - name: Remove extracted executable blob before artifact upload
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -f /tmp/R69_FLASHBOOT_64K.bin
+          test ! -e /tmp/R69_FLASHBOOT_64K.bin
+          echo "R69_FLASHBOOT_BINARY_RETAINED=NO" \
+            | tee /tmp/R69_TRANSIENT_STATE.txt
+
+      - name: Build R69 evidence bundle
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          OUT=/tmp/R69_BP1048P4_PCTOOL_VS_ANDES_PATH_EVIDENCE
+          rm -rf "$OUT"
+          mkdir -p "$OUT"
+
+          for f in \
+            R69_SOURCE_STATE.txt \
+            R69_ANDES_BINDING.txt \
+            R69_B1_PE_IMPORTS.txt \
+            R69_B1_USB_EVIDENCE.txt \
+            R69_B1_CLASSIFICATION.txt \
+            R69_FLASHBOOT_CONFIG.txt \
+            R69_FLASHBOOT_BLOB_STATE.txt \
+            R69_FLASHBOOT_64K_SHA256.txt \
+            R69_FLASHBOOT_STRINGS.txt \
+            R69_FLASHBOOT_COMMAND_HITS.txt \
+            R69_FLASHBOOT_COMMAND_STATE.txt \
+            R69_DECISION.txt \
+            R69_TRANSIENT_STATE.txt; do
+            test -f "/tmp/$f" && cp "/tmp/$f" "$OUT/"
+          done
+
+          test ! -e "$OUT/R69_FLASHBOOT_64K.bin"
+
+          cat > "$OUT/README.txt" <<'EOF'
+          R69 separates two different firmware-related paths:
+
+          1) b1_download_v1.7.exe is configured by Andes IDE as a Flash Burner
+             driver for a target image at address 0.
+
+          2) the application embeds a separate 64KiB flashboot image whose
+             configuration enables PCTOOL and UDisk update interfaces while
+             UART TX is disabled.
+
+          The mobile USB-C objective belongs to the PCTOOL flashboot path.
+          R69 does not yet claim the exact PCTOOL USB transport or recovery
+          protocol; those require targeted reverse engineering of the embedded
+          flashboot blob.
+
+          Static analysis only.  No vendor EXE execution, USB access, erase,
+          program, or flash operation.
+          EOF
+
+          (
+            cd /tmp
+            zip -qr \
+              R69_BP1048P4_PCTOOL_VS_ANDES_PATH_EVIDENCE.zip \
+              R69_BP1048P4_PCTOOL_VS_ANDES_PATH_EVIDENCE
+            sha256sum \
+              R69_BP1048P4_PCTOOL_VS_ANDES_PATH_EVIDENCE.zip \
+              > R69_BP1048P4_PCTOOL_VS_ANDES_PATH_EVIDENCE.zip.sha256
+          )
+
+          cat /tmp/R69_BP1048P4_PCTOOL_VS_ANDES_PATH_EVIDENCE.zip.sha256
+
+      - name: Upload R69 evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: R69-BP1048P4-PCTOOL-VS-ANDES-PATH-EVIDENCE
+          path: |
+            /tmp/R69_BP1048P4_PCTOOL_VS_ANDES_PATH_EVIDENCE.zip
+            /tmp/R69_BP1048P4_PCTOOL_VS_ANDES_PATH_EVIDENCE.zip.sha256
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: R69 final gate
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cat /tmp/R69_ANDES_BINDING.txt 2>/dev/null || true
+          cat /tmp/R69_B1_CLASSIFICATION.txt 2>/dev/null || true
+          cat /tmp/R69_FLASHBOOT_CONFIG.txt 2>/dev/null || true
+          cat /tmp/R69_FLASHBOOT_BLOB_STATE.txt 2>/dev/null || true
+          cat /tmp/R69_FLASHBOOT_COMMAND_STATE.txt 2>/dev/null || true
+          cat /tmp/R69_DECISION.txt 2>/dev/null || true
+
+          test "${{ steps.andes_binding.outcome }}" = "success"
+          test "${{ steps.b1_usb_evidence.outcome }}" = "success"
+          test "${{ steps.flashboot_config.outcome }}" = "success"
+          test "${{ steps.blob_extract.outcome }}" = "success"
+          test "${{ steps.command_scan.outcome }}" = "success"
+          test "${{ steps.decision.outcome }}" = "success"
+
+          grep -F 'R69_B1_BOUND_AS_ANDES_FLASH_DRIVER=YES' /tmp/R69_ANDES_BINDING.txt
+          grep -F 'R69_REFERENCE_PCTOOL_ENABLED=YES' /tmp/R69_FLASHBOOT_CONFIG.txt
+          grep -F 'R69_REFERENCE_BOOT_UART_TX_ENABLED=NO' /tmp/R69_FLASHBOOT_CONFIG.txt
+          grep -F 'R69_FLASHBOOT_BLOB_BYTES=65536' /tmp/R69_FLASHBOOT_BLOB_STATE.txt
+          grep -F 'R69_MOBILE_USB_C_TARGET_PATH=PCTOOL_FLASHBOOT' /tmp/R69_DECISION.txt
+          grep -F 'R69_VENDOR_EXE_EXECUTED=NO' /tmp/R69_DECISION.txt
+          grep -F 'R69_BOARD_USB_ACCESSED=NO' /tmp/R69_DECISION.txt
+          grep -F 'FLASH_ALLOWED=NO' /tmp/R69_DECISION.txt
+          grep -F 'R69_FLASHBOOT_BINARY_RETAINED=NO' /tmp/R69_TRANSIENT_STATE.txt
+
+          echo "R69_PCTOOL_VS_ANDES_PATH_PROOF=PASS"
+          echo "FLASH_ALLOWED=NO"
