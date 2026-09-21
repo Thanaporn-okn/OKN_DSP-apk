@@ -1,0 +1,484 @@
+name: R73 BP1048P4 app-side alternate boot/reset entrypoint audit
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - ".github/workflows/R73_BP1048P4_APP_SIDE_ALTERNATE_BOOT_RESET_ENTRYPOINT_AUDIT.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: r73-bp1048p4-app-boot-reset-audit-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  SDK_REPO: https://github.com/leadercxn/bp1048_sdk_v0.1.12.git
+  SDK_COMMIT: 8105bd864b04995d81c9f9ae77cb158259f39015
+
+jobs:
+  static-audit:
+    name: Alternate app-side bootstrap audit / STATIC ONLY / NO USB / NO FLASH
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Fetch pinned SDK
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          rm -rf /tmp/bp1048_r73
+          git init -q /tmp/bp1048_r73
+          cd /tmp/bp1048_r73
+          git remote add origin "$SDK_REPO"
+          git fetch -q --depth=1 origin "$SDK_COMMIT"
+          git checkout -q --detach FETCH_HEAD
+
+          test "$(git rev-parse HEAD)" = "$SDK_COMMIT"
+
+          echo "R73_SDK_COMMIT=$(git rev-parse HEAD)" \
+            | tee /tmp/R73_SDK_STATE.txt
+
+      - name: Enumerate every sys_reset reference
+        id: sys_reset
+        shell: bash
+        run: |
+          set -euo pipefail
+          ROOT=/tmp/bp1048_r73
+
+          grep -RIn \
+            --include='*.c' \
+            --include='*.h' \
+            -E '\bsys_reset\b|gCtrlVars\.sys_reset' \
+            "$ROOT" \
+            | tee /tmp/R73_SYS_RESET_ALL.txt || true
+
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          p=Path("/tmp/R73_SYS_RESET_ALL.txt")
+          lines=[x for x in p.read_text(encoding="utf-8", errors="replace").splitlines() if x.strip()]
+
+          writes=[]
+          reads=[]
+          decls=[]
+          defaults=[]
+
+          for line in lines:
+              low=line.lower()
+
+              if "uint16_t" in line and "sys_reset" in line:
+                  decls.append(line)
+
+              if "gctrlvars.sys_reset" in low:
+                  if re.search(r"gCtrlVars\.sys_reset\s*=", line):
+                      writes.append(line)
+                  elif "memcpy" in line and "&gCtrlVars.sys_reset" in line:
+                      # memcpy destination is a write; source is a read.
+                      before, _, after = line.partition("memcpy")
+                      arg = after
+                      first_arg = arg.split(",",1)[0]
+                      if "&gCtrlVars.sys_reset" in first_arg:
+                          writes.append(line)
+                      else:
+                          reads.append(line)
+                  else:
+                      reads.append(line)
+
+              if "CFG_SYS_RESET" in line:
+                  defaults.append(line)
+
+          # Exclude declaration/default lines from semantic consumer count.
+          semantic_reads=[
+              x for x in reads
+              if "uint16_t" not in x
+              and "CFG_SYS_RESET" not in x
+          ]
+
+          out=[
+              f"R73_SYS_RESET_TOTAL_REFERENCES={len(lines)}",
+              f"R73_SYS_RESET_DECLARATIONS={len(decls)}",
+              f"R73_SYS_RESET_WRITES={len(writes)}",
+              f"R73_SYS_RESET_DEFAULT_REFERENCES={len(defaults)}",
+              f"R73_SYS_RESET_SEMANTIC_READS={len(semantic_reads)}",
+              "R73_SYS_RESET_HAS_RUNTIME_CONSUMER="
+              + ("YES" if semantic_reads else "NO"),
+          ]
+
+          Path("/tmp/R73_SYS_RESET_STATE.txt").write_text(
+              "\n".join(out)+"\n",
+              encoding="utf-8"
+          )
+          Path("/tmp/R73_SYS_RESET_READS.txt").write_text(
+              "\n".join(semantic_reads)+"\n",
+              encoding="utf-8"
+          )
+
+          print("\n".join(out))
+          if semantic_reads:
+              print("=== semantic reads ===")
+              print("\n".join(semantic_reads))
+          PY
+
+      - name: Prove communication sys_reset command only writes control variable
+        id: comm_reset
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          SRC=/tmp/bp1048_r73/BT_Audio_APP/bt_audio_app_src/audio/communication.c
+
+          python3 - "$SRC" <<'PY'
+          from pathlib import Path
+          import sys
+
+          lines=Path(sys.argv[1]).read_text(
+              encoding="latin-1", errors="replace"
+          ).splitlines()
+
+          start=next(
+              i for i,x in enumerate(lines)
+              if "case 1:" in x and "system reset" in x
+          )
+          end=next(
+              i for i in range(start+1, len(lines))
+              if "case 2:" in lines[i]
+          )
+
+          block=lines[start:end]
+          text="\n".join(block)
+
+          required=[
+              "memcpy(&TmpData, &buf[1], 2);",
+              "TmpData = TmpData > 1? 1 : TmpData;",
+              "gCtrlVars.sys_reset =  TmpData;",
+          ]
+          for x in required:
+              if x not in text:
+                  raise SystemExit("missing expected sys_reset command logic: "+x)
+
+          forbidden=[
+              "start_up_grate",
+              "Reset_McuSystem",
+              "ROM_SysReset",
+              "jump_fun",
+              "ADR_FLASH_BOOT_FLAGE",
+              "SREG_FLASH_BOOT_FLAGE",
+          ]
+          bad=[x for x in forbidden if x in text]
+          if bad:
+              raise SystemExit("unexpected direct boot/reset side effect in sys_reset case: "+",".join(bad))
+
+          Path("/tmp/R73_COMM_SYS_RESET_BLOCK.txt").write_text(
+              "\n".join(
+                  f"{start+i+1}: {line}"
+                  for i,line in enumerate(block)
+              )+"\n",
+              encoding="utf-8"
+          )
+
+          out=[
+              "R73_COMM_SYS_RESET_COMMAND_PRESENT=YES",
+              "R73_COMM_SYS_RESET_VALUE_CLAMPED_0_OR_1=YES",
+              "R73_COMM_SYS_RESET_WRITES_CTRLVAR_ONLY=YES",
+              "R73_COMM_SYS_RESET_DIRECT_START_UP_GRATE_CALL=NO",
+              "R73_COMM_SYS_RESET_DIRECT_RESET_MCU_CALL=NO",
+              "R73_COMM_SYS_RESET_DIRECT_ROM_SYSRESET_CALL=NO",
+              "R73_COMM_SYS_RESET_DIRECT_FLASHBOOT_FLAG_WRITE=NO",
+          ]
+          Path("/tmp/R73_COMM_SYS_RESET_STATE.txt").write_text(
+              "\n".join(out)+"\n",
+              encoding="utf-8"
+          )
+          print("\n".join(out))
+          PY
+
+      - name: Enumerate app-side reset jump and upgrade entrypoints
+        id: entrypoints
+        shell: bash
+        run: |
+          set -euo pipefail
+          ROOT=/tmp/bp1048_r73/BT_Audio_APP
+
+          {
+            echo "=== start_up_grate ==="
+            grep -RIn \
+              --include='*.c' --include='*.h' \
+              'start_up_grate' "$ROOT" || true
+
+            echo
+            echo "=== Reset_McuSystem ==="
+            grep -RIn \
+              --include='*.c' --include='*.h' \
+              'Reset_McuSystem' "$ROOT" || true
+
+            echo
+            echo "=== ROM_SysReset ==="
+            grep -RIn \
+              --include='*.c' --include='*.h' \
+              'ROM_SysReset' "$ROOT" || true
+
+            echo
+            echo "=== ROM_BankBUpgradeApply ==="
+            grep -RIn \
+              --include='*.c' --include='*.h' \
+              'ROM_BankBUpgradeApply' "$ROOT" || true
+
+            echo
+            echo "=== jump_fun ==="
+            grep -RIn \
+              --include='*.c' --include='*.h' \
+              'jump_fun' "$ROOT" || true
+
+            echo
+            echo "=== flash boot flag ==="
+            grep -RIn \
+              --include='*.c' --include='*.h' \
+              -E 'ADR_FLASH_BOOT_FLAGE|SREG_FLASH_BOOT_FLAGE' "$ROOT" || true
+          } | tee /tmp/R73_ENTRYPOINTS.txt
+
+          python3 - <<'PY'
+          from pathlib import Path
+          import subprocess
+
+          root="/tmp/bp1048_r73/BT_Audio_APP"
+
+          def grep_count(token):
+              p=subprocess.run(
+                  [
+                      "grep","-RIl",
+                      "--include=*.c","--include=*.h",
+                      token,root
+                  ],
+                  stdout=subprocess.PIPE,
+                  stderr=subprocess.DEVNULL,
+                  text=True,
+                  check=False,
+              )
+              return len([x for x in p.stdout.splitlines() if x.strip()])
+
+          out=[
+              f"R73_FILES_WITH_START_UP_GRATE={grep_count('start_up_grate')}",
+              f"R73_FILES_WITH_RESET_MCU_SYSTEM={grep_count('Reset_McuSystem')}",
+              f"R73_FILES_WITH_ROM_SYSRESET={grep_count('ROM_SysReset')}",
+              f"R73_FILES_WITH_BANKB_UPGRADE_APPLY={grep_count('ROM_BankBUpgradeApply')}",
+              f"R73_FILES_WITH_JUMP_FUN={grep_count('jump_fun')}",
+              f"R73_FILES_WITH_FLASH_BOOT_FLAG={grep_count('ADR_FLASH_BOOT_FLAGE')}",
+          ]
+          Path("/tmp/R73_ENTRYPOINT_COUNTS.txt").write_text(
+              "\n".join(out)+"\n",
+              encoding="utf-8"
+          )
+          print("\n".join(out))
+          PY
+
+      - name: Prove only reference USB Feature path calls start_up_grate USB resource
+        id: usb_boot
+        shell: bash
+        run: |
+          set -euo pipefail
+          ROOT=/tmp/bp1048_r73
+
+          grep -RIn \
+            --include='*.c' \
+            --include='*.h' \
+            'start_up_grate(AppResourceUsbDevice)' \
+            "$ROOT" \
+            | tee /tmp/R73_USB_BOOT_CALLS.txt || true
+
+          COUNT="$(grep -c . /tmp/R73_USB_BOOT_CALLS.txt || true)"
+
+          {
+            echo "R73_START_UP_GRATE_USB_RESOURCE_CALLS=$COUNT"
+          } | tee /tmp/R73_USB_BOOT_STATE.txt
+
+          test "$COUNT" -ge 1
+
+          if grep -v 'otg_device_standard_request.c' /tmp/R73_USB_BOOT_CALLS.txt \
+               | grep -q .; then
+            echo "R73_ALTERNATE_USB_START_UP_GRATE_CALLSITE=YES" \
+              | tee -a /tmp/R73_USB_BOOT_STATE.txt
+          else
+            echo "R73_ALTERNATE_USB_START_UP_GRATE_CALLSITE=NO" \
+              | tee -a /tmp/R73_USB_BOOT_STATE.txt
+          fi
+
+      - name: Classify OBEX dual-bank reset as separate non-USB path
+        id: obex
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          SRC=/tmp/bp1048_r73/BT_Audio_APP/bt_audio_app_src/apps/bt_obex_upgrade.c
+
+          grep -F 'ROM_BankBUpgradeApply' "$SRC"
+          grep -F 'ROM_SysReset();' "$SRC"
+
+          cat > /tmp/R73_OBEX_STATE.txt <<'EOF'
+          R73_OBEX_DUALBANK_UPGRADE_PATH_PRESENT=YES
+          R73_OBEX_PATH_CALLS_BANKB_UPGRADE_APPLY=YES
+          R73_OBEX_PATH_CALLS_ROM_SYSRESET=YES
+          R73_OBEX_PATH_IS_USB_RUNTIME_CONTROL=NO
+          R73_OBEX_PATH_REQUIRES_SEPARATE_OTA_FLOW=YES
+          EOF
+
+          cat /tmp/R73_OBEX_STATE.txt
+
+      - name: Build R73 decision
+        id: decision
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          CONSUMER="$(
+            grep '^R73_SYS_RESET_HAS_RUNTIME_CONSUMER=' \
+              /tmp/R73_SYS_RESET_STATE.txt | cut -d= -f2
+          )"
+
+          ALT_USB="$(
+            grep '^R73_ALTERNATE_USB_START_UP_GRATE_CALLSITE=' \
+              /tmp/R73_USB_BOOT_STATE.txt | cut -d= -f2
+          )"
+
+          cat > /tmp/R73_DECISION.txt <<EOF
+          R73_SYS_RESET_HAS_RUNTIME_CONSUMER=$CONSUMER
+          R73_COMM_SYS_RESET_WRITES_CTRLVAR_ONLY=YES
+
+          R73_REFERENCE_USB_BOOT_ENTRY_REMAINS_START_UP_GRATE_PATH=YES
+          R73_ALTERNATE_USB_START_UP_GRATE_CALLSITE=$ALT_USB
+
+          R73_OBEX_DUALBANK_PATH_SEPARATE_FROM_USB_RUNTIME=YES
+          R73_NORMAL_RESET_IS_NOT_PROVEN_TO_SET_PC_FLASHBOOT_FLAG=YES
+
+          # Live production observations from R46G/R72B:
+          R73_PRODUCTION_NORMAL_RUNTIME_IDENTITY_CONFIRMED=6324:1719
+          R73_PRODUCTION_NORMAL_RUNTIME_INTERFACES=7
+          R73_PRODUCTION_FEATURE_AA_TO_55_PREVIOUSLY_CONFIRMED=YES
+          R73_PRODUCTION_FLASHBOOT_REENUMERATION_PREVIOUSLY_OBSERVED=NO
+
+          R73_REPEAT_AA55_REQUIRED=NO
+          R73_NEW_LIVE_RESET_PROBE_REQUIRED=NO
+
+          R73_PRODUCTION_FIRST_BOOTSTRAP_PROVEN=NO
+          R73_STOCK_BACKUP_PROVEN=NO
+          R73_RECOVERY_PROVEN=NO
+
+          R73_BOARD_USB_ACCESSED=NO
+          R73_FLASH_WRITE_EXECUTED=NO
+          R73_FLASH_ERASE_EXECUTED=NO
+          FLASH_ALLOWED=NO
+          EOF
+
+          cat /tmp/R73_DECISION.txt
+
+      - name: Build R73 evidence bundle
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          OUT=/tmp/R73_BP1048P4_APP_SIDE_BOOT_RESET_AUDIT_EVIDENCE
+          rm -rf "$OUT"
+          mkdir -p "$OUT"
+
+          for f in \
+            R73_SDK_STATE.txt \
+            R73_SYS_RESET_ALL.txt \
+            R73_SYS_RESET_STATE.txt \
+            R73_SYS_RESET_READS.txt \
+            R73_COMM_SYS_RESET_BLOCK.txt \
+            R73_COMM_SYS_RESET_STATE.txt \
+            R73_ENTRYPOINTS.txt \
+            R73_ENTRYPOINT_COUNTS.txt \
+            R73_USB_BOOT_CALLS.txt \
+            R73_USB_BOOT_STATE.txt \
+            R73_OBEX_STATE.txt \
+            R73_DECISION.txt; do
+            test -f "/tmp/$f" && cp "/tmp/$f" "$OUT/"
+          done
+
+          cat > "$OUT/README.txt" <<'EOF'
+          R73 audits all app-side reset/jump/upgrade entrypoints in the pinned
+          public BP1048 SDK.
+
+          It specifically answers whether the communication.c sys_reset control
+          is an alternate USB bootstrap or merely a control variable, and
+          whether any second start_up_grate(AppResourceUsbDevice) callsite
+          exists outside the known HID Feature handler.
+
+          STATIC ONLY:
+          - no vendor code execution
+          - no Android USB access
+          - no board access
+          - no reset
+          - no erase/program/flash
+          EOF
+
+          (
+            cd /tmp
+            zip -qr \
+              R73_BP1048P4_APP_SIDE_BOOT_RESET_AUDIT_EVIDENCE.zip \
+              R73_BP1048P4_APP_SIDE_BOOT_RESET_AUDIT_EVIDENCE
+            sha256sum \
+              R73_BP1048P4_APP_SIDE_BOOT_RESET_AUDIT_EVIDENCE.zip \
+              > R73_BP1048P4_APP_SIDE_BOOT_RESET_AUDIT_EVIDENCE.zip.sha256
+          )
+
+          cat /tmp/R73_BP1048P4_APP_SIDE_BOOT_RESET_AUDIT_EVIDENCE.zip.sha256
+
+      - name: Upload R73 evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: R73-BP1048P4-APP-SIDE-BOOT-RESET-AUDIT-EVIDENCE
+          path: |
+            /tmp/R73_BP1048P4_APP_SIDE_BOOT_RESET_AUDIT_EVIDENCE.zip
+            /tmp/R73_BP1048P4_APP_SIDE_BOOT_RESET_AUDIT_EVIDENCE.zip.sha256
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: R73 final gate
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cat /tmp/R73_SYS_RESET_STATE.txt 2>/dev/null || true
+          cat /tmp/R73_COMM_SYS_RESET_STATE.txt 2>/dev/null || true
+          cat /tmp/R73_ENTRYPOINT_COUNTS.txt 2>/dev/null || true
+          cat /tmp/R73_USB_BOOT_STATE.txt 2>/dev/null || true
+          cat /tmp/R73_OBEX_STATE.txt 2>/dev/null || true
+          cat /tmp/R73_DECISION.txt 2>/dev/null || true
+
+          test "${{ steps.sys_reset.outcome }}" = "success"
+          test "${{ steps.comm_reset.outcome }}" = "success"
+          test "${{ steps.entrypoints.outcome }}" = "success"
+          test "${{ steps.usb_boot.outcome }}" = "success"
+          test "${{ steps.obex.outcome }}" = "success"
+          test "${{ steps.decision.outcome }}" = "success"
+
+          grep -F 'R73_COMM_SYS_RESET_WRITES_CTRLVAR_ONLY=YES' \
+            /tmp/R73_COMM_SYS_RESET_STATE.txt
+          grep -F 'R73_COMM_SYS_RESET_DIRECT_START_UP_GRATE_CALL=NO' \
+            /tmp/R73_COMM_SYS_RESET_STATE.txt
+          grep -F 'R73_COMM_SYS_RESET_DIRECT_FLASHBOOT_FLAG_WRITE=NO' \
+            /tmp/R73_COMM_SYS_RESET_STATE.txt
+          grep -F 'R73_OBEX_PATH_IS_USB_RUNTIME_CONTROL=NO' \
+            /tmp/R73_OBEX_STATE.txt
+          grep -F 'R73_REPEAT_AA55_REQUIRED=NO' \
+            /tmp/R73_DECISION.txt
+          grep -F 'R73_NEW_LIVE_RESET_PROBE_REQUIRED=NO' \
+            /tmp/R73_DECISION.txt
+          grep -F 'R73_BOARD_USB_ACCESSED=NO' \
+            /tmp/R73_DECISION.txt
+          grep -F 'FLASH_ALLOWED=NO' \
+            /tmp/R73_DECISION.txt
+
+          echo "R73_APP_SIDE_ALTERNATE_BOOT_RESET_ENTRYPOINT_AUDIT=PASS"
+          echo "FLASH_ALLOWED=NO"
