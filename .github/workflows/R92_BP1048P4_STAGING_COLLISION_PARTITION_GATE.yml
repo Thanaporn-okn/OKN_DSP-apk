@@ -1,0 +1,314 @@
+name: R92 BP1048P4 dual-bank staging collision and partition gate
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: r92-bp1048p4-staging-collision-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  SDK_REPO: https://github.com/leadercxn/bp1048_sdk_v0.1.12.git
+  SDK_COMMIT: 8105bd864b04995d81c9f9ae77cb158259f39015
+  HISTORICAL_OBEX_URL: https://raw.githubusercontent.com/qshosfw/ap80sdk/a3b7bbd80b4d406e27808fcd9d9fbe73726c381f/Devkit/MVs_18_01_07/src/bluetooth/obex_spp_proc.c
+  PROVEN_PRODUCTION_APP_LENGTH_HEX: '0x160A58'
+  FLASH_ALLOWED: 'NO'
+
+jobs:
+  offline-staging-gate:
+    name: OFFLINE staging collision/partition gate - no execution/no USB/no board/no flash
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Safety gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/r92/evidence
+          cat > /tmp/r92/evidence/R92_SAFETY.txt <<'EOF'
+          R92_STATIC_ONLY=YES
+          BOARD_CONTACT=NO
+          USB_DEVICE_ACCESS=NO
+          BLUETOOTH_DEVICE_ACCESS=NO
+          VENDOR_BINARY_EXECUTION=NO
+          SEND_AA55=NO
+          SEND_0X11=NO
+          SEND_CHIPERAS_CODEDATA_BOOTDAT_CONSTDAT_CNFGDAT_BTUPDAT_UPINFO_CXXX=NO
+          R79_PHYSICAL_REPLUG_AUTORUN=NO
+          ERASE_PROGRAM_FLASH=NO
+          REFERENCE_SDK_EQUALS_PRODUCTION=NO
+          REFERENCE_STAGING_ADDRESS_IS_PRODUCTION_SAFE=NO
+          FLASH_ALLOWED=NO
+          PURPOSE=PROVE_WHETHER_REFERENCE_DUALBANK_STAGING_ADDRESSES_COLLIDE_WITH_KNOWN_APP_LENGTH_AND_WHETHER_REFERENCE_P4_MAP_HAS_AN_APP_SIZED_RESERVED_GAP
+          EOF
+          cat /tmp/r92/evidence/R92_SAFETY.txt
+
+      - name: Clone exact reference SDK
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --filter=blob:none --no-checkout "$SDK_REPO" /tmp/r92/sdk
+          cd /tmp/r92/sdk
+          git fetch --depth=1 origin "$SDK_COMMIT"
+          git checkout --detach "$SDK_COMMIT"
+          test "$(git rev-parse HEAD)" = "$SDK_COMMIT"
+
+          cp BT_Audio_APP/bt_audio_app_src/apps/bt_obex_upgrade.c \
+            /tmp/r92/evidence/R92_reference_bt_obex_upgrade.c
+          cp BT_Audio_APP/bt_audio_app_src/inc/flash_config.h \
+            /tmp/r92/evidence/R92_reference_flash_config.h
+
+          sha256sum \
+            /tmp/r92/evidence/R92_reference_bt_obex_upgrade.c \
+            /tmp/r92/evidence/R92_reference_flash_config.h \
+            > /tmp/r92/evidence/R92_REFERENCE_SOURCE_SHA256.txt
+
+      - name: Fetch independent historical MVSilicon-family staging example
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 4 --connect-timeout 20 \
+            "$HISTORICAL_OBEX_URL" \
+            -o /tmp/r92/evidence/R92_historical_obex_spp_proc.c
+
+          sha256sum /tmp/r92/evidence/R92_historical_obex_spp_proc.c \
+            > /tmp/r92/evidence/R92_HISTORICAL_SOURCE_SHA256.txt
+
+          grep -n 'FLASH_MVA_UPDATE_START_OFFSET' \
+            /tmp/r92/evidence/R92_historical_obex_spp_proc.c \
+            | tee /tmp/r92/evidence/R92_HISTORICAL_STAGING_HITS.txt
+
+      - name: Search linker maps scripts and P4 layout references
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /tmp/r92/sdk
+
+          grep -RInaE \
+            'CONST_DATA_ADDR|AUDIO_EFFECT_ADDR|FLASHFS_ADDR|USER_DATA_ADDR|BP_DATA_ADDR|BT_DATA_ADDR|USER_CONFIG_ADDR|BT_CONFIG_ADDR|FLASH_MVA_UPDATE_START_OFFSET' \
+            --exclude-dir=.git . \
+            > /tmp/r92/evidence/R92_LAYOUT_SOURCE_HITS.txt || true
+
+          find . -type f \( \
+              -iname '*.ld' -o -iname '*.lds' -o -iname '*.map' -o \
+              -iname '*link*script*' -o -iname '*.scf' \
+            \) -printf '%P\t%s\n' | sort \
+            > /tmp/r92/evidence/R92_LINKER_RELATED_FILES.tsv || true
+
+          : > /tmp/r92/evidence/R92_LINKER_LAYOUT_HITS.txt
+          while IFS=$'\t' read -r rel size; do
+            [ -n "$rel" ] || continue
+            grep -InaE \
+              '198000|1C8000|3C8000|1D0000|3D0000|1F0000|3F0000|CONST|EFFECT|FLASHFS|USER_DATA|CONFIG' \
+              "$rel" 2>/dev/null \
+              | sed "s#^#$rel:#" \
+              >> /tmp/r92/evidence/R92_LINKER_LAYOUT_HITS.txt || true
+          done < /tmp/r92/evidence/R92_LINKER_RELATED_FILES.tsv
+
+          sed -n '1,700p' /tmp/r92/evidence/R92_LAYOUT_SOURCE_HITS.txt
+          echo '--- linker related ---'
+          cat /tmp/r92/evidence/R92_LINKER_RELATED_FILES.tsv
+          echo '--- linker hits ---'
+          sed -n '1,1000p' /tmp/r92/evidence/R92_LINKER_LAYOUT_HITS.txt
+
+      - name: Compute collision and reserved-gap model
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import json,re,os
+
+          out=Path('/tmp/r92/evidence')
+          obex=(out/'R92_reference_bt_obex_upgrade.c').read_text(errors='ignore')
+          hist=(out/'R92_historical_obex_spp_proc.c').read_text(errors='ignore')
+          fc=(out/'R92_reference_flash_config.h').read_text(errors='ignore')
+          linker_hits=(out/'R92_LINKER_LAYOUT_HITS.txt').read_text(errors='ignore')
+
+          app_len=int(os.environ['PROVEN_PRODUCTION_APP_LENGTH_HEX'],16)
+
+          def define_hex(name,text):
+              m=re.search(r'#define\s+'+re.escape(name)+r'\s+(.*)',text)
+              if not m:return None
+              expr=m.group(1).split('//')[0].strip()
+              vals=[int(x,16) for x in re.findall(r'0x[0-9A-Fa-f]+',expr)]
+              if not vals:return None
+              # Supports the P4 expressions used in this SDK: base + 0x200000.
+              if '+' in expr and len(vals)>=2:return vals[0]+vals[1]
+              return vals[0]
+
+          ref_stage=define_hex('FLASH_MVA_UPDATE_START_OFFSET',obex)
+          hist_stage=define_hex('FLASH_MVA_UPDATE_START_OFFSET',hist)
+          code=define_hex('CODE_ADDR',fc)
+          const=define_hex('CONST_DATA_ADDR',fc)
+
+          # Parse only P4 branch.
+          p4={}
+          in_p4=False
+          for line in fc.splitlines():
+              if '#ifdef CFG_CHIP_BP1048P4' in line:
+                  in_p4=True
+                  continue
+              if in_p4 and line.strip().startswith('#else'):
+                  break
+              if in_p4:
+                  m=re.match(r'\s*#define\s+([A-Z0-9_]+)\s+(.+)',line)
+                  if not m: continue
+                  name=m.group(1)
+                  expr=m.group(2).split('//')[0].strip()
+                  vals=[int(x,16) for x in re.findall(r'0x[0-9A-Fa-f]+',expr)]
+                  if not vals: continue
+                  p4[name]=(sum(vals[:2]) if '+' in expr and len(vals)>=2 else vals[0])
+
+          # Ordered region starts. We conservatively treat each start->next start
+          # as reserved because no independent proof says unused bytes are free staging.
+          starts=[
+              ('CODE',code),
+              ('CONST',const),
+              ('AUDIO_EFFECT',p4.get('AUDIO_EFFECT_ADDR')),
+              ('FLASHFS',p4.get('FLASHFS_ADDR')),
+              ('USER_DATA',p4.get('USER_DATA_ADDR')),
+              ('BP_DATA',p4.get('BP_DATA_ADDR')),
+              ('BT_DATA',p4.get('BT_DATA_ADDR')),
+              ('USER_CONFIG',p4.get('USER_CONFIG_ADDR')),
+              ('BT_CONFIG',p4.get('BT_CONFIG_ADDR')),
+              ('FLASH_END_ASSUMED_FROM_P4_MAP',0x400000),
+          ]
+          starts=[x for x in starts if x[1] is not None]
+          starts=sorted(starts,key=lambda x:x[1])
+
+          regions=[]
+          for i in range(len(starts)-1):
+              n,a=starts[i]
+              n2,b=starts[i+1]
+              regions.append({
+                  'name':n,'start':a,'end_exclusive':b,
+                  'size':b-a,'next_region':n2
+              })
+
+          app_start=code if code is not None else 0
+          app_end=app_start+app_len
+          aligned_end=(app_end+0xFFF)&~0xFFF
+
+          def collide(stage):
+              if stage is None:return None
+              return app_start <= stage < app_end
+
+          def overlap_len(stage):
+              if stage is None or stage>=app_end:return 0
+              return max(0,app_end-max(stage,app_start))
+
+          low_gap=(const-aligned_end) if const is not None and const>=aligned_end else None
+
+          # "Free gap" is intentionally fail-closed: there is none unless source/linker
+          # evidence explicitly names an unallocated interval. The ordered region model
+          # treats CONST..AUDIO_EFFECT as reserved.
+          explicit_free_gap_proven=False
+          app_sized_free_gap_proven=False
+
+          data={
+              'project_proven_app_length':app_len,
+              'project_proven_app_length_hex':hex(app_len),
+              'reference_code_addr':code,
+              'reference_const_data_addr':const,
+              'reference_obex_staging':ref_stage,
+              'historical_obex_staging':hist_stage,
+              'reference_staging_varies_across_public_sdk_examples':(
+                  ref_stage is not None and hist_stage is not None and ref_stage!=hist_stage
+              ),
+              'app_interval_under_reference_code_base':{
+                  'start':app_start,'end_exclusive':app_end,
+                  'end_inclusive':app_end-1
+              },
+              'reference_0x100000_collides_with_app_interval':collide(ref_stage),
+              'reference_0x100000_overlap_bytes':overlap_len(ref_stage),
+              'historical_0x120000_collides_with_app_interval':collide(hist_stage),
+              'historical_0x120000_overlap_bytes':overlap_len(hist_stage),
+              'minimum_4k_aligned_address_after_app':aligned_end,
+              'gap_from_aligned_app_end_to_reference_const_start':low_gap,
+              'app_sized_package_fits_between_app_end_and_const_start':(
+                  low_gap is not None and low_gap >= app_len
+              ),
+              'p4_region_starts':starts,
+              'p4_conservative_reserved_regions':regions,
+              'explicit_unallocated_app_sized_gap_proven':explicit_free_gap_proven,
+              'app_sized_safe_bank_b_partition_proven_in_reference_p4_map':app_sized_free_gap_proven,
+              'linker_layout_hit_count':len([x for x in linker_hits.splitlines() if x.strip()]),
+          }
+          out.joinpath('R92_COLLISION_MODEL.json').write_text(json.dumps(data,indent=2)+'\n')
+          print(json.dumps(data,indent=2))
+          PY
+
+      - name: Build fail-closed decision
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import json
+
+          p=Path('/tmp/r92/evidence')
+          m=json.loads((p/'R92_COLLISION_MODEL.json').read_text())
+
+          decision={
+              'PUBLIC_SDK_STAGING_ADDRESS_IS_PRODUCT_SPECIFIC':m['reference_staging_varies_across_public_sdk_examples'],
+              'REFERENCE_0X100000_COLLIDES_WITH_KNOWN_APP_IF_CODE_BASE_ZERO':m['reference_0x100000_collides_with_app_interval'],
+              'HISTORICAL_0X120000_COLLIDES_WITH_KNOWN_APP_IF_CODE_BASE_ZERO':m['historical_0x120000_collides_with_app_interval'],
+              'APP_SIZED_PACKAGE_FITS_BEFORE_REFERENCE_CONST':m['app_sized_package_fits_between_app_end_and_const_start'],
+              'REFERENCE_P4_APP_SIZED_SAFE_BANKB_PARTITION_PROVEN':m['app_sized_safe_bank_b_partition_proven_in_reference_p4_map'],
+              'PRODUCTION_CODE_BASE_ZERO_PROVEN_FROM_R92':False,
+              'PRODUCTION_BANKB_STAGING_ADDRESS_PROVEN':False,
+              'PRODUCTION_FLASH_LAYOUT_PROVEN':False,
+              'PRODUCTION_BACKUP_RECOVERY_PROVEN':False,
+              'PHONE_DIRECT_USB_BOOTSTRAP_PROVEN':False,
+              'LIVE_BOARD_TEST_ALLOWED_FROM_R92':False,
+              'FLASH_ALLOWED':False,
+          }
+          p.joinpath('R92_DECISION.json').write_text(json.dumps(decision,indent=2)+'\n')
+
+          lines=[
+              '# R92 BP1048P4 dual-bank staging collision and partition gate',
+              '',
+              'OFFLINE/STATIC ONLY. No board/USB/Bluetooth access and no flash.',
+              '',
+              '## Decision',
+              '```json',json.dumps(decision,indent=2),'```','',
+              '## Collision model',
+              '```json',json.dumps(m,indent=2),'```','',
+              '## Interpretation',
+              '- Public MVSilicon-family examples use different staging addresses (0x100000 vs 0x120000), so the address is layout/product-specific.',
+              '- Under the reference CODE_ADDR=0 model, both sample staging addresses fall inside the previously proven app-length interval 0x000000..0x160A57.',
+              '- The first 4K-aligned address after that app is 0x161000; the remaining gap to reference CONST_DATA_ADDR=0x198000 is far smaller than another app-sized package.',
+              '- The P4 map defines subsequent region starts through 0x400000. Without explicit linker/source proof that a large interval is unallocated, R92 treats those intervals as reserved rather than inventing a Bank-B partition.',
+              '- Therefore neither 0x100000 nor 0x120000 may be used on the production board, and no alternative production staging address is inferred.',
+              '- A future custom firmware may reserve a Bank-B partition deliberately, but that does not solve the first stock-firmware bootstrap.',
+              '- FLASH_ALLOWED=NO.',
+          ]
+          p.joinpath('R92_REPORT.md').write_text('\n'.join(lines)+'\n')
+          print(json.dumps(decision,indent=2))
+          PY
+
+          sed -n '1,850p' /tmp/r92/evidence/R92_REPORT.md
+
+      - name: Package evidence
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          (cd /tmp/r92/evidence && zip -9 -r /tmp/R92_BP1048P4_STAGING_COLLISION_PARTITION_GATE_EVIDENCE.zip .)
+          sha256sum /tmp/R92_BP1048P4_STAGING_COLLISION_PARTITION_GATE_EVIDENCE.zip \
+            > /tmp/R92_BP1048P4_STAGING_COLLISION_PARTITION_GATE_EVIDENCE.zip.sha256
+
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: R92-BP1048P4-STAGING-COLLISION-PARTITION-GATE-EVIDENCE
+          path: |
+            /tmp/R92_BP1048P4_STAGING_COLLISION_PARTITION_GATE_EVIDENCE.zip
+            /tmp/R92_BP1048P4_STAGING_COLLISION_PARTITION_GATE_EVIDENCE.zip.sha256
+          if-no-files-found: error
