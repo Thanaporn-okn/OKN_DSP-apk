@@ -1,0 +1,443 @@
+name: R89 BP1048P4 official GoloPine Windows managed HID feature callgraph
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: r89-bp1048p4-golopine-managed-hid-callgraph-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  GOLOPINE_ZIP_URL: https://golodsp.com/wp-content/uploads/2026/05/golopine_audio_turning_release_2026-04-08.exe_.zip
+  EXPECTED_ZIP_SHA256: f14b0c4baad70a8b0d5dc3b2783819cc2ef6e1a9c6ec2adcf17f1557059edd2a
+  EXPECTED_EXE_SHA256: 3ca54171c53f7badd963ffe6851b8b3e2faf8aee8ba2afcb7040990e22ae09b2
+  FLASH_ALLOWED: 'NO'
+
+jobs:
+  managed-callgraph:
+    name: OFFLINE managed HID feature callgraph - no execution/no USB/no board/no flash
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Safety gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > /tmp/R89_SAFETY.txt <<'EOF'
+          R89_STATIC_ONLY=YES
+          VENDOR_BINARY_EXECUTION=NO
+          BOARD_CONTACT=NO
+          USB_DEVICE_ACCESS=NO
+          SEND_AA55=NO
+          SEND_0X11=NO
+          SEND_CHIPERAS_CODEDATA_BOOTDAT_CONSTDAT_CNFGDAT_BTUPDAT_UPINFO_CXXX=NO
+          R79_PHYSICAL_REPLUG_AUTORUN=NO
+          ERASE_PROGRAM_FLASH=NO
+          FLASH_ALLOWED=NO
+          PURPOSE=TRACE_MANAGED_CALLERS_OF_HID_FEATURE_APIS_AND_DISTINGUISH_UFE_RUNTIME_FROM_BOOT_RECOVERY
+          EOF
+          cat /tmp/R89_SAFETY.txt
+
+      - name: Install static IL tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq mono-utils
+          command -v monodis
+          monodis --help 2>&1 | head -40 || true
+
+      - name: Acquire exact official binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/r89/download /tmp/r89/unpacked /tmp/r89/evidence
+
+          curl --fail --location --retry 4 --connect-timeout 20 \
+            "$GOLOPINE_ZIP_URL" -o /tmp/r89/download/golopine.zip
+
+          ZIP_SHA="$(sha256sum /tmp/r89/download/golopine.zip | awk '{print $1}')"
+          test "$ZIP_SHA" = "$EXPECTED_ZIP_SHA256"
+          unzip -q /tmp/r89/download/golopine.zip -d /tmp/r89/unpacked
+
+          python3 - <<'PY'
+          from pathlib import Path
+          import hashlib, json
+          root=Path('/tmp/r89/unpacked')
+          candidates=[]
+          for p in root.rglob('*.exe'):
+              b=p.read_bytes()
+              candidates.append({
+                'path':str(p.relative_to(root)),
+                'size':len(b),
+                'sha256':hashlib.sha256(b).hexdigest(),
+                'mz':b[:2]==b'MZ',
+                'sidecar':'__MACOSX' in p.parts or p.name.startswith('._'),
+              })
+          real=[x for x in candidates if x['mz'] and not x['sidecar'] and x['size']>100000]
+          if len(real)!=1:
+              raise SystemExit(f'Expected one real PE: {real}')
+          chosen=real[0]
+          src=root/chosen['path']
+          Path('/tmp/r89/golopine.exe').write_bytes(src.read_bytes())
+          Path('/tmp/r89/evidence/R89_EXE_SELECTION.json').write_text(
+              json.dumps({'candidates':candidates,'selected':chosen},indent=2)+'\n'
+          )
+          print(json.dumps({'selected':chosen},indent=2))
+          PY
+
+          EXE_SHA="$(sha256sum /tmp/r89/golopine.exe | awk '{print $1}')"
+          test "$EXE_SHA" = "$EXPECTED_EXE_SHA256"
+          printf 'ZIP_SHA_MATCH=YES\nEXE_SHA_MATCH=YES\nZIP_SHA256=%s\nEXE_SHA256=%s\n' \
+            "$ZIP_SHA" "$EXE_SHA" | tee /tmp/r89/evidence/R89_SHA_GATE.txt
+
+      - name: Disassemble managed IL without execution
+        shell: bash
+        run: |
+          set -euo pipefail
+          monodis --output=/tmp/r89/full.il /tmp/r89/golopine.exe \
+            2> /tmp/r89/evidence/R89_MONODIS_STDERR.txt
+          test -s /tmp/r89/full.il
+          wc -l -c /tmp/r89/full.il | tee /tmp/r89/evidence/R89_MONODIS_SIZE.txt
+
+      - name: Build managed method graph and trace HID feature callers
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import collections, json, re
+
+          ilp=Path('/tmp/r89/full.il')
+          out=Path('/tmp/r89/evidence')
+          lines=ilp.read_text(errors='replace').splitlines()
+
+          # Parse method blocks using .method through "} // end of method".
+          methods=[]
+          cur=None
+          for lineno,line in enumerate(lines,1):
+              if line.lstrip().startswith('.method '):
+                  if cur is not None:
+                      methods.append(cur)
+                  cur={'start_line':lineno,'lines':[line]}
+                  continue
+              if cur is not None:
+                  cur['lines'].append(line)
+                  if '} // end of method' in line:
+                      cur['end_line']=lineno
+                      methods.append(cur)
+                      cur=None
+          if cur is not None:
+              cur['end_line']=len(lines)
+              methods.append(cur)
+
+          # Recover a stable-ish name from first part of each method block.
+          def method_name(block):
+              head=' '.join(block['lines'][:8])
+              # Name immediately before '('; accept quoted identifiers.
+              ms=list(re.finditer(r"(?:'([^']+)'|([A-Za-z0-9_.$<>`]+))\s*\(",head))
+              if not ms:
+                  return f"method_at_{block['start_line']}"
+              m=ms[-1]
+              return m.group(1) or m.group(2)
+
+          for i,m in enumerate(methods):
+              m['id']=i
+              m['name']=method_name(m)
+              m['text']='\n'.join(m['lines'])
+              m['header']=' '.join(m['lines'][:8])[:1600]
+              m['pinvoke']='pinvokeimpl' in m['header'].lower()
+
+          by_name=collections.defaultdict(list)
+          for m in methods:
+              by_name[m['name']].append(m['id'])
+
+          # Calls emitted by IL typically contain ::MethodName(
+          call_re=re.compile(r'::(?:\'([^\']+)\'|([A-Za-z0-9_.$<>`]+))\s*\(')
+          calls=collections.defaultdict(set)
+          called_names=collections.defaultdict(set)
+          for m in methods:
+              for line in m['lines']:
+                  if ' call ' not in (' '+line+' ') and ' callvirt ' not in (' '+line+' '):
+                      continue
+                  for cm in call_re.finditer(line):
+                      name=cm.group(1) or cm.group(2)
+                      called_names[m['id']].add(name)
+                      for tid in by_name.get(name,[]):
+                          calls[m['id']].add(tid)
+
+          rev=collections.defaultdict(set)
+          for a,ts in calls.items():
+              for b in ts:
+                  rev[b].add(a)
+
+          native_targets=[
+              'HidD_SetFeature',
+              'HidD_SetOutputReport',
+              'HidD_GetInputReport',
+              'HidD_GetAttributes',
+              'HidD_GetHidGuid',
+              'ReadFile',
+              'WriteFile',
+          ]
+          ufe_seeds=[
+              'SendDeviceDescriptionRequest',
+              'appendWriteActuatorCommand',
+              'appendDeviceCommand',
+              'DecodeUfeJSONdata',
+              'DecoderUFEdeviceDescriptionJSON',
+          ]
+          hid_managed_seeds=[
+              'OpenDevice','GetHidDeviceList','getFeature','HidRead','HidDataReceived'
+          ]
+          boot_terms=[
+              'bootloader','boot loader','recovery','pc_upgrade','start_up_grate',
+              'flash_boot_en','usbloadaudiomode','pctool','firmware upgrade',
+              'enter boot','enter_boot'
+          ]
+          flash_terms=[
+              'chiperas','codedata','bootdat','constdat','cnfgdat','btupdat','upinfo','cxxx'
+          ]
+
+          target_ids=set()
+          for n in native_targets:
+              target_ids.update(by_name.get(n,[]))
+
+          # Include managed methods that textually call P/Invoke names even if token linking is ambiguous.
+          managed_native_callers=set()
+          for m in methods:
+              if m['pinvoke']:
+                  continue
+              low=m['text'].lower()
+              if any(('::'+n.lower()+'(') in low for n in native_targets):
+                  managed_native_callers.add(m['id'])
+
+          # Upward caller closure from native target and its direct managed callers.
+          start_targets=set(target_ids)|managed_native_callers
+          upward=set(start_targets)
+          q=collections.deque((x,0) for x in start_targets)
+          depth={x:0 for x in start_targets}
+          while q:
+              cur,d=q.popleft()
+              if d>=8: continue
+              for parent in rev.get(cur,()):
+                  if parent not in upward:
+                      upward.add(parent); depth[parent]=d+1; q.append((parent,d+1))
+
+          # Find downward paths from selected runtime seeds to native feature methods.
+          def ids_for(names):
+              s=set()
+              for n in names:s.update(by_name.get(n,[]))
+              return s
+
+          ufe_ids=ids_for(ufe_seeds)
+          hid_seed_ids=ids_for(hid_managed_seeds)
+
+          def paths_from(seeds, targets, max_depth=10, max_paths=500):
+              results=[]
+              for s in sorted(seeds):
+                  dq=collections.deque([(s,[s])])
+                  seen_depth={s:0}
+                  while dq and len(results)<max_paths:
+                      cur,path=dq.popleft()
+                      if cur in targets and len(path)>1:
+                          results.append(path)
+                          continue
+                      if len(path)-1>=max_depth:
+                          continue
+                      for nxt in calls.get(cur,()):
+                          nd=len(path)
+                          if seen_depth.get(nxt,999)>nd:
+                              seen_depth[nxt]=nd
+                              dq.append((nxt,path+[nxt]))
+              return results
+
+          feature_ids=set()
+          for n in ['HidD_SetFeature','HidD_SetOutputReport','HidD_GetInputReport']:
+              feature_ids.update(by_name.get(n,[]))
+          feature_ids |= {
+              m['id'] for m in methods
+              if not m['pinvoke'] and any(('::'+n.lower()+'(') in m['text'].lower()
+                  for n in ['HidD_SetFeature','HidD_SetOutputReport','HidD_GetInputReport'])
+          }
+
+          ufe_paths=paths_from(ufe_ids,feature_ids)
+          hid_paths=paths_from(hid_seed_ids,feature_ids)
+
+          # Textual evidence in the entire upward feature caller closure.
+          closure_text='\n'.join(methods[i]['text'].lower() for i in upward)
+          boot_in_closure=[x for x in boot_terms if x in closure_text]
+          flash_in_closure=[x for x in flash_terms if x in closure_text]
+
+          # Raw IL ldstr boot/recovery scan, with method owner.
+          literal_hits=[]
+          ldstr_re=re.compile(r'ldstr\s+"(.*)"')
+          for m in methods:
+              for ln in m['lines']:
+                  mm=ldstr_re.search(ln)
+                  if not mm: continue
+                  val=mm.group(1)
+                  low=val.lower()
+                  terms=[x for x in boot_terms+flash_terms if x in low]
+                  if terms:
+                      literal_hits.append({
+                          'method_id':m['id'],'method_name':m['name'],
+                          'terms':terms,'literal':val[:1200]
+                      })
+
+          def compact_method(i):
+              m=methods[i]
+              return {
+                  'id':i,'name':m['name'],'start_line':m['start_line'],
+                  'end_line':m['end_line'],'pinvoke':m['pinvoke'],
+                  'header':m['header'],
+                  'calls':sorted(called_names.get(i,set())),
+              }
+
+          interesting_ids=sorted(upward | ufe_ids | hid_seed_ids | feature_ids)
+          out.joinpath('R89_INTERESTING_METHODS.json').write_text(
+              json.dumps([compact_method(i) for i in interesting_ids],indent=2,ensure_ascii=False)+'\n'
+          )
+
+          def path_obj(path):
+              return [{'id':i,'name':methods[i]['name'],'line':methods[i]['start_line']} for i in path]
+
+          out.joinpath('R89_UFE_TO_HID_FEATURE_PATHS.json').write_text(
+              json.dumps([path_obj(p) for p in ufe_paths],indent=2,ensure_ascii=False)+'\n'
+          )
+          out.joinpath('R89_HID_WRAPPER_TO_FEATURE_PATHS.json').write_text(
+              json.dumps([path_obj(p) for p in hid_paths],indent=2,ensure_ascii=False)+'\n'
+          )
+          out.joinpath('R89_BOOT_FLASH_LITERAL_HITS.json').write_text(
+              json.dumps(literal_hits,indent=2,ensure_ascii=False)+'\n'
+          )
+
+          # Focus contexts for methods in upward closure with native/UFE/HID keywords.
+          contexts=[]
+          focus_re=re.compile(
+              r'HidD_SetFeature|HidD_SetOutputReport|HidD_GetInputReport|'
+              r'GetHidDeviceList|getFeature|HidRead|OpenDevice|'
+              r'SendDeviceDescriptionRequest|appendWriteActuatorCommand|UFE|boot|recovery|upgrade|flash',
+              re.I
+          )
+          for i in sorted(interesting_ids):
+              m=methods[i]
+              matching=[x for x in m['lines'] if focus_re.search(x)]
+              if matching:
+                  contexts.append({
+                      'id':i,'name':m['name'],'start_line':m['start_line'],
+                      'header':m['header'],
+                      'matching_lines':matching[:120],
+                  })
+          out.joinpath('R89_FOCUSED_IL_CONTEXTS.json').write_text(
+              json.dumps(contexts,indent=2,ensure_ascii=False)+'\n'
+          )
+
+          decision={
+              'MONODIS_METHOD_COUNT':len(methods),
+              'HID_FEATURE_PINVOKE_METHOD_COUNT':sum(
+                  len(by_name.get(n,[])) for n in ['HidD_SetFeature','HidD_SetOutputReport','HidD_GetInputReport']
+              ),
+              'MANAGED_NATIVE_FEATURE_CALLER_COUNT':len(managed_native_callers),
+              'UFE_SEED_METHOD_COUNT':len(ufe_ids),
+              'UFE_TO_HID_FEATURE_PATH_COUNT':len(ufe_paths),
+              'HID_WRAPPER_TO_FEATURE_PATH_COUNT':len(hid_paths),
+              'BOOT_RECOVERY_TERMS_IN_HID_FEATURE_CALLER_CLOSURE':boot_in_closure,
+              'FORBIDDEN_FLASH_TERMS_IN_HID_FEATURE_CALLER_CLOSURE':flash_in_closure,
+              'BOOT_OR_FLASH_LDSTR_LITERAL_HIT_COUNT':len(literal_hits),
+              'HID_FEATURE_IS_REACHABLE_FROM_UFE_RUNTIME_EVIDENCE':bool(ufe_paths),
+              'DISTINCT_BOOT_RECOVERY_BRANCH_FROM_HID_FEATURE_PROVEN':False,
+              'BP1048P4_PHONE_DIRECT_BOOT_ENTRY_PROVEN':False,
+              'BP1048P4_PHONE_DIRECT_RECOVERY_IDENTITY_PROVEN':False,
+              'READ_ONLY_PHONE_DIRECT_BACKUP_PROVEN':False,
+              'LIVE_BOARD_TEST_ALLOWED_FROM_R89':False,
+              'FLASH_ALLOWED':False,
+          }
+          out.joinpath('R89_DECISION.json').write_text(json.dumps(decision,indent=2)+'\n')
+          print(json.dumps(decision,indent=2))
+          PY
+
+      - name: Build focused report
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import json
+
+          p=Path('/tmp/r89/evidence')
+          dec=json.loads((p/'R89_DECISION.json').read_text())
+          ufe=json.loads((p/'R89_UFE_TO_HID_FEATURE_PATHS.json').read_text())
+          hid=json.loads((p/'R89_HID_WRAPPER_TO_FEATURE_PATHS.json').read_text())
+          ctx=json.loads((p/'R89_FOCUSED_IL_CONTEXTS.json').read_text())
+          lits=json.loads((p/'R89_BOOT_FLASH_LITERAL_HITS.json').read_text())
+
+          lines=[
+              '# R89 official GoloPine Windows managed HID-feature callgraph',
+              '',
+              'OFFLINE/STATIC ONLY. No vendor execution, no USB/board access, no flash.',
+              '',
+              '## Decision',
+              '```json',json.dumps(dec,indent=2),'```','',
+              '## UFE/runtime -> HID feature paths',
+          ]
+          for path in ufe[:120]:
+              lines.append('- '+' -> '.join(f"{x['name']}@L{x['line']}" for x in path))
+
+          lines += ['','## HID wrapper -> HID feature paths']
+          for path in hid[:120]:
+              lines.append('- '+' -> '.join(f"{x['name']}@L{x['line']}" for x in path))
+
+          lines += ['','## Boot/flash ldstr literals']
+          if not lits:
+              lines.append('- none')
+          else:
+              for x in lits[:200]:
+                  lines.append(f"- {x['method_name']} terms={x['terms']} :: `{x['literal']}`")
+
+          lines += ['','## Focused IL contexts']
+          for x in ctx[:220]:
+              lines.append(f"### {x['name']} (IL line {x['start_line']})")
+              lines.append('```')
+              lines.extend(x['matching_lines'])
+              lines.append('```')
+
+          lines += [
+              '',
+              '## Gate',
+              '- R88C proved HID feature P/Invokes exist but found no boot/recovery control words.',
+              '- R89 determines whether those feature APIs belong to normal UFE runtime communication or a separate hidden branch.',
+              '- Absence of boot/recovery literals is not by itself protocol proof; callgraph evidence is evaluated together.',
+              '- No repeated AA55, no R79 autorun, no live board test.',
+              '- FLASH_ALLOWED=NO.',
+          ]
+          p.joinpath('R89_REPORT.md').write_text('\n'.join(lines)+'\n')
+          PY
+          sed -n '1,700p' /tmp/r89/evidence/R89_REPORT.md
+
+      - name: Package evidence
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp /tmp/R89_SAFETY.txt /tmp/r89/evidence/ || true
+          (cd /tmp/r89/evidence && zip -9 -r /tmp/R89_BP1048P4_OFFICIAL_WINDOWS_MANAGED_HID_FEATURE_CALLGRAPH_EVIDENCE.zip .)
+          sha256sum /tmp/R89_BP1048P4_OFFICIAL_WINDOWS_MANAGED_HID_FEATURE_CALLGRAPH_EVIDENCE.zip \
+            > /tmp/R89_BP1048P4_OFFICIAL_WINDOWS_MANAGED_HID_FEATURE_CALLGRAPH_EVIDENCE.zip.sha256
+
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: R89-BP1048P4-OFFICIAL-WINDOWS-MANAGED-HID-FEATURE-CALLGRAPH-EVIDENCE
+          path: |
+            /tmp/R89_BP1048P4_OFFICIAL_WINDOWS_MANAGED_HID_FEATURE_CALLGRAPH_EVIDENCE.zip
+            /tmp/R89_BP1048P4_OFFICIAL_WINDOWS_MANAGED_HID_FEATURE_CALLGRAPH_EVIDENCE.zip.sha256
+          if-no-files-found: error
