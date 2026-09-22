@@ -1,0 +1,354 @@
+name: R83 BP1048P4 MVAssistant HID xref static reverse
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: r83-bp1048p4-mvassistant-hid-xref-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  MVASSISTANT_DRIVE_FILE_ID: 15hdF2vnnUMVtIFKhZPGLPwBSEZpyqP2H
+  EXPECTED_ZIP_SHA256: 8074b3488453e268dc755fa88b2d0bc8ef14fc8c51c3de4e3a783279c195878f
+  EXPECTED_EXE_SHA256: a62a968f6e9dc06473390ec26d8e1a6ad70d88c242f05acb2463e5081ec12799
+  FLASH_ALLOWED: 'NO'
+
+jobs:
+  offline-xref:
+    name: OFFLINE xref/disassembly only - no execution/no USB/no board/no flash
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Safety gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > /tmp/R83_SAFETY.txt <<'EOF'
+          R83_STATIC_ONLY=YES
+          VENDOR_BINARY_EXECUTION=NO
+          BOARD_CONTACT=NO
+          USB_DEVICE_ACCESS=NO
+          SEND_AA55=NO
+          SEND_0X11=NO
+          SEND_CHIPERAS_CODEDATA_BOOTDAT_CONSTDAT_CNFGDAT_BTUPDAT_UPINFO_CXXX=NO
+          ERASE_PROGRAM_FLASH=NO
+          BP1048B2_TO_BP1048P4_ASSUMPTION=FORBIDDEN
+          FLASH_ALLOWED=NO
+          PURPOSE=RECOVER_HOST_SIDE_HID_XREFS_VID_PID_AND_BOOT_RECOVERY_CALL_PATHS
+          EOF
+          cat /tmp/R83_SAFETY.txt
+
+      - name: Install static analysis packages
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m venv /tmp/r83-venv
+          /tmp/r83-venv/bin/python -m pip install --disable-pip-version-check --no-cache-dir \
+            gdown pefile capstone
+          echo "/tmp/r83-venv/bin" >> "$GITHUB_PATH"
+
+      - name: Acquire and enforce R80 SHA pins
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/r83/download /tmp/r83/extracted /tmp/r83/evidence
+          /tmp/r83-venv/bin/gdown \
+            "https://drive.google.com/uc?id=${MVASSISTANT_DRIVE_FILE_ID}" \
+            -O /tmp/r83/download/MVAssistant_BP10xx_V1.8.11.zip
+          ZIP_SHA="$(sha256sum /tmp/r83/download/MVAssistant_BP10xx_V1.8.11.zip | awk '{print $1}')"
+          test "$ZIP_SHA" = "$EXPECTED_ZIP_SHA256"
+          unzip -q /tmp/r83/download/MVAssistant_BP10xx_V1.8.11.zip -d /tmp/r83/extracted
+          EXE=/tmp/r83/extracted/MVAssistant_BP10xx_V1.8.11.exe
+          test -s "$EXE"
+          EXE_SHA="$(sha256sum "$EXE" | awk '{print $1}')"
+          test "$EXE_SHA" = "$EXPECTED_EXE_SHA256"
+          printf 'R80_ZIP_SHA_MATCH=YES\nR80_EXE_SHA_MATCH=YES\nZIP_SHA256=%s\nEXE_SHA256=%s\n' \
+            "$ZIP_SHA" "$EXE_SHA" | tee /tmp/r83/evidence/R83_SHA_GATE.txt
+
+      - name: Static PE import map and xref disassembly
+        shell: bash
+        run: |
+          set -euo pipefail
+          /tmp/r83-venv/bin/python - <<'PY'
+          from pathlib import Path
+          import json, re, struct
+          import pefile
+          from capstone import Cs, CS_ARCH_X86, CS_MODE_32, CS_OP_IMM, CS_OP_MEM
+
+          exe=Path('/tmp/r83/extracted/MVAssistant_BP10xx_V1.8.11.exe')
+          out=Path('/tmp/r83/evidence')
+          pe=pefile.PE(str(exe), fast_load=False)
+          image_base=pe.OPTIONAL_HEADER.ImageBase
+
+          sections=[]
+          for s in pe.sections:
+              name=s.Name.rstrip(b'\0').decode(errors='ignore')
+              raw=s.get_data()
+              sections.append({
+                  'name':name,
+                  'rva':s.VirtualAddress,
+                  'va':image_base+s.VirtualAddress,
+                  'raw':raw,
+                  'raw_offset':s.PointerToRawData,
+                  'virtual_size':s.Misc_VirtualSize,
+              })
+
+          text_sec=next((s for s in sections if s['name']=='.text'), None)
+          if not text_sec:
+              raise SystemExit('no .text')
+          text=text_sec['raw']
+          text_va=text_sec['va']
+
+          md=Cs(CS_ARCH_X86, CS_MODE_32)
+          md.detail=True
+          insns=list(md.disasm(text, text_va))
+          by_addr={i.address:i for i in insns}
+
+          # Imports/IAT
+          imports=[]
+          interesting_imports=[]
+          for entry in getattr(pe,'DIRECTORY_ENTRY_IMPORT',[]):
+              dll=entry.dll.decode(errors='ignore')
+              for imp in entry.imports:
+                  name=imp.name.decode(errors='ignore') if imp.name else f'ordinal_{imp.ordinal}'
+                  rec={'dll':dll,'name':name,'iat_va':imp.address,'iat_rva':imp.address-image_base}
+                  imports.append(rec)
+                  if re.search(r'^(HidD_|HidP_|SetupDi|CreateFile|ReadFile|WriteFile|DeviceIoControl|CloseHandle)', name, re.I):
+                      interesting_imports.append(rec)
+          out.joinpath('R83_IMPORTS_INTERESTING.json').write_text(json.dumps(interesting_imports,indent=2))
+
+          # String extraction with exact VA
+          string_terms=[
+              'Find My HID Device',
+              'Otp usb connected',
+              'Flash usb connected',
+              'RD: PID VID Err',
+              'HidSendCommand',
+              'HidRead',
+              'FlashId:',
+              'actual_boot_lenth',
+              'flashboot',
+              'Load .MVA File OK',
+              'MVA File',
+              'VID_',
+              'PID_',
+              'PC升级下载',
+              'upgrade',
+              'recovery',
+              'bootloader',
+          ]
+
+          def extract_ascii(sec):
+              b=sec['raw']
+              for m in re.finditer(rb'[\x20-\x7e]{4,}', b):
+                  yield sec['va']+m.start(), m.group().decode('latin1','ignore'), 'ascii'
+
+          def extract_utf16(sec):
+              b=sec['raw']
+              for m in re.finditer(rb'(?:[\x20-\x7e]\x00){4,}', b):
+                  yield sec['va']+m.start(), m.group().decode('utf-16le','ignore'), 'utf16'
+
+          strings=[]
+          for sec in sections:
+              for va,s,enc in list(extract_ascii(sec))+list(extract_utf16(sec)):
+                  if any(t.lower() in s.lower() for t in string_terms):
+                      strings.append({'va':va,'rva':va-image_base,'section':sec['name'],'enc':enc,'text':s[:1000]})
+          out.joinpath('R83_TARGET_STRINGS.json').write_text(json.dumps(strings,indent=2,ensure_ascii=False))
+
+          # Helpers
+          def operand_refs(i, target):
+              for op in i.operands:
+                  if op.type==CS_OP_IMM and (op.imm & 0xffffffff)==(target & 0xffffffff):
+                      return True
+                  if op.type==CS_OP_MEM:
+                      if op.mem.disp and (op.mem.disp & 0xffffffff)==(target & 0xffffffff):
+                          return True
+              return False
+
+          def neighborhood(index, before=25, after=35):
+              a=max(0,index-before); b=min(len(insns),index+after+1)
+              return [
+                  {'address':x.address,'rva':x.address-image_base,'mnemonic':x.mnemonic,'op_str':x.op_str}
+                  for x in insns[a:b]
+              ]
+
+          # xrefs to target strings
+          string_xrefs=[]
+          for st in strings:
+              for idx,i in enumerate(insns):
+                  if operand_refs(i, st['va']):
+                      string_xrefs.append({
+                          'string':st,
+                          'xref_address':i.address,
+                          'xref_rva':i.address-image_base,
+                          'instruction':f'{i.mnemonic} {i.op_str}',
+                          'neighborhood':neighborhood(idx)
+                      })
+          out.joinpath('R83_STRING_XREFS.json').write_text(json.dumps(string_xrefs,indent=2,ensure_ascii=False))
+
+          # xrefs/calls to interesting IAT imports
+          import_xrefs=[]
+          for imp in interesting_imports:
+              target=imp['iat_va']
+              for idx,i in enumerate(insns):
+                  hit=False
+                  for op in i.operands:
+                      if op.type==CS_OP_MEM and op.mem.disp and (op.mem.disp & 0xffffffff)==(target & 0xffffffff):
+                          hit=True
+                      elif op.type==CS_OP_IMM and (op.imm & 0xffffffff)==(target & 0xffffffff):
+                          hit=True
+                  if hit:
+                      import_xrefs.append({
+                          'import':imp,
+                          'xref_address':i.address,
+                          'xref_rva':i.address-image_base,
+                          'instruction':f'{i.mnemonic} {i.op_str}',
+                          'neighborhood':neighborhood(idx)
+                      })
+          out.joinpath('R83_IMPORT_XREFS.json').write_text(json.dumps(import_xrefs,indent=2))
+
+          # Immediate constants that may be VID/PID or command/status markers.
+          wanted_consts={
+              'VID_6324':0x6324,
+              'PID_1719':0x1719,
+              'PID_2244':0x2244,
+              'AA':0xAA,
+              '55':0x55,
+              'AA55':0xAA55,
+              '55AA':0x55AA,
+          }
+          const_hits=[]
+          for idx,i in enumerate(insns):
+              vals=[]
+              for op in i.operands:
+                  if op.type==CS_OP_IMM:
+                      vals.append(op.imm & 0xffffffff)
+                  elif op.type==CS_OP_MEM and op.mem.disp:
+                      vals.append(op.mem.disp & 0xffffffff)
+              for name,val in wanted_consts.items():
+                  if val in vals:
+                      const_hits.append({
+                          'name':name,'value':val,
+                          'address':i.address,'rva':i.address-image_base,
+                          'instruction':f'{i.mnemonic} {i.op_str}',
+                          'neighborhood':neighborhood(idx,15,25)
+                      })
+          out.joinpath('R83_CONSTANT_XREFS.json').write_text(json.dumps(const_hits,indent=2))
+
+          # Static regex scan for textual VID/PID pairs in the full image.
+          data=exe.read_bytes()
+          ascii_all=[m.group().decode('latin1','ignore') for m in re.finditer(rb'[\x20-\x7e]{4,}',data)]
+          vidpid=[]
+          for s in ascii_all:
+              if re.search(r'VID_[0-9A-Fa-f]+',s) or re.search(r'PID_[0-9A-Fa-f]+',s):
+                  vidpid.append(s[:1000])
+          out.joinpath('R83_TEXTUAL_VID_PID.txt').write_text('\n'.join(vidpid)+'\n')
+
+          # Conservative summary: evidence, not P4 compatibility.
+          summary={
+              'EXE_SHA256_PIN_MATCH':True,
+              'HID_IMPORT_COUNT':sum(1 for x in interesting_imports if x['dll'].lower()=='hid.dll'),
+              'SETUPDI_IMPORT_COUNT':sum(1 for x in interesting_imports if x['name'].lower().startswith('setupdi')),
+              'STRING_XREF_COUNT':len(string_xrefs),
+              'IMPORT_XREF_COUNT':len(import_xrefs),
+              'VID6324_IMMEDIATE_HITS':sum(1 for x in const_hits if x['name']=='VID_6324'),
+              'PID1719_IMMEDIATE_HITS':sum(1 for x in const_hits if x['name']=='PID_1719'),
+              'PID2244_IMMEDIATE_HITS':sum(1 for x in const_hits if x['name']=='PID_2244'),
+              'MVASSISTANT_HID_PATH_STATIC_EVIDENCE':bool(interesting_imports and string_xrefs),
+              'BP1048P4_PRODUCTION_COMPATIBILITY_PROVEN':False,
+              'EXACT_PRODUCTION_BOOT_ENTRY_PROVEN':False,
+              'RECOVERY_USB_IDENTITY_PROVEN_FOR_P4':False,
+              'READ_ONLY_IDENTIFY_STATUS_PROVEN_FOR_P4':False,
+              'LIVE_BOARD_TEST_ALLOWED_FROM_R83':False,
+              'FLASH_ALLOWED':False,
+          }
+          out.joinpath('R83_DECISION.json').write_text(json.dumps(summary,indent=2)+'\n')
+          print(json.dumps(summary,indent=2))
+          PY
+
+      - name: Build focused human readable report
+        shell: bash
+        run: |
+          set -euo pipefail
+          /tmp/r83-venv/bin/python - <<'PY'
+          from pathlib import Path
+          import json
+          p=Path('/tmp/r83/evidence')
+          dec=json.loads((p/'R83_DECISION.json').read_text())
+          sx=json.loads((p/'R83_STRING_XREFS.json').read_text())
+          ix=json.loads((p/'R83_IMPORT_XREFS.json').read_text())
+          cx=json.loads((p/'R83_CONSTANT_XREFS.json').read_text())
+
+          focus_strings=('Find My HID Device','Otp usb connected','Flash usb connected','RD: PID VID Err',
+                         'HidSendCommand','HidRead','FlashId:','actual_boot_lenth','flashboot','MVA')
+          lines=[
+              '# R83 MVAssistant HID xref static reverse',
+              '',
+              'OFFLINE/STATIC ONLY. Vendor EXE was not executed. No USB/board access. FLASH_ALLOWED=NO.',
+              '',
+              '## Decision',
+              '```json',json.dumps(dec,indent=2),'```','',
+              '## Focus string xrefs',
+          ]
+          n=0
+          for x in sx:
+              txt=x['string']['text']
+              if any(k.lower() in txt.lower() for k in focus_strings):
+                  lines += [
+                      f"### {txt[:160]}",
+                      f"xref RVA=0x{x['xref_rva']:08X} `{x['instruction']}`",
+                      '```',
+                  ]
+                  for z in x['neighborhood']:
+                      lines.append(f"0x{z['rva']:08X}: {z['mnemonic']} {z['op_str']}")
+                  lines += ['```','']
+                  n+=1
+                  if n>=80: break
+
+          lines += ['## HID/SetupAPI/file-I/O import xrefs']
+          for x in ix[:120]:
+              imp=x['import']
+              lines.append(f"- RVA 0x{x['xref_rva']:08X} -> {imp['dll']}!{imp['name']} :: `{x['instruction']}`")
+
+          lines += ['','## Candidate numeric constants']
+          for x in cx[:200]:
+              lines.append(f"- {x['name']}=0x{x['value']:X} at RVA 0x{x['rva']:08X} :: `{x['instruction']}`")
+
+          lines += [
+              '',
+              '## Gate',
+              '- This proves only host-side static structure of this BP10xx MVAssistant candidate.',
+              '- Do not infer BP1048P4 production compatibility from family-common strings/imports.',
+              '- No live command may be derived or sent until P4/production-specific cross-check is obtained.',
+              '- FLASH_ALLOWED=NO.',
+          ]
+          (p/'R83_REPORT.md').write_text('\n'.join(lines)+'\n')
+          PY
+          sed -n '1,420p' /tmp/r83/evidence/R83_REPORT.md
+
+      - name: Package evidence
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp /tmp/R83_SAFETY.txt /tmp/r83/evidence/ || true
+          (cd /tmp/r83/evidence && zip -9 -r /tmp/R83_BP1048P4_MVASSISTANT_HID_XREF_STATIC_EVIDENCE.zip .)
+          sha256sum /tmp/R83_BP1048P4_MVASSISTANT_HID_XREF_STATIC_EVIDENCE.zip \
+            > /tmp/R83_BP1048P4_MVASSISTANT_HID_XREF_STATIC_EVIDENCE.zip.sha256
+
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: R83-BP1048P4-MVASSISTANT-HID-XREF-STATIC-EVIDENCE
+          path: |
+            /tmp/R83_BP1048P4_MVASSISTANT_HID_XREF_STATIC_EVIDENCE.zip
+            /tmp/R83_BP1048P4_MVASSISTANT_HID_XREF_STATIC_EVIDENCE.zip.sha256
+          if-no-files-found: error
