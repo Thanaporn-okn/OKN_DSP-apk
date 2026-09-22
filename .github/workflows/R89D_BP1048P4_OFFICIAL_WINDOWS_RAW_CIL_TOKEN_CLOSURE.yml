@@ -1,0 +1,503 @@
+name: R89D BP1048P4 official GoloPine raw CIL token reference closure
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: r89d-bp1048p4-golopine-raw-cil-token-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  GOLOPINE_ZIP_URL: https://golodsp.com/wp-content/uploads/2026/05/golopine_audio_turning_release_2026-04-08.exe_.zip
+  EXPECTED_ZIP_SHA256: f14b0c4baad70a8b0d5dc3b2783819cc2ef6e1a9c6ec2adcf17f1557059edd2a
+  EXPECTED_EXE_SHA256: 3ca54171c53f7badd963ffe6851b8b3e2faf8aee8ba2afcb7040990e22ae09b2
+  FLASH_ALLOWED: 'NO'
+
+jobs:
+  raw-token-closure:
+    name: OFFLINE raw CIL token reference closure - no execution/no USB/no board/no flash
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Safety gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > /tmp/R89D_SAFETY.txt <<'EOF'
+          R89D_STATIC_ONLY=YES
+          VENDOR_BINARY_EXECUTION=NO
+          BOARD_CONTACT=NO
+          USB_DEVICE_ACCESS=NO
+          SEND_AA55=NO
+          SEND_0X11=NO
+          SEND_CHIPERAS_CODEDATA_BOOTDAT_CONSTDAT_CNFGDAT_BTUPDAT_UPINFO_CXXX=NO
+          R79_PHYSICAL_REPLUG_AUTORUN=NO
+          ERASE_PROGRAM_FLASH=NO
+          FLASH_ALLOWED=NO
+          PURPOSE=RAW_CIL_TOKEN_REFERENCE_CENSUS_FOR_IMPLMAP_HID_METHODDEFS
+          EOF
+          cat /tmp/R89D_SAFETY.txt
+
+      - name: Install static parsers
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m venv /tmp/r89d-venv
+          /tmp/r89d-venv/bin/python -m pip install --disable-pip-version-check --no-cache-dir \
+            dnfile pefile
+          echo "/tmp/r89d-venv/bin" >> "$GITHUB_PATH"
+
+      - name: Acquire exact official binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/r89d/download /tmp/r89d/unpacked /tmp/r89d/evidence
+
+          curl --fail --location --retry 4 --connect-timeout 20 \
+            "$GOLOPINE_ZIP_URL" -o /tmp/r89d/download/golopine.zip
+
+          ZIP_SHA="$(sha256sum /tmp/r89d/download/golopine.zip | awk '{print $1}')"
+          test "$ZIP_SHA" = "$EXPECTED_ZIP_SHA256"
+          unzip -q /tmp/r89d/download/golopine.zip -d /tmp/r89d/unpacked
+
+          /tmp/r89d-venv/bin/python - <<'PY'
+          from pathlib import Path
+          import hashlib, json
+          root=Path('/tmp/r89d/unpacked')
+          candidates=[]
+          for p in root.rglob('*.exe'):
+              b=p.read_bytes()
+              candidates.append({
+                  'path':str(p.relative_to(root)),
+                  'size':len(b),
+                  'sha256':hashlib.sha256(b).hexdigest(),
+                  'mz':b[:2]==b'MZ',
+                  'sidecar':'__MACOSX' in p.parts or p.name.startswith('._'),
+              })
+          real=[x for x in candidates if x['mz'] and not x['sidecar'] and x['size']>100000]
+          if len(real)!=1:
+              raise SystemExit(f'Expected one real PE: {real}')
+          chosen=real[0]
+          src=root/chosen['path']
+          Path('/tmp/r89d/golopine.exe').write_bytes(src.read_bytes())
+          Path('/tmp/r89d/evidence/R89D_EXE_SELECTION.json').write_text(
+              json.dumps({'candidates':candidates,'selected':chosen},indent=2)+'\n'
+          )
+          print(json.dumps({'selected':chosen},indent=2))
+          PY
+
+          EXE_SHA="$(sha256sum /tmp/r89d/golopine.exe | awk '{print $1}')"
+          test "$EXE_SHA" = "$EXPECTED_EXE_SHA256"
+          printf 'ZIP_SHA_MATCH=YES\nEXE_SHA_MATCH=YES\nZIP_SHA256=%s\nEXE_SHA256=%s\n' \
+            "$ZIP_SHA" "$EXE_SHA" | tee /tmp/r89d/evidence/R89D_SHA_GATE.txt
+
+      - name: Raw CIL token reference census
+        shell: bash
+        run: |
+          set -euo pipefail
+          /tmp/r89d-venv/bin/python - <<'PY'
+          from pathlib import Path
+          import collections, json, struct
+
+          import dnfile
+          import pefile
+
+          exe=Path('/tmp/r89d/golopine.exe')
+          out=Path('/tmp/r89d/evidence')
+          raw=exe.read_bytes()
+
+          dn=dnfile.dnPE(str(exe))
+          pe=pefile.PE(str(exe), fast_load=False)
+          md=dn.net.mdtables
+          method_rows=md.MethodDef.rows
+          typedef_rows=md.TypeDef.rows
+
+          # Type owner mapping.
+          owner={}
+          starts=[]
+          for tr in typedef_rows:
+              first=None
+              ml=getattr(tr,'MethodList',None)
+              try:
+                  if isinstance(ml,list) and ml:
+                      first=getattr(ml[0],'row_index',None)
+                  else:
+                      first=getattr(ml,'row_index',None)
+              except Exception:
+                  pass
+              if first:
+                  starts.append((first,tr))
+          starts.sort(key=lambda x:x[0])
+          for i,(first,tr) in enumerate(starts):
+              end=(starts[i+1][0]-1) if i+1<len(starts) else len(method_rows)
+              typ=(str(getattr(tr,'TypeNamespace',''))+'.'+str(getattr(tr,'TypeName',''))).strip('.')
+              for rid in range(first,end+1):
+                  owner[rid]=typ
+
+          methods={}
+          for rid,row in enumerate(method_rows,1):
+              name=str(getattr(row,'Name',''))
+              methods[rid]={
+                  'rid':rid,
+                  'token':0x06000000|rid,
+                  'name':name,
+                  'owner':owner.get(rid,''),
+                  'full_name':(owner.get(rid,'')+'::'+name).strip(':'),
+                  'rva':int(getattr(row,'Rva',0) or 0),
+              }
+
+          # ImplMap -> target MethodDef RIDs.
+          target_native={
+              'HidD_GetHidGuid','SetupDiEnumDeviceInterfaces','SetupDiGetDeviceInterfaceDetail',
+              'HidD_GetAttributes','HidD_SetOutputReport','HidD_SetFeature','HidD_GetInputReport',
+              'ReadFile','WriteFile'
+          }
+          feature_native={'HidD_SetOutputReport','HidD_SetFeature','HidD_GetInputReport'}
+
+          native_to_rid={}
+          impl=getattr(md,'ImplMap',None)
+          if impl:
+              for row in impl.rows:
+                  name=str(getattr(row,'ImportName',''))
+                  if name not in target_native:
+                      continue
+                  fwd=getattr(row,'MemberForwarded',None)
+                  frow=getattr(fwd,'row',None)
+                  if frow is None:
+                      continue
+                  rid=getattr(frow,'row_index',None)
+                  if not rid:
+                      for i,x in enumerate(method_rows,1):
+                          if x is frow:
+                              rid=i
+                              break
+                  if rid:
+                      native_to_rid[name]=rid
+
+          target_rids=set(native_to_rid.values())
+          feature_rids={rid for name,rid in native_to_rid.items() if name in feature_native}
+          target_tokens={0x06000000|rid: name for name,rid in native_to_rid.items()}
+
+          # Parse raw method body boundaries ourselves.
+          body_ranges=[]
+          invalid_headers=[]
+          for rid,m in methods.items():
+              rva=m['rva']
+              if not rva:
+                  continue
+              try:
+                  off=pe.get_offset_from_rva(rva)
+                  b0=raw[off]
+                  kind=b0 & 0x3
+                  if kind==0x2:  # tiny
+                      header_size=1
+                      code_size=b0 >> 2
+                  elif kind==0x3:  # fat
+                      flags_size=struct.unpack_from('<H',raw,off)[0]
+                      header_dwords=(flags_size >> 12) & 0xF
+                      header_size=header_dwords*4
+                      code_size=struct.unpack_from('<I',raw,off+4)[0]
+                      if header_size < 12:
+                          raise ValueError(f'fat header too small: {header_size}')
+                  else:
+                      raise ValueError(f'unknown method header kind {kind}')
+
+                  code_off=off+header_size
+                  code_end=code_off+code_size
+                  if code_end > len(raw):
+                      raise ValueError('code body exceeds file')
+                  body_ranges.append({
+                      'rid':rid,
+                      'token':m['token'],
+                      'full_name':m['full_name'],
+                      'rva':rva,
+                      'file_offset':off,
+                      'header_size':header_size,
+                      'code_offset':code_off,
+                      'code_size':code_size,
+                      'code_end':code_end,
+                  })
+              except Exception as e:
+                  invalid_headers.append({
+                      'rid':rid,'method':m['full_name'],'rva':rva,'error':type(e).__name__+': '+str(e)
+                  })
+
+          # Exact CIL opcode patterns that carry metadata tokens.
+          one_byte={
+              0x28:'call',
+              0x6F:'callvirt',
+              0x73:'newobj',
+              0xD0:'ldtoken',
+              0x74:'castclass',  # token-bearing control check, not a call
+              0x75:'isinst',     # token-bearing control check
+              0x7B:'ldfld',
+              0x7C:'ldflda',
+              0x7D:'stfld',
+              0x7E:'ldsfld',
+              0x7F:'ldsflda',
+              0x80:'stsfld',
+          }
+          two_byte={
+              (0xFE,0x06):'ldftn',
+              (0xFE,0x07):'ldvirtftn',
+              (0xFE,0x16):'constrained',
+          }
+
+          hits=[]
+          all_methoddef_calllike_refs=collections.Counter()
+          all_methoddef_ref_examples=collections.defaultdict(list)
+
+          for body in body_ranges:
+              code=raw[body['code_offset']:body['code_end']]
+              n=len(code)
+
+              # Scan one-byte token opcodes.
+              for i in range(0,max(0,n-4)):
+                  op=code[i]
+                  opname=one_byte.get(op)
+                  if opname:
+                      tok=struct.unpack_from('<I',code,i+1)[0]
+                      if (tok >> 24)==0x06:
+                          all_methoddef_calllike_refs[tok]+=1
+                          if len(all_methoddef_ref_examples[tok])<20:
+                              all_methoddef_ref_examples[tok].append({
+                                  'caller_rid':body['rid'],
+                                  'caller':body['full_name'],
+                                  'offset_in_code':i,
+                                  'opcode':opname,
+                              })
+                      if tok in target_tokens:
+                          hits.append({
+                              'native_api':target_tokens[tok],
+                              'target_token':f'0x{tok:08X}',
+                              'target_rid':tok & 0x00FFFFFF,
+                              'caller_rid':body['rid'],
+                              'caller':body['full_name'],
+                              'caller_rva':body['rva'],
+                              'offset_in_code':i,
+                              'opcode':opname,
+                          })
+
+              # Scan two-byte token opcodes.
+              for i in range(0,max(0,n-5)):
+                  key=(code[i],code[i+1])
+                  opname=two_byte.get(key)
+                  if not opname:
+                      continue
+                  tok=struct.unpack_from('<I',code,i+2)[0]
+                  if (tok >> 24)==0x06:
+                      all_methoddef_calllike_refs[tok]+=1
+                      if len(all_methoddef_ref_examples[tok])<20:
+                          all_methoddef_ref_examples[tok].append({
+                              'caller_rid':body['rid'],
+                              'caller':body['full_name'],
+                              'offset_in_code':i,
+                              'opcode':opname,
+                          })
+                  if tok in target_tokens:
+                      hits.append({
+                          'native_api':target_tokens[tok],
+                          'target_token':f'0x{tok:08X}',
+                          'target_rid':tok & 0x00FFFFFF,
+                          'caller_rid':body['rid'],
+                          'caller':body['full_name'],
+                          'caller_rva':body['rva'],
+                          'offset_in_code':i,
+                          'opcode':opname,
+                      })
+
+          # Also raw-search each target token in all method code, regardless of preceding opcode.
+          raw_token_hits=[]
+          for body in body_ranges:
+              code=raw[body['code_offset']:body['code_end']]
+              for tok,native in target_tokens.items():
+                  needle=struct.pack('<I',tok)
+                  start=0
+                  while True:
+                      pos=code.find(needle,start)
+                      if pos<0:
+                          break
+                      prev1=code[pos-1] if pos>=1 else None
+                      prev2=tuple(code[pos-2:pos]) if pos>=2 else None
+                      raw_token_hits.append({
+                          'native_api':native,
+                          'target_token':f'0x{tok:08X}',
+                          'caller_rid':body['rid'],
+                          'caller':body['full_name'],
+                          'offset_in_code':pos,
+                          'preceding_byte':None if prev1 is None else f'0x{prev1:02X}',
+                          'preceding_two_bytes':None if prev2 is None else ' '.join(f'{x:02X}' for x in prev2),
+                      })
+                      start=pos+1
+
+          # Validation: raw scanner must find many MethodDef token references overall.
+          total_methoddef_token_refs=sum(all_methoddef_calllike_refs.values())
+          referenced_methoddef_count=len(all_methoddef_calllike_refs)
+
+          # Determine whether feature P/Invoke methods are truly referenced from managed CIL.
+          feature_names={name for name,rid in native_to_rid.items() if rid in feature_rids}
+          feature_opcode_hits=[x for x in hits if x['native_api'] in feature_names]
+          feature_raw_hits=[x for x in raw_token_hits if x['native_api'] in feature_names]
+
+          # Context classification by caller names.
+          ufe_terms=['ufe','writeactuator','readactuator','devicedescription','commandbridge']
+          ufe_feature_hits=[
+              x for x in feature_opcode_hits if any(t in x['caller'].lower() for t in ufe_terms)
+          ]
+
+          out.joinpath('R89D_TARGET_NATIVE_TO_RID.json').write_text(
+              json.dumps(native_to_rid,indent=2)+'\n'
+          )
+          out.joinpath('R89D_METHOD_BODY_RANGES.json').write_text(
+              json.dumps(body_ranges,indent=2,ensure_ascii=False)+'\n'
+          )
+          out.joinpath('R89D_INVALID_METHOD_HEADERS.json').write_text(
+              json.dumps(invalid_headers,indent=2,ensure_ascii=False)+'\n'
+          )
+          out.joinpath('R89D_TARGET_OPCODE_TOKEN_HITS.json').write_text(
+              json.dumps(hits,indent=2,ensure_ascii=False)+'\n'
+          )
+          out.joinpath('R89D_TARGET_RAW_TOKEN_HITS.json').write_text(
+              json.dumps(raw_token_hits,indent=2,ensure_ascii=False)+'\n'
+          )
+          out.joinpath('R89D_METHODDEF_REFERENCE_VALIDATION.json').write_text(
+              json.dumps({
+                  'total_methoddef_token_refs':total_methoddef_token_refs,
+                  'referenced_methoddef_count':referenced_methoddef_count,
+                  'top_referenced_tokens':[
+                      {
+                          'token':f'0x{tok:08X}',
+                          'rid':tok & 0x00FFFFFF,
+                          'count':cnt,
+                          'target_method':methods.get(tok & 0x00FFFFFF,{}).get('full_name'),
+                          'examples':all_methoddef_ref_examples[tok],
+                      }
+                      for tok,cnt in all_methoddef_calllike_refs.most_common(100)
+                  ]
+              },indent=2,ensure_ascii=False)+'\n'
+          )
+
+          decision={
+              'METHODDEF_COUNT':len(method_rows),
+              'METHOD_BODY_RANGE_COUNT':len(body_ranges),
+              'INVALID_METHOD_HEADER_COUNT':len(invalid_headers),
+              'IMPLMAP_TARGET_COUNT':len(native_to_rid),
+              'RAW_SCANNER_TOTAL_METHODDEF_TOKEN_REFS':total_methoddef_token_refs,
+              'RAW_SCANNER_REFERENCED_METHODDEF_COUNT':referenced_methoddef_count,
+              'TARGET_OPCODE_TOKEN_HIT_COUNT':len(hits),
+              'TARGET_RAW_TOKEN_HIT_COUNT':len(raw_token_hits),
+              'HID_FEATURE_OPCODE_TOKEN_HIT_COUNT':len(feature_opcode_hits),
+              'HID_FEATURE_RAW_TOKEN_HIT_COUNT':len(feature_raw_hits),
+              'UFE_NAMED_CALLER_TO_HID_FEATURE_HIT_COUNT':len(ufe_feature_hits),
+              'HID_FEATURE_PINVOKE_REFERENCED_FROM_MANAGED_CIL':bool(feature_raw_hits),
+              'HID_FEATURE_REACHABLE_FROM_UFE_RUNTIME_EVIDENCE':bool(ufe_feature_hits),
+              'DISTINCT_BOOT_RECOVERY_BRANCH_FROM_HID_FEATURE_PROVEN':False,
+              'BP1048P4_PHONE_DIRECT_BOOT_ENTRY_PROVEN':False,
+              'BP1048P4_PHONE_DIRECT_RECOVERY_IDENTITY_PROVEN':False,
+              'READ_ONLY_PHONE_DIRECT_BACKUP_PROVEN':False,
+              'LIVE_BOARD_TEST_ALLOWED_FROM_R89D':False,
+              'FLASH_ALLOWED':False,
+          }
+          out.joinpath('R89D_DECISION.json').write_text(json.dumps(decision,indent=2)+'\n')
+          print(json.dumps(decision,indent=2))
+          PY
+
+      - name: Build focused report
+        shell: bash
+        run: |
+          set -euo pipefail
+          /tmp/r89d-venv/bin/python - <<'PY'
+          from pathlib import Path
+          import json
+          p=Path('/tmp/r89d/evidence')
+          dec=json.loads((p/'R89D_DECISION.json').read_text())
+          native=json.loads((p/'R89D_TARGET_NATIVE_TO_RID.json').read_text())
+          hits=json.loads((p/'R89D_TARGET_OPCODE_TOKEN_HITS.json').read_text())
+          rawhits=json.loads((p/'R89D_TARGET_RAW_TOKEN_HITS.json').read_text())
+          val=json.loads((p/'R89D_METHODDEF_REFERENCE_VALIDATION.json').read_text())
+
+          lines=[
+              '# R89D official GoloPine raw CIL token reference closure',
+              '',
+              'OFFLINE/STATIC ONLY. No vendor execution, no USB/board access, no flash.',
+              '',
+              '## Decision',
+              '```json',json.dumps(dec,indent=2),'```','',
+              '## ImplMap targets',
+          ]
+          for name,rid in native.items():
+              lines.append(f"- `{name}` -> MethodDef RID {rid} token `0x{0x06000000|rid:08X}`")
+
+          lines += ['','## Exact target token hits with IL opcodes']
+          if not hits:
+              lines.append('- none')
+          else:
+              for x in hits[:500]:
+                  lines.append(
+                      f"- `{x['native_api']}` token={x['target_token']} "
+                      f"caller=`{x['caller']}` RVA=0x{x['caller_rva']:X} "
+                      f"opcode={x['opcode']} code+0x{x['offset_in_code']:X}"
+                  )
+
+          lines += ['','## Raw target token hits inside managed code bodies']
+          if not rawhits:
+              lines.append('- none')
+          else:
+              for x in rawhits[:500]:
+                  lines.append(
+                      f"- `{x['native_api']}` {x['target_token']} in `{x['caller']}` "
+                      f"at code+0x{x['offset_in_code']:X}, prev={x['preceding_byte']} "
+                      f"prev2={x['preceding_two_bytes']}"
+                  )
+
+          lines += [
+              '',
+              '## Scanner validation',
+              f"- total MethodDef-token references found: {val['total_methoddef_token_refs']}",
+              f"- distinct referenced MethodDefs: {val['referenced_methoddef_count']}",
+          ]
+          for x in val['top_referenced_tokens'][:20]:
+              lines.append(
+                  f"- {x['token']} count={x['count']} target=`{x['target_method']}`"
+              )
+
+          lines += [
+              '',
+              '## Gate',
+              '- R89C resolved the exact P/Invoke MethodDef tokens but found no callers through the dncil graph.',
+              '- R89D independently scans raw CIL bytes for those exact tokens and validates the scanner on other MethodDef references.',
+              '- No target token reference means the imported HID Feature method is present in metadata but not statically referenced from managed CIL.',
+              '- Raw token presence is classified by opcode before any protocol conclusion.',
+              '- No repeated AA55, no R79 autorun, no live board test.',
+              '- FLASH_ALLOWED=NO.',
+          ]
+          p.joinpath('R89D_REPORT.md').write_text('\n'.join(lines)+'\n')
+          PY
+          sed -n '1,760p' /tmp/r89d/evidence/R89D_REPORT.md
+
+      - name: Package evidence
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp /tmp/R89D_SAFETY.txt /tmp/r89d/evidence/ || true
+          (cd /tmp/r89d/evidence && zip -9 -r /tmp/R89D_BP1048P4_OFFICIAL_WINDOWS_RAW_CIL_TOKEN_CLOSURE_EVIDENCE.zip .)
+          sha256sum /tmp/R89D_BP1048P4_OFFICIAL_WINDOWS_RAW_CIL_TOKEN_CLOSURE_EVIDENCE.zip \
+            > /tmp/R89D_BP1048P4_OFFICIAL_WINDOWS_RAW_CIL_TOKEN_CLOSURE_EVIDENCE.zip.sha256
+
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: R89D-BP1048P4-OFFICIAL-WINDOWS-RAW-CIL-TOKEN-CLOSURE-EVIDENCE
+          path: |
+            /tmp/R89D_BP1048P4_OFFICIAL_WINDOWS_RAW_CIL_TOKEN_CLOSURE_EVIDENCE.zip
+            /tmp/R89D_BP1048P4_OFFICIAL_WINDOWS_RAW_CIL_TOKEN_CLOSURE_EVIDENCE.zip.sha256
+          if-no-files-found: error
