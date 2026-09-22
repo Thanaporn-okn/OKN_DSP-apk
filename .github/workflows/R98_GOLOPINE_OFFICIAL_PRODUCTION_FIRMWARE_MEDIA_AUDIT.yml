@@ -1,0 +1,428 @@
+name: R98 GoloPine official production firmware media inventory
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: r98-golopine-official-firmware-media-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  SITE: https://golodsp.com
+  PRODUCT_PAGE: https://golodsp.com/7%E9%80%9A%E9%81%93%E9%9F%B3%E9%A2%91%E5%89%8D%E7%BA%A7/
+  FLASH_ALLOWED: 'NO'
+
+jobs:
+  official-media-audit:
+    name: OFFLINE official GoloPine firmware/MVA media audit - no execution/no USB/no board/no flash
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+
+    steps:
+      - name: Safety gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/r98/evidence /tmp/r98/candidates
+          cat > /tmp/r98/evidence/R98_SAFETY.txt <<'EOF'
+          R98_PUBLIC_OFFICIAL_SITE_ONLY=YES
+          BOARD_CONTACT=NO
+          USB_DEVICE_ACCESS=NO
+          PHONE_LIVE_TEST=NO
+          VENDOR_BINARY_EXECUTION=NO
+          SEND_AA55=NO
+          SEND_0X11=NO
+          SEND_CHIPERAS_CODEDATA_BOOTDAT_CONSTDAT_CNFGDAT_BTUPDAT_UPINFO_CXXX=NO
+          R79_PHYSICAL_REPLUG_AUTORUN=NO
+          ERASE_PROGRAM_FLASH=NO
+          FINAL_REQUIRED_TRANSPORT=SAMSUNG_S25_PLUS_USB_C_DIRECT_TO_DSP_USB_C
+          HARDWARE_MODIFICATION=FORBIDDEN
+          FLASH_ALLOWED=NO
+          PURPOSE=ENUMERATE_OFFICIAL_GOLOPINE_WORDPRESS_MEDIA_FOR_PRODUCTION_FIRMWARE_MVA_UPGRADE_OR_BOOTSTRAP_PACKAGES
+          EOF
+          cat /tmp/r98/evidence/R98_SAFETY.txt
+
+      - name: Install static archive tooling
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq file unzip p7zip-full binutils
+          python3 -m venv /tmp/r98-venv
+          /tmp/r98-venv/bin/python -m pip install --disable-pip-version-check --no-cache-dir requests beautifulsoup4 lxml pefile
+          echo "/tmp/r98-venv/bin" >> "$GITHUB_PATH"
+
+      - name: Inventory official WordPress media and page links
+        shell: bash
+        run: |
+          set -euo pipefail
+          /tmp/r98-venv/bin/python - <<'PY'
+          from pathlib import Path
+          import requests, json, re, time
+          from bs4 import BeautifulSoup
+          from urllib.parse import urljoin, unquote
+
+          site='https://golodsp.com'
+          product='https://golodsp.com/7%E9%80%9A%E9%81%93%E9%9F%B3%E9%A2%91%E5%89%8D%E7%BA%A7/'
+          ev=Path('/tmp/r98/evidence')
+          s=requests.Session()
+          s.headers.update({'User-Agent':'Mozilla/5.0 R98-static-audit'})
+
+          # Product-page links.
+          page=s.get(product,timeout=30)
+          page.raise_for_status()
+          ev.joinpath('R98_PRODUCT_PAGE.html').write_bytes(page.content)
+          soup=BeautifulSoup(page.text,'lxml')
+          links=[]
+          for a in soup.find_all('a'):
+              href=a.get('href')
+              if not href: continue
+              links.append({
+                  'text':' '.join(a.stripped_strings),
+                  'url':urljoin(product,href),
+              })
+          ev.joinpath('R98_PRODUCT_PAGE_LINKS.json').write_text(
+              json.dumps(links,indent=2,ensure_ascii=False)+'\n'
+          )
+
+          # Enumerate ALL media metadata, fail-soft if REST is restricted.
+          media=[]
+          errors=[]
+          first_url=site+'/wp-json/wp/v2/media'
+          try:
+              r=s.get(first_url,params={'per_page':100,'page':1},timeout=30)
+              if r.status_code==200:
+                  total_pages=int(r.headers.get('X-WP-TotalPages','1') or 1)
+                  total_items=int(r.headers.get('X-WP-Total','0') or 0)
+                  ev.joinpath('R98_MEDIA_TOTALS.json').write_text(
+                      json.dumps({'total_pages':total_pages,'total_items':total_items},indent=2)+'\n'
+                  )
+                  for pg in range(1,total_pages+1):
+                      rr=s.get(first_url,params={'per_page':100,'page':pg},timeout=30)
+                      if rr.status_code!=200:
+                          errors.append({'page':pg,'status':rr.status_code,'text':rr.text[:1000]})
+                          continue
+                      arr=rr.json()
+                      for x in arr:
+                          media.append({
+                              'id':x.get('id'),
+                              'date':x.get('date'),
+                              'slug':x.get('slug'),
+                              'title':(x.get('title') or {}).get('rendered',''),
+                              'caption':(x.get('caption') or {}).get('rendered',''),
+                              'description':(x.get('description') or {}).get('rendered',''),
+                              'mime_type':x.get('mime_type'),
+                              'media_type':x.get('media_type'),
+                              'source_url':x.get('source_url'),
+                              'link':x.get('link'),
+                          })
+                      time.sleep(0.05)
+              else:
+                  errors.append({'page':1,'status':r.status_code,'text':r.text[:1000]})
+          except Exception as e:
+              errors.append({'exception':repr(e)})
+
+          ev.joinpath('R98_MEDIA_ALL.json').write_text(
+              json.dumps(media,indent=2,ensure_ascii=False)+'\n'
+          )
+          ev.joinpath('R98_MEDIA_ERRORS.json').write_text(
+              json.dumps(errors,indent=2,ensure_ascii=False)+'\n'
+          )
+
+          # Search media metadata + visible product page for firmware-specific terms.
+          terms=[
+              'firmware','upgrade','update','boot','bootloader','flash','mva',
+              'bp1048','bp1048p4','烧录','升级','固件','程序','韧体',
+              'recovery','download tool','burner'
+          ]
+          exclude_soft=[
+              'audio_turning','audio-turning','dst ech','dstech_audiodsp_client',
+              'golopine_audio_turning','instruction','manual','video'
+          ]
+
+          candidates=[]
+          for x in media:
+              blob=' '.join(str(x.get(k) or '') for k in
+                            ('slug','title','caption','description','source_url','link'))
+              low=unquote(blob).lower()
+              hits=[t for t in terms if t.lower() in low]
+              if hits:
+                  candidates.append({**x,'hits':hits})
+
+          # Page links get an independent pass.
+          page_candidates=[]
+          for x in links:
+              low=unquote((x['text']+' '+x['url'])).lower()
+              hits=[t for t in terms if t.lower() in low]
+              if hits:
+                  page_candidates.append({**x,'hits':hits})
+
+          ev.joinpath('R98_MEDIA_FIRMWARE_CANDIDATES.json').write_text(
+              json.dumps(candidates,indent=2,ensure_ascii=False)+'\n'
+          )
+          ev.joinpath('R98_PAGE_FIRMWARE_CANDIDATES.json').write_text(
+              json.dumps(page_candidates,indent=2,ensure_ascii=False)+'\n'
+          )
+
+          print(json.dumps({
+              'media_count':len(media),
+              'media_error_count':len(errors),
+              'firmware_candidate_count':len(candidates),
+              'page_candidate_count':len(page_candidates),
+          },indent=2))
+          PY
+
+      - name: Download official candidate files only
+        shell: bash
+        run: |
+          set -euo pipefail
+          /tmp/r98-venv/bin/python - <<'PY'
+          from pathlib import Path
+          import requests,json,re,hashlib,os
+          from urllib.parse import urlparse, unquote
+
+          ev=Path('/tmp/r98/evidence')
+          out=Path('/tmp/r98/candidates')
+          cands=json.loads((ev/'R98_MEDIA_FIRMWARE_CANDIDATES.json').read_text())
+          pcands=json.loads((ev/'R98_PAGE_FIRMWARE_CANDIDATES.json').read_text())
+
+          # Strict file-extension allow list for static inspection.
+          exts={'.zip','.7z','.rar','.exe','.apk','.mva','.bin','.hex','.fw','.img','.dat'}
+          urls=[]
+          meta={}
+
+          for x in cands:
+              u=x.get('source_url')
+              if not u: continue
+              path=unquote(urlparse(u).path).lower()
+              if any(path.endswith(e) for e in exts):
+                  urls.append(u); meta[u]=x
+
+          for x in pcands:
+              u=x.get('url')
+              if not u: continue
+              path=unquote(urlparse(u).path).lower()
+              if any(path.endswith(e) for e in exts):
+                  urls.append(u); meta.setdefault(u,x)
+
+          urls=list(dict.fromkeys(urls))[:100]
+          s=requests.Session()
+          s.headers.update({'User-Agent':'Mozilla/5.0 R98-static-audit'})
+          results=[]
+
+          for i,u in enumerate(urls):
+              rec={'url':u,'metadata':meta.get(u,{})}
+              try:
+                  r=s.get(u,timeout=45,allow_redirects=True)
+                  rec['status']=r.status_code
+                  rec['final_url']=r.url
+                  rec['content_type']=r.headers.get('content-type','')
+                  data=r.content
+                  rec['size']=len(data)
+                  rec['sha256']=hashlib.sha256(data).hexdigest()
+                  if r.status_code==200 and len(data)>0 and len(data)<100_000_000:
+                      suffix=Path(unquote(urlparse(r.url).path)).suffix.lower()
+                      if suffix not in exts: suffix='.bin'
+                      dst=out/f'candidate_{i:03d}{suffix}'
+                      dst.write_bytes(data)
+                      rec['local_path']=str(dst)
+              except Exception as e:
+                  rec['error']=repr(e)
+              results.append(rec)
+
+          ev.joinpath('R98_DOWNLOADED_CANDIDATES.json').write_text(
+              json.dumps(results,indent=2,ensure_ascii=False)+'\n'
+          )
+          print(json.dumps(results,indent=2,ensure_ascii=False))
+          PY
+
+      - name: Static inspect candidates and archive members
+        shell: bash
+        run: |
+          set -euo pipefail
+          : > /tmp/r98/evidence/R98_FILE_INVENTORY.tsv
+          : > /tmp/r98/evidence/R98_ARCHIVE_LISTINGS.txt
+          : > /tmp/r98/evidence/R98_INTERESTING_STRINGS.txt
+
+          for f in /tmp/r98/candidates/*; do
+            [ -f "$f" ] || continue
+            sha="$(sha256sum "$f" | awk '{print $1}')"
+            size="$(stat -c '%s' "$f")"
+            typ="$(file -b "$f" || true)"
+            printf '%s\t%s\t%s\t%s\n' "$(basename "$f")" "$size" "$sha" "$typ" \
+              >> /tmp/r98/evidence/R98_FILE_INVENTORY.tsv
+
+            7z l "$f" 2>/dev/null \
+              | sed "s#^#$(basename "$f")\t#" \
+              >> /tmp/r98/evidence/R98_ARCHIVE_LISTINGS.txt || true
+
+            strings -a -t x "$f" 2>/dev/null \
+              | grep -Ei \
+                'BP1048P4|BP1048|MVA|firmware|upgrade|bootloader|flashboot|FLASH_BOOT_EN|CFG_UPGRADE_PC_EN|chiperas|codedata|bootdat|constdat|cnfgdat|btupdat|upinfo|VID_|PID_|6324|1719|flash|recovery' \
+              | sed "s#^#$(basename "$f")\t#" \
+              >> /tmp/r98/evidence/R98_INTERESTING_STRINGS.txt || true
+          done
+
+          echo '=== inventory ==='
+          cat /tmp/r98/evidence/R98_FILE_INVENTORY.tsv
+          echo '=== archive listings ==='
+          sed -n '1,1500p' /tmp/r98/evidence/R98_ARCHIVE_LISTINGS.txt
+          echo '=== strings ==='
+          sed -n '1,1500p' /tmp/r98/evidence/R98_INTERESTING_STRINGS.txt
+
+      - name: Identify firmware-like archive payloads without executing anything
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import json,re,zipfile,hashlib,struct
+
+          cand=Path('/tmp/r98/candidates')
+          ev=Path('/tmp/r98/evidence')
+          records=[]
+
+          firmware_exts={'.mva','.bin','.fw','.img','.hex','.dat'}
+          firmware_terms=('firmware','upgrade','update','flash','boot','mva','bp1048','code')
+
+          for p in cand.iterdir() if cand.exists() else []:
+              if not p.is_file(): continue
+              rec={
+                  'file':p.name,
+                  'sha256':hashlib.sha256(p.read_bytes()).hexdigest(),
+                  'size':p.stat().st_size,
+                  'zip_members':[],
+                  'firmware_like_members':[],
+              }
+              if zipfile.is_zipfile(p):
+                  try:
+                      with zipfile.ZipFile(p) as z:
+                          for zi in z.infolist():
+                              item={'name':zi.filename,'size':zi.file_size}
+                              rec['zip_members'].append(item)
+                              low=zi.filename.lower()
+                              if Path(low).suffix in firmware_exts or any(t in low for t in firmware_terms):
+                                  rec['firmware_like_members'].append(item)
+                  except Exception as e:
+                      rec['zip_error']=repr(e)
+              records.append(rec)
+
+          ev.joinpath('R98_FIRMWARE_PAYLOAD_CLASSIFICATION.json').write_text(
+              json.dumps(records,indent=2,ensure_ascii=False)+'\n'
+          )
+          print(json.dumps(records,indent=2,ensure_ascii=False))
+          PY
+
+      - name: Build fail-closed decision
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import json
+
+          p=Path('/tmp/r98/evidence')
+          media=json.loads((p/'R98_MEDIA_ALL.json').read_text())
+          errs=json.loads((p/'R98_MEDIA_ERRORS.json').read_text())
+          cands=json.loads((p/'R98_MEDIA_FIRMWARE_CANDIDATES.json').read_text())
+          down=json.loads((p/'R98_DOWNLOADED_CANDIDATES.json').read_text())
+          payload=json.loads((p/'R98_FIRMWARE_PAYLOAD_CLASSIFICATION.json').read_text())
+
+          downloaded=[x for x in down if x.get('local_path')]
+          fw_members=[]
+          for x in payload:
+              fw_members.extend({'container':x['file'],**m} for m in x.get('firmware_like_members',[]))
+
+          # "Production firmware package proven" is intentionally not inferred merely
+          # from filename keywords. It remains false until a candidate has explicit
+          # GoloPine 7CH/BP1048P4 context plus a firmware payload and can be format-validated.
+          decision={
+              'OFFICIAL_WORDPRESS_MEDIA_ENUMERATION_WORKED':bool(media) and not errs,
+              'OFFICIAL_MEDIA_ITEM_COUNT':len(media),
+              'OFFICIAL_FIRMWARE_KEYWORD_CANDIDATE_COUNT':len(cands),
+              'OFFICIAL_CANDIDATE_FILE_DOWNLOAD_COUNT':len(downloaded),
+              'FIRMWARE_LIKE_ARCHIVE_MEMBER_COUNT':len(fw_members),
+              'OFFICIAL_GOLOPINE_7CH_BP1048P4_PRODUCTION_FIRMWARE_PACKAGE_PROVEN':False,
+              'PRODUCTION_FLASHBOOT_64K_PRESENT_PROVEN':False,
+              'PRODUCTION_FLASH_BOOT_EN_PROVEN':False,
+              'PRODUCTION_RECOVERY_USB_IDENTITY_PROVEN':False,
+              'READ_ONLY_PRODUCTION_BACKUP_PATH_PROVEN':False,
+              'PHONE_DIRECT_PRODUCTION_BOOTSTRAP_PROVEN':False,
+              'LIVE_BOARD_TEST_ALLOWED_FROM_R98':False,
+              'FLASH_ALLOWED':False,
+          }
+          p.joinpath('R98_DECISION.json').write_text(json.dumps(decision,indent=2)+'\n')
+
+          lines=[
+              '# R98 GoloPine official production firmware media inventory',
+              '',
+              'PUBLIC OFFICIAL SITE / STATIC FILE INSPECTION ONLY. No board or USB access.',
+              '',
+              '## Decision',
+              '```json',json.dumps(decision,indent=2),'```','',
+              '## Official firmware-keyword media candidates',
+          ]
+          if cands:
+              for x in cands[:300]:
+                  lines.append(
+                      f"- id={x.get('id')} title={x.get('title')!r} "
+                      f"mime={x.get('mime_type')} hits={x.get('hits')} "
+                      f"url={x.get('source_url')}"
+                  )
+          else:
+              lines.append('- none')
+
+          lines += ['','## Downloaded candidate files']
+          if downloaded:
+              for x in downloaded:
+                  lines.append(
+                      f"- {x.get('local_path')} size={x.get('size')} "
+                      f"sha256={x.get('sha256')} source={x.get('final_url')}"
+                  )
+          else:
+              lines.append('- none')
+
+          lines += ['','## Firmware-like members']
+          if fw_members:
+              for x in fw_members[:500]:
+                  lines.append(f"- {x}")
+          else:
+              lines.append('- none')
+
+          lines += [
+              '',
+              '## Interpretation gate',
+              '- R97 closed the reference USB command branch: the AA/55 latch can compile independently from the FLASH_BOOT_EN jump.',
+              '- R98 searches only the official GoloPine site for a production image/updater package that can prove the production first 64K/flashboot and build/update format.',
+              '- A filename or generic BP1048 firmware is not accepted as the GoloPine 7CH production image.',
+              '- If no official production package exists publicly, the remaining safe path is to obtain the board-specific stock firmware/updater package from the manufacturer; live board guessing is not authorized.',
+              '- No AA55 repeat, no R79, no 0x11, no flash.',
+              '- FLASH_ALLOWED=NO.',
+          ]
+          p.joinpath('R98_REPORT.md').write_text('\n'.join(lines)+'\n')
+          print(json.dumps(decision,indent=2))
+          PY
+
+          sed -n '1,1000p' /tmp/r98/evidence/R98_REPORT.md
+
+      - name: Package evidence
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          (cd /tmp/r98/evidence && zip -9 -r /tmp/R98_GOLOPINE_OFFICIAL_FIRMWARE_MEDIA_EVIDENCE.zip .)
+          sha256sum /tmp/R98_GOLOPINE_OFFICIAL_FIRMWARE_MEDIA_EVIDENCE.zip \
+            > /tmp/R98_GOLOPINE_OFFICIAL_FIRMWARE_MEDIA_EVIDENCE.zip.sha256
+
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: R98-GOLOPINE-OFFICIAL-FIRMWARE-MEDIA-EVIDENCE
+          path: |
+            /tmp/R98_GOLOPINE_OFFICIAL_FIRMWARE_MEDIA_EVIDENCE.zip
+            /tmp/R98_GOLOPINE_OFFICIAL_FIRMWARE_MEDIA_EVIDENCE.zip.sha256
+          if-no-files-found: error
