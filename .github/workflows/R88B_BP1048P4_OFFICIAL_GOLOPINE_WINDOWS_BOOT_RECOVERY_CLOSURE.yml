@@ -1,0 +1,353 @@
+name: R88B BP1048P4 official GoloPine Windows boot recovery closure robust
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: r88b-bp1048p4-golopine-windows-closure-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  GOLOPINE_ZIP_URL: https://golodsp.com/wp-content/uploads/2026/05/golopine_audio_turning_release_2026-04-08.exe_.zip
+  HISTORICAL_ZIP_SHA256: f14b0c4baad70a8b0d5dc3b2783819cc2ef6e1a9c6ec2adcf17f1557059edd2a
+  HISTORICAL_EXE_SHA256: 3ca54171c53f7badd963ffe6851b8b3e2faf8aee8ba2afcb7040990e22ae09b2
+  FLASH_ALLOWED: 'NO'
+
+jobs:
+  static-closure:
+    name: OFFLINE current official Windows client audit - no execution/no USB/no board/no flash
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Safety gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > /tmp/R88B_SAFETY.txt <<'EOF'
+          R88B_STATIC_ONLY=YES
+          SOURCE=OFFICIAL_GOLOPINE_WINDOWS_ENDPOINT
+          VENDOR_BINARY_EXECUTION=NO
+          BOARD_CONTACT=NO
+          USB_DEVICE_ACCESS=NO
+          ERASE_PROGRAM_FLASH=NO
+          SEND_AA55=NO
+          SEND_0X11=NO
+          SEND_CHIPERAS_CODEDATA_BOOTDAT_CONSTDAT_CNFGDAT_BTUPDAT_UPINFO_CXXX=NO
+          R79_PHYSICAL_REPLUG_AUTORUN=NO
+          FLASH_ALLOWED=NO
+          PURPOSE=CLOSE_HIDDEN_BOOT_RECOVERY_TRANSPORT_SURFACE_IN_CURRENT_OFFICIAL_WINDOWS_CLIENT
+          EOF
+          cat /tmp/R88B_SAFETY.txt
+
+      - name: Install static-analysis prerequisites
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m venv /tmp/r88b-venv
+          /tmp/r88b-venv/bin/python -m pip install --disable-pip-version-check --no-cache-dir pefile dnfile
+          echo "/tmp/r88b-venv/bin" >> "$GITHUB_PATH"
+
+      - name: Acquire official package and record observed hashes before any gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/r88b/download /tmp/r88b/unpacked /tmp/r88b/evidence
+
+          curl --fail --location --retry 4 --connect-timeout 20 \
+            "$GOLOPINE_ZIP_URL" -o /tmp/r88b/download/golopine_windows_current.zip
+
+          OBS_ZIP_SHA="$(sha256sum /tmp/r88b/download/golopine_windows_current.zip | awk '{print $1}')"
+          OBS_ZIP_SIZE="$(stat -c '%s' /tmp/r88b/download/golopine_windows_current.zip)"
+          ZIP_TYPE="$(file -b /tmp/r88b/download/golopine_windows_current.zip)"
+
+          echo "OBSERVED_ZIP_SHA256=$OBS_ZIP_SHA"
+          echo "OBSERVED_ZIP_SIZE=$OBS_ZIP_SIZE"
+          echo "OBSERVED_ZIP_FILETYPE=$ZIP_TYPE"
+          echo "HISTORICAL_ZIP_SHA256=$HISTORICAL_ZIP_SHA256"
+
+          unzip -t /tmp/r88b/download/golopine_windows_current.zip \
+            | tee /tmp/r88b/evidence/R88B_ZIP_TEST.txt
+          unzip -q /tmp/r88b/download/golopine_windows_current.zip -d /tmp/r88b/unpacked
+
+          EXE="$(find /tmp/r88b/unpacked -type f -iname '*.exe' -print -quit)"
+          test -n "$EXE"
+          cp "$EXE" /tmp/r88b/golopine_windows_current.exe
+
+          OBS_EXE_SHA="$(sha256sum /tmp/r88b/golopine_windows_current.exe | awk '{print $1}')"
+          OBS_EXE_SIZE="$(stat -c '%s' /tmp/r88b/golopine_windows_current.exe)"
+          EXE_TYPE="$(file -b /tmp/r88b/golopine_windows_current.exe)"
+
+          ZIP_MATCH=NO
+          EXE_MATCH=NO
+          [ "$OBS_ZIP_SHA" = "$HISTORICAL_ZIP_SHA256" ] && ZIP_MATCH=YES
+          [ "$OBS_EXE_SHA" = "$HISTORICAL_EXE_SHA256" ] && EXE_MATCH=YES
+
+          echo "OBSERVED_EXE_SHA256=$OBS_EXE_SHA"
+          echo "OBSERVED_EXE_SIZE=$OBS_EXE_SIZE"
+          echo "OBSERVED_EXE_FILETYPE=$EXE_TYPE"
+          echo "HISTORICAL_EXE_SHA256=$HISTORICAL_EXE_SHA256"
+          echo "HISTORICAL_ZIP_SHA_MATCH=$ZIP_MATCH"
+          echo "HISTORICAL_EXE_SHA_MATCH=$EXE_MATCH"
+
+          python3 - <<PY
+          import json, pathlib
+          d={
+            "observed_zip_sha256":"$OBS_ZIP_SHA",
+            "observed_zip_size":int("$OBS_ZIP_SIZE"),
+            "zip_filetype":"$ZIP_TYPE",
+            "historical_zip_sha256":"$HISTORICAL_ZIP_SHA256",
+            "historical_zip_sha_match":"$ZIP_MATCH"=="YES",
+            "observed_exe_sha256":"$OBS_EXE_SHA",
+            "observed_exe_size":int("$OBS_EXE_SIZE"),
+            "exe_filetype":"$EXE_TYPE",
+            "historical_exe_sha256":"$HISTORICAL_EXE_SHA256",
+            "historical_exe_sha_match":"$EXE_MATCH"=="YES",
+          }
+          pathlib.Path("/tmp/r88b/evidence/R88B_ACQUISITION.json").write_text(json.dumps(d,indent=2)+"\n")
+          print(json.dumps(d,indent=2))
+          PY
+
+          find /tmp/r88b/unpacked -type f -printf '%P\t%s\n' | sort \
+            > /tmp/r88b/evidence/R88B_PACKAGE_FILES.tsv
+          find /tmp/r88b/unpacked -type f -print0 | sort -z | xargs -0 sha256sum \
+            > /tmp/r88b/evidence/R88B_PACKAGE_SHA256.txt
+
+      - name: PE imports CLR metadata and exact transport API audit
+        shell: bash
+        run: |
+          set -euo pipefail
+          /tmp/r88b-venv/bin/python - <<'PY'
+          from pathlib import Path
+          import json,re
+          import pefile
+
+          exe=Path('/tmp/r88b/golopine_windows_current.exe')
+          out=Path('/tmp/r88b/evidence')
+          pe=pefile.PE(str(exe), fast_load=False)
+          base=pe.OPTIONAL_HEADER.ImageBase
+
+          imports=[]
+          for ent in getattr(pe,'DIRECTORY_ENTRY_IMPORT',[]):
+              dll=ent.dll.decode(errors='ignore')
+              for imp in ent.imports:
+                  name=imp.name.decode(errors='ignore') if imp.name else f'ordinal_{imp.ordinal}'
+                  imports.append({'dll':dll,'name':name,'iat_va':imp.address,'iat_rva':imp.address-base})
+
+          transport_re=re.compile(
+              r'HidD_|HidP_|SetupDi|WinUsb|libusb|CreateFile|ReadFile|WriteFile|DeviceIoControl',
+              re.I
+          )
+          transport_imports=[x for x in imports if transport_re.search(x['dll']+'!'+x['name'])]
+
+          clr=pe.OPTIONAL_HEADER.DATA_DIRECTORY[14]
+          meta={
+            'machine':hex(pe.FILE_HEADER.Machine),
+            'image_base':hex(base),
+            'entry_rva':hex(pe.OPTIONAL_HEADER.AddressOfEntryPoint),
+            'is_dotnet':bool(clr.VirtualAddress and clr.Size),
+            'clr_rva':clr.VirtualAddress,
+            'clr_size':clr.Size,
+            'transport_imports':transport_imports,
+          }
+          out.joinpath('R88B_PE_TRANSPORT_IMPORTS.json').write_text(json.dumps(meta,indent=2)+'\n')
+
+          managed={'parse_ok':False,'assembly_refs':[],'type_refs':[],'method_defs':[],'pinvoke_impls':[],'interesting_names':[]}
+          try:
+              import dnfile
+              dn=dnfile.dnPE(str(exe))
+              managed['parse_ok']=bool(getattr(dn,'net',None))
+              if getattr(dn,'net',None):
+                  md=getattr(dn.net,'mdtables',None)
+                  if md:
+                      for tab,field,key in [('AssemblyRef','Name','assembly_refs'),('TypeRef','TypeName','type_refs'),('MethodDef','Name','method_defs')]:
+                          t=getattr(md,tab,None)
+                          if t:
+                              for row in t.rows:
+                                  try:v=str(getattr(row,field,''))
+                                  except:continue
+                                  if v:managed[key].append(v)
+                      t=getattr(md,'ImplMap',None)
+                      if t:
+                          for row in t.rows:
+                              try:
+                                  managed['pinvoke_impls'].append(str(getattr(row,'ImportName','')))
+                              except: pass
+              needles=['usb','hid','winusb','setupdi','boot','recovery','upgrade','firmware','flash','writeactuator','readactuator','ufe']
+              vals=managed['assembly_refs']+managed['type_refs']+managed['method_defs']+managed['pinvoke_impls']
+              managed['interesting_names']=sorted({v for v in vals if any(n in v.lower() for n in needles)})
+          except Exception as e:
+              managed['error']=repr(e)
+
+          out.joinpath('R88B_DOTNET_METADATA.json').write_text(json.dumps(managed,indent=2,ensure_ascii=False)+'\n')
+          print(json.dumps({
+            'IS_DOTNET':meta['is_dotnet'],
+            'TRANSPORT_IMPORT_COUNT':len(transport_imports),
+            'DOTNET_PARSE_OK':managed['parse_ok'],
+            'DOTNET_INTERESTING_NAME_COUNT':len(managed['interesting_names']),
+          },indent=2))
+          PY
+
+      - name: Exact ASCII UTF16 and binary pattern scan
+        shell: bash
+        run: |
+          set -euo pipefail
+          /tmp/r88b-venv/bin/python - <<'PY'
+          from pathlib import Path
+          import json,re
+
+          b=Path('/tmp/r88b/golopine_windows_current.exe').read_bytes()
+          out=Path('/tmp/r88b/evidence')
+
+          terms=[
+            'HidD_SetFeature','HidD_GetFeature','HidD_SetOutputReport','HidD_GetInputReport',
+            'WinUsb_ControlTransfer','WinUSB','libusb','SetupDiEnumDeviceInterfaces',
+            'SetupDiGetDeviceInterfaceDetail','DeviceIoControl','CreateFileW','CreateFileA',
+            'AA55','55AA','6324','1719','2244','VID_','PID_','BP1048P4','BP1048','BP10',
+            'bootloader','boot loader','recovery','pc_upgrade','start_up_grate',
+            'UsbLoadAudioMode','FLASH_BOOT_EN','PCTOOL','firmware','upgrade','update','download','flash',
+            'WriteActuator','ReadActuator','DeviceDescription','UFE',
+            'chiperas','codedata','bootdat','constdat','cnfgdat','btupdat','upinfo','cxxx'
+          ]
+
+          hits=[]
+          for m in re.finditer(rb'[\x20-\x7e]{4,}',b):
+              s=m.group().decode('latin1','ignore')
+              ms=[x for x in terms if x.lower() in s.lower()]
+              if ms:hits.append({'offset':m.start(),'encoding':'ascii','terms':ms,'text':s[:1200]})
+          for m in re.finditer(rb'(?:[\x20-\x7e]\x00){4,}',b):
+              s=m.group().decode('utf-16le','ignore')
+              ms=[x for x in terms if x.lower() in s.lower()]
+              if ms:hits.append({'offset':m.start(),'encoding':'utf16le','terms':ms,'text':s[:1200]})
+
+          patterns={
+            'AA55_BYTES':bytes.fromhex('aa55'),
+            '55AA_BYTES':bytes.fromhex('55aa'),
+            'RUNTIME_VID_PID_LE_CONTIG':bytes.fromhex('24631917'),
+            'RUNTIME_VID_LE':bytes.fromhex('2463'),
+            'RUNTIME_PID_LE':bytes.fromhex('1917'),
+            'REFERENCE_PID2244_LE':bytes.fromhex('4422'),
+          }
+          census={}
+          for name,p in patterns.items():
+              offs=[]; start=0
+              while True:
+                  i=b.find(p,start)
+                  if i<0:break
+                  offs.append(i); start=i+1
+                  if len(offs)>=2000:break
+              census[name]={'count':len(offs),'offsets':offs[:200]}
+
+          out.joinpath('R88B_STRING_HITS.json').write_text(json.dumps(hits,indent=2,ensure_ascii=False)+'\n')
+          out.joinpath('R88B_BINARY_PATTERN_CENSUS.json').write_text(json.dumps(census,indent=2)+'\n')
+          print('STRING_HIT_COUNT',len(hits))
+          print(json.dumps({k:v['count'] for k,v in census.items()},indent=2))
+          PY
+
+      - name: Build fail-closed decision
+        shell: bash
+        run: |
+          set -euo pipefail
+          /tmp/r88b-venv/bin/python - <<'PY'
+          from pathlib import Path
+          import json
+
+          p=Path('/tmp/r88b/evidence')
+          acq=json.loads((p/'R88B_ACQUISITION.json').read_text())
+          pe=json.loads((p/'R88B_PE_TRANSPORT_IMPORTS.json').read_text())
+          dn=json.loads((p/'R88B_DOTNET_METADATA.json').read_text())
+          hits=json.loads((p/'R88B_STRING_HITS.json').read_text())
+          census=json.loads((p/'R88B_BINARY_PATTERN_CENSUS.json').read_text())
+
+          strings='\n'.join(x['text'].lower() for x in hits)
+          api='\n'.join((x['dll']+'!'+x['name']).lower() for x in pe['transport_imports'])
+          api+='\n'+'\n'.join(x.lower() for x in dn.get('interesting_names',[]))
+
+          exact_hid_feature=any(x in api for x in ['hidd_setfeature','hidd_getfeature','hidd_setoutputreport','hidd_getinputreport'])
+          raw_usb_api=any(x in api for x in ['setupdi','hid.dll','winusb','libusb'])
+          boot_words=any(x in strings for x in ['bootloader','boot loader','recovery','pc_upgrade','start_up_grate','flash_boot_en'])
+          forbidden=any(x in strings for x in ['chiperas','codedata','bootdat','constdat','cnfgdat','btupdat','upinfo','cxxx'])
+
+          dec={
+            'OFFICIAL_ENDPOINT_OBSERVED_ZIP_SHA256':acq['observed_zip_sha256'],
+            'OFFICIAL_ENDPOINT_OBSERVED_EXE_SHA256':acq['observed_exe_sha256'],
+            'HISTORICAL_ZIP_SHA_MATCH':acq['historical_zip_sha_match'],
+            'HISTORICAL_EXE_SHA_MATCH':acq['historical_exe_sha_match'],
+            'PE_TRANSPORT_IMPORT_COUNT':len(pe['transport_imports']),
+            'DOTNET_METADATA_PARSE_OK':dn.get('parse_ok',False),
+            'EXACT_HID_FEATURE_API_EVIDENCE':exact_hid_feature,
+            'SETUPDI_RAW_HID_WINUSB_API_EVIDENCE':raw_usb_api,
+            'BOOT_RECOVERY_CONTROL_WORD_EVIDENCE':boot_words,
+            'FORBIDDEN_FLASH_COMMAND_STRING_EVIDENCE':forbidden,
+            'AA55_BYTE_PATTERN_COUNT':census['AA55_BYTES']['count'],
+            '55AA_BYTE_PATTERN_COUNT':census['55AA_BYTES']['count'],
+            'RUNTIME_VID_PID_CONTIG_PATTERN_COUNT':census['RUNTIME_VID_PID_LE_CONTIG']['count'],
+            'HIDDEN_OFFICIAL_CLIENT_BOOT_ENTRY_PROVEN':False,
+            'HIDDEN_OFFICIAL_CLIENT_RECOVERY_TRANSPORT_PROVEN':False,
+            'BP1048P4_PHONE_DIRECT_RECOVERY_IDENTITY_PROVEN':False,
+            'READ_ONLY_PHONE_DIRECT_BACKUP_PROVEN':False,
+            'LIVE_BOARD_TEST_ALLOWED_FROM_R88B':False,
+            'FLASH_ALLOWED':False,
+          }
+          p.joinpath('R88B_DECISION.json').write_text(json.dumps(dec,indent=2)+'\n')
+
+          lines=[
+            '# R88B official GoloPine Windows client boot/recovery closure',
+            '',
+            'OFFLINE/STATIC ONLY. Official EXE was not executed. No board/USB access. FLASH_ALLOWED=NO.',
+            '',
+            '## Acquisition',
+            '```json',json.dumps(acq,indent=2),'```','',
+            '## Decision',
+            '```json',json.dumps(dec,indent=2),'```','',
+            '## High-value exact string hits',
+          ]
+          priority=['hidd_','winusb','setupdi','bootloader','recovery','pc_upgrade','start_up_grate','flash_boot_en',
+                    'bp1048p4','writeactuator','readactuator','ufe','chiperas','codedata','bootdat','constdat',
+                    'cnfgdat','btupdat','upinfo','cxxx']
+          n=0
+          for h in hits:
+              low=h['text'].lower()
+              if any(x in low for x in priority):
+                  lines.append(f"- +0x{h['offset']:X} [{h['encoding']}] terms={h['terms']} :: `{h['text'][:600]}`")
+                  n+=1
+                  if n>=500:break
+          lines += [
+            '',
+            '## Gate',
+            '- Historical ZIP mismatch by itself is not treated as payload change; EXE hash is recorded separately.',
+            '- If the EXE hash changed, this report describes the current official endpoint payload and does not equate it with the historical binary.',
+            '- String/byte hits alone never prove a boot-entry protocol.',
+            '- No live test, no repeated AA55, and no R79 autorun.',
+            '- FLASH_ALLOWED=NO.',
+          ]
+          p.joinpath('R88B_REPORT.md').write_text('\n'.join(lines)+'\n')
+          print(json.dumps(dec,indent=2))
+          PY
+          sed -n '1,650p' /tmp/r88b/evidence/R88B_REPORT.md
+
+      - name: Package evidence
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp /tmp/R88B_SAFETY.txt /tmp/r88b/evidence/ || true
+          (cd /tmp/r88b/evidence && zip -9 -r /tmp/R88B_BP1048P4_OFFICIAL_GOLOPINE_WINDOWS_BOOT_RECOVERY_CLOSURE_EVIDENCE.zip .)
+          sha256sum /tmp/R88B_BP1048P4_OFFICIAL_GOLOPINE_WINDOWS_BOOT_RECOVERY_CLOSURE_EVIDENCE.zip \
+            > /tmp/R88B_BP1048P4_OFFICIAL_GOLOPINE_WINDOWS_BOOT_RECOVERY_CLOSURE_EVIDENCE.zip.sha256
+
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: R88B-BP1048P4-OFFICIAL-GOLOPINE-WINDOWS-BOOT-RECOVERY-CLOSURE-EVIDENCE
+          path: |
+            /tmp/R88B_BP1048P4_OFFICIAL_GOLOPINE_WINDOWS_BOOT_RECOVERY_CLOSURE_EVIDENCE.zip
+            /tmp/R88B_BP1048P4_OFFICIAL_GOLOPINE_WINDOWS_BOOT_RECOVERY_CLOSURE_EVIDENCE.zip.sha256
+          if-no-files-found: error
