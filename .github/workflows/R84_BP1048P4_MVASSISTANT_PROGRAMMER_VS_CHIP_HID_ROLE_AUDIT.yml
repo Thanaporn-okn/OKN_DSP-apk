@@ -1,0 +1,324 @@
+name: R84 BP1048P4 MVAssistant programmer-vs-chip HID role audit
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: r84-bp1048p4-mvassistant-role-audit-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  MVASSISTANT_DRIVE_FILE_ID: 15hdF2vnnUMVtIFKhZPGLPwBSEZpyqP2H
+  EXPECTED_ZIP_SHA256: 8074b3488453e268dc755fa88b2d0bc8ef14fc8c51c3de4e3a783279c195878f
+  EXPECTED_EXE_SHA256: a62a968f6e9dc06473390ec26d8e1a6ad70d88c242f05acb2463e5081ec12799
+  FLASH_ALLOWED: 'NO'
+
+jobs:
+  offline-role-audit:
+    name: OFFLINE programmer-vs-chip HID role audit - no execution/no USB/no board/no flash
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Safety gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > /tmp/R84_SAFETY.txt <<'EOF'
+          R84_STATIC_ONLY=YES
+          VENDOR_BINARY_EXECUTION=NO
+          BOARD_CONTACT=NO
+          USB_DEVICE_ACCESS=NO
+          SEND_AA55=NO
+          SEND_0X11=NO
+          SEND_CHIPERAS_CODEDATA_BOOTDAT_CONSTDAT_CNFGDAT_BTUPDAT_UPINFO_CXXX=NO
+          ERASE_PROGRAM_FLASH=NO
+          BP1048B2_TO_BP1048P4_ASSUMPTION=FORBIDDEN
+          TEST_0633_5322_ON_BOARD=NO
+          TEST_0288_7966_ON_BOARD=NO
+          FLASH_ALLOWED=NO
+          PURPOSE=DISAMBIGUATE_PROGRAMMER_SIDE_HID_FROM_PHONE_DIRECT_CHIP_RECOVERY
+          EOF
+          cat /tmp/R84_SAFETY.txt
+
+      - name: Install static analysis prerequisites
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m venv /tmp/r84-venv
+          /tmp/r84-venv/bin/python -m pip install --disable-pip-version-check --no-cache-dir \
+            gdown pefile capstone
+          echo "/tmp/r84-venv/bin" >> "$GITHUB_PATH"
+
+      - name: Acquire candidate and enforce R80/R83 SHA pins
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/r84/download /tmp/r84/extracted /tmp/r84/evidence
+          /tmp/r84-venv/bin/gdown \
+            "https://drive.google.com/uc?id=${MVASSISTANT_DRIVE_FILE_ID}" \
+            -O /tmp/r84/download/MVAssistant_BP10xx_V1.8.11.zip
+          ZIP_SHA="$(sha256sum /tmp/r84/download/MVAssistant_BP10xx_V1.8.11.zip | awk '{print $1}')"
+          test "$ZIP_SHA" = "$EXPECTED_ZIP_SHA256"
+          unzip -q /tmp/r84/download/MVAssistant_BP10xx_V1.8.11.zip -d /tmp/r84/extracted
+          EXE=/tmp/r84/extracted/MVAssistant_BP10xx_V1.8.11.exe
+          EXE_SHA="$(sha256sum "$EXE" | awk '{print $1}')"
+          test "$EXE_SHA" = "$EXPECTED_EXE_SHA256"
+          printf 'PIN_MATCH=YES\nZIP_SHA256=%s\nEXE_SHA256=%s\n' "$ZIP_SHA" "$EXE_SHA" \
+            | tee /tmp/r84/evidence/R84_SHA_GATE.txt
+
+      - name: Recover HID identities dataflow and Win32 transport semantics
+        shell: bash
+        run: |
+          set -euo pipefail
+          /tmp/r84-venv/bin/python - <<'PY'
+          from pathlib import Path
+          import json, re
+          import pefile
+          from capstone import Cs, CS_ARCH_X86, CS_MODE_32, CS_OP_IMM, CS_OP_MEM
+
+          exe=Path('/tmp/r84/extracted/MVAssistant_BP10xx_V1.8.11.exe')
+          out=Path('/tmp/r84/evidence')
+          pe=pefile.PE(str(exe), fast_load=False)
+          base=pe.OPTIONAL_HEADER.ImageBase
+
+          textsec=next(s for s in pe.sections if s.Name.rstrip(b'\0')==b'.text')
+          text=textsec.get_data()
+          text_va=base+textsec.VirtualAddress
+          md=Cs(CS_ARCH_X86, CS_MODE_32); md.detail=True
+          ins=list(md.disasm(text,text_va))
+
+          # Resolve full import table and import thunks.
+          imports=[]
+          by_iat={}
+          for ent in getattr(pe,'DIRECTORY_ENTRY_IMPORT',[]):
+              dll=ent.dll.decode(errors='ignore')
+              for imp in ent.imports:
+                  name=imp.name.decode(errors='ignore') if imp.name else f'ordinal_{imp.ordinal}'
+                  rec={'dll':dll,'name':name,'iat_va':imp.address,'iat_rva':imp.address-base}
+                  imports.append(rec); by_iat[imp.address]=rec
+          out.joinpath('R84_IMPORTS.json').write_text(json.dumps(imports,indent=2))
+
+          # Collect direct import-thunk pattern: jmp dword ptr [IAT].
+          thunks={}
+          for i in ins:
+              if i.mnemonic!='jmp': continue
+              for op in i.operands:
+                  if op.type==CS_OP_MEM and op.mem.disp in by_iat:
+                      thunks[i.address]=by_iat[op.mem.disp]
+          out.joinpath('R84_IMPORT_THUNKS.json').write_text(json.dumps(
+              [{'thunk_va':k,'thunk_rva':k-base,**v} for k,v in sorted(thunks.items())], indent=2))
+
+          # Known globals from R83 HID path.
+          G={
+            'HANDLE':0xeaa238,
+            'EXPECTED_VID':0xeaa244,
+            'EXPECTED_PID':0xeaa246,
+            'FLAG_FLASH':0xeaa24c,
+            'FLAG_OTP':0xeaa248,
+            'READ_BUFFER':0xeaa2a0,
+            'SEND_BUFFER':0xeaa2e0,
+            'REPORT_LEN_WORD':0xeaa1e4,
+            'OVERLAPPED_READ':0xeaa224,
+            'WAIT_HANDLE':0xeaa220,
+          }
+
+          def refs_global(i,va):
+              for op in i.operands:
+                  if op.type==CS_OP_MEM and (op.mem.disp & 0xffffffff)==va:
+                      return True
+                  if op.type==CS_OP_IMM and (op.imm & 0xffffffff)==va:
+                      return True
+              return False
+
+          global_refs={k:[] for k in G}
+          for idx,i in enumerate(ins):
+              for k,va in G.items():
+                  if refs_global(i,va):
+                      global_refs[k].append({
+                          'rva':i.address-base,'address':i.address,
+                          'mnemonic':i.mnemonic,'op_str':i.op_str
+                      })
+          out.joinpath('R84_GLOBAL_REFS.json').write_text(json.dumps(global_refs,indent=2))
+
+          # Recover all immediate writes to expected VID/PID globals.
+          pairs=[]
+          cur={}
+          for idx,i in enumerate(ins):
+              op=i.op_str.lower()
+              m=re.search(r'word ptr \[(0x[0-9a-f]+)\], (0x[0-9a-f]+)',op)
+              if not m: continue
+              dst=int(m.group(1),16); val=int(m.group(2),16)
+              if dst==G['EXPECTED_VID']:
+                  cur={'vid':val,'vid_rva':i.address-base,'vid_instruction':f'{i.mnemonic} {i.op_str}'}
+              elif dst==G['EXPECTED_PID'] and cur:
+                  rec=dict(cur); rec.update({'pid':val,'pid_rva':i.address-base,'pid_instruction':f'{i.mnemonic} {i.op_str}'})
+                  pairs.append(rec); cur={}
+          out.joinpath('R84_EXPECTED_VID_PID_WRITES.json').write_text(json.dumps(pairs,indent=2))
+
+          # HID_ATTRIBUTES proof sites. Struct layout:
+          # ULONG Size @ +0; USHORT VendorID @ +4; USHORT ProductID @ +6; USHORT VersionNumber @ +8.
+          hidd_attr_iat=next((x['iat_va'] for x in imports if x['dll'].lower()=='hid.dll' and x['name']=='HidD_GetAttributes'),None)
+          attr_sites=[]
+          for idx,i in enumerate(ins):
+              hit=False
+              for op in i.operands:
+                  if op.type==CS_OP_MEM and op.mem.disp==hidd_attr_iat: hit=True
+              if not hit: continue
+              n=ins[max(0,idx-18):min(len(ins),idx+30)]
+              attr_sites.append({
+                  'call_rva':i.address-base,
+                  'window':[{'rva':z.address-base,'mnemonic':z.mnemonic,'op_str':z.op_str} for z in n]
+              })
+          out.joinpath('R84_HIDD_GETATTRIBUTES_SITES.json').write_text(json.dumps(attr_sites,indent=2))
+
+          # Function-focused ranges from R83.
+          ranges=[
+              ('HID_READ_VALIDATE',0x408494,0x408714),
+              ('HID_ENUMERATION',0x408a80,0x4097c8),
+              ('HID_SEND_COMMAND',0x409a08,0x409d00),
+          ]
+          focused={}
+          for name,start,end in ranges:
+              rows=[]
+              for i in ins:
+                  if start<=i.address<end:
+                      import_target=None
+                      # direct call to import thunk
+                      if i.mnemonic=='call':
+                          for op in i.operands:
+                              if op.type==CS_OP_IMM and op.imm in thunks:
+                                  import_target=thunks[op.imm]
+                      rows.append({
+                          'rva':i.address-base,'address':i.address,
+                          'mnemonic':i.mnemonic,'op_str':i.op_str,
+                          'resolved_import':import_target
+                      })
+              focused[name]=rows
+          out.joinpath('R84_FOCUSED_DISASM.json').write_text(json.dumps(focused,indent=2))
+
+          # Full string role scan.
+          data=exe.read_bytes()
+          strs=[]
+          for m in re.finditer(rb'[\x20-\x7e]{4,}',data):
+              s=m.group().decode('latin1','ignore')
+              if re.search(r'humming|programmer|burn|otp|flash usb|hid device|aice|recovery|bootloader|bp1048|bp10|mva|upgrade',s,re.I):
+                  strs.append(s[:1000])
+          out.joinpath('R84_ROLE_STRINGS.txt').write_text('\n'.join(strs)+'\n')
+
+          # Summarize exact import use in focused functions.
+          focused_imports=[]
+          for name,rows in focused.items():
+              for r in rows:
+                  if r['resolved_import']:
+                      focused_imports.append({'function':name,**r})
+          out.joinpath('R84_FOCUSED_IMPORT_CALLS.json').write_text(json.dumps(focused_imports,indent=2))
+
+          # Determine whether known Flash/OTP IDs are proven as HidD_GetAttributes match values.
+          # R83 showed comparisons of HID_ATTRIBUTES VendorID/ProductID against EXPECTED_VID/PID;
+          # here we fail-closed unless pair writes and attribute call sites are both present.
+          pair_set={(x['vid'],x['pid']) for x in pairs}
+          decision={
+              'SHA_PIN_MATCH':True,
+              'HIDD_GETATTRIBUTES_SITE_COUNT':len(attr_sites),
+              'EXPECTED_PAIR_WRITES':[
+                  {'vid':f'{v:04X}','pid':f'{p:04X}'} for v,p in sorted(pair_set)
+              ],
+              'FLASH_IDENTITY_0633_5322_PRESENT_IN_EXPECTED_PAIR_WRITES':(0x0633,0x5322) in pair_set,
+              'OTP_IDENTITY_0288_7966_PRESENT_IN_EXPECTED_PAIR_WRITES':(0x0288,0x7966) in pair_set,
+              'READFILE_USED_IN_HID_PATH':any(
+                  x.get('resolved_import') and x['resolved_import']['name']=='ReadFile'
+                  for rows in focused.values() for x in rows
+              ),
+              'WRITEFILE_USED_IN_HID_PATH':any(
+                  x.get('resolved_import') and x['resolved_import']['name']=='WriteFile'
+                  for rows in focused.values() for x in rows
+              ),
+              'PROGRAMMER_SIDE_ROLE_SUSPECTED_FROM_TOOL_STRINGS':any(
+                  re.search(r'programmer|burn|otp usb|flash usb',s,re.I) for s in strs
+              ),
+              'PHONE_DIRECT_BP1048P4_RECOVERY_IDENTITY_PROVEN':False,
+              'BP1048P4_PRODUCTION_COMPATIBILITY_PROVEN':False,
+              'EXACT_PHONE_DIRECT_BOOT_ENTRY_PROVEN':False,
+              'READ_ONLY_PHONE_DIRECT_IDENTIFY_STATUS_PROVEN':False,
+              'LIVE_BOARD_TEST_ALLOWED_FROM_R84':False,
+              'FLASH_ALLOWED':False,
+          }
+          out.joinpath('R84_DECISION.json').write_text(json.dumps(decision,indent=2)+'\n')
+          print(json.dumps(decision,indent=2))
+          PY
+
+      - name: Build focused report
+        shell: bash
+        run: |
+          set -euo pipefail
+          /tmp/r84-venv/bin/python - <<'PY'
+          from pathlib import Path
+          import json,re
+          p=Path('/tmp/r84/evidence')
+          dec=json.loads((p/'R84_DECISION.json').read_text())
+          pairs=json.loads((p/'R84_EXPECTED_VID_PID_WRITES.json').read_text())
+          attrs=json.loads((p/'R84_HIDD_GETATTRIBUTES_SITES.json').read_text())
+          calls=json.loads((p/'R84_FOCUSED_IMPORT_CALLS.json').read_text())
+          roles=(p/'R84_ROLE_STRINGS.txt').read_text(errors='ignore').splitlines()
+
+          lines=[
+              '# R84 MVAssistant programmer-vs-chip HID role audit',
+              '',
+              'OFFLINE/STATIC ONLY. Vendor EXE not executed. No board/USB access. FLASH_ALLOWED=NO.',
+              '',
+              '## Conservative decision',
+              '```json',json.dumps(dec,indent=2),'```','',
+              '## HID_ATTRIBUTES semantic gate',
+              'HID_ATTRIBUTES layout is Size(+0), VendorID(+4), ProductID(+6), VersionNumber(+8).',
+              'R83/R84 compare the +4/+6 words returned by HidD_GetAttributes against EXPECTED_VID/EXPECTED_PID globals.',
+              '',
+              '## Expected VID/PID global writes',
+          ]
+          for x in pairs:
+              lines.append(f"- VID=0x{x['vid']:04X} at RVA 0x{x['vid_rva']:08X}; PID=0x{x['pid']:04X} at RVA 0x{x['pid_rva']:08X}")
+          lines += ['','## Focused Win32 transport calls']
+          for x in calls:
+              imp=x['resolved_import']
+              lines.append(f"- {x['function']} RVA 0x{x['rva']:08X}: {imp['dll']}!{imp['name']} via `{x['mnemonic']} {x['op_str']}`")
+          lines += ['','## Role strings']
+          for s in roles[:300]:
+              lines.append(f'- `{s}`')
+          lines += [
+              '',
+              '## Gate',
+              '- 0633:5322 and 0288:7966 are host-tool HID identities in this MVAssistant candidate.',
+              '- This does NOT prove either identity belongs to BP1048P4 production recovery over the board USB-C port.',
+              '- Do not live-test these IDs or derive flash actions from them.',
+              '- Next acceptable proof must be production/P4-specific phone-direct bootstrap or recovery evidence.',
+              '- FLASH_ALLOWED=NO.',
+          ]
+          (p/'R84_REPORT.md').write_text('\n'.join(lines)+'\n')
+          PY
+          sed -n '1,420p' /tmp/r84/evidence/R84_REPORT.md
+
+      - name: Package evidence
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp /tmp/R84_SAFETY.txt /tmp/r84/evidence/ || true
+          (cd /tmp/r84/evidence && zip -9 -r /tmp/R84_BP1048P4_MVASSISTANT_PROGRAMMER_VS_CHIP_HID_ROLE_EVIDENCE.zip .)
+          sha256sum /tmp/R84_BP1048P4_MVASSISTANT_PROGRAMMER_VS_CHIP_HID_ROLE_EVIDENCE.zip \
+            > /tmp/R84_BP1048P4_MVASSISTANT_PROGRAMMER_VS_CHIP_HID_ROLE_EVIDENCE.zip.sha256
+
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: R84-BP1048P4-MVASSISTANT-PROGRAMMER-VS-CHIP-HID-ROLE-EVIDENCE
+          path: |
+            /tmp/R84_BP1048P4_MVASSISTANT_PROGRAMMER_VS_CHIP_HID_ROLE_EVIDENCE.zip
+            /tmp/R84_BP1048P4_MVASSISTANT_PROGRAMMER_VS_CHIP_HID_ROLE_EVIDENCE.zip.sha256
+          if-no-files-found: error
