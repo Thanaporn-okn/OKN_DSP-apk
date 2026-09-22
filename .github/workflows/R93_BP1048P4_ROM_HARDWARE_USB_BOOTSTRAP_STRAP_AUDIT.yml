@@ -1,0 +1,366 @@
+name: R93 BP1048P4 ROM hardware USB bootstrap and strap audit
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: r93-bp1048p4-rom-hardware-bootstrap-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  SDK_REPO: https://github.com/leadercxn/bp1048_sdk_v0.1.12.git
+  SDK_COMMIT: 8105bd864b04995d81c9f9ae77cb158259f39015
+  P4_DOWNLOAD_PAGE: https://www.wolftech-radio.com/jrwm
+  FLASH_ALLOWED: 'NO'
+
+jobs:
+  offline-bootstrap-audit:
+    name: OFFLINE ROM/hardware USB bootstrap audit - no execution/no USB/no board/no flash
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Safety gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/r93/evidence
+          cat > /tmp/r93/evidence/R93_SAFETY.txt <<'EOF'
+          R93_STATIC_ONLY=YES
+          BOARD_CONTACT=NO
+          USB_DEVICE_ACCESS=NO
+          BLUETOOTH_DEVICE_ACCESS=NO
+          VENDOR_BINARY_EXECUTION=NO
+          SEND_AA55=NO
+          SEND_0X11=NO
+          SEND_CHIPERAS_CODEDATA_BOOTDAT_CONSTDAT_CNFGDAT_BTUPDAT_UPINFO_CXXX=NO
+          R79_PHYSICAL_REPLUG_AUTORUN=NO
+          ERASE_PROGRAM_FLASH=NO
+          REFERENCE_SDK_EQUALS_PRODUCTION=NO
+          BP1048B2_EQUALS_BP1048P4=NO
+          FLASH_ALLOWED=NO
+          PURPOSE=FIND_DOCUMENTED_BP1048P4_POWERON_RESET_ROM_USB_BOOTSTRAP_OR_HARDWARE_STRAP_PATH
+          EOF
+          cat /tmp/r93/evidence/R93_SAFETY.txt
+
+      - name: Install static tooling
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq file poppler-utils binutils
+          python3 -m venv /tmp/r93-venv
+          /tmp/r93-venv/bin/python -m pip install --disable-pip-version-check --no-cache-dir \
+            beautifulsoup4 lxml
+          echo "/tmp/r93-venv/bin" >> "$GITHUB_PATH"
+
+      - name: Clone exact SDK commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --filter=blob:none --no-checkout "$SDK_REPO" /tmp/r93/sdk
+          cd /tmp/r93/sdk
+          git fetch --depth=1 origin "$SDK_COMMIT"
+          git checkout --detach "$SDK_COMMIT"
+          HEAD="$(git rev-parse HEAD)"
+          test "$HEAD" = "$SDK_COMMIT"
+          printf 'SDK_COMMIT_MATCH=YES\nSDK_HEAD=%s\n' "$HEAD" \
+            | tee /tmp/r93/evidence/R93_SDK_GATE.txt
+
+      - name: Audit SDK for reset boot strap debug and USB-loader semantics
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /tmp/r93/sdk
+
+          grep -RInaE \
+            'boot.?mode|boot.?strap|strap|boot.?pin|download.?mode|rom.?boot|rom.?loader|usb.?boot|usb.?download|usb.?upgrade|upgrade.?usb|flash.?burner|burner|SW_CLK|SW_D|serial.?debug|SDP|debug.?port|POWERKEY|EFUSE|OTP|AppResourceUsbDevice|start_up_grate|UsbLoadAudioMode|FLASH_BOOT_EN|ROM_BankBUpgradeApply|ROM_SysReset|Reset_FlagGet|POR_CODE|ADR_FLASH_BOOT_FLAGE' \
+            --exclude-dir=.git . \
+            > /tmp/r93/evidence/R93_SDK_BOOTSTRAP_HITS.txt || true
+
+          grep -RInaE \
+            'GPIO_B0|GPIO_B1|GPIO_A18|GPIO_A19|USB_DM|USB_DP|SW_CLK|SW_D|POWERKEY' \
+            --include='*.h' --include='*.c' --include='*.s' --include='*.S' \
+            --exclude-dir=.git . \
+            > /tmp/r93/evidence/R93_SDK_PIN_HITS.txt || true
+
+          grep -RInaE \
+            'jump_fun[[:space:]]*=[[:space:]]*\(fun\)0|jump_fun\(\)|ROM_BankBUpgradeApply|ROM_SysReset|NVIC_SystemReset|Reset_McuSystem|Reset_McuCore' \
+            --include='*.h' --include='*.c' --include='*.s' --include='*.S' \
+            --exclude-dir=.git . \
+            > /tmp/r93/evidence/R93_SDK_RESET_JUMP_HITS.txt || true
+
+          find . -type f \( \
+              -iname '*startup*' -o -iname '*boot*' -o -iname '*reset*' -o \
+              -iname '*rom*' -o -iname '*burn*' -o -iname '*usb*' -o \
+              -iname '*otg*' -o -iname '*debug*' \
+            \) -printf '%P\t%s\n' | sort \
+            > /tmp/r93/evidence/R93_RELEVANT_FILES.tsv || true
+
+          sed -n '1,1200p' /tmp/r93/evidence/R93_SDK_BOOTSTRAP_HITS.txt
+          echo '--- PIN HITS ---'
+          sed -n '1,700p' /tmp/r93/evidence/R93_SDK_PIN_HITS.txt
+          echo '--- RESET/JUMP ---'
+          sed -n '1,700p' /tmp/r93/evidence/R93_SDK_RESET_JUMP_HITS.txt
+
+      - name: Preserve key SDK files for exact review
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /tmp/r93/sdk
+
+          for f in \
+            BT_Audio_APP/bt_audio_app_src/device/upgrade.c \
+            BT_Audio_APP/bt_audio_app_src/inc/bt_config.h \
+            BT_Audio_APP/bt_audio_app_src/inc/flash_config.h \
+            MVsB1_Base_SDK/driver/driver/inc/rom.h \
+            MVsB1_Base_SDK/driver/driver/inc/remap.h
+          do
+            if [ -f "$f" ]; then
+              dst="/tmp/r93/evidence/R93_$(echo "$f" | tr '/ ' '__')"
+              cp "$f" "$dst"
+            fi
+          done
+
+          sha256sum /tmp/r93/evidence/R93_*__* 2>/dev/null \
+            > /tmp/r93/evidence/R93_KEY_SOURCE_SHA256.txt || true
+
+      - name: Fetch public BP1048P4 datasheet listing and discover exact PDF URL
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          set +e
+          curl --location --retry 4 --connect-timeout 20 \
+            -A 'Mozilla/5.0' \
+            -D /tmp/r93/evidence/R93_P4_PAGE_HEADERS.txt \
+            "$P4_DOWNLOAD_PAGE" \
+            -o /tmp/r93/evidence/R93_P4_DOWNLOAD_PAGE.html
+          CURL_RC=$?
+          set -e
+
+          echo "PAGE_CURL_RC=$CURL_RC" \
+            | tee /tmp/r93/evidence/R93_P4_PAGE_FETCH_STATUS.txt
+
+          if [ -f /tmp/r93/evidence/R93_P4_DOWNLOAD_PAGE.html ]; then
+            file /tmp/r93/evidence/R93_P4_DOWNLOAD_PAGE.html \
+              | tee -a /tmp/r93/evidence/R93_P4_PAGE_FETCH_STATUS.txt
+            sha256sum /tmp/r93/evidence/R93_P4_DOWNLOAD_PAGE.html \
+              | tee /tmp/r93/evidence/R93_P4_PAGE_SHA256.txt
+          fi
+
+          /tmp/r93-venv/bin/python - <<'PY'
+          from pathlib import Path
+          from urllib.parse import urljoin, unquote
+          import json,re
+
+          base='https://www.wolftech-radio.com/jrwm'
+          p=Path('/tmp/r93/evidence/R93_P4_DOWNLOAD_PAGE.html')
+          html=p.read_text(errors='ignore') if p.exists() else ''
+
+          candidates=set()
+
+          try:
+              from bs4 import BeautifulSoup
+              soup=BeautifulSoup(html,'lxml')
+              for tag in soup.find_all(True):
+                  for attr in ('href','src','data-url','data-href','download'):
+                      v=tag.get(attr)
+                      if not v:
+                          continue
+                      full=urljoin(base,v)
+                      low=unquote(full).lower()
+                      if 'bp1048p4' in low or ('.pdf' in low and '1048' in low):
+                          candidates.add(full)
+          except Exception:
+              pass
+
+          for m in re.finditer(r'''(?:"|')([^"'<>]*(?:BP1048P4|bp1048p4)[^"'<>]*)(?:"|')''',html):
+              v=m.group(1).replace('\\/','/')
+              if v.startswith('http://') or v.startswith('https://') or v.startswith('/'):
+                  candidates.add(urljoin(base,v))
+
+          for m in re.finditer(r'''https?://[^"'<>\\\s]+''',html):
+              v=m.group(0).replace('\\/','/')
+              low=unquote(v).lower()
+              if 'bp1048p4' in low or ('1048' in low and '.pdf' in low):
+                  candidates.add(v)
+
+          out={
+              'page_contains_BP1048P4': 'bp1048p4' in html.lower(),
+              'page_contains_pdf_text': '.pdf' in html.lower(),
+              'candidate_urls':sorted(candidates),
+          }
+          Path('/tmp/r93/evidence/R93_P4_PDF_DISCOVERY.json').write_text(
+              json.dumps(out,indent=2,ensure_ascii=False)+'\n'
+          )
+          print(json.dumps(out,indent=2,ensure_ascii=False))
+          PY
+
+      - name: Download any discovered exact BP1048P4 PDF candidates and extract text
+        shell: bash
+        run: |
+          set -euo pipefail
+          /tmp/r93-venv/bin/python - <<'PY'
+          from pathlib import Path
+          import json,subprocess,urllib.request,hashlib
+
+          ev=Path('/tmp/r93/evidence')
+          disc=json.loads((ev/'R93_P4_PDF_DISCOVERY.json').read_text())
+          urls=disc.get('candidate_urls',[])
+          results=[]
+
+          for idx,url in enumerate(urls[:20]):
+              rec={'url':url,'download_ok':False,'is_pdf':False}
+              try:
+                  req=urllib.request.Request(url,headers={'User-Agent':'Mozilla/5.0'})
+                  with urllib.request.urlopen(req,timeout=30) as r:
+                      data=r.read(20_000_000)
+                  rec['download_ok']=True
+                  rec['size']=len(data)
+                  rec['sha256']=hashlib.sha256(data).hexdigest()
+                  rec['is_pdf']=data.startswith(b'%PDF')
+                  if rec['is_pdf']:
+                      pdf=ev/f'R93_BP1048P4_candidate_{idx}.pdf'
+                      pdf.write_bytes(data)
+                      txt=ev/f'R93_BP1048P4_candidate_{idx}.txt'
+                      subprocess.run(
+                          ['pdftotext','-layout',str(pdf),str(txt)],
+                          check=False,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL
+                      )
+                      rec['text_file']=txt.name if txt.exists() else None
+              except Exception as e:
+                  rec['error']=repr(e)
+              results.append(rec)
+
+          ev.joinpath('R93_P4_PDF_DOWNLOAD_RESULTS.json').write_text(
+              json.dumps(results,indent=2,ensure_ascii=False)+'\n'
+          )
+          print(json.dumps(results,indent=2,ensure_ascii=False))
+          PY
+
+          : > /tmp/r93/evidence/R93_P4_DATASHEET_TERM_HITS.txt
+          for txt in /tmp/r93/evidence/R93_BP1048P4_candidate_*.txt; do
+            [ -f "$txt" ] || continue
+            grep -InaE \
+              'boot|bootloader|ROM|download|burn|burner|program|programmer|upgrade|recovery|USB|OTG|SW_CLK|SW_D|debug|SDP|strap|POWERKEY|OTP|EFUSE|reset' \
+              "$txt" \
+              | sed "s#^#$(basename "$txt"):#" \
+              >> /tmp/r93/evidence/R93_P4_DATASHEET_TERM_HITS.txt || true
+          done
+
+          sed -n '1,1200p' /tmp/r93/evidence/R93_P4_DATASHEET_TERM_HITS.txt
+
+      - name: Classify whether a documented hardware bootstrap exists
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import json,re
+
+          p=Path('/tmp/r93/evidence')
+          sdk=(p/'R93_SDK_BOOTSTRAP_HITS.txt').read_text(errors='ignore')
+          jumps=(p/'R93_SDK_RESET_JUMP_HITS.txt').read_text(errors='ignore')
+          disc=json.loads((p/'R93_P4_PDF_DISCOVERY.json').read_text())
+          dl=json.loads((p/'R93_P4_PDF_DOWNLOAD_RESULTS.json').read_text())
+          dshits=(p/'R93_P4_DATASHEET_TERM_HITS.txt').read_text(errors='ignore')
+
+          exact_p4_pdf=any(x.get('is_pdf') for x in dl)
+
+          p4_usb_terms=bool(re.search(r'USB|OTG',dshits,re.I))
+          p4_debug_terms=bool(re.search(r'SW_CLK|SW_D|debug|SDP',dshits,re.I))
+          p4_boot_terms=bool(re.search(r'boot|bootloader|ROM|burner|program',dshits,re.I))
+          p4_strap_terms=bool(re.search(r'strap|boot.?pin|download.?mode|recovery',dshits,re.I))
+
+          sdk_pc_flashboot=(
+              'AppResourceUsbDevice' in sdk and
+              'start_up_grate' in sdk and
+              'FLASH_BOOT_EN' in sdk
+          )
+          sdk_zero_jump=('jump_fun = (fun)0' in jumps or 'jump_fun()' in jumps)
+
+          decision={
+              'SDK_COMMIT_MATCH':True,
+              'PUBLIC_P4_DOWNLOAD_PAGE_FETCHED':(p/'R93_P4_DOWNLOAD_PAGE.html').exists(),
+              'PUBLIC_P4_PAGE_MENTIONS_BP1048P4':disc.get('page_contains_BP1048P4',False),
+              'EXACT_BP1048P4_PDF_DOWNLOADED':exact_p4_pdf,
+              'EXACT_P4_DATASHEET_USB_TERM_PRESENT':p4_usb_terms if exact_p4_pdf else False,
+              'EXACT_P4_DATASHEET_DEBUG_SDP_TERM_PRESENT':p4_debug_terms if exact_p4_pdf else False,
+              'EXACT_P4_DATASHEET_BOOT_PROGRAM_TERM_PRESENT':p4_boot_terms if exact_p4_pdf else False,
+              'EXACT_P4_DATASHEET_HARDWARE_STRAP_TERM_PRESENT':p4_strap_terms if exact_p4_pdf else False,
+              'SDK_FLASHBOOT_PC_ENTRY_PATH_PRESENT':sdk_pc_flashboot,
+              'SDK_FLASHBOOT_ZERO_ADDRESS_JUMP_PRESENT':sdk_zero_jump,
+              'DEDICATED_POWERON_ROM_USB_BOOTSTRAP_DOCUMENTED':False,
+              'HARDWARE_BOOT_STRAP_TO_USB_ROM_LOADER_PROVEN':False,
+              'BP1048P4_PHONE_DIRECT_FIRST_BOOTSTRAP_PROVEN':False,
+              'PRODUCTION_RECOVERY_USB_IDENTITY_PROVEN':False,
+              'READ_ONLY_PRODUCTION_BACKUP_PATH_PROVEN':False,
+              'LIVE_BOARD_TEST_ALLOWED_FROM_R93':False,
+              'FLASH_ALLOWED':False,
+          }
+          p.joinpath('R93_DECISION.json').write_text(json.dumps(decision,indent=2)+'\n')
+
+          lines=[
+              '# R93 BP1048P4 ROM/hardware USB bootstrap and strap audit',
+              '',
+              'OFFLINE/STATIC ONLY. No board/USB access and no flash.',
+              '',
+              '## Decision',
+              '```json',json.dumps(decision,indent=2),'```','',
+              '## Exact interpretation',
+              '- The required target is a documented power-on/reset route into a ROM USB loader that does not depend on the stock application firmware.',
+              '- Generic USB/OTG support, SDP debug pins, Flash Burner support, or a dual-bank bootloader are not sufficient by themselves.',
+              '- The known SDK PC-upgrade route remains application-mediated through FLASH_BOOT_EN/start_up_grate(AppResourceUsbDevice), then jumps to address zero.',
+              '- R93 never treats BP1048B2 behavior as BP1048P4 proof.',
+              '- No live board test is authorized from term presence alone.',
+              '- FLASH_ALLOWED=NO.',
+              '',
+              '## P4 datasheet discovery',
+              '```json',json.dumps(disc,indent=2,ensure_ascii=False),'```','',
+              '## P4 PDF download results',
+              '```json',json.dumps(dl,indent=2,ensure_ascii=False),'```','',
+              '## High-value SDK bootstrap hits',
+          ]
+
+          count=0
+          for line in sdk.splitlines():
+              if re.search(r'AppResourceUsbDevice|start_up_grate|FLASH_BOOT_EN|UsbLoadAudioMode|boot.?mode|boot.?strap|usb.?boot|burner|SW_CLK|SW_D|SDP|POWERKEY',line,re.I):
+                  lines.append('- '+line[:1800])
+                  count += 1
+                  if count>=700:
+                      break
+
+          lines += ['','## Exact P4 datasheet term hits']
+          if dshits.strip():
+              lines.extend('- '+x[:1800] for x in dshits.splitlines()[:700])
+          else:
+              lines.append('- none / exact PDF text not available from discovered page links')
+
+          p.joinpath('R93_REPORT.md').write_text('\n'.join(lines)+'\n')
+          print(json.dumps(decision,indent=2))
+          PY
+
+          sed -n '1,900p' /tmp/r93/evidence/R93_REPORT.md
+
+      - name: Package evidence
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          (cd /tmp/r93/evidence && zip -9 -r /tmp/R93_BP1048P4_ROM_HARDWARE_USB_BOOTSTRAP_STRAP_EVIDENCE.zip .)
+          sha256sum /tmp/R93_BP1048P4_ROM_HARDWARE_USB_BOOTSTRAP_STRAP_EVIDENCE.zip \
+            > /tmp/R93_BP1048P4_ROM_HARDWARE_USB_BOOTSTRAP_STRAP_EVIDENCE.zip.sha256
+
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: R93-BP1048P4-ROM-HARDWARE-USB-BOOTSTRAP-STRAP-EVIDENCE
+          path: |
+            /tmp/R93_BP1048P4_ROM_HARDWARE_USB_BOOTSTRAP_STRAP_EVIDENCE.zip
+            /tmp/R93_BP1048P4_ROM_HARDWARE_USB_BOOTSTRAP_STRAP_EVIDENCE.zip.sha256
+          if-no-files-found: error
