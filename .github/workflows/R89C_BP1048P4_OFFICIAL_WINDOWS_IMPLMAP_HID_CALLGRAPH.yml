@@ -1,0 +1,499 @@
+name: R89C BP1048P4 official GoloPine ImplMap HID callgraph closure
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: r89c-bp1048p4-golopine-implmap-callgraph-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  GOLOPINE_ZIP_URL: https://golodsp.com/wp-content/uploads/2026/05/golopine_audio_turning_release_2026-04-08.exe_.zip
+  EXPECTED_ZIP_SHA256: f14b0c4baad70a8b0d5dc3b2783819cc2ef6e1a9c6ec2adcf17f1557059edd2a
+  EXPECTED_EXE_SHA256: 3ca54171c53f7badd963ffe6851b8b3e2faf8aee8ba2afcb7040990e22ae09b2
+  FLASH_ALLOWED: 'NO'
+
+jobs:
+  implmap-callgraph:
+    name: OFFLINE ImplMap HID callgraph closure - no execution/no USB/no board/no flash
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Safety gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > /tmp/R89C_SAFETY.txt <<'EOF'
+          R89C_STATIC_ONLY=YES
+          VENDOR_BINARY_EXECUTION=NO
+          BOARD_CONTACT=NO
+          USB_DEVICE_ACCESS=NO
+          SEND_AA55=NO
+          SEND_0X11=NO
+          SEND_CHIPERAS_CODEDATA_BOOTDAT_CONSTDAT_CNFGDAT_BTUPDAT_UPINFO_CXXX=NO
+          R79_PHYSICAL_REPLUG_AUTORUN=NO
+          ERASE_PROGRAM_FLASH=NO
+          FLASH_ALLOWED=NO
+          PURPOSE=RESOLVE_IMPLMAP_NATIVE_HID_TO_OBFUSCATED_METHODDEF_THEN_TRACE_REAL_CALLERS_TO_UFE_OR_BOOT_RECOVERY
+          EOF
+          cat /tmp/R89C_SAFETY.txt
+
+      - name: Install static parsers
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m venv /tmp/r89c-venv
+          /tmp/r89c-venv/bin/python -m pip install --disable-pip-version-check --no-cache-dir \
+            dnfile dncil pefile
+          echo "/tmp/r89c-venv/bin" >> "$GITHUB_PATH"
+
+      - name: Acquire exact official binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/r89c/download /tmp/r89c/unpacked /tmp/r89c/evidence
+
+          curl --fail --location --retry 4 --connect-timeout 20 \
+            "$GOLOPINE_ZIP_URL" -o /tmp/r89c/download/golopine.zip
+
+          ZIP_SHA="$(sha256sum /tmp/r89c/download/golopine.zip | awk '{print $1}')"
+          echo "OBSERVED_ZIP_SHA256=$ZIP_SHA"
+          test "$ZIP_SHA" = "$EXPECTED_ZIP_SHA256"
+
+          unzip -q /tmp/r89c/download/golopine.zip -d /tmp/r89c/unpacked
+
+          /tmp/r89c-venv/bin/python - <<'PY'
+          from pathlib import Path
+          import hashlib, json
+          root=Path('/tmp/r89c/unpacked')
+          candidates=[]
+          for p in root.rglob('*.exe'):
+              b=p.read_bytes()
+              candidates.append({
+                  'path':str(p.relative_to(root)),
+                  'size':len(b),
+                  'sha256':hashlib.sha256(b).hexdigest(),
+                  'mz':b[:2]==b'MZ',
+                  'sidecar':'__MACOSX' in p.parts or p.name.startswith('._'),
+              })
+          real=[x for x in candidates if x['mz'] and not x['sidecar'] and x['size']>100000]
+          if len(real)!=1:
+              raise SystemExit(f'Expected one real PE EXE: {real}')
+          chosen=real[0]
+          src=root/chosen['path']
+          Path('/tmp/r89c/golopine.exe').write_bytes(src.read_bytes())
+          Path('/tmp/r89c/evidence/R89C_EXE_SELECTION.json').write_text(
+              json.dumps({'candidates':candidates,'selected':chosen},indent=2)+'\n'
+          )
+          print(json.dumps({'selected':chosen},indent=2))
+          PY
+
+          EXE_SHA="$(sha256sum /tmp/r89c/golopine.exe | awk '{print $1}')"
+          echo "OBSERVED_REAL_EXE_SHA256=$EXE_SHA"
+          test "$EXE_SHA" = "$EXPECTED_EXE_SHA256"
+
+          printf 'ZIP_SHA_MATCH=YES\nEXE_SHA_MATCH=YES\nZIP_SHA256=%s\nEXE_SHA256=%s\n' \
+            "$ZIP_SHA" "$EXE_SHA" | tee /tmp/r89c/evidence/R89C_SHA_GATE.txt
+
+      - name: Resolve ImplMap HID native APIs to forwarded MethodDefs and trace callers
+        shell: bash
+        run: |
+          set -euo pipefail
+          /tmp/r89c-venv/bin/python - <<'PY'
+          from pathlib import Path
+          import collections, json
+
+          import dnfile
+          from dnfile.enums import MetadataTables
+          from dncil.cil.body import CilMethodBody
+          from dncil.cil.body.reader import CilMethodBodyReaderBase
+          from dncil.clr.token import Token, StringToken
+
+          exe=Path('/tmp/r89c/golopine.exe')
+          out=Path('/tmp/r89c/evidence')
+          pe=dnfile.dnPE(str(exe))
+          md=pe.net.mdtables
+          method_rows=md.MethodDef.rows
+          typedef_rows=md.TypeDef.rows
+
+          class Reader(CilMethodBodyReaderBase):
+              def __init__(self, pe, row):
+                  self.pe=pe
+                  self.offset=self.pe.get_offset_from_rva(row.Rva)
+              def read(self,n):
+                  data=self.pe.get_data(self.pe.get_rva_from_offset(self.offset),n)
+                  self.offset += n
+                  return data
+              def tell(self): return self.offset
+              def seek(self,offset):
+                  self.offset=offset
+                  return self.offset
+
+          def row_index(table_rows, row):
+              ri=getattr(row,'row_index',None)
+              if isinstance(ri,int) and ri>0:
+                  return ri
+              for i,x in enumerate(table_rows,1):
+                  if x is row:
+                      return i
+              return None
+
+          # Method owner map.
+          owner={}
+          starts=[]
+          for tr in typedef_rows:
+              first=None
+              ml=getattr(tr,'MethodList',None)
+              try:
+                  if isinstance(ml,list) and ml:
+                      first=getattr(ml[0],'row_index',None)
+                  else:
+                      first=getattr(ml,'row_index',None)
+              except Exception:
+                  pass
+              if first:
+                  starts.append((first,tr))
+          starts.sort(key=lambda x:x[0])
+          for i,(first,tr) in enumerate(starts):
+              end=(starts[i+1][0]-1) if i+1<len(starts) else len(method_rows)
+              typ=(str(getattr(tr,'TypeNamespace',''))+'.'+str(getattr(tr,'TypeName',''))).strip('.')
+              for rid in range(first,end+1):
+                  owner[rid]=typ
+
+          methods={}
+          for rid,row in enumerate(method_rows,1):
+              name=str(getattr(row,'Name',''))
+              methods[rid]={
+                  'rid':rid,
+                  'row':row,
+                  'name':name,
+                  'owner':owner.get(rid,''),
+                  'full_name':(owner.get(rid,'')+'::'+name).strip(':'),
+                  'rva':int(getattr(row,'Rva',0) or 0),
+              }
+
+          # Resolve ImplMap rows, especially native HID/SetupDi/kernel32 APIs.
+          target_native={
+              'HidD_SetFeature','HidD_SetOutputReport','HidD_GetInputReport',
+              'HidD_GetAttributes','HidD_GetHidGuid',
+              'ReadFile','WriteFile',
+              'SetupDiEnumDeviceInterfaces','SetupDiGetDeviceInterfaceDetail'
+          }
+          feature_native={'HidD_SetFeature','HidD_SetOutputReport','HidD_GetInputReport'}
+
+          implmap_records=[]
+          native_to_method_rids=collections.defaultdict(set)
+
+          impl=getattr(md,'ImplMap',None)
+          if impl:
+              for irid,row in enumerate(impl.rows,1):
+                  import_name=str(getattr(row,'ImportName',''))
+                  import_scope=''
+                  try:
+                      scope=getattr(row,'ImportScope',None)
+                      srow=getattr(scope,'row',None)
+                      import_scope=str(getattr(srow,'Name','')) if srow is not None else str(scope)
+                  except Exception:
+                      pass
+
+                  forwarded=getattr(row,'MemberForwarded',None)
+                  frow=getattr(forwarded,'row',None)
+                  ftable=type(frow).__name__ if frow is not None else ''
+                  frid=row_index(method_rows,frow) if frow is not None else None
+
+                  rec={
+                      'implmap_rid':irid,
+                      'import_name':import_name,
+                      'import_scope':import_scope,
+                      'forwarded_row_type':ftable,
+                      'forwarded_methoddef_rid':frid,
+                      'forwarded_method':methods.get(frid,{}).get('full_name') if frid else None,
+                      'forwarded_method_rva':methods.get(frid,{}).get('rva') if frid else None,
+                      'member_forwarded_repr':repr(forwarded),
+                  }
+                  implmap_records.append(rec)
+                  if import_name in target_native and frid:
+                      native_to_method_rids[import_name].add(frid)
+
+          out.joinpath('R89C_IMPLMAP_ALL.json').write_text(
+              json.dumps(implmap_records,indent=2,ensure_ascii=False)+'\n'
+          )
+
+          target_impl=[x for x in implmap_records if x['import_name'] in target_native]
+          out.joinpath('R89C_IMPLMAP_TARGETS.json').write_text(
+              json.dumps(target_impl,indent=2,ensure_ascii=False)+'\n'
+          )
+
+          # CIL call graph.
+          call_graph=collections.defaultdict(set)
+          strings=collections.defaultdict(list)
+          parsed=0
+          failures=[]
+
+          for rid,m in methods.items():
+              if not m['rva']:
+                  continue
+              try:
+                  body=CilMethodBody(Reader(pe,m['row']))
+              except Exception as e:
+                  failures.append({'rid':rid,'method':m['full_name'],'error':type(e).__name__+': '+str(e)})
+                  continue
+              parsed += 1
+              for ins in body.instructions:
+                  op=str(ins.opcode).lower()
+                  operand=ins.operand
+                  if op in ('call','callvirt','newobj','ldftn','ldvirtftn') and isinstance(operand,Token):
+                      if operand.table==0x06 and 1 <= operand.rid <= len(method_rows):
+                          call_graph[rid].add(operand.rid)
+                  if op=='ldstr' and isinstance(operand,StringToken):
+                      try:
+                          us=pe.net.user_strings.get(operand.rid)
+                          v=getattr(us,'value',None)
+                          if isinstance(v,str):
+                              strings[rid].append(v)
+                      except Exception:
+                          pass
+
+          rev=collections.defaultdict(set)
+          for a,ts in call_graph.items():
+              for b in ts:
+                  rev[b].add(a)
+
+          feature_rids=set()
+          all_target_rids=set()
+          for n,rids in native_to_method_rids.items():
+              all_target_rids |= rids
+              if n in feature_native:
+                  feature_rids |= rids
+
+          direct_feature_callers={src for src,ts in call_graph.items() if ts & feature_rids}
+
+          # Upward caller closure.
+          upward=set(feature_rids)|set(direct_feature_callers)
+          depth={rid:0 for rid in feature_rids}
+          q=collections.deque((rid,0) for rid in feature_rids)
+          while q:
+              cur,d=q.popleft()
+              if d>=12: continue
+              for p in rev.get(cur,()):
+                  if p not in upward:
+                      upward.add(p)
+                      depth[p]=d+1
+                      q.append((p,d+1))
+
+          ufe_terms=[
+              'ufe','writeactuator','readactuator','devicedescription',
+              'appendwriteactuatorcommand','appenddevicecommand',
+              'senddevicedescriptionrequest','commandbridge'
+          ]
+          ufe_rids={
+              rid for rid,m in methods.items()
+              if any(t in m['full_name'].lower() for t in ufe_terms)
+          }
+
+          # Path from UFE seeds to feature P/Invoke MethodDefs.
+          def shortest_paths(seeds, targets, max_depth=16, max_paths=500):
+              found=[]
+              for s in sorted(seeds):
+                  dq=collections.deque([(s,[s])])
+                  best={s:0}
+                  while dq and len(found)<max_paths:
+                      cur,path=dq.popleft()
+                      if cur in targets and len(path)>1:
+                          found.append(path)
+                          continue
+                      if len(path)-1>=max_depth:
+                          continue
+                      for nxt in call_graph.get(cur,()):
+                          nd=len(path)
+                          if best.get(nxt,999)>nd:
+                              best[nxt]=nd
+                              dq.append((nxt,path+[nxt]))
+              return found
+
+          ufe_paths=shortest_paths(ufe_rids,feature_rids)
+
+          boot_terms=[
+              'bootloader','boot loader','recovery','pc_upgrade','start_up_grate',
+              'flash_boot_en','usbloadaudiomode','pctool','enter boot','enter_boot'
+          ]
+          forbidden_terms=[
+              'chiperas','codedata','bootdat','constdat','cnfgdat','btupdat','upinfo','cxxx'
+          ]
+
+          closure_text=[]
+          for rid in upward:
+              closure_text.extend(strings.get(rid,[]))
+          closure_blob='\n'.join(closure_text).lower()
+          boot_hits=sorted({x for x in boot_terms if x in closure_blob})
+          forbidden_hits=sorted({x for x in forbidden_terms if x in closure_blob})
+
+          all_lit_hits=[]
+          for rid,vals in strings.items():
+              for v in vals:
+                  low=v.lower()
+                  terms=[x for x in boot_terms+forbidden_terms if x in low]
+                  if terms:
+                      all_lit_hits.append({
+                          'rid':rid,'method':methods[rid]['full_name'],
+                          'terms':terms,'literal':v[:1200]
+                      })
+
+          def mobj(rid):
+              m=methods[rid]
+              return {
+                  'rid':rid,'token':f'0x{0x06000000|rid:08X}',
+                  'full_name':m['full_name'],'rva':m['rva'],
+              }
+
+          target_method_records=[]
+          for native in sorted(native_to_method_rids):
+              for rid in sorted(native_to_method_rids[native]):
+                  target_method_records.append({
+                      'native_api':native, **mobj(rid),
+                      'direct_callers':[mobj(x) for x in sorted(rev.get(rid,set()))],
+                  })
+          out.joinpath('R89C_NATIVE_TO_METHODDEF_CALLERS.json').write_text(
+              json.dumps(target_method_records,indent=2,ensure_ascii=False)+'\n'
+          )
+
+          out.joinpath('R89C_FEATURE_UPWARD_CLOSURE.json').write_text(
+              json.dumps([
+                  {**mobj(rid),'depth':depth.get(rid)}
+                  for rid in sorted(upward)
+              ],indent=2,ensure_ascii=False)+'\n'
+          )
+
+          out.joinpath('R89C_UFE_TO_HID_FEATURE_PATHS.json').write_text(
+              json.dumps([
+                  [mobj(rid) for rid in path] for path in ufe_paths
+              ],indent=2,ensure_ascii=False)+'\n'
+          )
+          out.joinpath('R89C_BOOT_FLASH_LITERAL_HITS.json').write_text(
+              json.dumps(all_lit_hits,indent=2,ensure_ascii=False)+'\n'
+          )
+          out.joinpath('R89C_PARSE_FAILURES.json').write_text(
+              json.dumps(failures,indent=2,ensure_ascii=False)+'\n'
+          )
+
+          decision={
+              'METHODDEF_COUNT':len(method_rows),
+              'PARSED_METHOD_BODY_COUNT':parsed,
+              'METHOD_BODY_PARSE_FAILURE_COUNT':len(failures),
+              'IMPLMAP_ROW_COUNT':len(implmap_records),
+              'TARGET_HID_SETUPDI_IMPLMAP_COUNT':len(target_impl),
+              'HID_FEATURE_NATIVE_API_TO_METHODDEF':{
+                  n:sorted(rids) for n,rids in native_to_method_rids.items() if n in feature_native
+              },
+              'HID_FEATURE_FORWARDED_METHODDEF_COUNT':len(feature_rids),
+              'HID_FEATURE_DIRECT_CALLER_COUNT':len(direct_feature_callers),
+              'HID_FEATURE_CALLER_UPWARD_CLOSURE_COUNT':len(upward),
+              'UFE_SEED_METHOD_COUNT':len(ufe_rids),
+              'UFE_TO_HID_FEATURE_PATH_COUNT':len(ufe_paths),
+              'BOOT_RECOVERY_TERMS_IN_FEATURE_CALLER_CLOSURE':boot_hits,
+              'FORBIDDEN_FLASH_TERMS_IN_FEATURE_CALLER_CLOSURE':forbidden_hits,
+              'BOOT_OR_FLASH_LDSTR_LITERAL_HIT_COUNT':len(all_lit_hits),
+              'HID_FEATURE_REACHABLE_FROM_UFE_RUNTIME_EVIDENCE':bool(ufe_paths),
+              'DISTINCT_BOOT_RECOVERY_BRANCH_FROM_HID_FEATURE_PROVEN':False,
+              'BP1048P4_PHONE_DIRECT_BOOT_ENTRY_PROVEN':False,
+              'BP1048P4_PHONE_DIRECT_RECOVERY_IDENTITY_PROVEN':False,
+              'READ_ONLY_PHONE_DIRECT_BACKUP_PROVEN':False,
+              'LIVE_BOARD_TEST_ALLOWED_FROM_R89C':False,
+              'FLASH_ALLOWED':False,
+          }
+          out.joinpath('R89C_DECISION.json').write_text(json.dumps(decision,indent=2)+'\n')
+          print(json.dumps(decision,indent=2))
+          PY
+
+      - name: Build focused report
+        shell: bash
+        run: |
+          set -euo pipefail
+          /tmp/r89c-venv/bin/python - <<'PY'
+          from pathlib import Path
+          import json
+
+          p=Path('/tmp/r89c/evidence')
+          dec=json.loads((p/'R89C_DECISION.json').read_text())
+          impl=json.loads((p/'R89C_IMPLMAP_TARGETS.json').read_text())
+          callers=json.loads((p/'R89C_NATIVE_TO_METHODDEF_CALLERS.json').read_text())
+          paths=json.loads((p/'R89C_UFE_TO_HID_FEATURE_PATHS.json').read_text())
+          lits=json.loads((p/'R89C_BOOT_FLASH_LITERAL_HITS.json').read_text())
+
+          lines=[
+              '# R89C official GoloPine ImplMap HID callgraph closure',
+              '',
+              'OFFLINE/STATIC ONLY. No vendor execution, no USB/board access, no flash.',
+              '',
+              '## Decision',
+              '```json',json.dumps(dec,indent=2),'```','',
+              '## ImplMap native API -> forwarded MethodDef',
+          ]
+
+          for x in impl:
+              lines.append(
+                  f"- `{x['import_scope']}!{x['import_name']}` -> RID {x['forwarded_methoddef_rid']} "
+                  f"`{x['forwarded_method']}` RVA={x['forwarded_method_rva']}"
+              )
+
+          lines += ['','## Native feature MethodDef -> direct callers']
+          for x in callers:
+              if x['native_api'] in ('HidD_SetFeature','HidD_SetOutputReport','HidD_GetInputReport'):
+                  c=', '.join(y['full_name'] for y in x['direct_callers']) or 'none'
+                  lines.append(
+                      f"- `{x['native_api']}` -> `{x['full_name']}`; callers: {c}"
+                  )
+
+          lines += ['','## UFE/runtime -> HID feature paths']
+          if not paths:
+              lines.append('- none resolved')
+          else:
+              for path in paths[:300]:
+                  lines.append('- '+' -> '.join(x['full_name'] for x in path))
+
+          lines += ['','## Boot/flash literals']
+          if not lits:
+              lines.append('- none')
+          else:
+              for x in lits[:200]:
+                  lines.append(f"- `{x['method']}` terms={x['terms']} :: `{x['literal']}`")
+
+          lines += [
+              '',
+              '## Gate',
+              '- R89B missed HID methods because native names live in ImplMap.ImportName while forwarded managed MethodDefs are obfuscated.',
+              '- R89C resolves the actual forwarded MethodDef RID first, then traces real MethodDef call tokens.',
+              '- Raw AA55/55AA byte occurrences are not treated as boot evidence.',
+              '- No repeated AA55, no R79 autorun, no live board test.',
+              '- FLASH_ALLOWED=NO.',
+          ]
+          p.joinpath('R89C_REPORT.md').write_text('\n'.join(lines)+'\n')
+          PY
+          sed -n '1,760p' /tmp/r89c/evidence/R89C_REPORT.md
+
+      - name: Package evidence
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp /tmp/R89C_SAFETY.txt /tmp/r89c/evidence/ || true
+          (cd /tmp/r89c/evidence && zip -9 -r /tmp/R89C_BP1048P4_OFFICIAL_WINDOWS_IMPLMAP_HID_CALLGRAPH_EVIDENCE.zip .)
+          sha256sum /tmp/R89C_BP1048P4_OFFICIAL_WINDOWS_IMPLMAP_HID_CALLGRAPH_EVIDENCE.zip \
+            > /tmp/R89C_BP1048P4_OFFICIAL_WINDOWS_IMPLMAP_HID_CALLGRAPH_EVIDENCE.zip.sha256
+
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: R89C-BP1048P4-OFFICIAL-WINDOWS-IMPLMAP-HID-CALLGRAPH-EVIDENCE
+          path: |
+            /tmp/R89C_BP1048P4_OFFICIAL_WINDOWS_IMPLMAP_HID_CALLGRAPH_EVIDENCE.zip
+            /tmp/R89C_BP1048P4_OFFICIAL_WINDOWS_IMPLMAP_HID_CALLGRAPH_EVIDENCE.zip.sha256
+          if-no-files-found: error
