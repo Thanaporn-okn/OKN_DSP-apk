@@ -1,0 +1,419 @@
+name: R82 BP1048P4 GoloPine dnfile dncil HID callers static reverse
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - ".github/workflows/R82_BP1048P4_GOLOPINE_DNFILE_DNCIL_HID_CALLERS_STATIC.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: r82-bp1048p4-golopine-dncil-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  GOLOPINE_PACKAGE_URL: https://golodsp.com/wp-content/uploads/2026/05/golopine_audio_turning_release_2026-04-08.exe_.zip
+  EXPECTED_EXE_NAME: golopine_audio_turning_release_2026-04-08.exe
+  EXPECTED_EXE_SIZE: "3307008"
+  EXPECTED_EXE_SHA256: 3ca54171c53f7badd963ffe6851b8b3e2faf8aee8ba2afcb7040990e22ae09b2
+
+jobs:
+  static-dncil-reverse:
+    name: dnfile dncil metadata and HID caller reverse ONLY - NO USB - NO FLASH
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Declare immutable safety gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > /tmp/R82_SAFETY.txt <<'EOF'
+          R82_MODE=STATIC_OFFLINE_ONLY
+          R82_TARGET_BINARY_EXECUTED=NO
+          R82_WINE_MONO_DOTNET_TARGET_EXECUTION=NO
+          R82_BOARD_USB_ACCESSED=NO
+          R82_AA55_SENT=NO
+          R82_LINEIN_AA55_SENT=NO
+          R82_RUNTIME_0X11_SENT=NO
+          R82_LEGACY_FLASHBOOT_COMMANDS_SENT=NO
+          R82_FLASH_READ_EXECUTED=NO
+          R82_FLASH_ERASE_EXECUTED=NO
+          R82_FLASH_WRITE_EXECUTED=NO
+          R82_REFERENCE_0000_2244_ASSUMED_PRODUCTION=NO
+          R82_BP1048B2_TOOL_USED_ON_BP1048P4=NO
+          FLASH_ALLOWED=NO
+          EOF
+          cat /tmp/R82_SAFETY.txt
+
+      - name: Download and pin official production client
+        id: pin
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/r82 && mkdir -p /tmp/r82/extract
+          curl --fail --location --retry 3 --retry-all-errors --connect-timeout 20 --max-time 180 \
+            "$GOLOPINE_PACKAGE_URL" -o /tmp/r82/pkg.zip
+          unzip -q /tmp/r82/pkg.zip -d /tmp/r82/extract
+          EXE="$(find /tmp/r82/extract -type f -name "$EXPECTED_EXE_NAME" -print -quit)"
+          test -n "$EXE" -a -f "$EXE"
+          chmod a-x "$EXE" || true
+          SIZE="$(stat -c '%s' "$EXE")"
+          SHA="$(sha256sum "$EXE" | awk '{print $1}')"
+          test "$SIZE" = "$EXPECTED_EXE_SIZE"
+          test "$SHA" = "$EXPECTED_EXE_SHA256"
+          {
+            echo "R82_EXE_NAME=$(basename "$EXE")"
+            echo "R82_EXE_SIZE=$SIZE"
+            echo "R82_EXE_SHA256=$SHA"
+            echo "R82_SHA256_PIN_MATCH=YES"
+          } | tee /tmp/R82_BINARY_PIN.txt
+          echo "exe=$EXE" >> "$GITHUB_OUTPUT"
+
+      - name: Install static parsers only
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m pip install --disable-pip-version-check --no-input dnfile dncil pefile > /tmp/R82_PIP_INSTALL.txt 2>&1
+          python3 - <<'PY' | tee /tmp/R82_PARSER_VERSIONS.txt
+          import importlib.metadata as m
+          for n in ('dnfile','dncil','pefile'):
+              try: print(f'{n}={m.version(n)}')
+              except Exception as e: print(f'{n}=UNKNOWN:{e}')
+          PY
+
+      - name: Extract MethodDef IL and exact HID caller graph without dependency resolution
+        shell: bash
+        env:
+          EXE: ${{ steps.pin.outputs.exe }}
+        run: |
+          set -euo pipefail
+          cat > /tmp/r82_extract.py <<'PY'
+          from pathlib import Path
+          import os, re, json
+          import dnfile
+          from dncil.cil.body import CilMethodBody
+          from dncil.cil.body.reader import CilMethodBodyReaderBase
+          from dncil.cil.error import MethodBodyFormatError
+          from dncil.clr.token import Token, StringToken, InvalidToken
+          from dnfile.enums import MetadataTables
+
+          EXE = os.environ['EXE']
+          pe = dnfile.dnPE(EXE)
+          assert pe.net is not None, 'No CLR metadata'
+
+          DOTNET_META_TABLES_BY_INDEX = {table.value: table.name for table in MetadataTables}
+
+          class DnfileMethodBodyReader(CilMethodBodyReaderBase):
+              def __init__(self, pe, row):
+                  self.pe = pe
+                  self.offset = self.pe.get_offset_from_rva(row.Rva)
+              def read(self, n):
+                  data = self.pe.get_data(self.pe.get_rva_from_offset(self.offset), n)
+                  self.offset += n
+                  return data
+              def tell(self): return self.offset
+              def seek(self, offset):
+                  self.offset = offset
+                  return self.offset
+
+          def resolve_token(tok):
+              if isinstance(tok, StringToken):
+                  try:
+                      us = pe.net.user_strings.get(tok.rid)
+                      return us.value if us is not None and not isinstance(us, bytes) else tok
+                  except Exception:
+                      return tok
+              if not isinstance(tok, Token): return tok
+              table_name = DOTNET_META_TABLES_BY_INDEX.get(tok.table, '')
+              table = getattr(pe.net.mdtables, table_name, None) if table_name else None
+              if table is None: return tok
+              try: return table.rows[tok.rid - 1]
+              except Exception: return tok
+
+          def operand_token_value(op):
+              if isinstance(op, Token): return int(op.value)
+              return None
+
+          def describe_operand(op):
+              if isinstance(op, Token):
+                  val = int(op.value)
+                  resolved = resolve_token(op)
+                  if isinstance(resolved, str): return f'0x{val:08X} "{resolved}"'
+                  name = getattr(resolved, 'Name', None)
+                  if name is not None: return f'0x{val:08X} {name}'
+                  tname = getattr(resolved, 'TypeName', None)
+                  ns = getattr(resolved, 'TypeNamespace', None)
+                  if tname is not None: return f'0x{val:08X} {ns}.{tname}'
+                  return f'0x{val:08X} {resolved}'
+              if isinstance(op, list): return '[' + ', '.join(map(str,op)) + ']'
+              return repr(op) if op is not None else ''
+
+          def read_body(row):
+              if not getattr(row, 'Rva', 0): return None
+              try:
+                  return CilMethodBody(DnfileMethodBodyReader(pe, row))
+              except Exception:
+                  return None
+
+          methods = list(pe.net.mdtables.MethodDef.rows)
+
+          # Build best-effort owner map from TypeDef MethodList references.
+          owner = {}
+          typedefs = list(pe.net.mdtables.TypeDef.rows)
+          for ti, tr in enumerate(typedefs, start=1):
+              tname = f'{getattr(tr,"TypeNamespace","")}.{getattr(tr,"TypeName","")}'.strip('.')
+              try:
+                  refs = tr.MethodList
+                  for ref in refs:
+                      rr = getattr(ref, 'row', None)
+                      if rr is not None: owner[id(rr)] = tname
+              except Exception:
+                  pass
+
+          def method_desc(rid):
+              if rid < 1 or rid > len(methods): return f'MethodDef#{rid}:OUT_OF_RANGE'
+              r = methods[rid-1]
+              return f'0x{0x06000000|rid:08X} rid={rid} owner={owner.get(id(r),"?")} name={r.Name} RVA=0x{int(getattr(r,"Rva",0)):X}'
+
+          # R81 exact pinned-binary rows. Verify names before relying on token identity.
+          expected = {
+              1107: '.ctor',
+              1113: 'OpenDevice', 1114: 'OpenDevice', 1120: 'Read', 1121: 'Write',
+              1133: 'HLvqy7J7nC',       # HidD_SetOutputReport
+              1134: 'wQMqbMG4IT',       # HidD_SetFeature
+              1135: 'Hl8q09gqNT',       # HidD_GetInputReport
+              1136: 'getFeature',
+              1139: 'CyaqdU7ib9',       # ReadFile
+              1140: 'z9oqBfatR5',       # WriteFile
+              1164: 'HidRead',
+              1172: 'Connect', 1173: 'Connect', 1174: 'Send', 1175: 'Send',
+              1178: 'HidDataReceived', 1180: 'GetHidDeviceList',
+          }
+          verify=[]
+          for rid, want in expected.items():
+              got = str(methods[rid-1].Name) if rid <= len(methods) else '<missing>'
+              verify.append(f'RID={rid} TOKEN=0x{0x06000000|rid:08X} EXPECT={want} GOT={got} MATCH={"YES" if got==want else "NO"}')
+          Path('/tmp/R82_TARGET_TOKEN_VERIFY.txt').write_text('\n'.join(verify)+'\n')
+          if any('MATCH=NO' in x for x in verify):
+              raise SystemExit('Pinned MethodDef layout changed; refusing token assumptions')
+
+          targets = {
+              0x06000459:'Hid.OpenDevice(path)',
+              0x0600045A:'Hid.OpenDevice(vid,pid,serial)',
+              0x06000460:'Hid.Read',
+              0x06000461:'Hid.Write',
+              0x0600046D:'HidD_SetOutputReport',
+              0x0600046E:'HidD_SetFeature',
+              0x0600046F:'HidD_GetInputReport',
+              0x06000470:'Hid.getFeature',
+              0x06000473:'ReadFile',
+              0x06000474:'WriteFile',
+              0x0600048C:'HIDInterface.HidRead',
+              0x06000494:'HIDInterface.Connect(enum)',
+              0x06000495:'HIDInterface.Connect(string)',
+              0x06000496:'HIDInterface.Send(bytes)',
+              0x06000497:'HIDInterface.Send(string)',
+              0x0600049A:'HIDInterface.HidDataReceived',
+              0x0600049C:'HIDInterface.GetHidDeviceList',
+          }
+
+          # Dump selected methods completely and discover all methods that call target tokens.
+          selected_rids = set(expected)
+          callers = {tok:[] for tok in targets}
+          parse_ok=parse_fail=0
+          method_cache={}
+          for rid,row in enumerate(methods, start=1):
+              body = read_body(row)
+              if body is None:
+                  if getattr(row,'Rva',0): parse_fail += 1
+                  continue
+              parse_ok += 1
+              method_cache[rid]=body
+              for ins in body.instructions:
+                  tok = operand_token_value(ins.operand)
+                  if tok in targets:
+                      callers[tok].append(rid)
+                      selected_rids.add(rid)
+
+          def dump_method(rid):
+              row=methods[rid-1]
+              body=method_cache.get(rid) or read_body(row)
+              out=[f'===== {method_desc(rid)} =====']
+              if body is None:
+                  out.append('BODY_PARSE=FAILED_OR_NO_RVA')
+                  return '\n'.join(out)
+              out.append(f'CODE_SIZE={body.code_size} INSTRUCTION_COUNT={len(body.instructions)}')
+              for ins in body.instructions:
+                  raw=' '.join(f'{b:02X}' for b in ins.get_bytes())
+                  out.append(f'{ins.offset:08X}  {raw:<26} {str(ins.opcode):<14} {describe_operand(ins.operand)}')
+              return '\n'.join(out)
+
+          dumps=[]
+          for rid in sorted(selected_rids):
+              dumps.append(dump_method(rid))
+          Path('/tmp/R82_TARGET_AND_CALLER_IL.txt').write_text('\n\n'.join(dumps)+'\n')
+
+          cg=[]
+          for tok,label in targets.items():
+              rs=sorted(set(callers[tok]))
+              cg.append(f'TARGET=0x{tok:08X} {label} CALLER_COUNT={len(rs)}')
+              for rid in rs:
+                  cg.append('  '+method_desc(rid))
+          Path('/tmp/R82_CALLGRAPH.txt').write_text('\n'.join(cg)+'\n')
+
+          # Focus on instructions that build byte arrays/constants near HID/Send calls.
+          ctx=[]
+          interesting_ops={'ldc.i4','ldc.i4.s','ldc.i4.0','ldc.i4.1','ldc.i4.2','ldc.i4.3','ldc.i4.4','ldc.i4.5','ldc.i4.6','ldc.i4.7','ldc.i4.8','ldc.i4.m1','stelem.i1','newarr','ldstr','call','callvirt'}
+          for rid in sorted(selected_rids):
+              body=method_cache.get(rid) or read_body(methods[rid-1])
+              if body is None: continue
+              ins=body.instructions
+              target_positions=[]
+              for i,x in enumerate(ins):
+                  tok=operand_token_value(x.operand)
+                  if tok in targets: target_positions.append((i,tok))
+              if rid in expected: target_positions.append((len(ins)//2,0))
+              seen=set()
+              for pos,tok in target_positions:
+                  a=max(0,pos-45); b=min(len(ins),pos+25)
+                  key=(rid,a,b)
+                  if key in seen: continue
+                  seen.add(key)
+                  ctx.append(f'===== CONTEXT {method_desc(rid)} around {targets.get(tok,"selected-method")} =====')
+                  for x in ins[a:b]:
+                      raw=' '.join(f'{q:02X}' for q in x.get_bytes())
+                      ctx.append(f'{x.offset:08X} {raw:<26} {str(x.opcode):<14} {describe_operand(x.operand)}')
+          Path('/tmp/R82_REPORT_CONSTRUCTION_CONTEXT.txt').write_text('\n'.join(ctx)+'\n')
+
+          # Search all CLR #US user strings for updater/boot/recovery identity terms.
+          kws=('update','upgrade','firmware','boot','reboot','recover','flash','download','upload','hid','usb','vid','pid','version','device','reset')
+          sh=[]
+          us=pe.net.user_strings
+          # iterate raw offsets conservatively because dnfile stream does not promise a public iterator on every version
+          data = getattr(us, '__data__', b'') or b''
+          # Also search decoded textual projection of the whole binary for UTF-16LE/ASCII keyword evidence.
+          blob=Path(EXE).read_bytes()
+          for kw in kws:
+              a=[m.start() for m in re.finditer(re.escape(kw.encode()), blob, re.I)]
+              u=[m.start() for m in re.finditer(re.escape(kw.encode('utf-16le')), blob, re.I)]
+              sh.append(f'{kw}: ASCII={len(a)} UTF16LE={len(u)} ASCII_OFFSETS={",".join(hex(x) for x in a[:20])} UTF16_OFFSETS={",".join(hex(x) for x in u[:20])}')
+          Path('/tmp/R82_KEYWORD_OFFSETS.txt').write_text('\n'.join(sh)+'\n')
+
+          summary={
+              'methoddef_count':len(methods),'typedef_count':len(typedefs),
+              'cil_methods_parsed':parse_ok,'cil_method_parse_failures_with_rva':parse_fail,
+              'target_count':len(targets),'selected_method_count':len(selected_rids),
+              'caller_edges':sum(len(set(v)) for v in callers.values()),
+          }
+          Path('/tmp/R82_DNCIL_SUMMARY.json').write_text(json.dumps(summary,indent=2)+'\n')
+          print(json.dumps(summary,indent=2))
+          PY
+          python3 /tmp/r82_extract.py | tee /tmp/R82_DNCIL_STDOUT.txt
+
+      - name: ILSpyCmd targeted cross-check without executing target
+        shell: bash
+        env:
+          EXE: ${{ steps.pin.outputs.exe }}
+        run: |
+          set -u
+          mkdir -p /tmp/r82/tools /tmp/r82/ilspy
+          dotnet --info > /tmp/R82_DOTNET_INFO.txt 2>&1 || true
+          dotnet tool install --tool-path /tmp/r82/tools ilspycmd > /tmp/R82_ILSPY_INSTALL.txt 2>&1 || true
+          if [ -x /tmp/r82/tools/ilspycmd ]; then
+            /tmp/r82/tools/ilspycmd --version > /tmp/R82_ILSPY_VERSION.txt 2>&1 || true
+            : > /tmp/R82_ILSPY_TARGETED_IL.txt
+            for tok in 0x06000453 0x06000459 0x0600045A 0x06000460 0x06000461 0x06000470 0x0600048C 0x06000494 0x06000495 0x06000496 0x06000497 0x0600049A 0x0600049C; do
+              echo "===== $tok =====" >> /tmp/R82_ILSPY_TARGETED_IL.txt
+              /tmp/r82/tools/ilspycmd --ilcode --member "$tok" "$EXE" >> /tmp/R82_ILSPY_TARGETED_IL.txt 2>> /tmp/R82_ILSPY_ERRORS.txt || true
+              echo >> /tmp/R82_ILSPY_TARGETED_IL.txt
+            done
+            /tmp/r82/tools/ilspycmd --list-resources "$EXE" > /tmp/R82_ILSPY_RESOURCES.txt 2>> /tmp/R82_ILSPY_ERRORS.txt || true
+          else
+            echo 'ILSPYCMD_AVAILABLE=NO' > /tmp/R82_ILSPY_VERSION.txt
+          fi
+          test -f /tmp/R82_ILSPY_ERRORS.txt || : > /tmp/R82_ILSPY_ERRORS.txt
+          test -f /tmp/R82_ILSPY_TARGETED_IL.txt || : > /tmp/R82_ILSPY_TARGETED_IL.txt
+          test -f /tmp/R82_ILSPY_RESOURCES.txt || : > /tmp/R82_ILSPY_RESOURCES.txt
+
+      - name: Produce R82 decision
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          s=json.load(open('/tmp/R82_DNCIL_SUMMARY.json'))
+          with open('/tmp/R82_DECISION.txt','w') as f:
+              f.write('R82_PINNED_PRODUCTION_CLIENT=YES\n')
+              f.write(f'R82_METHODDEF_COUNT={s["methoddef_count"]}\n')
+              f.write(f'R82_DNCIL_METHODS_PARSED={s["cil_methods_parsed"]}\n')
+              f.write(f'R82_DNCIL_PARSE_FAILURES_WITH_RVA={s["cil_method_parse_failures_with_rva"]}\n')
+              f.write(f'R82_HID_CALLER_EDGES={s["caller_edges"]}\n')
+              f.write('R82_MONODIS_DEPENDENCY_FAILURE_BYPASSED=YES\n')
+              f.write('R82_PACKET_EVIDENCE_IS_STATIC_ONLY=YES\n')
+              f.write('R82_NO_PACKET_IS_AUTHORIZED_FOR_BOARD_TRANSMISSION=YES\n')
+              f.write('R82_BOOT_ENTRY_PROVEN=NO\n')
+              f.write('R82_RECOVERY_USB_IDENTITY_PROVEN=NO\n')
+              f.write('R82_SAFE_READONLY_IDENTIFY_PROVEN=NO\n')
+              f.write('R82_NEXT=REVIEW_EXACT_HID_CALLERS_AND_REPORT_BYTES_OFFLINE\n')
+              f.write('FLASH_ALLOWED=NO\n')
+          PY
+          cat /tmp/R82_DECISION.txt
+
+      - name: Build R82 evidence bundle without vendor executable
+        shell: bash
+        run: |
+          set -euo pipefail
+          OUT=/tmp/R82_BP1048P4_GOLOPINE_DNCIL_HID_CALLERS_EVIDENCE
+          rm -rf "$OUT" && mkdir -p "$OUT"
+          for f in \
+            R82_SAFETY.txt R82_BINARY_PIN.txt R82_PIP_INSTALL.txt R82_PARSER_VERSIONS.txt \
+            R82_TARGET_TOKEN_VERIFY.txt R82_DNCIL_STDOUT.txt R82_DNCIL_SUMMARY.json \
+            R82_CALLGRAPH.txt R82_TARGET_AND_CALLER_IL.txt R82_REPORT_CONSTRUCTION_CONTEXT.txt \
+            R82_KEYWORD_OFFSETS.txt R82_DOTNET_INFO.txt R82_ILSPY_INSTALL.txt R82_ILSPY_VERSION.txt \
+            R82_ILSPY_TARGETED_IL.txt R82_ILSPY_RESOURCES.txt R82_ILSPY_ERRORS.txt R82_DECISION.txt; do
+            test -f "/tmp/$f" && cp "/tmp/$f" "$OUT/"
+          done
+          cat > "$OUT/README.txt" <<'EOF'
+          R82 is static/offline reverse evidence from the exact SHA256-pinned current GoloPine production client.
+          dnfile+dncil parses MethodDef bodies directly without loading PresentationCore/NAudio, bypassing R81 monodis dependency crashes.
+          ILSpyCmd is used only as an independent static cross-check. The target EXE is never executed.
+          No board USB access, no AA55, no 0x11, no legacy flashboot commands, and no flash read/erase/write occur.
+          Any packet/report/constants shown are evidence only and are NOT authorized to transmit to the production board.
+          FLASH_ALLOWED=NO.
+          EOF
+          (cd /tmp && zip -qr R82_BP1048P4_GOLOPINE_DNCIL_HID_CALLERS_EVIDENCE.zip "$(basename "$OUT")")
+          sha256sum /tmp/R82_BP1048P4_GOLOPINE_DNCIL_HID_CALLERS_EVIDENCE.zip | tee /tmp/R82_EVIDENCE_ZIP_SHA256.txt
+
+      - name: Upload R82 evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: R82-BP1048P4-GOLOPINE-DNCIL-HID-CALLERS-EVIDENCE
+          path: |
+            /tmp/R82_BP1048P4_GOLOPINE_DNCIL_HID_CALLERS_EVIDENCE.zip
+            /tmp/R82_EVIDENCE_ZIP_SHA256.txt
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Final safety gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -F 'R82_TARGET_BINARY_EXECUTED=NO' /tmp/R82_SAFETY.txt
+          grep -F 'R82_BOARD_USB_ACCESSED=NO' /tmp/R82_SAFETY.txt
+          grep -F 'R82_AA55_SENT=NO' /tmp/R82_SAFETY.txt
+          grep -F 'R82_RUNTIME_0X11_SENT=NO' /tmp/R82_SAFETY.txt
+          grep -F 'R82_LEGACY_FLASHBOOT_COMMANDS_SENT=NO' /tmp/R82_SAFETY.txt
+          grep -F 'R82_FLASH_WRITE_EXECUTED=NO' /tmp/R82_SAFETY.txt
+          grep -F 'R82_FLASH_ERASE_EXECUTED=NO' /tmp/R82_SAFETY.txt
+          grep -F 'FLASH_ALLOWED=NO' /tmp/R82_SAFETY.txt
+          cat /tmp/R82_DNCIL_SUMMARY.json
+          cat /tmp/R82_CALLGRAPH.txt
+          cat /tmp/R82_DECISION.txt
+          echo 'R82_STATIC_REVERSE_COMPLETE=YES'
+          echo 'FLASH_ALLOWED=NO'
