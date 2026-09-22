@@ -1,0 +1,408 @@
+name: R80 BP1048P4 current GoloPine updater surface static audit
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - ".github/workflows/R80_BP1048P4_CURRENT_GOLOPINE_UPDATER_SURFACE_STATIC_AUDIT.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: r80-bp1048p4-current-golopine-updater-surface-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Official GoloPine 7-channel page currently labels this Windows build 08Apr2026.
+  GOLOPINE_PAGE_URL: https://golodsp.com/7%E9%80%9A%E9%81%93%E9%9F%B3%E9%A2%91%E5%89%8D%E7%BA%A7/
+  GOLOPINE_PACKAGE_URL: https://golodsp.com/wp-content/uploads/2026/05/golopine_audio_turning_release_2026-04-08.exe_.zip
+
+  # Exact production-specific client sample already pinned in the R1/R2/R3 handoff.
+  EXPECTED_EXE_NAME: golopine_audio_turning_release_2026-04-08.exe
+  EXPECTED_EXE_SIZE: "3307008"
+  EXPECTED_EXE_SHA256: 3ca54171c53f7badd963ffe6851b8b3e2faf8aee8ba2afcb7040990e22ae09b2
+
+jobs:
+  static-only:
+    name: Download and reverse CURRENT GoloPine package / STATIC ONLY / NEVER EXECUTE / NO USB / NO FLASH
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Declare safety gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > /tmp/R80_SAFETY.txt <<'EOF'
+          R80_MODE=STATIC_OFFLINE_ONLY
+          R80_BOARD_USB_ACCESSED=NO
+          R80_DOWNLOADED_WINDOWS_BINARY_EXECUTED=NO
+          R80_MONO_WINE_DOTNET_EXECUTION_ALLOWED=NO
+          R80_AA55_SENT=NO
+          R80_LINEIN_AA55_SENT=NO
+          R80_RUNTIME_0X11_SENT=NO
+          R80_LEGACY_FLASHBOOT_COMMANDS_SENT=NO
+          R80_FLASH_READ_EXECUTED=NO
+          R80_FLASH_ERASE_EXECUTED=NO
+          R80_FLASH_WRITE_EXECUTED=NO
+          R80_REFERENCE_0000_2244_ASSUMED_PRODUCTION=NO
+          R80_BP1048B2_TOOL_USED_ON_BP1048P4=NO
+          FLASH_ALLOWED=NO
+          EOF
+          cat /tmp/R80_SAFETY.txt
+
+      - name: Download official current GoloPine Windows package
+        id: download
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/r80 && mkdir -p /tmp/r80/extract
+
+          curl --fail --location --retry 3 --retry-all-errors \
+            --connect-timeout 20 --max-time 180 \
+            "$GOLOPINE_PACKAGE_URL" \
+            -o /tmp/r80/golopine_current.zip
+
+          file /tmp/r80/golopine_current.zip | tee /tmp/R80_PACKAGE_FILETYPE.txt
+          sha256sum /tmp/r80/golopine_current.zip | tee /tmp/R80_PACKAGE_SHA256.txt
+          unzip -Z1 /tmp/r80/golopine_current.zip | tee /tmp/R80_PACKAGE_MEMBERS.txt
+          unzip -q /tmp/r80/golopine_current.zip -d /tmp/r80/extract
+
+          cat > /tmp/R80_SOURCE.txt <<EOF
+          R80_SOURCE_TYPE=OFFICIAL_GOLOPINE_PUBLIC_DOWNLOAD
+          R80_SOURCE_PAGE=$GOLOPINE_PAGE_URL
+          R80_SOURCE_PACKAGE=$GOLOPINE_PACKAGE_URL
+          R80_EXPECTED_BUILD_LABEL=08Apr2026
+          EOF
+          cat /tmp/R80_SOURCE.txt
+
+      - name: Select and pin EXE without executing it
+        id: pin
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mapfile -t EXES < <(find /tmp/r80/extract -type f -iname '*.exe' -print | sort)
+          printf '%s\n' "${EXES[@]}" | tee /tmp/R80_EXE_CANDIDATES.txt
+          test "${#EXES[@]}" -ge 1
+
+          EXE=""
+          for f in "${EXES[@]}"; do
+            if [ "$(basename "$f")" = "$EXPECTED_EXE_NAME" ]; then
+              EXE="$f"
+              break
+            fi
+          done
+          if [ -z "$EXE" ] && [ "${#EXES[@]}" -eq 1 ]; then
+            EXE="${EXES[0]}"
+          fi
+          test -n "$EXE"
+
+          # Remove executable bits as a belt-and-suspenders guard. Never invoke the file.
+          chmod a-x "$EXE" || true
+
+          ACTUAL_NAME="$(basename "$EXE")"
+          ACTUAL_SIZE="$(stat -c '%s' "$EXE")"
+          ACTUAL_SHA="$(sha256sum "$EXE" | awk '{print $1}')"
+
+          NAME_MATCH=NO
+          SIZE_MATCH=NO
+          SHA_MATCH=NO
+          [ "$ACTUAL_NAME" = "$EXPECTED_EXE_NAME" ] && NAME_MATCH=YES
+          [ "$ACTUAL_SIZE" = "$EXPECTED_EXE_SIZE" ] && SIZE_MATCH=YES
+          [ "$ACTUAL_SHA" = "$EXPECTED_EXE_SHA256" ] && SHA_MATCH=YES
+
+          cat > /tmp/R80_BINARY_PIN.txt <<EOF
+          R80_EXE_PATH=$EXE
+          R80_EXE_NAME=$ACTUAL_NAME
+          R80_EXE_SIZE=$ACTUAL_SIZE
+          R80_EXE_SHA256=$ACTUAL_SHA
+          R80_EXPECTED_EXE_NAME=$EXPECTED_EXE_NAME
+          R80_EXPECTED_EXE_SIZE=$EXPECTED_EXE_SIZE
+          R80_EXPECTED_EXE_SHA256=$EXPECTED_EXE_SHA256
+          R80_NAME_MATCH_PRIOR_PIN=$NAME_MATCH
+          R80_SIZE_MATCH_PRIOR_PIN=$SIZE_MATCH
+          R80_SHA_MATCH_PRIOR_PIN=$SHA_MATCH
+          EOF
+          cat /tmp/R80_BINARY_PIN.txt
+
+          echo "exe=$EXE" >> "$GITHUB_OUTPUT"
+          echo "sha_match=$SHA_MATCH" >> "$GITHUB_OUTPUT"
+
+      - name: Static PE and package inventory
+        shell: bash
+        run: |
+          set -euo pipefail
+          EXE='${{ steps.pin.outputs.exe }}'
+          test -f "$EXE"
+
+          file "$EXE" | tee /tmp/R80_EXE_FILETYPE.txt
+          objdump -x "$EXE" > /tmp/R80_OBJDUMP_X.txt 2>&1 || true
+          strings -a -n 4 "$EXE" > /tmp/R80_STRINGS_ASCII.txt
+          strings -a -e l -n 4 "$EXE" > /tmp/R80_STRINGS_UTF16LE.txt || true
+
+          find /tmp/r80/extract -type f -print0 \
+            | sort -z \
+            | xargs -0 sha256sum \
+            > /tmp/R80_ALL_EXTRACTED_SHA256.txt
+
+          find /tmp/r80/extract -type f -printf '%s  %p\n' \
+            | sort -n \
+            > /tmp/R80_ALL_EXTRACTED_SIZES.txt
+
+      - name: Search updater boot recovery transport and MVA surfaces
+        id: surface
+        shell: bash
+        run: |
+          set -euo pipefail
+          EXE='${{ steps.pin.outputs.exe }}'
+          python3 - "$EXE" <<'PY'
+          from pathlib import Path
+          import re, sys, struct, hashlib
+
+          exe=Path(sys.argv[1])
+          b=exe.read_bytes()
+
+          ascii_text=Path('/tmp/R80_STRINGS_ASCII.txt').read_text(
+              encoding='utf-8', errors='replace')
+          utf16_text=Path('/tmp/R80_STRINGS_UTF16LE.txt').read_text(
+              encoding='utf-8', errors='replace')
+          text=ascii_text+'\n'+utf16_text
+
+          groups={
+            'UPDATER_WORDS': [
+              'MVAssistant','MV Assistant','MVA','.mva','upgrade','updater',
+              'firmware','recovery','bootloader','flash','PC升级','升级下载',
+              'MVA file load OK'
+            ],
+            'USB_API_WORDS': [
+              'HidD_','HidP_','SetupDi','WinUsb','libusb','LibUsb',
+              'HidSharp','CyUSB','CreateFile','DeviceIoControl',
+              'SetFeature','GetFeature','SET_REPORT','GET_REPORT',
+              'control transfer','ControlTransfer'
+            ],
+            'IDENTITY_WORDS': [
+              'VID_','PID_','6324','1719','2244','55AA','AA55','FF00'
+            ],
+            'LEGACY_FLASHBOOT_WORDS_STATIC_ONLY': [
+              'chiperas','codedata','bootdat','constdat','cnfgdat',
+              'btupdat','upinfo','cxxx'
+            ],
+            'DELEGATION_WORDS': [
+              'Process.Start','ShellExecute','UseShellExecute',
+              'StartInfo','CreateProcess','cmd.exe','powershell.exe'
+            ],
+          }
+
+          lines=text.splitlines()
+          out=[]
+          hit_counts={}
+          for group, needles in groups.items():
+              out.append(f'=== {group} ===')
+              count=0
+              for needle in needles:
+                  hits=[x for x in lines if needle.casefold() in x.casefold()]
+                  # De-duplicate while preserving order and cap evidence volume.
+                  seen=[]
+                  for h in hits:
+                      h=h.strip()
+                      if h and h not in seen:
+                          seen.append(h)
+                  out.append(f'[{needle}] HITS={len(seen)}')
+                  for h in seen[:30]:
+                      out.append(h[:1000])
+                  count += len(seen)
+              hit_counts[group]=count
+              out.append('')
+
+          Path('/tmp/R80_KEYWORD_EVIDENCE.txt').write_text(
+              '\n'.join(out)+'\n', encoding='utf-8')
+
+          # Raw exact signatures: static byte search only.
+          signatures={
+            'MVA_MAGIC_4D56B158': bytes.fromhex('4d56b158'),
+            'chiperas_ascii': b'chiperas',
+            'codedata_ascii': b'codedata',
+            'bootdat_ascii': b'bootdat',
+            'constdat_ascii': b'constdat',
+            'cnfgdat_ascii': b'cnfgdat',
+            'btupdat_ascii': b'btupdat',
+            'upinfo_ascii': b'upinfo',
+            'cxxx_ascii': b'cxxx',
+          }
+          siglines=[]
+          for name,sig in signatures.items():
+              offs=[]; start=0
+              while True:
+                  i=b.find(sig,start)
+                  if i<0: break
+                  offs.append(i); start=i+1
+                  if len(offs)>=100: break
+              siglines.append(f'{name}_COUNT={len(offs)}')
+              if offs:
+                  siglines.append(f'{name}_OFFSETS=' + ','.join(hex(x) for x in offs))
+          Path('/tmp/R80_RAW_SIGNATURES.txt').write_text(
+              '\n'.join(siglines)+'\n', encoding='utf-8')
+
+          # Locate embedded PE images conservatively: MZ + valid e_lfanew -> PE signature.
+          pe_offsets=[]
+          pos=0
+          while True:
+              pos=b.find(b'MZ',pos)
+              if pos<0: break
+              if pos+0x40 <= len(b):
+                  e_lfanew=struct.unpack_from('<I',b,pos+0x3c)[0]
+                  pe=pos+e_lfanew
+                  if e_lfanew < 0x100000 and pe+4 <= len(b) and b[pe:pe+4]==b'PE\0\0':
+                      pe_offsets.append(pos)
+              pos += 2
+          Path('/tmp/R80_EMBEDDED_PE_OFFSETS.txt').write_text(
+              'R80_VALID_PE_OFFSETS=' + ','.join(hex(x) for x in pe_offsets) + '\n'
+              + f'R80_VALID_PE_COUNT={len(pe_offsets)}\n',
+              encoding='utf-8')
+
+          # MZ at offset 0 is the host EXE itself. Non-zero valid PE offsets are interesting
+          # but are NOT automatically an updater; they require later static attribution.
+          nonzero=[x for x in pe_offsets if x != 0]
+          state=[
+            f'R80_UPDATER_WORD_HITS={hit_counts["UPDATER_WORDS"]}',
+            f'R80_USB_API_WORD_HITS={hit_counts["USB_API_WORDS"]}',
+            f'R80_IDENTITY_WORD_HITS={hit_counts["IDENTITY_WORDS"]}',
+            f'R80_LEGACY_FLASHBOOT_WORD_HITS={hit_counts["LEGACY_FLASHBOOT_WORDS_STATIC_ONLY"]}',
+            f'R80_DELEGATION_WORD_HITS={hit_counts["DELEGATION_WORDS"]}',
+            f'R80_NONZERO_EMBEDDED_PE_COUNT={len(nonzero)}',
+            'R80_STRING_ABSENCE_IS_PROOF_OF_ABSENCE=NO',
+            'R80_PROTECTED_OR_PACKED_CODE_MAY_HIDE_SURFACES=YES',
+          ]
+          Path('/tmp/R80_SURFACE_STATE.txt').write_text(
+              '\n'.join(state)+'\n', encoding='utf-8')
+          print('\n'.join(state))
+          PY
+
+      - name: Produce R80 decision without claiming updater proof
+        shell: bash
+        run: |
+          set -euo pipefail
+          source <(sed 's/[^A-Za-z0-9_=.\/-]//g' /tmp/R80_BINARY_PIN.txt) || true
+
+          SHA_MATCH="$(grep -F 'R80_SHA_MATCH_PRIOR_PIN=' /tmp/R80_BINARY_PIN.txt | cut -d= -f2-)"
+          MVA_MAGIC="$(grep -F 'MVA_MAGIC_4D56B158_COUNT=' /tmp/R80_RAW_SIGNATURES.txt | cut -d= -f2-)"
+          LEGACY_HITS="$(grep -F 'R80_LEGACY_FLASHBOOT_WORD_HITS=' /tmp/R80_SURFACE_STATE.txt | cut -d= -f2-)"
+          UPDATER_HITS="$(grep -F 'R80_UPDATER_WORD_HITS=' /tmp/R80_SURFACE_STATE.txt | cut -d= -f2-)"
+          USB_HITS="$(grep -F 'R80_USB_API_WORD_HITS=' /tmp/R80_SURFACE_STATE.txt | cut -d= -f2-)"
+
+          cat > /tmp/R80_DECISION.txt <<EOF
+          R80_OFFICIAL_CURRENT_GOLOPINE_PACKAGE_ACQUIRED=YES
+          R80_CURRENT_PACKAGE_MATCHES_PRIOR_PINNED_EXE_SHA256=$SHA_MATCH
+          R80_MVA_MAGIC_OCCURRENCES_IN_EXE=$MVA_MAGIC
+          R80_UPDATER_RELATED_STRING_HITS=$UPDATER_HITS
+          R80_USB_API_RELATED_STRING_HITS=$USB_HITS
+          R80_LEGACY_FLASHBOOT_STRING_HITS=$LEGACY_HITS
+
+          R80_THIS_WORKFLOW_PROVES_CURRENT_MVASSISTANT_BINARY=NO
+          R80_THIS_WORKFLOW_PROVES_PRODUCTION_BOOT_ENTRY_SEQUENCE=NO
+          R80_THIS_WORKFLOW_PROVES_PRODUCTION_RECOVERY_VIDPID=NO
+          R80_THIS_WORKFLOW_PROVES_SAFE_READONLY_IDENTIFY_COMMAND=NO
+
+          R80_REFERENCE_RUNTIME_ID_FOR_COMPARISON_ONLY=6324:1719
+          R80_REFERENCE_FLASHBOOT_LITERAL_FOR_COMPARISON_ONLY=0000:2244
+          R80_ASSUME_REFERENCE_FLASHBOOT_ID_IS_PRODUCTION=NO
+
+          R80_NEXT_IF_POSITIVE_SURFACE=STATIC_CALLER_XREF_AND_RESOURCE_CARVE_ONLY
+          R80_NEXT_IF_NO_SURFACE=ACQUIRE_AUTHENTIC_CURRENT_MVASSISTANT_OR_VENDOR_P4_UPDATER_BINARY
+          R80_BOARD_USB_ACCESSED=NO
+          R80_FLASH_WRITE_EXECUTED=NO
+          R80_FLASH_ERASE_EXECUTED=NO
+          FLASH_ALLOWED=NO
+          EOF
+          cat /tmp/R80_DECISION.txt
+
+      - name: Build R80 evidence bundle
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          OUT=/tmp/R80_BP1048P4_CURRENT_GOLOPINE_UPDATER_SURFACE_EVIDENCE
+          rm -rf "$OUT" && mkdir -p "$OUT"
+
+          for f in \
+            R80_SAFETY.txt \
+            R80_SOURCE.txt \
+            R80_PACKAGE_FILETYPE.txt \
+            R80_PACKAGE_SHA256.txt \
+            R80_PACKAGE_MEMBERS.txt \
+            R80_EXE_CANDIDATES.txt \
+            R80_BINARY_PIN.txt \
+            R80_EXE_FILETYPE.txt \
+            R80_ALL_EXTRACTED_SHA256.txt \
+            R80_ALL_EXTRACTED_SIZES.txt \
+            R80_OBJDUMP_X.txt \
+            R80_KEYWORD_EVIDENCE.txt \
+            R80_RAW_SIGNATURES.txt \
+            R80_EMBEDDED_PE_OFFSETS.txt \
+            R80_SURFACE_STATE.txt \
+            R80_DECISION.txt; do
+            test -f "/tmp/$f" && cp "/tmp/$f" "$OUT/"
+          done
+
+          cat > "$OUT/README.txt" <<'EOF'
+          R80 is a static-only audit of the CURRENT public GoloPine Windows
+          package for the 7-channel BP1048P4 product line.
+
+          Purpose:
+          - re-acquire and pin the official current production-specific client;
+          - detect any embedded/delegated firmware-updater surface;
+          - search static evidence for MVAssistant/MVA, recovery/boot, USB APIs,
+            VID/PID strings, MVA magic and the known legacy command vocabulary;
+          - never execute the Windows binary and never access a DSP board.
+
+          This evidence does NOT authorize boot entry, erase, program or flash.
+          It also does NOT treat a BP1048B2 MVAssistant build as compatible with
+          BP1048P4. Reference 0000:2244 remains reference-only, not production proof.
+          EOF
+
+          (
+            cd /tmp
+            zip -qr R80_BP1048P4_CURRENT_GOLOPINE_UPDATER_SURFACE_EVIDENCE.zip \
+              R80_BP1048P4_CURRENT_GOLOPINE_UPDATER_SURFACE_EVIDENCE
+            sha256sum R80_BP1048P4_CURRENT_GOLOPINE_UPDATER_SURFACE_EVIDENCE.zip \
+              > R80_BP1048P4_CURRENT_GOLOPINE_UPDATER_SURFACE_EVIDENCE.zip.sha256
+          )
+          cat /tmp/R80_BP1048P4_CURRENT_GOLOPINE_UPDATER_SURFACE_EVIDENCE.zip.sha256
+
+      - name: Upload R80 evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: R80-BP1048P4-CURRENT-GOLOPINE-UPDATER-SURFACE-EVIDENCE
+          path: |
+            /tmp/R80_BP1048P4_CURRENT_GOLOPINE_UPDATER_SURFACE_EVIDENCE.zip
+            /tmp/R80_BP1048P4_CURRENT_GOLOPINE_UPDATER_SURFACE_EVIDENCE.zip.sha256
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: R80 final safety gate
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat /tmp/R80_BINARY_PIN.txt 2>/dev/null || true
+          cat /tmp/R80_SURFACE_STATE.txt 2>/dev/null || true
+          cat /tmp/R80_DECISION.txt 2>/dev/null || true
+          cat /tmp/R80_SAFETY.txt 2>/dev/null || true
+
+          grep -F 'R80_BOARD_USB_ACCESSED=NO' /tmp/R80_SAFETY.txt
+          grep -F 'R80_DOWNLOADED_WINDOWS_BINARY_EXECUTED=NO' /tmp/R80_SAFETY.txt
+          grep -F 'R80_AA55_SENT=NO' /tmp/R80_SAFETY.txt
+          grep -F 'R80_RUNTIME_0X11_SENT=NO' /tmp/R80_SAFETY.txt
+          grep -F 'R80_LEGACY_FLASHBOOT_COMMANDS_SENT=NO' /tmp/R80_SAFETY.txt
+          grep -F 'R80_FLASH_WRITE_EXECUTED=NO' /tmp/R80_SAFETY.txt
+          grep -F 'R80_FLASH_ERASE_EXECUTED=NO' /tmp/R80_SAFETY.txt
+          grep -F 'FLASH_ALLOWED=NO' /tmp/R80_SAFETY.txt
+
+          echo 'R80_STATIC_AUDIT_COMPLETE=YES'
+          echo 'FLASH_ALLOWED=NO'
