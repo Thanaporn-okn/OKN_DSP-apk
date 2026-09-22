@@ -1,0 +1,426 @@
+name: R87 BP1048P4 MVAssistant P2 B1X downloader role closure
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: r87-bp1048p4-mvassistant-p2-b1x-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  MVASSISTANT_DRIVE_FILE_ID: 15hdF2vnnUMVtIFKhZPGLPwBSEZpyqP2H
+  EXPECTED_ZIP_SHA256: 8074b3488453e268dc755fa88b2d0bc8ef14fc8c51c3de4e3a783279c195878f
+  EXPECTED_EXE_SHA256: a62a968f6e9dc06473390ec26d8e1a6ad70d88c242f05acb2463e5081ec12799
+  FLASH_ALLOWED: 'NO'
+
+jobs:
+  offline-role-closure:
+    name: OFFLINE P2/B1X downloader role closure - no execution/no USB/no board/no flash
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Safety gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > /tmp/R87_SAFETY.txt <<'EOF'
+          R87_STATIC_ONLY=YES
+          VENDOR_BINARY_EXECUTION=NO
+          BOARD_CONTACT=NO
+          USB_DEVICE_ACCESS=NO
+          ERASE_PROGRAM_FLASH=NO
+          SEND_AA55=NO
+          SEND_0X11=NO
+          SEND_CHIPERAS_CODEDATA_BOOTDAT_CONSTDAT_CNFGDAT_BTUPDAT_UPINFO_CXXX=NO
+          TEST_0633_5322_ON_BOARD=NO
+          TEST_0288_7966_ON_BOARD=NO
+          R79_PHYSICAL_REPLUG_AUTORUN=NO
+          BP1048B2_TO_BP1048P4_ASSUMPTION=FORBIDDEN
+          FLASH_ALLOWED=NO
+          PURPOSE=CLOSE_P2_B1X_DOWNLOADER_ROLE_AND_ENUMERATE_ALL_HID_IDENTITIES
+          EOF
+          cat /tmp/R87_SAFETY.txt
+
+      - name: Install static-analysis prerequisites
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m venv /tmp/r87-venv
+          /tmp/r87-venv/bin/python -m pip install --disable-pip-version-check --no-cache-dir \
+            gdown pefile capstone
+          echo "/tmp/r87-venv/bin" >> "$GITHUB_PATH"
+
+      - name: Acquire candidate and enforce SHA pins
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/r87/download /tmp/r87/extracted /tmp/r87/evidence
+          /tmp/r87-venv/bin/gdown \
+            "https://drive.google.com/uc?id=${MVASSISTANT_DRIVE_FILE_ID}" \
+            -O /tmp/r87/download/MVAssistant_BP10xx_V1.8.11.zip
+          ZIP_SHA="$(sha256sum /tmp/r87/download/MVAssistant_BP10xx_V1.8.11.zip | awk '{print $1}')"
+          test "$ZIP_SHA" = "$EXPECTED_ZIP_SHA256"
+          unzip -q /tmp/r87/download/MVAssistant_BP10xx_V1.8.11.zip -d /tmp/r87/extracted
+          EXE=/tmp/r87/extracted/MVAssistant_BP10xx_V1.8.11.exe
+          EXE_SHA="$(sha256sum "$EXE" | awk '{print $1}')"
+          test "$EXE_SHA" = "$EXPECTED_EXE_SHA256"
+          printf 'SHA_PIN_MATCH=YES\nZIP_SHA256=%s\nEXE_SHA256=%s\n' "$ZIP_SHA" "$EXE_SHA" \
+            | tee /tmp/r87/evidence/R87_SHA_GATE.txt
+
+      - name: Recover direct indirect xrefs and downloader callgraph
+        shell: bash
+        run: |
+          set -euo pipefail
+          /tmp/r87-venv/bin/python - <<'PY'
+          from pathlib import Path
+          import bisect, collections, json, re, struct
+          import pefile
+          from capstone import Cs, CS_ARCH_X86, CS_MODE_32, CS_OP_IMM, CS_OP_MEM
+
+          exe=Path('/tmp/r87/extracted/MVAssistant_BP10xx_V1.8.11.exe')
+          out=Path('/tmp/r87/evidence')
+          pe=pefile.PE(str(exe), fast_load=False)
+          base=pe.OPTIONAL_HEADER.ImageBase
+
+          sections=[]
+          for s in pe.sections:
+              sections.append({
+                  'name':s.Name.rstrip(b'\0').decode(errors='ignore'),
+                  'va':base+s.VirtualAddress,
+                  'rva':s.VirtualAddress,
+                  'raw':s.get_data(),
+                  'vsize':s.Misc_VirtualSize,
+              })
+          textsec=next(s for s in sections if s['name']=='.text')
+          text_start=textsec['va']
+          text_end=text_start+max(len(textsec['raw']),textsec['vsize'])
+
+          md=Cs(CS_ARCH_X86, CS_MODE_32)
+          md.detail=True
+          ins=list(md.disasm(textsec['raw'],text_start))
+
+          # imports / thunks
+          imports=[]
+          by_iat={}
+          for ent in getattr(pe,'DIRECTORY_ENTRY_IMPORT',[]):
+              dll=ent.dll.decode(errors='ignore')
+              for imp in ent.imports:
+                  name=imp.name.decode(errors='ignore') if imp.name else f'ordinal_{imp.ordinal}'
+                  rec={'dll':dll,'name':name,'iat_va':imp.address,'iat_rva':imp.address-base}
+                  imports.append(rec); by_iat[imp.address]=rec
+
+          thunks={}
+          for i in ins:
+              if i.mnemonic!='jmp': continue
+              for op in i.operands:
+                  if op.type==CS_OP_MEM and op.mem.disp in by_iat:
+                      thunks[i.address]=by_iat[op.mem.disp]
+
+          # function start approximation
+          call_targets=set()
+          for i in ins:
+              if i.mnemonic=='call' and i.operands and i.operands[0].type==CS_OP_IMM:
+                  t=i.operands[0].imm & 0xffffffff
+                  if text_start <= t < text_end:
+                      call_targets.add(t)
+          known={
+              base+pe.OPTIONAL_HEADER.AddressOfEntryPoint,
+              base+0x8494, base+0x8620, base+0x8714, base+0x8AC0,
+              base+0x91D4, base+0x9800, base+0x98C8, base+0x9A08,
+              base+0x17594, base+0x1E03C,
+          }
+          starts=sorted(call_targets|known)
+
+          def owner(addr):
+              k=bisect.bisect_right(starts,addr)-1
+              if k<0:return None
+              s=starts[k]
+              return s if addr-s<=0x6000 else None
+
+          # call graph + imports per function
+          graph=collections.defaultdict(set)
+          imps_by_func=collections.defaultdict(list)
+          for i in ins:
+              f=owner(i.address)
+              if f is None or i.mnemonic!='call' or not i.operands: continue
+              op=i.operands[0]
+              if op.type==CS_OP_IMM:
+                  t=op.imm & 0xffffffff
+                  if t in thunks:
+                      imps_by_func[f].append({'call_rva':i.address-base,**thunks[t]})
+                  elif text_start <= t < text_end:
+                      graph[f].add(t)
+              elif op.type==CS_OP_MEM and op.mem.disp in by_iat:
+                  imps_by_func[f].append({'call_rva':i.address-base,**by_iat[op.mem.disp]})
+
+          targets=[
+              'Ready to handshake with p2 downloader',
+              'Ready to handshake with b1x downloader',
+              'Handshake with B1X Downloader OK',
+              'HandShake2Dongle OK, Goto Transfer Flash Data',
+              'USB Dongle is linked',
+              'USB Dongle is unlink',
+              'Make sure the correct dongle is inserted',
+              'Find My HID Device, Flash usb connected',
+              'Find My HID Device, Otp usb connected',
+          ]
+
+          # ASCII string inventory with exact addresses
+          strings=[]
+          for sec in sections:
+              b=sec['raw']
+              for m in re.finditer(rb'[\x20-\x7e]{4,}',b):
+                  s=m.group().decode('latin1','ignore')
+                  if any(t.lower() in s.lower() for t in targets):
+                      strings.append({
+                          'section':sec['name'],'text':s,
+                          'va':sec['va']+m.start(),'rva':sec['rva']+m.start()
+                      })
+
+          # direct code xrefs
+          direct=[]
+          for st in strings:
+              target=st['va'] & 0xffffffff
+              for i in ins:
+                  hit=False
+                  for op in i.operands:
+                      if op.type==CS_OP_IMM and (op.imm & 0xffffffff)==target: hit=True
+                      if op.type==CS_OP_MEM and op.mem.disp and (op.mem.disp & 0xffffffff)==target: hit=True
+                  if hit:
+                      direct.append({
+                          'string':st,'xref_rva':i.address-base,
+                          'owner_rva':None if owner(i.address) is None else owner(i.address)-base,
+                          'instruction':f'{i.mnemonic} {i.op_str}'
+                      })
+
+          # pointer-table xrefs: locate VA encoded as little-endian anywhere, then locate code refs to pointer slots
+          indirect=[]
+          for st in strings:
+              needle=struct.pack('<I',st['va'] & 0xffffffff)
+              for sec in sections:
+                  b=sec['raw']; pos=0
+                  while True:
+                      off=b.find(needle,pos)
+                      if off<0: break
+                      pva=sec['va']+off
+                      for i in ins:
+                          hit=False
+                          for op in i.operands:
+                              if op.type==CS_OP_IMM and (op.imm & 0xffffffff)==(pva & 0xffffffff): hit=True
+                              elif op.type==CS_OP_MEM and op.mem.disp and (op.mem.disp & 0xffffffff)==(pva & 0xffffffff): hit=True
+                          if hit:
+                              indirect.append({
+                                  'string':st,
+                                  'pointer_section':sec['name'],
+                                  'pointer_rva':pva-base,
+                                  'xref_rva':i.address-base,
+                                  'owner_rva':None if owner(i.address) is None else owner(i.address)-base,
+                                  'instruction':f'{i.mnemonic} {i.op_str}'
+                              })
+                      pos=off+1
+
+          out.joinpath('R87_TARGET_STRINGS.json').write_text(json.dumps(strings,indent=2))
+          out.joinpath('R87_DIRECT_XREFS.json').write_text(json.dumps(direct,indent=2))
+          out.joinpath('R87_INDIRECT_POINTER_XREFS.json').write_text(json.dumps(indirect,indent=2))
+
+          # seed owners from direct + indirect xrefs
+          seed_by_text=collections.defaultdict(set)
+          for x in direct+indirect:
+              if x['owner_rva'] is not None:
+                  seed_by_text[x['string']['text']].add(base+x['owner_rva'])
+
+          # transport functions
+          tr_re=re.compile(r'^(HidD_|HidP_|SetupDi|CreateFile|ReadFile|WriteFile|DeviceIoControl|WaitForSingleObject)',re.I)
+          transport_funcs=set()
+          for f,arr in imps_by_func.items():
+              if any(tr_re.search(x['name']) for x in arr):
+                  transport_funcs.add(f)
+
+          known_dongle_funcs={
+              base+0x8494:'R84_HID_READ',
+              base+0x8620:'R84_HID_WRITE',
+              base+0x8714:'R84_HID_OPEN_ATTRIBUTES',
+              base+0x8AC0:'R84_HID_ENUM_EXPECTED_ID',
+              base+0x91D4:'R84_FLASH_OTP_ENUM',
+              base+0x9A08:'R84_HID_SEND_COMMAND',
+              base+0x17594:'R86_USB_DONGLE_LINK_UI',
+              base+0x1E03C:'R86_CORRECT_DONGLE_REQUIRED_UI',
+          }
+
+          paths=[]
+          for text,seeds in seed_by_text.items():
+              for start in seeds:
+                  q=collections.deque([(start,[start])]); seen={start}
+                  while q:
+                      cur,path=q.popleft()
+                      label=known_dongle_funcs.get(cur)
+                      if label or cur in transport_funcs:
+                          paths.append({
+                              'seed_text':text,
+                              'seed_owner_rva':start-base,
+                              'path_rvas':[x-base for x in path],
+                              'terminal_rva':cur-base,
+                              'terminal_label':label,
+                              'terminal_imports':imps_by_func.get(cur,[]),
+                          })
+                      if len(path)-1>=7: continue
+                      for nxt in graph.get(cur,()):
+                          if nxt not in seen:
+                              seen.add(nxt); q.append((nxt,path+[nxt]))
+
+          out.joinpath('R87_DOWNLOADER_TO_TRANSPORT_PATHS.json').write_text(
+              json.dumps(paths,indent=2)
+          )
+
+          # Exhaustive HID_ATTRIBUTES sites and nearby comparison constants.
+          hidd_iat=next((x['iat_va'] for x in imports if x['dll'].lower()=='hid.dll' and x['name']=='HidD_GetAttributes'),None)
+          hid_sites=[]
+          for idx,i in enumerate(ins):
+              hit=False
+              for op in i.operands:
+                  if op.type==CS_OP_MEM and op.mem.disp==hidd_iat: hit=True
+              if not hit: continue
+              vals=[]
+              for z in ins[max(0,idx-50):min(len(ins),idx+80)]:
+                  for op in z.operands:
+                      if op.type==CS_OP_IMM:
+                          v=op.imm & 0xffffffff
+                          if 0 < v <= 0xffff:
+                              vals.append(v)
+              hid_sites.append({
+                  'call_rva':i.address-base,
+                  'owner_rva':None if owner(i.address) is None else owner(i.address)-base,
+                  'nearby_u16_constants':sorted(set(vals)),
+              })
+          out.joinpath('R87_HIDD_GETATTRIBUTES_CONSTANT_CENSUS.json').write_text(
+              json.dumps(hid_sites,indent=2)
+          )
+
+          # Existing global expected VID/PID writes from R84/R86.
+          expected_vid=0xEAA244; expected_pid=0xEAA246
+          id_writes=[]
+          for i in ins:
+              m=re.search(r'word ptr \[(0x[0-9a-f]+)\], (0x[0-9a-f]+)',i.op_str.lower())
+              if not m: continue
+              dst=int(m.group(1),16); val=int(m.group(2),16)
+              if dst in (expected_vid,expected_pid):
+                  id_writes.append({
+                      'field':'VID' if dst==expected_vid else 'PID',
+                      'value':f'{val:04X}','rva':i.address-base,
+                  })
+          out.joinpath('R87_EXPECTED_ID_WRITES.json').write_text(json.dumps(id_writes,indent=2))
+
+          known_values={'0633','5322','0288','7966'}
+          observed={x['value'] for x in id_writes}
+          p2_refs=[x for x in direct+indirect if 'p2 downloader' in x['string']['text'].lower()]
+          b1_refs=[x for x in direct+indirect if 'b1x downloader' in x['string']['text'].lower()]
+          p2paths=[p for p in paths if 'p2 downloader' in p['seed_text'].lower()]
+          b1paths=[p for p in paths if 'b1x downloader' in p['seed_text'].lower()]
+          donglepaths=[p for p in paths if 'dongle' in p['seed_text'].lower()]
+
+          decision={
+              'SHA_PIN_MATCH':True,
+              'P2_DOWNLOADER_STRING_COUNT':sum(1 for x in strings if 'p2 downloader' in x['text'].lower()),
+              'B1X_DOWNLOADER_STRING_COUNT':sum(1 for x in strings if 'b1x downloader' in x['text'].lower()),
+              'P2_DIRECT_OR_INDIRECT_XREF_COUNT':len(p2_refs),
+              'B1X_DIRECT_OR_INDIRECT_XREF_COUNT':len(b1_refs),
+              'P2_TO_TRANSPORT_PATH_COUNT':len(p2paths),
+              'B1X_TO_TRANSPORT_PATH_COUNT':len(b1paths),
+              'DONGLE_TO_TRANSPORT_PATH_COUNT':len(donglepaths),
+              'HIDD_GETATTRIBUTES_SITE_COUNT':len(hid_sites),
+              'EXPECTED_ID_VALUES':sorted(observed),
+              'NEW_EXPECTED_ID_VALUE_BEYOND_0633_5322_0288_7966':bool(observed-known_values),
+              'P2_B1X_DISTINCT_PHONE_DIRECT_TRANSPORT_PROVEN':False,
+              'BP1048P4_PHONE_DIRECT_BOOT_ENTRY_PROVEN':False,
+              'BP1048P4_PHONE_DIRECT_RECOVERY_IDENTITY_PROVEN':False,
+              'READ_ONLY_PHONE_DIRECT_BACKUP_PROVEN':False,
+              'LIVE_BOARD_TEST_ALLOWED_FROM_R87':False,
+              'FLASH_ALLOWED':False,
+          }
+          out.joinpath('R87_DECISION.json').write_text(json.dumps(decision,indent=2)+'\n')
+          print(json.dumps(decision,indent=2))
+          PY
+
+      - name: Build focused report
+        shell: bash
+        run: |
+          set -euo pipefail
+          /tmp/r87-venv/bin/python - <<'PY'
+          from pathlib import Path
+          import json
+          p=Path('/tmp/r87/evidence')
+          dec=json.loads((p/'R87_DECISION.json').read_text())
+          direct=json.loads((p/'R87_DIRECT_XREFS.json').read_text())
+          indirect=json.loads((p/'R87_INDIRECT_POINTER_XREFS.json').read_text())
+          paths=json.loads((p/'R87_DOWNLOADER_TO_TRANSPORT_PATHS.json').read_text())
+          hid=json.loads((p/'R87_HIDD_GETATTRIBUTES_CONSTANT_CENSUS.json').read_text())
+
+          lines=[
+              '# R87 MVAssistant P2/B1X downloader role closure',
+              '',
+              'OFFLINE/STATIC ONLY. No vendor execution, no USB/board access, no flash.',
+              '',
+              '## Decision',
+              '```json',json.dumps(dec,indent=2),'```','',
+              '## P2/B1X direct and indirect xrefs',
+          ]
+          for x in direct+indirect:
+              t=x['string']['text'].lower()
+              if 'p2 downloader' in t or 'b1x downloader' in t or 'dongle' in t:
+                  lines.append(
+                      f"- `{x['string']['text']}` owner={x.get('owner_rva')} "
+                      f"xref=0x{x['xref_rva']:08X} `{x['instruction']}`"
+                  )
+
+          lines += ['','## Downloader/dongle -> transport paths']
+          for x in paths[:400]:
+              path=' -> '.join(f"0x{r:08X}" for r in x['path_rvas'])
+              imps=','.join(f"{i.get('dll','')}!{i.get('name','')}" for i in x['terminal_imports'])
+              lines.append(
+                  f"- `{x['seed_text']}` path={path} terminal={x['terminal_label'] or imps}"
+              )
+
+          lines += ['','## HidD_GetAttributes site census']
+          for x in hid:
+              vals=', '.join(f'0x{v:04X}' for v in x['nearby_u16_constants'])
+              lines.append(f"- call RVA 0x{x['call_rva']:08X} owner={x['owner_rva']} nearby_u16=[{vals}]")
+
+          lines += [
+              '',
+              '## Gate',
+              '- R86 already proved active MVA/download UI reaches the MVAssistant HID/dongle transport.',
+              '- R87 closes whether P2/B1X names expose any separate host transport or HID identity.',
+              '- Strings or downloader names alone never prove BP1048P4 phone-direct recovery.',
+              '- No live test, no R79 autorun, and no flash follows from this audit.',
+              '- FLASH_ALLOWED=NO.',
+          ]
+          (p/'R87_REPORT.md').write_text('\n'.join(lines)+'\n')
+          PY
+          sed -n '1,650p' /tmp/r87/evidence/R87_REPORT.md
+
+      - name: Package evidence
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp /tmp/R87_SAFETY.txt /tmp/r87/evidence/ || true
+          (cd /tmp/r87/evidence && zip -9 -r /tmp/R87_BP1048P4_MVASSISTANT_P2_B1X_ROLE_CLOSURE_EVIDENCE.zip .)
+          sha256sum /tmp/R87_BP1048P4_MVASSISTANT_P2_B1X_ROLE_CLOSURE_EVIDENCE.zip \
+            > /tmp/R87_BP1048P4_MVASSISTANT_P2_B1X_ROLE_CLOSURE_EVIDENCE.zip.sha256
+
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: R87-BP1048P4-MVASSISTANT-P2-B1X-ROLE-CLOSURE-EVIDENCE
+          path: |
+            /tmp/R87_BP1048P4_MVASSISTANT_P2_B1X_ROLE_CLOSURE_EVIDENCE.zip
+            /tmp/R87_BP1048P4_MVASSISTANT_P2_B1X_ROLE_CLOSURE_EVIDENCE.zip.sha256
+          if-no-files-found: error
