@@ -1,0 +1,382 @@
+name: R97 BP1048P4 USB alternate bootstrap and compile-gate closure
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: r97-bp1048p4-usb-alt-bootstrap-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  SDK_REPO: https://github.com/leadercxn/bp1048_sdk_v0.1.12.git
+  SDK_COMMIT: 8105bd864b04995d81c9f9ae77cb158259f39015
+  FLASH_ALLOWED: 'NO'
+
+jobs:
+  offline-closure:
+    name: OFFLINE USB alternate-bootstrap/compile-gate closure - no USB/no board/no flash
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Safety gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/r97/evidence
+          cat > /tmp/r97/evidence/R97_SAFETY.txt <<'EOF'
+          R97_STATIC_ONLY=YES
+          BOARD_CONTACT=NO
+          USB_DEVICE_ACCESS=NO
+          PHONE_LIVE_TEST=NO
+          VENDOR_BINARY_EXECUTION=NO
+          SEND_AA55=NO
+          SEND_0X11=NO
+          SEND_CHIPERAS_CODEDATA_BOOTDAT_CONSTDAT_CNFGDAT_BTUPDAT_UPINFO_CXXX=NO
+          R79_PHYSICAL_REPLUG_AUTORUN=NO
+          ERASE_PROGRAM_FLASH=NO
+          FINAL_REQUIRED_TRANSPORT=SAMSUNG_S25_PLUS_USB_C_DIRECT_TO_DSP_USB_C
+          HARDWARE_MODIFICATION=FORBIDDEN
+          FLASH_ALLOWED=NO
+          PURPOSE=PROVE_REFERENCE_COMPILE_GATE_FOR_AA55_BOOT_JUMP_AND_ENUMERATE_ANY_ALTERNATE_USB_HOST_TRIGGERED_BOOT_RESET_JUMP
+          EOF
+          cat /tmp/r97/evidence/R97_SAFETY.txt
+
+      - name: Clone exact SDK commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --filter=blob:none --no-checkout "$SDK_REPO" /tmp/r97/sdk
+          cd /tmp/r97/sdk
+          git fetch --depth=1 origin "$SDK_COMMIT"
+          git checkout --detach "$SDK_COMMIT"
+          HEAD="$(git rev-parse HEAD)"
+          test "$HEAD" = "$SDK_COMMIT"
+          printf 'SDK_COMMIT_MATCH=YES\nSDK_HEAD=%s\n' "$HEAD" \
+            > /tmp/r97/evidence/R97_SDK_GATE.txt
+
+      - name: Preserve exact USB and flashboot source
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /tmp/r97/sdk
+
+          cp MVsB1_Base_SDK/driver/driver_api/src/otg/device/otg_device_standard_request.c \
+            /tmp/r97/evidence/R97_otg_device_standard_request.c
+          cp BT_Audio_APP/bt_audio_app_src/device/upgrade.c \
+            /tmp/r97/evidence/R97_upgrade.c
+          cp BT_Audio_APP/bt_audio_app_src/user/sys_gpio.h \
+            /tmp/r97/evidence/R97_sys_gpio.h
+          cp BT_Audio_APP/bt_audio_app_src/inc/app_config.h \
+            /tmp/r97/evidence/R97_app_config.h
+
+          sha256sum /tmp/r97/evidence/R97_*.c /tmp/r97/evidence/R97_*.h \
+            > /tmp/r97/evidence/R97_SOURCE_SHA256.txt
+
+      - name: Enumerate every source reference to boot jump reset and upgrade flags
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /tmp/r97/sdk
+
+          grep -RInaE \
+            'start_up_grate|pc_upgrade|FLASH_BOOT_EN|CFG_UPGRADE_PC_EN|CFG_UPGRADE_UDISK_EN|ROM_SysReset|Reset_McuSystem|Reset_McuCore|NVIC_SystemReset|jump_fun|ADR_FLASH_BOOT_FLAGE|ROM_UserRegister(Set|Clear|Get)|OTG_DeviceManufacturerRequest|OTG_DeviceClassRequest|OTG_DeviceStandardRequest|HIDUsb_Rx|UsbLoadAudioMode' \
+            --include='*.c' --include='*.h' \
+            --exclude-dir=.git . \
+            > /tmp/r97/evidence/R97_BOOT_RESET_SOURCE_HITS.txt || true
+
+          grep -RInaE \
+            'start_up_grate[[:space:]]*\(' \
+            --include='*.c' --include='*.h' \
+            --exclude-dir=.git . \
+            > /tmp/r97/evidence/R97_ALL_START_UP_GRATE_CALLS.txt || true
+
+          grep -RInaE \
+            'ROM_SysReset[[:space:]]*\(|Reset_McuSystem[[:space:]]*\(|Reset_McuCore[[:space:]]*\(|NVIC_SystemReset[[:space:]]*\(|jump_fun[[:space:]]*\(' \
+            --include='*.c' --include='*.h' \
+            --exclude-dir=.git . \
+            > /tmp/r97/evidence/R97_ALL_RESET_JUMP_CALLS.txt || true
+
+          cat /tmp/r97/evidence/R97_ALL_START_UP_GRATE_CALLS.txt
+          echo '--- reset/jump ---'
+          sed -n '1,1000p' /tmp/r97/evidence/R97_ALL_RESET_JUMP_CALLS.txt
+
+      - name: Extract USB request handler and preprocessor guard context
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import json,re
+
+          root=Path('/tmp/r97/sdk')
+          out=Path('/tmp/r97/evidence')
+          req=root/'MVsB1_Base_SDK/driver/driver_api/src/otg/device/otg_device_standard_request.c'
+          sysgpio=root/'BT_Audio_APP/bt_audio_app_src/user/sys_gpio.h'
+          upgrade=root/'BT_Audio_APP/bt_audio_app_src/device/upgrade.c'
+
+          req_lines=req.read_text(errors='ignore').splitlines()
+          sys_lines=sysgpio.read_text(errors='ignore').splitlines()
+          up_lines=upgrade.read_text(errors='ignore').splitlines()
+
+          def contexts(lines, pattern, before=20, after=30):
+              r=[]
+              rx=re.compile(pattern,re.I)
+              for i,line in enumerate(lines):
+                  if rx.search(line):
+                      lo=max(0,i-before); hi=min(len(lines),i+after+1)
+                      r.append({
+                          'line':i+1,
+                          'text':'\n'.join(f'{j+1}: {lines[j]}' for j in range(lo,hi))
+                      })
+              return r
+
+          evidence={
+              'pc_upgrade_contexts':contexts(req_lines,r'pc_upgrade',35,45),
+              'feature_report_contexts':contexts(req_lines,r'Feature Report|Setup\[3\].*0x03',30,45),
+              'manufacturer_request_contexts':contexts(req_lines,r'OTG_DeviceManufacturerRequest',25,80),
+              'class_request_contexts':contexts(req_lines,r'OTG_DeviceClassRequest',25,80),
+              'flash_boot_define_contexts':contexts(sys_lines,r'FLASH_BOOT_EN|CFG_UPGRADE_PC_EN|CFG_UPGRADE_UDISK_EN',20,25),
+              'start_up_grate_impl_contexts':contexts(up_lines,r'void\s+start_up_grate|jump_fun',20,80),
+          }
+          out.joinpath('R97_GUARD_CONTEXTS.json').write_text(
+              json.dumps(evidence,indent=2,ensure_ascii=False)+'\n'
+          )
+
+          parts=[]
+          for key,items in evidence.items():
+              parts.append(f'===== {key} =====')
+              for x in items:
+                  parts.append(x['text'])
+          out.joinpath('R97_GUARD_CONTEXTS.txt').write_text('\n\n'.join(parts)+'\n')
+          PY
+
+          sed -n '1,2600p' /tmp/r97/evidence/R97_GUARD_CONTEXTS.txt
+
+      - name: Parse compile gates and USB host-triggered alternatives
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import json,re
+
+          root=Path('/tmp/r97/sdk')
+          out=Path('/tmp/r97/evidence')
+
+          req=(root/'MVsB1_Base_SDK/driver/driver_api/src/otg/device/otg_device_standard_request.c').read_text(errors='ignore')
+          sysgpio=(root/'BT_Audio_APP/bt_audio_app_src/user/sys_gpio.h').read_text(errors='ignore')
+          upgrade=(root/'BT_Audio_APP/bt_audio_app_src/device/upgrade.c').read_text(errors='ignore')
+          allcalls=(out/'R97_ALL_START_UP_GRATE_CALLS.txt').read_text(errors='ignore')
+          resets=(out/'R97_ALL_RESET_JUMP_CALLS.txt').read_text(errors='ignore')
+
+          set_feature_aa=bool(re.search(
+              r'SetReport\s*\(Feature Report\).*?Request\[0\]\s*==\s*0xAA.*?pc_upgrade\s*=\s*1',
+              req,re.S|re.I
+          ))
+          get_feature_55=bool(re.search(
+              r'GetReport\s*\(Feature Report\).*?if\s*\(\s*pc_upgrade\s*\).*?Setup\[0\]\s*=\s*0x55',
+              req,re.S|re.I
+          ))
+          get_feature_boot=bool(re.search(
+              r'GetReport\s*\(Feature Report\).*?if\s*\(\s*pc_upgrade\s*\).*?start_up_grate\s*\(\s*AppResourceUsbDevice\s*\)',
+              req,re.S|re.I
+          ))
+
+          # Prove the boot call itself is textually enclosed by #if FLASH_BOOT_EN.
+          lines=req.splitlines()
+          boot_guarded=False
+          boot_line=None
+          for i,line in enumerate(lines):
+              if re.search(r'start_up_grate\s*\(\s*AppResourceUsbDevice\s*\)',line):
+                  boot_line=i+1
+                  stack=[]
+                  for j in range(0,i):
+                      s=lines[j].strip()
+                      if re.match(r'#\s*(if|ifdef|ifndef)\b',s):
+                          stack.append(s)
+                      elif re.match(r'#\s*endif\b',s) and stack:
+                          stack.pop()
+                      elif re.match(r'#\s*(else|elif)\b',s):
+                          # retain parent condition text plus branch marker
+                          if stack:
+                              stack[-1]=stack[-1]+' | '+s
+                  if any('FLASH_BOOT_EN' in x for x in stack):
+                      boot_guarded=True
+                      break
+
+          latch_guard_cfg_app=bool(re.search(
+              r'#ifdef\s+CFG_APP_CONFIG.*?SetReport\s*\(Feature Report\).*?pc_upgrade',
+              req,re.S
+          ))
+
+          flashboot_formula=bool(re.search(
+              r'#if\s+CFG_USB_EN.*?#if\s+CFG_UPGRADE_PC_EN\s*\|\|\s*CFG_UPGRADE_UDISK_EN.*?#define\s+FLASH_BOOT_EN\s*\(\s*1\s*\).*?#else.*?#define\s+FLASH_BOOT_EN\s*\(\s*0\s*\)',
+              sysgpio,re.S
+          ))
+
+          jump_to_zero=bool(re.search(
+              r'jump_fun\s*=\s*\(fun\)\s*0\s*;.*?jump_fun\s*\(\s*\)',
+              upgrade,re.S
+          ))
+          ram_handoff=bool(
+              'ADR_FLASH_BOOT_FLAGE' in upgrade and
+              'SREG_FLASH_BOOT_FLAGE.PC = 1' in upgrade and
+              'SREG_FLASH_BOOT_FLAGE.updata = 1' in upgrade
+          )
+
+          # Source-wide start_up_grate call lines. Any host USB alternative must be
+          # outside the known Feature GET path and still reachable from an OTG request.
+          call_lines=[x for x in allcalls.splitlines() if x.strip()]
+          usb_alt_candidates=[]
+          for x in call_lines:
+              low=x.lower()
+              if 'otg_device_standard_request.c' in low and 'appresourceusbdevice' in low:
+                  # this is the known Feature GET call
+                  continue
+              if any(k in low for k in ('otg','usb','hid','manufacturer','standard_request','class_request')):
+                  usb_alt_candidates.append(x)
+
+          # Look for CPU/system reset/jump directly in USB OTG driver tree.
+          usb_reset_jump_lines=[
+              x for x in resets.splitlines()
+              if '/otg/' in x.lower() or 'usb' in x.lower() or 'hid' in x.lower()
+          ]
+
+          # Key compile-matrix fact: CFG_APP_CONFIG independently guards feature code,
+          # while FLASH_BOOT_EN independently guards the jump.
+          separable_latch_and_jump=(
+              latch_guard_cfg_app and boot_guarded and flashboot_formula
+          )
+
+          decision={
+              'SDK_COMMIT_MATCH':True,
+              'SET_FEATURE_AA_SETS_PC_UPGRADE':set_feature_aa,
+              'GET_FEATURE_PC_UPGRADE_RETURNS_55':get_feature_55,
+              'GET_FEATURE_PC_UPGRADE_HAS_START_UP_GRATE':get_feature_boot,
+              'START_UP_GRATE_CALL_IS_GUARDED_BY_FLASH_BOOT_EN':boot_guarded,
+              'FEATURE_LATCH_LOGIC_IS_GUARDED_BY_CFG_APP_CONFIG':latch_guard_cfg_app,
+              'FLASH_BOOT_EN_DERIVED_FROM_USB_AND_UPGRADE_FLAGS':flashboot_formula,
+              'LATCH_CAN_EXIST_IN_BUILD_WHILE_BOOT_JUMP_IS_COMPILED_OUT_BY_SEPARATE_GATE':separable_latch_and_jump,
+              'START_UP_GRATE_WRITES_RAM_HANDOFF_PC_AND_UPDATE_BITS':ram_handoff,
+              'START_UP_GRATE_JUMPS_TO_ADDRESS_ZERO':jump_to_zero,
+              'SOURCE_WIDE_START_UP_GRATE_CALL_COUNT':len(call_lines),
+              'ALTERNATE_USB_HOST_TRIGGERED_START_UP_GRATE_CANDIDATE_COUNT':len(usb_alt_candidates),
+              'USB_DRIVER_CPU_RESET_OR_ZERO_JUMP_OUTSIDE_KNOWN_BOOT_PATH_COUNT':len(usb_reset_jump_lines),
+              'ALTERNATE_USB_CONTROL_CLASS_VENDOR_BOOTSTRAP_PROVEN':False,
+              'PRODUCTION_FLASH_BOOT_EN_VALUE_PROVEN':False,
+              'PRODUCTION_FLASHBOOT_PRESENT_AT_ADDRESS_ZERO_PROVEN':False,
+              'PHONE_DIRECT_PRODUCTION_BOOTSTRAP_PROVEN_FROM_R97':False,
+              'LIVE_BOARD_TEST_ALLOWED_FROM_R97':False,
+              'FLASH_ALLOWED':False,
+          }
+
+          out.joinpath('R97_DECISION.json').write_text(json.dumps(decision,indent=2)+'\n')
+          out.joinpath('R97_USB_ALT_CANDIDATES.json').write_text(
+              json.dumps({
+                  'alternate_start_up_grate_candidates':usb_alt_candidates,
+                  'usb_reset_jump_lines':usb_reset_jump_lines,
+                  'all_start_up_grate_calls':call_lines,
+                  'known_feature_boot_line':boot_line,
+              },indent=2,ensure_ascii=False)+'\n'
+          )
+          print(json.dumps(decision,indent=2))
+          PY
+
+      - name: Audit OTG request handlers for hidden reset jump or user-register writes
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /tmp/r97/sdk
+
+          grep -RInaE \
+            'ROM_SysReset|Reset_McuSystem|Reset_McuCore|NVIC_SystemReset|ROM_UserRegister(Set|Clear)|ADR_FLASH_BOOT_FLAGE|start_up_grate|jump_fun|0x4000100C' \
+            MVsB1_Base_SDK/driver/driver_api/src/otg \
+            > /tmp/r97/evidence/R97_OTG_RESET_REGISTER_HITS.txt || true
+
+          grep -RInaE \
+            'OTG_DeviceManufacturerRequest|OTG_DeviceClassRequest|OTG_DeviceStandardRequest|Setup\[[0-9]+\]|Request\[[0-9]+\]' \
+            MVsB1_Base_SDK/driver/driver_api/src/otg/device \
+            > /tmp/r97/evidence/R97_OTG_REQUEST_MATRIX_HITS.txt || true
+
+          echo '=== OTG reset/register hits ==='
+          cat /tmp/r97/evidence/R97_OTG_RESET_REGISTER_HITS.txt
+          echo '=== OTG request matrix hits ==='
+          sed -n '1,1800p' /tmp/r97/evidence/R97_OTG_REQUEST_MATRIX_HITS.txt
+
+      - name: Build report
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import json
+
+          p=Path('/tmp/r97/evidence')
+          dec=json.loads((p/'R97_DECISION.json').read_text())
+          alt=json.loads((p/'R97_USB_ALT_CANDIDATES.json').read_text())
+          otg=(p/'R97_OTG_RESET_REGISTER_HITS.txt').read_text(errors='ignore')
+
+          lines=[
+              '# R97 BP1048P4 USB alternate-bootstrap and compile-gate closure',
+              '',
+              'OFFLINE/STATIC ONLY. No phone, USB or board access. No AA55. No flash.',
+              '',
+              '## Decision',
+              '```json',json.dumps(dec,indent=2),'```','',
+              '## Exact reference behavior',
+              '- HID Feature SET with payload byte AA sets pc_upgrade=1.',
+              '- Subsequent HID Feature GET returns 55 when pc_upgrade is set.',
+              '- The call to start_up_grate(AppResourceUsbDevice) is separately compiled only under FLASH_BOOT_EN.',
+              '- FLASH_BOOT_EN is derived from CFG_USB_EN plus CFG_UPGRADE_PC_EN/CFG_UPGRADE_UDISK_EN.',
+              '- Therefore reference source permits a build where the AA/55 latch exists but the boot jump is absent.',
+              '',
+              '## Alternate USB start_up_grate candidates',
+          ]
+          if alt['alternate_start_up_grate_candidates']:
+              lines.extend('- '+x for x in alt['alternate_start_up_grate_candidates'])
+          else:
+              lines.append('- none')
+
+          lines += ['','## USB-driver reset/jump/register hits']
+          if otg.strip():
+              lines.extend('- '+x for x in otg.splitlines()[:600])
+          else:
+              lines.append('- none')
+
+          lines += [
+              '',
+              '## Production interpretation gate',
+              '- The previously observed production behavior (AA latch -> GET begins 55 -> device remains runtime) is consistent with the reference compile matrix where feature-latch code exists but FLASH_BOOT_EN is disabled, but R97 does not claim that compile flag value is proven for production.',
+              '- No alternative USB control/class/vendor bootstrap is accepted unless an explicit source path reaches reset/jump/start_up_grate independently of the guarded Feature GET path.',
+              '- Physical replug is not a substitute: the reference handoff uses RAM at 0x4000100C before a software jump to address zero.',
+              '- Do not repeat AA->55 and do not run R79.',
+              '- FLASH_ALLOWED=NO.',
+          ]
+          p.joinpath('R97_REPORT.md').write_text('\n'.join(lines)+'\n')
+          print(json.dumps(dec,indent=2))
+          PY
+
+          sed -n '1,950p' /tmp/r97/evidence/R97_REPORT.md
+
+      - name: Package evidence
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          (cd /tmp/r97/evidence && zip -9 -r /tmp/R97_BP1048P4_USB_ALT_BOOTSTRAP_COMPILE_GATE_EVIDENCE.zip .)
+          sha256sum /tmp/R97_BP1048P4_USB_ALT_BOOTSTRAP_COMPILE_GATE_EVIDENCE.zip \
+            > /tmp/R97_BP1048P4_USB_ALT_BOOTSTRAP_COMPILE_GATE_EVIDENCE.zip.sha256
+
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: R97-BP1048P4-USB-ALT-BOOTSTRAP-COMPILE-GATE-EVIDENCE
+          path: |
+            /tmp/R97_BP1048P4_USB_ALT_BOOTSTRAP_COMPILE_GATE_EVIDENCE.zip
+            /tmp/R97_BP1048P4_USB_ALT_BOOTSTRAP_COMPILE_GATE_EVIDENCE.zip.sha256
+          if-no-files-found: error
