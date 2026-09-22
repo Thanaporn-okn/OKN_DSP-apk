@@ -1,0 +1,341 @@
+name: R85 BP1048P4 MVAssistant embedded manual direct-upgrade audit
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: r85-bp1048p4-mvassistant-manual-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  MVASSISTANT_DRIVE_FILE_ID: 15hdF2vnnUMVtIFKhZPGLPwBSEZpyqP2H
+  EXPECTED_ZIP_SHA256: 8074b3488453e268dc755fa88b2d0bc8ef14fc8c51c3de4e3a783279c195878f
+  EXPECTED_EXE_SHA256: a62a968f6e9dc06473390ec26d8e1a6ad70d88c242f05acb2463e5081ec12799
+  FLASH_ALLOWED: 'NO'
+
+jobs:
+  offline-resource-audit:
+    name: OFFLINE embedded manual/resources audit - no execution/no USB/no board/no flash
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Safety gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > /tmp/R85_SAFETY.txt <<'EOF'
+          R85_STATIC_ONLY=YES
+          VENDOR_BINARY_EXECUTION=NO
+          BOARD_CONTACT=NO
+          USB_DEVICE_ACCESS=NO
+          ERASE_PROGRAM_FLASH=NO
+          SEND_AA55=NO
+          SEND_0X11=NO
+          SEND_CHIPERAS_CODEDATA_BOOTDAT_CONSTDAT_CNFGDAT_BTUPDAT_UPINFO_CXXX=NO
+          TEST_0633_5322_ON_BOARD=NO
+          TEST_0288_7966_ON_BOARD=NO
+          R79_PHYSICAL_REPLUG_AUTORUN=NO
+          FLASH_ALLOWED=NO
+          PURPOSE=RECOVER_EMBEDDED_HELP_MANUAL_AND_CHECK_FOR_PC_PHONE_DIRECT_USB_UPGRADE_PATH_DISTINCT_FROM_PROGRAMMER
+          EOF
+          cat /tmp/R85_SAFETY.txt
+
+      - name: Install static-only prerequisites
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m venv /tmp/r85-venv
+          /tmp/r85-venv/bin/python -m pip install --disable-pip-version-check --no-cache-dir gdown pefile
+          echo "/tmp/r85-venv/bin" >> "$GITHUB_PATH"
+          command -v 7z || true
+          command -v objdump || true
+
+      - name: Acquire candidate and enforce SHA pins
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/r85/download /tmp/r85/extracted /tmp/r85/evidence /tmp/r85/resources
+          /tmp/r85-venv/bin/gdown \
+            "https://drive.google.com/uc?id=${MVASSISTANT_DRIVE_FILE_ID}" \
+            -O /tmp/r85/download/MVAssistant_BP10xx_V1.8.11.zip
+          ZIP_SHA="$(sha256sum /tmp/r85/download/MVAssistant_BP10xx_V1.8.11.zip | awk '{print $1}')"
+          test "$ZIP_SHA" = "$EXPECTED_ZIP_SHA256"
+          unzip -q /tmp/r85/download/MVAssistant_BP10xx_V1.8.11.zip -d /tmp/r85/extracted
+          EXE=/tmp/r85/extracted/MVAssistant_BP10xx_V1.8.11.exe
+          EXE_SHA="$(sha256sum "$EXE" | awk '{print $1}')"
+          test "$EXE_SHA" = "$EXPECTED_EXE_SHA256"
+          printf 'SHA_PIN_MATCH=YES\nZIP_SHA256=%s\nEXE_SHA256=%s\n' "$ZIP_SHA" "$EXE_SHA" \
+            | tee /tmp/r85/evidence/R85_SHA_GATE.txt
+
+      - name: Extract PE resources overlay and embedded containers without execution
+        shell: bash
+        run: |
+          set -euo pipefail
+          /tmp/r85-venv/bin/python - <<'PY'
+          from pathlib import Path
+          import hashlib, json, re, struct
+          import pefile
+
+          exe=Path('/tmp/r85/extracted/MVAssistant_BP10xx_V1.8.11.exe')
+          root=Path('/tmp/r85/resources')
+          evidence=Path('/tmp/r85/evidence')
+          pe=pefile.PE(str(exe), fast_load=False)
+
+          type_names={
+              1:'CURSOR',2:'BITMAP',3:'ICON',4:'MENU',5:'DIALOG',6:'STRING',
+              7:'FONTDIR',8:'FONT',9:'ACCELERATOR',10:'RCDATA',11:'MESSAGETABLE',
+              12:'GROUP_CURSOR',14:'GROUP_ICON',16:'VERSION',17:'DLGINCLUDE',
+              19:'PLUGPLAY',20:'VXD',21:'ANICURSOR',22:'ANIICON',23:'HTML',24:'MANIFEST'
+          }
+          items=[]
+
+          def entry_name(e):
+              if e.name is not None:
+                  try: return str(e.name)
+                  except: return 'name'
+              return str(e.id)
+
+          if hasattr(pe,'DIRECTORY_ENTRY_RESOURCE'):
+              for te in pe.DIRECTORY_ENTRY_RESOURCE.entries:
+                  t=entry_name(te)
+                  if te.name is None:
+                      t=type_names.get(te.id, f'TYPE_{te.id}')
+                  if not hasattr(te,'directory'): continue
+                  for ne in te.directory.entries:
+                      n=entry_name(ne)
+                      if not hasattr(ne,'directory'): continue
+                      for le in ne.directory.entries:
+                          lang=entry_name(le)
+                          d=le.data.struct
+                          b=pe.get_data(d.OffsetToData,d.Size)
+                          fn=f"{t}__{n}__{lang}__rva_{d.OffsetToData:08X}.bin".replace('/','_').replace('\\','_')
+                          p=root/fn
+                          p.write_bytes(b)
+                          items.append({
+                              'type':t,'name':n,'lang':lang,
+                              'rva':d.OffsetToData,'size':len(b),
+                              'sha256':hashlib.sha256(b).hexdigest(),
+                              'path':p.name,
+                              'magic16':b[:16].hex()
+                          })
+
+          # Overlay after the last section; useful for installers/self-contained help blobs.
+          last=max((s.PointerToRawData+s.SizeOfRawData for s in pe.sections), default=0)
+          data=exe.read_bytes()
+          overlay=data[last:] if last < len(data) else b''
+          if overlay:
+              p=root/'PE_OVERLAY.bin'
+              p.write_bytes(overlay)
+              items.append({
+                  'type':'OVERLAY','name':'PE_OVERLAY','lang':'',
+                  'rva':None,'size':len(overlay),
+                  'sha256':hashlib.sha256(overlay).hexdigest(),
+                  'path':p.name,'magic16':overlay[:16].hex()
+              })
+
+          evidence.joinpath('R85_RESOURCE_INVENTORY.json').write_text(
+              json.dumps(items,indent=2,ensure_ascii=False)+'\n'
+          )
+
+          # Detect embedded file/container signatures anywhere in each resource/overlay.
+          sigs=[
+              ('ZIP',b'PK\x03\x04'),
+              ('CHM_ITSF',b'ITSF'),
+              ('PDF',b'%PDF-'),
+              ('7Z',bytes.fromhex('377abcaf271c')),
+              ('RAR4',b'Rar!\x1a\x07\x00'),
+              ('RAR5',b'Rar!\x1a\x07\x01\x00'),
+              ('MVA',bytes.fromhex('4d56b158')),
+              ('PE',b'MZ'),
+          ]
+          carved=[]
+          cdir=root/'carved'
+          cdir.mkdir(exist_ok=True)
+          for it in items:
+              b=(root/it['path']).read_bytes()
+              for sn,sg in sigs:
+                  start=0
+                  while True:
+                      off=b.find(sg,start)
+                      if off<0: break
+                      # Save from signature to end; extraction tools can validate it later.
+                      cp=cdir/f"{it['path']}__{sn}__off_{off:08X}.bin"
+                      cp.write_bytes(b[off:])
+                      carved.append({
+                          'source':it['path'],'signature':sn,'offset':off,
+                          'carved_path':str(cp.relative_to(root)),
+                          'size_to_end':len(b)-off,
+                          'sha256':hashlib.sha256(b[off:]).hexdigest(),
+                      })
+                      start=off+1
+          evidence.joinpath('R85_CARVED_SIGNATURES.json').write_text(
+              json.dumps(carved,indent=2)+'\n'
+          )
+          print('RESOURCE_COUNT',len(items))
+          print('CARVED_SIGNATURE_COUNT',len(carved))
+          PY
+
+          # Try extraction only as data. Never execute extracted files.
+          mkdir -p /tmp/r85/carved_extract
+          while IFS= read -r f; do
+            base="$(basename "$f")"
+            mkdir -p "/tmp/r85/carved_extract/$base"
+            7z x -y "$f" -o"/tmp/r85/carved_extract/$base" >/dev/null 2>&1 || true
+          done < <(find /tmp/r85/resources/carved -type f 2>/dev/null | sort)
+
+          find /tmp/r85/resources -type f -printf '%P\t%s\n' | sort \
+            > /tmp/r85/evidence/R85_RESOURCE_FILES.tsv
+          find /tmp/r85/carved_extract -type f -printf '%P\t%s\n' | sort \
+            > /tmp/r85/evidence/R85_EXTRACTED_EMBEDDED_FILES.tsv || true
+
+      - name: Static text and manual direct-upgrade clue scan
+        shell: bash
+        run: |
+          set -euo pipefail
+          /tmp/r85-venv/bin/python - <<'PY'
+          from pathlib import Path
+          import json,re
+
+          roots=[
+              Path('/tmp/r85/resources'),
+              Path('/tmp/r85/carved_extract'),
+              Path('/tmp/r85/extracted'),
+          ]
+          evidence=Path('/tmp/r85/evidence')
+          terms=[
+              'PC升级下载','升级下载','PC upgrade','upgrade download',
+              'programmer','programmer mode','burn','burner','dongle',
+              'Hummingbird','蜂鸟','OTP','Flash usb','Otp usb',
+              'USB','HID','VID','PID','0633','5322','0288','7966',
+              'BP1048P4','BP1048P','BP1048B2','BP10xx','BP1048',
+              'recovery','bootloader','flashboot','boot',
+              'MVA','Mountain View Upgrade File',
+              'phone','Android','OTG','USB Host',
+              'readback','read flash','backup','identify','chip id','flash id',
+          ]
+
+          def astr(b):
+              for m in re.finditer(rb'[\x20-\x7e]{4,}',b):
+                  yield m.start(),m.group().decode('latin1','ignore'),'ascii'
+          def u16(b):
+              for m in re.finditer(rb'(?:[\x20-\x7e]\x00){4,}',b):
+                  yield m.start(),m.group().decode('utf-16le','ignore'),'utf16le'
+
+          hits=[]
+          seen=set()
+          for root in roots:
+              if not root.exists(): continue
+              for p in root.rglob('*'):
+                  if not p.is_file(): continue
+                  try:
+                      b=p.read_bytes()
+                  except: continue
+                  # Avoid scanning the full original EXE twice in this step.
+                  if p.name=='MVAssistant_BP10xx_V1.8.11.exe':
+                      continue
+                  for off,s,enc in list(astr(b))+list(u16(b)):
+                      ms=[t for t in terms if t.lower() in s.lower()]
+                      if not ms: continue
+                      key=(str(p),off,enc,s[:400])
+                      if key in seen: continue
+                      seen.add(key)
+                      hits.append({
+                          'path':str(p),
+                          'offset':off,'encoding':enc,
+                          'terms':ms,'text':s[:1200]
+                      })
+          evidence.joinpath('R85_RESOURCE_TEXT_HITS.json').write_text(
+              json.dumps(hits,indent=2,ensure_ascii=False)+'\n'
+          )
+
+          # Fail-closed classifier. Text alone never proves phone-direct mode.
+          low='\n'.join(x['text'].lower() for x in hits)
+          dec={
+              'EMBEDDED_RESOURCE_HIT_COUNT':len(hits),
+              'PROGRAMMER_OR_DONGLE_TERMS_PRESENT':any(x in low for x in ['programmer','dongle','hummingbird','蜂鸟','otp usb','flash usb']),
+              'PC_UPGRADE_TERMS_PRESENT':any(x in low for x in ['pc升级下载','升级下载','pc upgrade','upgrade download']),
+              'ANDROID_OR_OTG_TERMS_PRESENT':any(x in low for x in ['android',' otg','usb host']),
+              'BP1048P4_EXPLICIT_RESOURCE_TERM_PRESENT':'bp1048p4' in low,
+              'PHONE_DIRECT_USB_UPGRADE_PROVEN':False,
+              'PHONE_DIRECT_RECOVERY_IDENTITY_PROVEN':False,
+              'READ_ONLY_PHONE_DIRECT_BACKUP_PROVEN':False,
+              'LIVE_BOARD_TEST_ALLOWED_FROM_R85':False,
+              'FLASH_ALLOWED':False,
+          }
+          evidence.joinpath('R85_DECISION.json').write_text(json.dumps(dec,indent=2)+'\n')
+          print(json.dumps(dec,indent=2))
+          PY
+
+      - name: Build human-readable evidence report
+        shell: bash
+        run: |
+          set -euo pipefail
+          /tmp/r85-venv/bin/python - <<'PY'
+          from pathlib import Path
+          import json
+          p=Path('/tmp/r85/evidence')
+          dec=json.loads((p/'R85_DECISION.json').read_text())
+          hits=json.loads((p/'R85_RESOURCE_TEXT_HITS.json').read_text())
+          inv=json.loads((p/'R85_RESOURCE_INVENTORY.json').read_text())
+          carved=json.loads((p/'R85_CARVED_SIGNATURES.json').read_text())
+
+          lines=[
+              '# R85 MVAssistant embedded manual / direct-upgrade audit',
+              '',
+              'OFFLINE/STATIC ONLY. No vendor binary execution, no board/USB access, no flash.',
+              '',
+              '## Decision',
+              '```json',json.dumps(dec,indent=2),'```','',
+              f'PE resources/overlay items: {len(inv)}',
+              f'Embedded container signatures carved: {len(carved)}',
+              '',
+              '## High-value resource/help hits',
+          ]
+          priority=['pc升级下载','升级下载','programmer','dongle','hummingbird','蜂鸟','otp usb','flash usb',
+                    'bp1048p4','android','otg','usb host','recovery','bootloader','readback','backup','flash id']
+          n=0
+          for h in hits:
+              t=h['text'].lower()
+              if any(x in t for x in priority):
+                  lines.append(f"- `{h['path']}` +0x{h['offset']:X} [{','.join(h['terms'])}] :: `{h['text'][:500]}`")
+                  n+=1
+                  if n>=500: break
+          lines += [
+              '',
+              '## Gate',
+              '- R84 plus public evidence identify 0633:5322 / 0288:7966 as MVAssistant host-tool/programmer HID paths.',
+              '- Resource strings alone do not establish a direct BP1048P4 USB recovery mode.',
+              '- A phone-direct path requires an explicit direct-PC/USB-to-chip sequence or production/P4-specific updater evidence.',
+              '- No R79 autorun. No live test from this workflow.',
+              '- FLASH_ALLOWED=NO.',
+          ]
+          (p/'R85_REPORT.md').write_text('\n'.join(lines)+'\n')
+          PY
+          sed -n '1,520p' /tmp/r85/evidence/R85_REPORT.md
+
+      - name: Package evidence
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp /tmp/R85_SAFETY.txt /tmp/r85/evidence/ || true
+          (cd /tmp/r85/evidence && zip -9 -r /tmp/R85_BP1048P4_MVASSISTANT_EMBEDDED_MANUAL_DIRECT_UPGRADE_EVIDENCE.zip .)
+          sha256sum /tmp/R85_BP1048P4_MVASSISTANT_EMBEDDED_MANUAL_DIRECT_UPGRADE_EVIDENCE.zip \
+            > /tmp/R85_BP1048P4_MVASSISTANT_EMBEDDED_MANUAL_DIRECT_UPGRADE_EVIDENCE.zip.sha256
+
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: R85-BP1048P4-MVASSISTANT-EMBEDDED-MANUAL-DIRECT-UPGRADE-EVIDENCE
+          path: |
+            /tmp/R85_BP1048P4_MVASSISTANT_EMBEDDED_MANUAL_DIRECT_UPGRADE_EVIDENCE.zip
+            /tmp/R85_BP1048P4_MVASSISTANT_EMBEDDED_MANUAL_DIRECT_UPGRADE_EVIDENCE.zip.sha256
+          if-no-files-found: error
