@@ -1,0 +1,336 @@
+name: R104 MVSilicon Flash Burner Lite dongle firmware static audit
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - ".github/workflows/R104_MVSILICON_FLASH_BURNER_LITE_DONGLE_STATIC_AUDIT.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: r104-mvsilicon-flash-burner-lite-dongle-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  MEGA_URL_MODERN: https://mega.nz/folder/WVc3kSLD#LFVFW_v28gN-NCKhjdjxIg
+  MEGA_URL_LEGACY: https://mega.nz/#F!WVc3kSLD!LFVFW_v28gN-NCKhjdjxIg
+  SOURCE_FORUM_URL: https://usmi.mybb.ru/viewtopic.php?id=70&p=2
+  FLASH_ALLOWED: "NO"
+
+jobs:
+  static-audit:
+    name: Dongle firmware STATIC ONLY - NO EXECUTION - NO USB - NO BOARD - NO FLASH
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Immutable safety gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/r104/download /tmp/r104/extract /tmp/r104/evidence
+          cat > /tmp/r104/evidence/R104_SAFETY.txt <<'EOF'
+          R104_MODE=STATIC_OFFLINE_ONLY
+          R104_PUBLIC_DONGLE_FILES_EXECUTED=NO
+          R104_USB_DEVICE_ACCESS=NO
+          R104_BOARD_CONTACT=NO
+          R104_AA55_SENT=NO
+          R104_LINEIN_AA55_SENT=NO
+          R104_RUNTIME_0X11_SENT=NO
+          R104_SEND_CHIPERAS_CODEDATA_BOOTDAT_CONSTDAT_CNFGDAT_BTUPDAT_UPINFO_CXXX=NO
+          R104_FLASH_READ_EXECUTED=NO
+          R104_FLASH_ERASE_EXECUTED=NO
+          R104_FLASH_WRITE_EXECUTED=NO
+          R104_ANY_DISCOVERED_PACKET_AUTHORIZED_FOR_BP1048P4=NO
+          R104_UART_OR_JTAG_PATH_ACCEPTED_AS_FINAL_SOLUTION=NO
+          FINAL_REQUIRED_TRANSPORT=SAMSUNG_S25_PLUS_USB_C_DIRECT_TO_DSP_USB_C
+          HARDWARE_MODIFICATION=FORBIDDEN
+          FLASH_ALLOWED=NO
+          EOF
+          cat /tmp/r104/evidence/R104_SAFETY.txt
+
+      - name: Install static acquisition and analysis tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+            megatools file unzip p7zip-full binutils python3-pip jq >/dev/null
+          python3 -m pip install --disable-pip-version-check --no-input \
+            pefile capstone >/dev/null
+          {
+            megadl --version 2>&1 | head -n3 || true
+            file --version | head -n1
+            objdump --version | head -n1
+            python3 - <<'PY'
+          import pefile, capstone
+          print("pefile="+getattr(pefile,"__version__","unknown"))
+          print("capstone="+getattr(capstone,"__version__","unknown"))
+          PY
+          } > /tmp/r104/evidence/R104_TOOL_VERSIONS.txt
+
+      - name: Download public dongle folder without executing anything
+        shell: bash
+        run: |
+          set -u
+          : > /tmp/r104/evidence/R104_MEGA_DOWNLOAD_LOG.txt
+
+          try_download() {
+            url="$1"
+            rm -rf /tmp/r104/download/*
+            echo "TRY=$url" >> /tmp/r104/evidence/R104_MEGA_DOWNLOAD_LOG.txt
+            timeout 180s megadl --path /tmp/r104/download "$url" \
+              >> /tmp/r104/evidence/R104_MEGA_DOWNLOAD_LOG.txt 2>&1
+          }
+
+          try_download "$MEGA_URL_MODERN" || \
+          try_download "$MEGA_URL_LEGACY" || true
+
+          COUNT="$(find /tmp/r104/download -type f | wc -l)"
+          echo "DOWNLOADED_FILE_COUNT=$COUNT" | tee /tmp/r104/evidence/R104_DOWNLOAD_COUNT.txt
+          if [ "$COUNT" -eq 0 ]; then
+            echo "R104_MEGA_ACQUISITION=FAILED" | tee -a /tmp/r104/evidence/R104_DOWNLOAD_COUNT.txt
+            exit 2
+          fi
+          echo "R104_MEGA_ACQUISITION=SUCCESS" | tee -a /tmp/r104/evidence/R104_DOWNLOAD_COUNT.txt
+
+      - name: Inventory and pin every downloaded public file
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /tmp/r104/download
+          find . -type f -printf '%P\n' | sort > /tmp/r104/evidence/R104_FILE_LIST.txt
+          find . -type f -print0 | sort -z | xargs -0 sha256sum \
+            > /tmp/r104/evidence/R104_ALL_SHA256.txt
+          find . -type f -print0 | sort -z | while IFS= read -r -d '' f; do
+            printf '%s\t%s\t' "$(stat -c '%s' "$f")" "$f"
+            file -b "$f"
+          done > /tmp/r104/evidence/R104_FILE_TYPES.txt
+          {
+            echo "SOURCE_FORUM_URL=$SOURCE_FORUM_URL"
+            echo "MEGA_FOLDER_ID=WVc3kSLD"
+            echo "TOTAL_FILES=$(wc -l < /tmp/r104/evidence/R104_FILE_LIST.txt)"
+            echo "TOTAL_BYTES=$(find . -type f -printf '%s\n' | awk '{s+=$1} END{print s+0}')"
+          } > /tmp/r104/evidence/R104_SOURCE_PIN.txt
+          cat /tmp/r104/evidence/R104_SOURCE_PIN.txt
+
+      - name: Recursively list and extract archives safely
+        shell: bash
+        run: |
+          set -euo pipefail
+          : > /tmp/r104/evidence/R104_ARCHIVE_LISTINGS.txt
+          : > /tmp/r104/evidence/R104_ARCHIVE_EXTRACT_LOG.txt
+          i=0
+          while IFS= read -r -d '' f; do
+            case "${f,,}" in
+              *.zip|*.7z|*.rar|*.cab)
+                i=$((i+1))
+                echo "===== $f =====" >> /tmp/r104/evidence/R104_ARCHIVE_LISTINGS.txt
+                7z l "$f" >> /tmp/r104/evidence/R104_ARCHIVE_LISTINGS.txt 2>&1 || true
+                d="/tmp/r104/extract/$i"
+                mkdir -p "$d"
+                timeout 60s 7z x -y -o"$d" "$f" >> /tmp/r104/evidence/R104_ARCHIVE_EXTRACT_LOG.txt 2>&1 || true
+                ;;
+            esac
+            [ "$i" -ge 50 ] && break
+          done < <(find /tmp/r104/download -type f -print0)
+
+          find /tmp/r104/extract -type f -printf '%P\n' | sort \
+            > /tmp/r104/evidence/R104_EXTRACTED_FILE_LIST.txt || true
+          find /tmp/r104/extract -type f -print0 2>/dev/null | sort -z | xargs -0 -r sha256sum \
+            > /tmp/r104/evidence/R104_EXTRACTED_SHA256.txt || true
+
+      - name: Identify candidate dongle firmware and SPI flash dumps
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import hashlib, math, re, json
+
+          roots=[Path("/tmp/r104/download"),Path("/tmp/r104/extract")]
+          rows=[]
+          for root in roots:
+              if not root.exists(): continue
+              for p in root.rglob("*"):
+                  if not p.is_file(): continue
+                  try: b=p.read_bytes()
+                  except Exception: continue
+                  suffix=p.suffix.lower()
+                  typ=""
+                  if suffix in (".bin",".img",".rom",".hex",".mva",".fw",".dump",".dat"): typ="firmware_like"
+                  elif len(b) in (0x100000,0x200000,0x400000,0x800000,0x1000000): typ="spi_flash_sized"
+                  elif b[:2]==b"MZ": typ="pe"
+                  if not typ: continue
+
+                  counts={x:b.count(bytes([x])) for x in set(b)} if b else {}
+                  ent=(-sum((c/len(b))*math.log2(c/len(b)) for c in counts.values())) if b else 0
+                  strings=re.findall(rb'[\x20-\x7e]{5,}',b)
+                  sh=" ".join(s.decode("ascii","replace") for s in strings[:20000])
+                  rows.append({
+                    "path":str(p),
+                    "type":typ,
+                    "size":len(b),
+                    "sha256":hashlib.sha256(b).hexdigest(),
+                    "entropy":round(ent,5),
+                    "ap8048a":bool(re.search(r"AP8048A",sh,re.I)),
+                    "bp10":bool(re.search(r"BP10|BP1048",sh,re.I)),
+                    "flash_burner":bool(re.search(r"Flash Burner|Burner|Dongle|Hummingbird",sh,re.I)),
+                    "usb_host_words":bool(re.search(r"USB.?Host|OTG.?Host|Host Controller|DeviceAttach|EnumDevice",sh,re.I)),
+                    "usb_words":bool(re.search(r"USB|OTG|HID",sh,re.I)),
+                    "flash_words":bool(re.search(r"flash|erase|program|verify|upgrade",sh,re.I)),
+                  })
+          Path("/tmp/r104/evidence/R104_FIRMWARE_CANDIDATES.json").write_text(
+            json.dumps(rows,indent=2,ensure_ascii=False)+"\n"
+          )
+          print(json.dumps(rows,indent=2,ensure_ascii=False))
+          PY
+
+      - name: Search candidate blobs for target-side USB host and programmer semantics
+        shell: bash
+        run: |
+          set -euo pipefail
+          : > /tmp/r104/evidence/R104_FIRMWARE_STRING_CONTEXT.txt
+          find /tmp/r104/download /tmp/r104/extract -type f -size -64M -print0 2>/dev/null |
+          while IFS= read -r -d '' f; do
+            case "${f,,}" in
+              *.bin|*.img|*.rom|*.fw|*.dump|*.dat|*.exe|*.dll)
+                {
+                  echo "===== $f ASCII ====="
+                  strings -a -n 4 "$f"
+                  echo "===== $f UTF16LE ====="
+                  strings -el -n 4 "$f" || true
+                } | grep -Ein -C 3 \
+                  'AP8048A|BP1048P4|BP1048|BP10|Flash Burner|Burner Lite|dongle|Hummingbird|USB.?Host|OTG.?Host|host mode|device attach|enumerat|control transfer|setup packet|endpoint|descriptor|VID[_:= ]|PID[_:= ]|USB|OTG|HID|flashboot|bootloader|upgrade|erase|program|verify|CRC|flash|MVA|dual.?bank|unique.?id|key|encrypt' \
+                  >> /tmp/r104/evidence/R104_FIRMWARE_STRING_CONTEXT.txt || true
+                ;;
+            esac
+          done
+
+      - name: Scan raw firmware for USB descriptor and image signatures
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import json, hashlib
+
+          roots=[Path("/tmp/r104/download"),Path("/tmp/r104/extract")]
+          files=[]
+          for r in roots:
+              if r.exists():
+                  files += [p for p in r.rglob("*") if p.is_file() and p.stat().st_size <= 64*1024*1024]
+
+          sigs={
+            "MVA_MAGIC_4D56B158":bytes.fromhex("4d56b158"),
+            "USB_DEVICE_DESCRIPTOR_1201":bytes.fromhex("1201"),
+            "HID_DESCRIPTOR_0921":bytes.fromhex("0921"),
+            "USB_CONFIG_DESCRIPTOR_0902":bytes.fromhex("0902"),
+            "MZ":b"MZ",
+            "ZIP":b"PK\x03\x04",
+          }
+          out=[]
+          for p in files:
+              try:b=p.read_bytes()
+              except:continue
+              row={"path":str(p),"size":len(b),"sha256":hashlib.sha256(b).hexdigest(),"hits":{}}
+              anyhit=False
+              for name,sig in sigs.items():
+                  offs=[]; pos=0
+                  while True:
+                      q=b.find(sig,pos)
+                      if q<0:break
+                      offs.append(q); pos=q+1
+                      if len(offs)>=64:break
+                  if offs:
+                      anyhit=True
+                      row["hits"][name]=[hex(x) for x in offs]
+              if anyhit: out.append(row)
+          Path("/tmp/r104/evidence/R104_RAW_SIGNATURES.json").write_text(
+              json.dumps(out,indent=2)+"\n"
+          )
+          PY
+
+      - name: Build exact next-step decision
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import json,re
+          ev=Path("/tmp/r104/evidence")
+          cand=json.loads((ev/"R104_FIRMWARE_CANDIDATES.json").read_text())
+          ctx=(ev/"R104_FIRMWARE_STRING_CONTEXT.txt").read_text(errors="replace")
+          decision={
+            "PUBLIC_DONGLE_FOLDER_ACQUIRED": True,
+            "FIRMWARE_CANDIDATE_COUNT": len(cand),
+            "AP8048A_DONGLE_FIRMWARE_LITERAL_PRESENT": bool(re.search(r"AP8048A",ctx,re.I)) or any(x["ap8048a"] for x in cand),
+            "BP1048P4_LITERAL_PRESENT": bool(re.search(r"BP1048P4",ctx,re.I)),
+            "BP1048_OR_BP10_LITERAL_PRESENT": bool(re.search(r"BP1048|BP10",ctx,re.I)) or any(x["bp10"] for x in cand),
+            "USB_HOST_OR_OTG_HOST_SEMANTICS_PRESENT": bool(re.search(r"USB.?Host|OTG.?Host|host mode|device attach|enumerat",ctx,re.I)) or any(x["usb_host_words"] for x in cand),
+            "DONGLE_TO_TARGET_USB_PROTOCOL_PROVEN": False,
+            "PRODUCTION_GOLOPINE_BP1048P4_COMPATIBILITY_PROVEN": False,
+            "PHONE_DIRECT_S25_USB_C_BOOTSTRAP_PROVEN": False,
+            "PRODUCTION_RECOVERY_USB_IDENTITY_PROVEN": False,
+            "SAFE_READ_ONLY_PRODUCTION_BACKUP_PROVEN": False,
+            "ANY_PACKET_AUTHORIZED_FOR_BOARD": False,
+            "NEXT_IF_DONGLE_FW_FOUND": "STATIC_DISASSEMBLY_OF_DONGLE_USB_HOST_TARGET_PROTOCOL",
+            "FLASH_ALLOWED": False
+          }
+          (ev/"R104_DECISION.json").write_text(json.dumps(decision,indent=2)+"\n")
+          report=[
+            "# R104 MVSilicon Flash Burner Lite dongle firmware static audit",
+            "",
+            "OFFLINE STATIC ONLY. No downloaded binary is executed and no USB/board access occurs.",
+            "",
+            "```json",json.dumps(decision,indent=2),"```",
+            "",
+            "Gate:",
+            "- The only accepted final route is Samsung S25+ -> USB-C -> DSP USB-C.",
+            "- UART/JTAG/programmer hardware is not an accepted final solution.",
+            "- Dongle evidence is useful only to recover the target-side USB protocol for a future Android USB-host implementation.",
+            "- No packet discovered here is authorized for the production board.",
+            "- No AA55 repeat, no 0x11, no legacy flash commands.",
+            "- FLASH_ALLOWED=NO.",
+          ]
+          (ev/"R104_REPORT.md").write_text("\n".join(report)+"\n")
+          print(json.dumps(decision,indent=2))
+          PY
+
+      - name: Package evidence only
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /tmp/r104/evidence
+          zip -9 -r /tmp/R104_MVSILICON_FLASH_BURNER_LITE_DONGLE_STATIC_EVIDENCE.zip .
+          sha256sum /tmp/R104_MVSILICON_FLASH_BURNER_LITE_DONGLE_STATIC_EVIDENCE.zip \
+            > /tmp/R104_MVSILICON_FLASH_BURNER_LITE_DONGLE_STATIC_EVIDENCE.zip.sha256
+          cat /tmp/R104_MVSILICON_FLASH_BURNER_LITE_DONGLE_STATIC_EVIDENCE.zip.sha256
+
+      - name: Upload R104 evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: R104-MVSILICON-FLASH-BURNER-LITE-DONGLE-STATIC-EVIDENCE
+          path: |
+            /tmp/R104_MVSILICON_FLASH_BURNER_LITE_DONGLE_STATIC_EVIDENCE.zip
+            /tmp/R104_MVSILICON_FLASH_BURNER_LITE_DONGLE_STATIC_EVIDENCE.zip.sha256
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Final fail-closed gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -F 'R104_PUBLIC_DONGLE_FILES_EXECUTED=NO' /tmp/r104/evidence/R104_SAFETY.txt
+          grep -F 'R104_USB_DEVICE_ACCESS=NO' /tmp/r104/evidence/R104_SAFETY.txt
+          grep -F 'R104_ANY_DISCOVERED_PACKET_AUTHORIZED_FOR_BP1048P4=NO' /tmp/r104/evidence/R104_SAFETY.txt
+          grep -F 'R104_UART_OR_JTAG_PATH_ACCEPTED_AS_FINAL_SOLUTION=NO' /tmp/r104/evidence/R104_SAFETY.txt
+          grep -F 'FLASH_ALLOWED=NO' /tmp/r104/evidence/R104_SAFETY.txt
+          cat /tmp/r104/evidence/R104_DECISION.json
+          echo R104_STATIC_AUDIT_COMPLETE=YES
+          echo FLASH_ALLOWED=NO
