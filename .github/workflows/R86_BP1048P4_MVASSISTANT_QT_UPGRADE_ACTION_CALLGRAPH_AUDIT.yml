@@ -1,0 +1,487 @@
+name: R86 BP1048P4 MVAssistant Qt upgrade action callgraph audit
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: r86-bp1048p4-mvassistant-callgraph-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  MVASSISTANT_DRIVE_FILE_ID: 15hdF2vnnUMVtIFKhZPGLPwBSEZpyqP2H
+  EXPECTED_ZIP_SHA256: 8074b3488453e268dc755fa88b2d0bc8ef14fc8c51c3de4e3a783279c195878f
+  EXPECTED_EXE_SHA256: a62a968f6e9dc06473390ec26d8e1a6ad70d88c242f05acb2463e5081ec12799
+  FLASH_ALLOWED: 'NO'
+
+jobs:
+  offline-callgraph:
+    name: OFFLINE Qt upgrade action/callgraph audit - no execution/no USB/no board/no flash
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Safety gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > /tmp/R86_SAFETY.txt <<'EOF'
+          R86_STATIC_ONLY=YES
+          VENDOR_BINARY_EXECUTION=NO
+          BOARD_CONTACT=NO
+          USB_DEVICE_ACCESS=NO
+          ERASE_PROGRAM_FLASH=NO
+          SEND_AA55=NO
+          SEND_0X11=NO
+          SEND_CHIPERAS_CODEDATA_BOOTDAT_CONSTDAT_CNFGDAT_BTUPDAT_UPINFO_CXXX=NO
+          TEST_0633_5322_ON_BOARD=NO
+          TEST_0288_7966_ON_BOARD=NO
+          R79_PHYSICAL_REPLUG_AUTORUN=NO
+          BP1048B2_TO_BP1048P4_ASSUMPTION=FORBIDDEN
+          FLASH_ALLOWED=NO
+          PURPOSE=TRACE_MVASSISTANT_UI_UPGRADE_ACTIONS_TO_HOST_TRANSPORT_WITHOUT_EXECUTION
+          EOF
+          cat /tmp/R86_SAFETY.txt
+
+      - name: Install static-analysis prerequisites
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m venv /tmp/r86-venv
+          /tmp/r86-venv/bin/python -m pip install --disable-pip-version-check --no-cache-dir \
+            gdown pefile capstone
+          echo "/tmp/r86-venv/bin" >> "$GITHUB_PATH"
+
+      - name: Acquire candidate and enforce SHA pins
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/r86/download /tmp/r86/extracted /tmp/r86/evidence
+          /tmp/r86-venv/bin/gdown \
+            "https://drive.google.com/uc?id=${MVASSISTANT_DRIVE_FILE_ID}" \
+            -O /tmp/r86/download/MVAssistant_BP10xx_V1.8.11.zip
+          ZIP_SHA="$(sha256sum /tmp/r86/download/MVAssistant_BP10xx_V1.8.11.zip | awk '{print $1}')"
+          test "$ZIP_SHA" = "$EXPECTED_ZIP_SHA256"
+          unzip -q /tmp/r86/download/MVAssistant_BP10xx_V1.8.11.zip -d /tmp/r86/extracted
+          EXE=/tmp/r86/extracted/MVAssistant_BP10xx_V1.8.11.exe
+          EXE_SHA="$(sha256sum "$EXE" | awk '{print $1}')"
+          test "$EXE_SHA" = "$EXPECTED_EXE_SHA256"
+          printf 'SHA_PIN_MATCH=YES\nZIP_SHA256=%s\nEXE_SHA256=%s\n' "$ZIP_SHA" "$EXE_SHA" \
+            | tee /tmp/r86/evidence/R86_SHA_GATE.txt
+
+      - name: Recover UI strings xrefs direct calls and transport paths
+        shell: bash
+        run: |
+          set -euo pipefail
+          /tmp/r86-venv/bin/python - <<'PY'
+          from pathlib import Path
+          import collections, hashlib, json, re
+          import pefile
+          from capstone import Cs, CS_ARCH_X86, CS_MODE_32, CS_OP_IMM, CS_OP_MEM
+
+          exe=Path('/tmp/r86/extracted/MVAssistant_BP10xx_V1.8.11.exe')
+          out=Path('/tmp/r86/evidence')
+          pe=pefile.PE(str(exe), fast_load=False)
+          base=pe.OPTIONAL_HEADER.ImageBase
+
+          sections=[]
+          for s in pe.sections:
+              name=s.Name.rstrip(b'\0').decode(errors='ignore')
+              sections.append({
+                  'name':name,
+                  'va':base+s.VirtualAddress,
+                  'rva':s.VirtualAddress,
+                  'raw':s.get_data(),
+                  'vsize':s.Misc_VirtualSize,
+              })
+
+          textsec=next(s for s in sections if s['name']=='.text')
+          text_start=textsec['va']
+          text_end=text_start+max(len(textsec['raw']), textsec['vsize'])
+
+          md=Cs(CS_ARCH_X86, CS_MODE_32)
+          md.detail=True
+          ins=list(md.disasm(textsec['raw'],text_start))
+          idx_by_addr={x.address:i for i,x in enumerate(ins)}
+
+          # Imports + import thunks.
+          imports=[]
+          by_iat={}
+          for ent in getattr(pe,'DIRECTORY_ENTRY_IMPORT',[]):
+              dll=ent.dll.decode(errors='ignore')
+              for imp in ent.imports:
+                  name=imp.name.decode(errors='ignore') if imp.name else f'ordinal_{imp.ordinal}'
+                  rec={'dll':dll,'name':name,'iat_va':imp.address,'iat_rva':imp.address-base}
+                  imports.append(rec)
+                  by_iat[imp.address]=rec
+
+          thunks={}
+          for i in ins:
+              if i.mnemonic!='jmp': continue
+              for op in i.operands:
+                  if op.type==CS_OP_MEM and op.mem.disp in by_iat:
+                      thunks[i.address]=by_iat[op.mem.disp]
+
+          # String anchors. English terms are extracted generally; Chinese terms are searched in
+          # UTF-8 / UTF-16LE / GBK to avoid silently missing UI text encoding.
+          english_terms=[
+              'upgrade','download','pc upgrade','mva','mountain view upgrade',
+              'actionmva','flash usb','otp usb','hid device','hidsendcommand','hidread',
+              'programmer','burner','burn','dongle','hummingbird',
+              'recovery','bootloader','flashboot','firmware',
+              'device info','chip id','flash id','readback','backup',
+              'bp1048p4','bp1048p','bp1048b2','bp10xx','bp1048',
+          ]
+          chinese_terms=['PC升级下载','升级下载','升级','下载','烧录','编程器','恢复']
+
+          anchors=[]
+
+          def add_anchor(sec,off,text,enc,terms):
+              anchors.append({
+                  'section':sec['name'],'va':sec['va']+off,'rva':sec['rva']+off,
+                  'encoding':enc,'terms':sorted(set(terms)),'text':text[:1200]
+              })
+
+          for sec in sections:
+              b=sec['raw']
+              for m in re.finditer(rb'[\x20-\x7e]{4,}',b):
+                  s=m.group().decode('latin1','ignore')
+                  ms=[t for t in english_terms if t in s.lower()]
+                  if ms:
+                      add_anchor(sec,m.start(),s,'ascii',ms)
+              for m in re.finditer(rb'(?:[\x20-\x7e]\x00){4,}',b):
+                  s=m.group().decode('utf-16le','ignore')
+                  ms=[t for t in english_terms if t in s.lower()]
+                  if ms:
+                      add_anchor(sec,m.start(),s,'utf16le-ascii',ms)
+              for term in chinese_terms:
+                  for enc in ('utf-8','utf-16le','gbk'):
+                      try: needle=term.encode(enc)
+                      except: continue
+                      start=0
+                      while True:
+                          off=b.find(needle,start)
+                          if off<0: break
+                          lo=max(0,off-96); hi=min(len(b),off+len(needle)+160)
+                          snippet=b[lo:hi]
+                          try:
+                              txt=snippet.decode(enc,'ignore').replace('\x00','')
+                          except:
+                              txt=term
+                          add_anchor(sec,off,txt,enc,[term])
+                          start=off+1
+
+          # De-duplicate exact VA+text anchors.
+          dedup={}
+          for a in anchors:
+              dedup[(a['va'],a['encoding'],a['text'])]=a
+          anchors=list(dedup.values())
+          anchors.sort(key=lambda x:x['va'])
+          out.joinpath('R86_UI_TRANSPORT_STRING_ANCHORS.json').write_text(
+              json.dumps(anchors,indent=2,ensure_ascii=False)+'\n'
+          )
+
+          # Xrefs from code to string addresses.
+          xrefs=[]
+          for a in anchors:
+              target=a['va'] & 0xffffffff
+              for i in ins:
+                  hit=False
+                  for op in i.operands:
+                      if op.type==CS_OP_IMM and (op.imm & 0xffffffff)==target:
+                          hit=True
+                      elif op.type==CS_OP_MEM and op.mem.disp and (op.mem.disp & 0xffffffff)==target:
+                          hit=True
+                  if hit:
+                      xrefs.append({
+                          'anchor':a,'xref_va':i.address,'xref_rva':i.address-base,
+                          'instruction':f'{i.mnemonic} {i.op_str}'
+                      })
+          out.joinpath('R86_STRING_XREFS.json').write_text(
+              json.dumps(xrefs,indent=2,ensure_ascii=False)+'\n'
+          )
+
+          # Direct calls and likely function starts.
+          call_targets=set()
+          direct_calls=[]
+          for i in ins:
+              if i.mnemonic!='call' or not i.operands: continue
+              op=i.operands[0]
+              if op.type==CS_OP_IMM:
+                  t=op.imm & 0xffffffff
+                  direct_calls.append((i.address,t))
+                  if text_start <= t < text_end:
+                      call_targets.add(t)
+
+          # Known R83/R84 function starts and entry point are also valid owners.
+          known_starts={
+              base+pe.OPTIONAL_HEADER.AddressOfEntryPoint,
+              0x408494, # HID_READ_VALIDATE region
+              0x408A80, # HID enumeration region
+              0x409A08, # HID send-command region
+          }
+          starts=sorted(call_targets | known_starts)
+
+          # Owner approximation: nearest direct-call target / known function start below instruction,
+          # fail closed if farther than 0x5000 bytes.
+          import bisect
+          def owner(addr):
+              k=bisect.bisect_right(starts,addr)-1
+              if k<0: return None
+              s=starts[k]
+              return s if addr-s <= 0x5000 else None
+
+          # Build function call graph and import-touch map.
+          graph=collections.defaultdict(set)
+          imports_by_func=collections.defaultdict(list)
+          calls_by_func=collections.defaultdict(list)
+          for i in ins:
+              f=owner(i.address)
+              if f is None or i.mnemonic!='call' or not i.operands: continue
+              op=i.operands[0]
+              if op.type==CS_OP_IMM:
+                  t=op.imm & 0xffffffff
+                  if t in thunks:
+                      imp=thunks[t]
+                      imports_by_func[f].append({
+                          'call_rva':i.address-base,**imp
+                      })
+                  elif text_start <= t < text_end:
+                      graph[f].add(t)
+                      calls_by_func[f].append({
+                          'call_rva':i.address-base,'target_va':t,'target_rva':t-base
+                      })
+              elif op.type==CS_OP_MEM and op.mem.disp in by_iat:
+                  imp=by_iat[op.mem.disp]
+                  imports_by_func[f].append({
+                      'call_rva':i.address-base,**imp
+                  })
+
+          # Attach each string xref to an approximate containing function.
+          seeds=[]
+          for x in xrefs:
+              f=owner(x['xref_va'])
+              rec=dict(x)
+              rec['owner_va']=f
+              rec['owner_rva']=None if f is None else f-base
+              seeds.append(rec)
+          out.joinpath('R86_SEED_FUNCTIONS.json').write_text(
+              json.dumps(seeds,indent=2,ensure_ascii=False)+'\n'
+          )
+
+          # Mark functions that touch transport APIs or known HID global-ID regions.
+          transport_names=re.compile(
+              r'^(HidD_|HidP_|SetupDi|CreateFile|ReadFile|WriteFile|DeviceIoControl|CloseHandle|WaitForSingleObject)',
+              re.I
+          )
+          transport_funcs=set()
+          transport_evidence={}
+          for f,arr in imports_by_func.items():
+              hi=[x for x in arr if transport_names.search(x['name'])]
+              if hi:
+                  transport_funcs.add(f)
+                  transport_evidence[f]=hi
+
+          programmer_ranges=[
+              (0x408A80,0x4097C8,'R84_HID_ENUM_EXPECTED_ID_PATH'),
+              (0x409A08,0x409D00,'R84_HID_SEND_COMMAND_PATH'),
+              (0x408494,0x408714,'R84_HID_READ_VALIDATE_PATH'),
+          ]
+          def range_label(f):
+              for a,b,n in programmer_ranges:
+                  if a <= f < b:
+                      return n
+              return None
+
+          # BFS forward up to depth 5 from each UI/string seed owner.
+          paths=[]
+          for s in seeds:
+              start=s['owner_va']
+              if start is None: continue
+              q=collections.deque([(start,[start])])
+              seen={start}
+              while q:
+                  cur,path=q.popleft()
+                  label=range_label(cur)
+                  if cur in transport_funcs or label:
+                      paths.append({
+                          'seed_text':s['anchor']['text'],
+                          'seed_terms':s['anchor']['terms'],
+                          'seed_owner_rva':start-base,
+                          'path_rvas':[x-base for x in path],
+                          'terminal_rva':cur-base,
+                          'terminal_range_label':label,
+                          'terminal_imports':transport_evidence.get(cur,[]),
+                      })
+                  if len(path)-1 >= 5: continue
+                  for nxt in sorted(graph.get(cur,())):
+                      if nxt not in seen:
+                          seen.add(nxt)
+                          q.append((nxt,path+[nxt]))
+
+          # De-dupe paths.
+          uniq={}
+          for p in paths:
+              key=(tuple(p['seed_terms']),p['seed_owner_rva'],tuple(p['path_rvas']),p['terminal_rva'])
+              uniq[key]=p
+          paths=list(uniq.values())
+          out.joinpath('R86_UI_TO_TRANSPORT_PATHS.json').write_text(
+              json.dumps(paths,indent=2,ensure_ascii=False)+'\n'
+          )
+
+          # Inspect all writes of the R84 expected VID/PID globals.
+          expected_vid=0xEAA244
+          expected_pid=0xEAA246
+          id_writes=[]
+          for i in ins:
+              opstr=i.op_str.lower()
+              m=re.search(r'word ptr \[(0x[0-9a-f]+)\], (0x[0-9a-f]+)',opstr)
+              if not m: continue
+              dst=int(m.group(1),16); val=int(m.group(2),16)
+              if dst in (expected_vid,expected_pid):
+                  f=owner(i.address)
+                  id_writes.append({
+                      'rva':i.address-base,
+                      'owner_rva':None if f is None else f-base,
+                      'field':'VID' if dst==expected_vid else 'PID',
+                      'value':f'{val:04X}',
+                      'instruction':f'{i.mnemonic} {i.op_str}',
+                  })
+          out.joinpath('R86_EXPECTED_ID_GLOBAL_WRITES.json').write_text(
+              json.dumps(id_writes,indent=2)+'\n'
+          )
+
+          # Classify only exact evidence, never substring assumptions.
+          seed_terms_lower=[t.lower() for s in seeds for t in s['anchor']['terms']]
+          direct_ui_present=any(
+              t in ('pc升级下载','升级下载','pc upgrade','upgrade','download') for t in seed_terms_lower
+          )
+          mva_ui_present=any('mva' in t or 'mountain view upgrade' in t for t in seed_terms_lower)
+
+          paths_to_programmer=[
+              p for p in paths
+              if p['terminal_range_label'] is not None
+              or any(
+                  x.get('name','').lower().startswith(('hidd_','hidp_','setupdi','readfile','writefile'))
+                  for x in p['terminal_imports']
+              )
+          ]
+
+          distinct_id_values=sorted({(x['field'],x['value']) for x in id_writes})
+          only_known_programmer_ids=all(
+              (field,value) in {('VID','0633'),('PID','5322'),('VID','0288'),('PID','7966')}
+              for field,value in distinct_id_values
+          ) if distinct_id_values else False
+
+          decision={
+              'SHA_PIN_MATCH':True,
+              'UI_TRANSPORT_STRING_ANCHOR_COUNT':len(anchors),
+              'STRING_XREF_COUNT':len(xrefs),
+              'SEED_FUNCTION_COUNT':len({s['owner_va'] for s in seeds if s['owner_va'] is not None}),
+              'UI_TO_TRANSPORT_PATH_COUNT':len(paths),
+              'UPGRADE_OR_DOWNLOAD_UI_ANCHOR_PRESENT':direct_ui_present,
+              'MVA_UI_ANCHOR_PRESENT':mva_ui_present,
+              'EXPECTED_VID_PID_GLOBAL_WRITE_COUNT':len(id_writes),
+              'EXPECTED_ID_WRITES_ONLY_MATCH_R84_PROGRAMMER_PAIRS':only_known_programmer_ids,
+              'UI_PATH_REACHES_HID_OR_WIN32_TRANSPORT':bool(paths_to_programmer),
+              'DISTINCT_DIRECT_TO_CHIP_TRANSPORT_PROVEN':False,
+              'BP1048P4_PHONE_DIRECT_BOOT_ENTRY_PROVEN':False,
+              'BP1048P4_PHONE_DIRECT_RECOVERY_IDENTITY_PROVEN':False,
+              'READ_ONLY_PHONE_DIRECT_BACKUP_PROVEN':False,
+              'LIVE_BOARD_TEST_ALLOWED_FROM_R86':False,
+              'FLASH_ALLOWED':False,
+          }
+          out.joinpath('R86_DECISION.json').write_text(json.dumps(decision,indent=2)+'\n')
+          print(json.dumps(decision,indent=2))
+          PY
+
+      - name: Build focused report
+        shell: bash
+        run: |
+          set -euo pipefail
+          /tmp/r86-venv/bin/python - <<'PY'
+          from pathlib import Path
+          import json
+          p=Path('/tmp/r86/evidence')
+          dec=json.loads((p/'R86_DECISION.json').read_text())
+          anchors=json.loads((p/'R86_UI_TRANSPORT_STRING_ANCHORS.json').read_text())
+          seeds=json.loads((p/'R86_SEED_FUNCTIONS.json').read_text())
+          paths=json.loads((p/'R86_UI_TO_TRANSPORT_PATHS.json').read_text())
+          ids=json.loads((p/'R86_EXPECTED_ID_GLOBAL_WRITES.json').read_text())
+
+          lines=[
+              '# R86 MVAssistant Qt upgrade action / callgraph audit',
+              '',
+              'OFFLINE/STATIC ONLY. Vendor EXE not executed. No board/USB access. FLASH_ALLOWED=NO.',
+              '',
+              '## Decision',
+              '```json',json.dumps(dec,indent=2),'```','',
+              '## High-value UI / transport anchors',
+          ]
+          interesting=('upgrade','download','mva','pc升级下载','升级下载','flash usb','otp usb',
+                       'hid device','programmer','dongle','recovery','bootloader','bp1048p4')
+          n=0
+          for a in anchors:
+              low=a['text'].lower()
+              if any(x in low for x in interesting):
+                  lines.append(
+                      f"- RVA 0x{a['rva']:08X} [{a['encoding']}] terms={a['terms']} :: `{a['text'][:500]}`"
+                  )
+                  n+=1
+                  if n>=250: break
+
+          lines += ['','## UI/string seed -> transport paths']
+          for x in paths[:300]:
+              imps=','.join(
+                  f"{i.get('dll','')}!{i.get('name','')}" for i in x.get('terminal_imports',[])
+              )
+              path=' -> '.join(f"0x{r:08X}" for r in x['path_rvas'])
+              lines.append(
+                  f"- terms={x['seed_terms']} owner=0x{x['seed_owner_rva']:08X} "
+                  f"path={path} terminal={x.get('terminal_range_label') or imps}"
+              )
+
+          lines += ['','## Expected HID identity global writes']
+          for x in ids:
+              lines.append(
+                  f"- {x['field']}=0x{x['value']} at RVA 0x{x['rva']:08X} "
+                  f"owner={('unknown' if x['owner_rva'] is None else '0x%08X'%x['owner_rva'])}"
+              )
+
+          lines += [
+              '',
+              '## Gate',
+              '- R85 found no embedded manual/help/container carrying a separate direct-upgrade protocol.',
+              '- R86 tests whether UI upgrade/MVA actions statically reach the already-proven R84 HID/programmer path.',
+              '- Even if an upgrade action reaches HID, that does not prove phone-direct BP1048P4 recovery.',
+              '- No live board test and no R79 autorun follows from this workflow.',
+              '- FLASH_ALLOWED=NO.',
+          ]
+          (p/'R86_REPORT.md').write_text('\n'.join(lines)+'\n')
+          PY
+          sed -n '1,600p' /tmp/r86/evidence/R86_REPORT.md
+
+      - name: Package evidence
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp /tmp/R86_SAFETY.txt /tmp/r86/evidence/ || true
+          (cd /tmp/r86/evidence && zip -9 -r /tmp/R86_BP1048P4_MVASSISTANT_QT_UPGRADE_CALLGRAPH_EVIDENCE.zip .)
+          sha256sum /tmp/R86_BP1048P4_MVASSISTANT_QT_UPGRADE_CALLGRAPH_EVIDENCE.zip \
+            > /tmp/R86_BP1048P4_MVASSISTANT_QT_UPGRADE_CALLGRAPH_EVIDENCE.zip.sha256
+
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: R86-BP1048P4-MVASSISTANT-QT-UPGRADE-CALLGRAPH-EVIDENCE
+          path: |
+            /tmp/R86_BP1048P4_MVASSISTANT_QT_UPGRADE_CALLGRAPH_EVIDENCE.zip
+            /tmp/R86_BP1048P4_MVASSISTANT_QT_UPGRADE_CALLGRAPH_EVIDENCE.zip.sha256
+          if-no-files-found: error
