@@ -1,0 +1,343 @@
+name: R102 MVAssistant V4.1 family updater transport and MVA static audit
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - ".github/workflows/R102_MVASSISTANT_V41_FAMILY_STATIC_AUDIT.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: r102-mvassistant-v41-family-static-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  MV_REPO: ZhiqingLi/Upgrade_file
+  MV_BRANCH: master
+  EXE_URL: https://raw.githubusercontent.com/ZhiqingLi/Upgrade_file/master/AP80%20MVAssistant%20V4.1/MVAssistant-V4.1-Release-20150813.exe
+  EXE_GIT_BLOB_SHA1: 9b539d2f57eae15f9ba422f256b727f952531633
+  EXE_SIZE: "4984320"
+  INI_URL: https://raw.githubusercontent.com/ZhiqingLi/Upgrade_file/master/AP80%20MVAssistant%20V4.1/MVAssistant.ini
+  BOOT_DOC_URL: https://raw.githubusercontent.com/ZhiqingLi/Upgrade_file/master/AP80%20MVAssistant%20V4.1/BOOT_v5.0%E4%BD%BF%E7%94%A8%E8%AF%B4%E6%98%8E_v0.6.doc
+  MANUAL_PDF_URL: https://raw.githubusercontent.com/ZhiqingLi/Upgrade_file/master/AP80%20MVAssistant%20V4.1/MVAssistant%E4%BD%BF%E7%94%A8%E6%89%8B%E5%86%8C%20V4.1-20150813.pdf
+  MVA_SAMPLE_URL: https://raw.githubusercontent.com/ZhiqingLi/Upgrade_file/master/AP80%20MVAssistant%20V4.1/%E5%8D%87%E7%BA%A7%E6%96%87%E4%BB%B6%20MVA/JR-M30/JR-M30_20171213_1838_0x0D24.MVA
+  MVA_SAMPLE_GIT_BLOB_SHA1: 4f34ec6b112f5a06ecd0b9362d5d3240e1cb2a4e
+  MVA_SAMPLE_SIZE: "901521"
+
+jobs:
+  static-reference-audit:
+    name: Reference-family static audit ONLY - NEVER EXECUTE - NO BOARD - NO FLASH
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Immutable safety gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/r102/evidence /tmp/r102/input
+          cat > /tmp/r102/evidence/R102_SAFETY.txt <<'EOF'
+          R102_MODE=STATIC_OFFLINE_REFERENCE_ONLY
+          R102_TARGET_FAMILY=AP80_MVASSISTANT_V4_1
+          R102_BP1048P4_COMPATIBILITY_ASSUMED=NO
+          R102_VENDOR_BINARY_EXECUTED=NO
+          R102_WINE_MONO_EXECUTION=NO
+          R102_USB_DEVICE_ACCESS=NO
+          R102_BOARD_CONTACT=NO
+          R102_AA55_SENT=NO
+          R102_LINEIN_AA55_SENT=NO
+          R102_RUNTIME_0X11_SENT=NO
+          R102_LEGACY_FLASHBOOT_COMMANDS_SENT=NO
+          R102_FLASH_READ_EXECUTED=NO
+          R102_FLASH_ERASE_EXECUTED=NO
+          R102_FLASH_WRITE_EXECUTED=NO
+          R102_ANY_DISCOVERED_PACKET_AUTHORIZED_FOR_BP1048P4=NO
+          FINAL_REQUIRED_TRANSPORT=SAMSUNG_S25_PLUS_USB_C_DIRECT_TO_DSP_USB_C
+          HARDWARE_MODIFICATION=FORBIDDEN
+          FLASH_ALLOWED=NO
+          EOF
+          cat /tmp/r102/evidence/R102_SAFETY.txt
+
+      - name: Install static inspection tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+            binutils file unzip p7zip-full poppler-utils antiword python3-pip >/dev/null
+          python3 -m pip install --disable-pip-version-check --no-input pefile >/dev/null
+          {
+            file --version | head -n1
+            strings --version | head -n1
+            pdftotext -v 2>&1 | head -n1
+            antiword -h 2>&1 | head -n1 || true
+            python3 - <<'PY'
+          import pefile
+          print("pefile="+getattr(pefile,"__version__","unknown"))
+          PY
+          } > /tmp/r102/evidence/R102_TOOL_VERSIONS.txt
+
+      - name: Download exact public reference-family files without execution
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 3 --retry-all-errors "$EXE_URL" -o /tmp/r102/input/MVAssistant.exe
+          curl --fail --location --retry 3 --retry-all-errors "$INI_URL" -o /tmp/r102/input/MVAssistant.ini
+          curl --fail --location --retry 3 --retry-all-errors "$BOOT_DOC_URL" -o /tmp/r102/input/BOOT_v5.0.doc
+          curl --fail --location --retry 3 --retry-all-errors "$MANUAL_PDF_URL" -o /tmp/r102/input/MVAssistant_manual.pdf
+          curl --fail --location --retry 3 --retry-all-errors "$MVA_SAMPLE_URL" -o /tmp/r102/input/sample.MVA
+          chmod a-x /tmp/r102/input/MVAssistant.exe || true
+
+          python3 - <<'PY'
+          from pathlib import Path
+          import hashlib, os
+          rows=[]
+          checks=[
+              ("MVAssistant.exe", os.environ["EXE_SIZE"], os.environ["EXE_GIT_BLOB_SHA1"]),
+              ("sample.MVA", os.environ["MVA_SAMPLE_SIZE"], os.environ["MVA_SAMPLE_GIT_BLOB_SHA1"]),
+          ]
+          for name, expected_size, expected_blob in checks:
+              p=Path("/tmp/r102/input")/name
+              b=p.read_bytes()
+              sha256=hashlib.sha256(b).hexdigest()
+              git_sha1=hashlib.sha1(b"blob "+str(len(b)).encode()+b"\0"+b).hexdigest()
+              rows += [
+                  f"FILE={name}",
+                  f"SIZE={len(b)}",
+                  f"SHA256={sha256}",
+                  f"GIT_BLOB_SHA1={git_sha1}",
+                  f"EXPECTED_SIZE={expected_size}",
+                  f"EXPECTED_GIT_BLOB_SHA1={expected_blob}",
+                  f"SIZE_MATCH={'YES' if len(b)==int(expected_size) else 'NO'}",
+                  f"GIT_BLOB_MATCH={'YES' if git_sha1==expected_blob else 'NO'}",
+                  "",
+              ]
+              if len(b)!=int(expected_size) or git_sha1!=expected_blob:
+                  raise SystemExit("source integrity mismatch: "+name)
+          Path("/tmp/r102/evidence/R102_BINARY_PINS.txt").write_text("\n".join(rows))
+          PY
+          file /tmp/r102/input/* > /tmp/r102/evidence/R102_FILE_TYPES.txt
+          sha256sum /tmp/r102/input/* > /tmp/r102/evidence/R102_ALL_SHA256.txt
+
+      - name: Static PE imports sections resources and strings
+        shell: bash
+        run: |
+          set -euo pipefail
+          EXE=/tmp/r102/input/MVAssistant.exe
+          objdump -x "$EXE" > /tmp/r102/evidence/R102_OBJDUMP_X.txt 2>&1 || true
+          strings -a -n 4 "$EXE" > /tmp/r102/ascii.txt
+          strings -el -n 4 "$EXE" > /tmp/r102/utf16.txt || true
+
+          python3 - <<'PY'
+          from pathlib import Path
+          import pefile, hashlib, math, re
+          p="/tmp/r102/input/MVAssistant.exe"
+          pe=pefile.PE(p, fast_load=False)
+          out=[]
+          out.append(f"MACHINE=0x{pe.FILE_HEADER.Machine:04X}")
+          out.append(f"TIMESTAMP={pe.FILE_HEADER.TimeDateStamp}")
+          out.append(f"IMAGE_BASE=0x{pe.OPTIONAL_HEADER.ImageBase:X}")
+          out.append(f"ENTRY_RVA=0x{pe.OPTIONAL_HEADER.AddressOfEntryPoint:X}")
+          out.append(f"SUBSYSTEM={pe.OPTIONAL_HEADER.Subsystem}")
+          for i,s in enumerate(pe.sections):
+              name=s.Name.rstrip(b"\0").decode("ascii","replace")
+              data=s.get_data()
+              ent=s.get_entropy()
+              out.append(f"SECTION[{i}] {name} RVA=0x{s.VirtualAddress:X} RAW=0x{s.PointerToRawData:X}+0x{s.SizeOfRawData:X} ENTROPY={ent:.4f} SHA256={hashlib.sha256(data).hexdigest()}")
+          imports=[]
+          if hasattr(pe,"DIRECTORY_ENTRY_IMPORT"):
+              for ent in pe.DIRECTORY_ENTRY_IMPORT:
+                  dll=ent.dll.decode(errors="replace")
+                  for imp in ent.imports:
+                      nm=(imp.name.decode(errors="replace") if imp.name else f"ord:{imp.ordinal}")
+                      imports.append(f"{dll}!{nm}")
+          Path("/tmp/r102/evidence/R102_PE_SUMMARY.txt").write_text("\n".join(out)+"\n")
+          Path("/tmp/r102/evidence/R102_IMPORTS.txt").write_text("\n".join(imports)+"\n")
+
+          raw=Path(p).read_bytes()
+          sigs={
+            "MVA_MAGIC_4D56B158":bytes.fromhex("4d56b158"),
+            "ZIP":b"PK\x03\x04",
+            "MZ":b"MZ",
+            "7Z":bytes.fromhex("377abcaf271c"),
+          }
+          rs=[]
+          for n,sig in sigs.items():
+              offs=[]; pos=0
+              while True:
+                  q=raw.find(sig,pos)
+                  if q<0: break
+                  offs.append(q); pos=q+1
+                  if len(offs)>=200: break
+              rs.append(f"{n}_COUNT={len(offs)}")
+              if offs: rs.append(f"{n}_OFFSETS="+",".join(hex(x) for x in offs))
+          Path("/tmp/r102/evidence/R102_RAW_SIGNATURES.txt").write_text("\n".join(rs)+"\n")
+          PY
+
+          cat /tmp/r102/ascii.txt /tmp/r102/utf16.txt > /tmp/r102/all_strings.txt
+          grep -Ein -C 2 \
+            'HidD_|hid\.dll|setupapi|SetupDi|WinUSB|libusb|CreateFile|ReadFile|WriteFile|DeviceIoControl|USB|VID[_:= ]|PID[_:= ]|bootloader|boot|recovery|upgrade|update|firmware|flash|burn|program|MVA|\.mva|chiperas|codedata|bootdat|constdat|cnfgdat|btupdat|upinfo|cxxx|BP1048|BP10|AP80|6324|1719|2244|烧录|升级|固件|恢复|下载|引导' \
+            /tmp/r102/all_strings.txt \
+            | head -n 2500 > /tmp/r102/evidence/R102_TARGETED_STRING_CONTEXT.txt || true
+
+          grep -Ei \
+            'hid|setupapi|winusb|libusb|createfile|readfile|writefile|deviceiocontrol|usb' \
+            /tmp/r102/evidence/R102_IMPORTS.txt \
+            > /tmp/r102/evidence/R102_TRANSPORT_IMPORTS.txt || true
+
+      - name: Extract reference manuals to bounded keyword context
+        shell: bash
+        run: |
+          set -euo pipefail
+          antiword /tmp/r102/input/BOOT_v5.0.doc > /tmp/r102/boot_doc.txt 2>/tmp/r102/boot_doc.err || true
+          pdftotext -layout /tmp/r102/input/MVAssistant_manual.pdf /tmp/r102/manual.txt 2>/tmp/r102/manual.err || true
+
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+          needles=[
+            r'USB',r'HID',r'boot',r'bootloader',r'recovery',r'MVA',r'upgrade',r'update',
+            r'flash',r'firmware',r'VID',r'PID',r'烧录',r'升级',r'固件',r'恢复',
+            r'下载',r'引导',r'PC',r'U盘',r'优盘',r'量产',r'擦除',r'校验'
+          ]
+          rx=re.compile("|".join(needles),re.I)
+          out=[]
+          for label,path in [("BOOT_DOC","/tmp/r102/boot_doc.txt"),("MVASSISTANT_MANUAL","/tmp/r102/manual.txt")]:
+              lines=Path(path).read_text(errors="replace").splitlines() if Path(path).exists() else []
+              out.append(f"===== {label} LINE_COUNT={len(lines)} =====")
+              seen=set()
+              for i,line in enumerate(lines):
+                  if not rx.search(line): continue
+                  a=max(0,i-2); b=min(len(lines),i+3)
+                  key=(a,b)
+                  if key in seen: continue
+                  seen.add(key)
+                  out.append(f"--- {label} HIT line {i+1} ---")
+                  out.extend(f"{j+1:05d}: {lines[j]}" for j in range(a,b))
+                  if len(out)>1800: break
+          Path("/tmp/r102/evidence/R102_MANUAL_KEYWORD_CONTEXT.txt").write_text("\n".join(out)+"\n")
+          PY
+          {
+            echo "BOOT_DOC_STDERR:"
+            cat /tmp/r102/boot_doc.err
+            echo "MANUAL_PDF_STDERR:"
+            cat /tmp/r102/manual.err
+          } > /tmp/r102/evidence/R102_MANUAL_EXTRACT_ERRORS.txt
+
+      - name: Static MVA sample structure audit
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import hashlib, math, re, struct
+          p=Path("/tmp/r102/input/sample.MVA")
+          b=p.read_bytes()
+          out=[
+              f"SIZE={len(b)}",
+              f"SHA256={hashlib.sha256(b).hexdigest()}",
+              f"HEAD_64={b[:64].hex()}",
+              f"TAIL_64={b[-64:].hex()}",
+              f"MVA_MAGIC_4D56B158_OFFSET={b.find(bytes.fromhex('4d56b158'))}",
+          ]
+          if b:
+              counts={x:b.count(bytes([x])) for x in set(b)}
+              ent=-sum((c/len(b))*math.log2(c/len(b)) for c in counts.values())
+              out.append(f"ENTROPY={ent:.6f}")
+          ascii_strings=re.findall(rb'[\x20-\x7e]{5,}',b)
+          interesting=[]
+          for s in ascii_strings:
+              t=s.decode("ascii","replace")
+              if re.search(r'boot|flash|firm|upgrade|update|mva|vid|pid|ap80|version|crc|code|data',t,re.I):
+                  interesting.append(t[:300])
+          out.append("INTERESTING_ASCII_COUNT="+str(len(interesting)))
+          out.extend("STR="+x for x in interesting[:300])
+          Path("/tmp/r102/evidence/R102_MVA_STRUCTURE.txt").write_text("\n".join(out)+"\n")
+          PY
+
+      - name: Conservative reference-family decision
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import re, json
+          ev=Path("/tmp/r102/evidence")
+          imports=(ev/"R102_TRANSPORT_IMPORTS.txt").read_text(errors="ignore")
+          strs=(ev/"R102_TARGETED_STRING_CONTEXT.txt").read_text(errors="ignore")
+          docs=(ev/"R102_MANUAL_KEYWORD_CONTEXT.txt").read_text(errors="ignore")
+          mva=(ev/"R102_MVA_STRUCTURE.txt").read_text(errors="ignore")
+          alltxt="\n".join([imports,strs,docs,mva])
+
+          def has(p): return bool(re.search(p,alltxt,re.I))
+          d={
+            "REFERENCE_BINARY_PINNED": True,
+            "REFERENCE_FAMILY": "AP80_MVAssistant_V4.1_20150813",
+            "REFERENCE_USB_HID_SURFACE_PRESENT": has(r'HidD_|hid\.dll|SetupDi|USB'),
+            "REFERENCE_WINUSB_SURFACE_PRESENT": has(r'WinUSB'),
+            "REFERENCE_MVA_FORMAT_SURFACE_PRESENT": has(r'\bMVA\b|\.MVA|4D56B158'),
+            "REFERENCE_BOOT_OR_UPGRADE_LANGUAGE_PRESENT": has(r'boot|upgrade|firmware|烧录|升级|固件|引导'),
+            "BP1048P4_LITERAL_PRESENT": has(r'BP1048P4'),
+            "GOLOPINE_LITERAL_PRESENT": has(r'GoloPine|DSTech'),
+            "PRODUCTION_BP1048P4_COMPATIBILITY_PROVEN": False,
+            "PRODUCTION_BOOT_ENTRY_SEQUENCE_PROVEN": False,
+            "PRODUCTION_RECOVERY_USB_IDENTITY_PROVEN": False,
+            "PRODUCTION_READ_ONLY_IDENTIFY_PROVEN": False,
+            "ANY_REFERENCE_PACKET_AUTHORIZED_FOR_PRODUCTION_BOARD": False,
+            "FLASH_ALLOWED": False
+          }
+          (ev/"R102_DECISION.json").write_text(json.dumps(d,indent=2,ensure_ascii=False)+"\n")
+          report=[
+            "# R102 MVAssistant V4.1 family static audit",
+            "",
+            "REFERENCE-FAMILY / OFFLINE STATIC ONLY. This is AP80-era evidence, not BP1048P4 compatibility proof.",
+            "",
+            "```json", json.dumps(d,indent=2,ensure_ascii=False), "```",
+            "",
+            "Gate:",
+            "- Never execute the downloaded EXE in this workflow.",
+            "- Never contact a board or USB device.",
+            "- Never transmit any discovered packet to BP1048P4.",
+            "- Final accepted programming transport remains Samsung S25+ -> USB-C -> DSP USB-C with no hardware modification.",
+            "- FLASH_ALLOWED=NO.",
+          ]
+          (ev/"R102_REPORT.md").write_text("\n".join(report)+"\n")
+          print(json.dumps(d,indent=2,ensure_ascii=False))
+          PY
+
+      - name: Package evidence only - exclude vendor binaries and full manuals
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /tmp/r102/evidence
+          zip -9 -r /tmp/R102_MVASSISTANT_V41_FAMILY_STATIC_EVIDENCE.zip .
+          sha256sum /tmp/R102_MVASSISTANT_V41_FAMILY_STATIC_EVIDENCE.zip \
+            > /tmp/R102_MVASSISTANT_V41_FAMILY_STATIC_EVIDENCE.zip.sha256
+          cat /tmp/R102_MVASSISTANT_V41_FAMILY_STATIC_EVIDENCE.zip.sha256
+
+      - name: Upload R102 evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: R102-MVASSISTANT-V41-FAMILY-STATIC-EVIDENCE
+          path: |
+            /tmp/R102_MVASSISTANT_V41_FAMILY_STATIC_EVIDENCE.zip
+            /tmp/R102_MVASSISTANT_V41_FAMILY_STATIC_EVIDENCE.zip.sha256
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Final fail-closed gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -F 'R102_VENDOR_BINARY_EXECUTED=NO' /tmp/r102/evidence/R102_SAFETY.txt
+          grep -F 'R102_USB_DEVICE_ACCESS=NO' /tmp/r102/evidence/R102_SAFETY.txt
+          grep -F 'R102_ANY_DISCOVERED_PACKET_AUTHORIZED_FOR_BP1048P4=NO' /tmp/r102/evidence/R102_SAFETY.txt
+          grep -F 'FLASH_ALLOWED=NO' /tmp/r102/evidence/R102_SAFETY.txt
+          cat /tmp/r102/evidence/R102_DECISION.json
+          echo R102_STATIC_AUDIT_COMPLETE=YES
+          echo FLASH_ALLOWED=NO
