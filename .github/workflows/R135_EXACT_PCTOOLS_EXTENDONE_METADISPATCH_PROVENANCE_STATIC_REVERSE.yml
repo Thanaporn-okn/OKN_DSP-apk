@@ -1,0 +1,347 @@
+name: R135 exact PCTools ExtendOne meta-dispatch provenance static reverse
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - ".github/workflows/R135_EXACT_PCTOOLS_EXTENDONE_METADISPATCH_PROVENANCE_STATIC_REVERSE.yml"
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: r135-pctools-extendone-metadispatch-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  FLASH_ALLOWED: "NO"
+  R127_RUN_ID: "35865759674"
+  R127_ACQUIRED_ARTIFACT_NAME: "R127-ACQUIRED-PUBLIC-FILES"
+  R127_INNER_ZIP_SHA256: "d217dff170352179ee3d6a70b8e3a58b98b41ef2d365a4551daff4124ce21be6"
+  BT_NAME_RAR_SHA256: "c6b1fcb4d0e430c86c50e9ddf1007fa110f416c0570888060d693819164eccb8"
+  PCTOOLS_SHA256: "0e13801b29070f805869823e6db4ad56d70494b2621fb63c330cea1d69e9ca33"
+  R134_RUN_ID: "35893681782"
+  R134_JOB_ID: "107292173174"
+  R134_EVIDENCE_ARTIFACT_ID: "10765049559"
+  R134_EVIDENCE_ARTIFACT_NAME: "R134-EXACT-PCTOOLS-CALLER-VIDPID-SN-LINKAGE-STATIC-EVIDENCE"
+  R134_EVIDENCE_DIGEST: "sha256:c7d6edc8846f723dc9ccd2eea8bd13d573b5826de6c6c8aeaae0542577b9e1aa"
+
+jobs:
+  static_reverse:
+    name: STATIC ONLY - ExtendOne dispatcher provenance - no execution - no USB - no board
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Immutable safety gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/r135/input /tmp/r135/acquired /tmp/r135/unpacked/bt /tmp/r135/r134 /tmp/r135/evidence
+          cat > /tmp/r135/evidence/R135_SAFETY.txt <<'EOF'
+          R135_MODE=TARGETED_EXTENDONE_METADISPATCH_STATIC_ONLY
+          R135_VENDOR_BINARY_EXECUTED=NO
+          R135_INSTALLER_EXECUTED=NO
+          R135_USB_DEVICE_ACCESS=NO
+          R135_BOARD_CONTACT=NO
+          R135_AA55_SENT=NO
+          R135_RUNTIME_0X11_SENT=NO
+          R135_RUNTIME_0XFE_SENT=NO
+          R135_FLASHBOOT_COMMAND_SENT=NO
+          R135_FLASH_READ_EXECUTED=NO
+          R135_FLASH_ERASE_EXECUTED=NO
+          R135_FLASH_WRITE_EXECUTED=NO
+          R135_ANY_DISCOVERED_FRAME_AUTHORIZED_FOR_BOARD=NO
+          FINAL_REQUIRED_TRANSPORT=SAMSUNG_S25_PLUS_USB_C_DIRECT_TO_DSP_USB_C
+          HARDWARE_MODIFICATION=FORBIDDEN
+          REFERENCE_OR_TOOL_EVIDENCE_IS_NOT_PRODUCTION_PROOF=YES
+          FLASH_ALLOWED=NO
+          EOF
+
+      - name: Download pinned R127 acquired files as inert data
+        uses: actions/download-artifact@v4
+        with:
+          name: R127-ACQUIRED-PUBLIC-FILES
+          path: /tmp/r135/input
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          repository: Thanaporn-okn/OKN_DSP-apk
+          run-id: 35865759674
+
+      - name: Download pinned R134 evidence for continuity only
+        uses: actions/download-artifact@v4
+        with:
+          name: R134-EXACT-PCTOOLS-CALLER-VIDPID-SN-LINKAGE-STATIC-EVIDENCE
+          path: /tmp/r135/r134
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          repository: Thanaporn-okn/OKN_DSP-apk
+          run-id: 35893681782
+
+      - name: Install static tooling only
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq file unzip p7zip-full python3-pip >/dev/null
+          python3 -m pip install --disable-pip-version-check --no-input pefile capstone pyyaml >/dev/null
+
+      - name: Verify pinned hashes and extract inert PCTools
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /tmp/r135/input
+          test -f R127_ACQUIRED_PUBLIC_FILES.zip
+          echo "${R127_INNER_ZIP_SHA256}  R127_ACQUIRED_PUBLIC_FILES.zip" | sha256sum -c -
+          unzip -q R127_ACQUIRED_PUBLIC_FILES.zip -d /tmp/r135/acquired
+          BT_RAR="$(find /tmp/r135/acquired -type f -name '*.rar' -path '*BT_NAME_TOOL*' -print -quit)"
+          test -n "$BT_RAR"
+          echo "${BT_NAME_RAR_SHA256}  ${BT_RAR}" | sha256sum -c -
+          7z x -y -o/tmp/r135/unpacked/bt "$BT_RAR" >/tmp/r135/evidence/R135_7Z_BT_EXTRACT.txt
+          PCTOOLS="$(find /tmp/r135/unpacked/bt -type f -name 'MV_AP82xx_BP10xx_PC_Tools_V2.2.8_20210205.exe' -print -quit)"
+          test -n "$PCTOOLS"
+          echo "${PCTOOLS_SHA256}  ${PCTOOLS}" | sha256sum -c -
+          printf '%s\n' "$PCTOOLS" > /tmp/r135/PCTOOLS_PATH
+          find /tmp/r135/r134 -maxdepth 1 -type f -printf '%f\n' | sort > /tmp/r135/evidence/R135_R134_ARTIFACT_FILES.txt
+
+      - name: Trace ExtendOne dispatcher register provenance branch selection and callers
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import json,re,bisect,pefile
+          from capstone import Cs,CS_ARCH_X86,CS_MODE_32
+          from capstone.x86 import X86_OP_IMM,X86_OP_MEM,X86_OP_REG
+
+          p=Path(Path('/tmp/r135/PCTOOLS_PATH').read_text().strip())
+          pe=pefile.PE(str(p),fast_load=False); ib=pe.OPTIONAL_HEADER.ImageBase
+          data=p.read_bytes()
+          DISPATCH=0x41ea64
+          TARGET_CALLS={
+              0x41ef10:0x40a920,
+              0x41ef37:0x40d7d4,
+              0x41ef8d:0x40cb24,
+          }
+          PROD={0x18B4,0x06B7}
+
+          md=Cs(CS_ARCH_X86,CS_MODE_32); md.detail=True
+          ins=[]; exec_ranges=[]
+          for s in pe.sections:
+              if s.Characteristics & 0x20000000:
+                  lo=ib+s.VirtualAddress; hi=lo+max(int(s.Misc_VirtualSize),int(s.SizeOfRawData))
+                  exec_ranges.append((lo,hi)); ins.extend(md.disasm(s.get_data(),lo))
+          ins=sorted(ins,key=lambda x:x.address); by_va={x.address:i for i,x in enumerate(ins)}
+          def is_exec(v): return any(a<=v<b for a,b in exec_ranges)
+          def values(x):
+              out=[]
+              for op in x.operands:
+                  if op.type==X86_OP_IMM: out.append(op.imm & 0xffffffff)
+                  elif op.type==X86_OP_MEM and op.mem.disp: out.append(op.mem.disp & 0xffffffff)
+              return out
+
+          # Approximate function starts via direct-call targets; enough for exact local dispatcher boundary.
+          starts={ib+pe.OPTIONAL_HEADER.AddressOfEntryPoint}
+          direct=[]
+          for i,x in enumerate(ins):
+              if x.mnemonic!='call': continue
+              for v in values(x):
+                  if is_exec(v): starts.add(v); direct.append((i,x.address,v))
+          starts=sorted(starts)
+          def fend(st):
+              j=bisect.bisect_left(starts,st)
+              return starts[j+1] if j+1<len(starts) else max(b for _,b in exec_ranges)
+          def owner(va):
+              j=bisect.bisect_right(starts,va)-1
+              return starts[j] if j>=0 else None
+          dispatch_end=fend(DISPATCH)
+          d_ins=[x for x in ins if DISPATCH<=x.address<dispatch_end]
+
+          # Strings referenced by dispatcher/callers.
+          strings={}
+          for enc,pat in [('ascii',rb'[\x20-\x7e]{4,}'),('utf16le',rb'(?:[\x20-\x7e]\x00){4,}')]:
+              for m in re.finditer(pat,data):
+                  try:
+                      txt=m.group().decode('latin1' if enc=='ascii' else 'utf-16le','replace')
+                      va=ib+pe.get_rva_from_offset(m.start())
+                  except Exception: continue
+                  strings[va]=txt[:500]
+
+          def string_refs(seq):
+              out=[]; seen=set()
+              for x in seq:
+                  for v in values(x):
+                      if v in strings and (x.address,strings[v]) not in seen:
+                          seen.add((x.address,strings[v])); out.append({'va':hex(x.address),'text':strings[v]})
+              return out
+
+          # Exact dispatcher instruction dump and same-EDX member-call pattern.
+          member_calls=[]
+          for i,x in enumerate(d_ins):
+              if x.mnemonic!='call': continue
+              # preceding small window: detect mov [esp], edx
+              pre=d_ins[max(0,i-4):i]
+              same_edx=any(y.mnemonic=='mov' and '[esp]' in y.op_str and y.op_str.strip().endswith(', edx') for y in pre)
+              dst=[v for v in values(x) if is_exec(v)]
+              member_calls.append({'call_va':hex(x.address),'target_va':hex(dst[0]) if dst else None,
+                                   'same_edx_as_arg0':same_edx,
+                                   'pre':[{'va':hex(y.address),'text':f'{y.mnemonic} {y.op_str}'} for y in pre]})
+
+          # Backwards provenance: keep instructions that define/use EDX/EBX/ECX or stack arg0 before target calls.
+          provenance={}
+          for call_va,target in TARGET_CALLS.items():
+              idx=by_va.get(call_va)
+              if idx is None:
+                  provenance[hex(call_va)]={'found':False}; continue
+              lo=by_va.get(DISPATCH, max(0,idx-500))
+              seq=ins[lo:idx+1]
+              relevant=[]
+              for x in seq:
+                  t=f'{x.mnemonic} {x.op_str}'
+                  low=t.lower()
+                  if any(r in low for r in ['edx','ebx','ecx','[esp]','[ebp + 8]','[ebp + 0xc]','[ebp + 0x10]']) or x.mnemonic.startswith('j') or x.mnemonic in {'cmp','test'}:
+                      relevant.append({'va':hex(x.address),'text':t})
+              production=[]
+              for x in seq:
+                  for op in x.operands:
+                      if op.type==X86_OP_IMM and (op.imm & 0xffffffff) in PROD:
+                          production.append({'va':hex(x.address),'value':hex(op.imm & 0xffffffff),'text':f'{x.mnemonic} {x.op_str}'})
+              provenance[hex(call_va)]={
+                  'found':True,'target_va':hex(target),
+                  'relevant_provenance_and_branch_instructions':relevant[-500:],
+                  'production_immediate_evidence_since_dispatch_start':production,
+              }
+
+          # All direct callers of dispatcher and their argument setup/string context.
+          dispatcher_callers=[]
+          for i,va,dst in direct:
+              if dst!=DISPATCH: continue
+              st=owner(va); en=fend(st) if st else va+1
+              pre=ins[max(0,i-100):i+20]
+              dispatcher_callers.append({
+                  'call_va':hex(va),'caller_start':hex(st) if st else None,'caller_end':hex(en),
+                  'context':[{'va':hex(z.address),'text':f'{z.mnemonic} {z.op_str}'} for z in pre],
+                  'strings':string_refs([z for z in ins if st is not None and st<=z.address<en])[:120],
+                  'production_immediates':[{'va':hex(z.address),'value':hex(op.imm & 0xffffffff),'text':f'{z.mnemonic} {z.op_str}'}
+                      for z in pre for op in z.operands if op.type==X86_OP_IMM and (op.imm & 0xffffffff) in PROD],
+              })
+
+          # Qt/meta-dispatch textual signals anywhere in binary and dispatcher-referenced strings.
+          qt_re=re.compile(r'qt_(?:static_)?metacall|QMetaObject|QMetaMethod|QMetaType|ExtendOne|signal|slot',re.I)
+          qt_strings=[]
+          for va,txt in strings.items():
+              if qt_re.search(txt): qt_strings.append({'va':hex(va),'text':txt})
+
+          out={
+              'pctools_sha256':'0e13801b29070f805869823e6db4ad56d70494b2621fb63c330cea1d69e9ca33',
+              'dispatcher_start':hex(DISPATCH),'dispatcher_end':hex(dispatch_end),
+              'dispatcher_instruction_count':len(d_ins),
+              'dispatcher_strings':string_refs(d_ins)[:200],
+              'qt_meta_text_signals':qt_strings[:300],
+              'direct_member_call_count':len(member_calls),
+              'direct_member_calls_with_same_edx_arg0_count':sum(1 for x in member_calls if x['same_edx_as_arg0']),
+              'member_calls':member_calls[:500],
+              'target_call_provenance':provenance,
+              'dispatcher_direct_callers':dispatcher_callers,
+          }
+          Path('/tmp/r135/evidence/R135_EXTENDONE_METADISPATCH_PROVENANCE.json').write_text(json.dumps(out,indent=2,ensure_ascii=False)+'\n')
+          PY
+
+      - name: Build fail-closed R135 decision and report
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import json,re
+          ev=Path('/tmp/r135/evidence')
+          d=json.loads((ev/'R135_EXTENDONE_METADISPATCH_PROVENANCE.json').read_text())
+          member_count=d['direct_member_call_count']
+          same_edx=d['direct_member_calls_with_same_edx_arg0_count']
+          qt=[x['text'] for x in d['qt_meta_text_signals']]
+          extend_signal=any('ExtendOne' in x for x in qt)
+          qt_meta_signal=any(re.search(r'qt_(?:static_)?metacall|QMetaObject|QMetaMethod',x,re.I) for x in qt)
+          prod_in_targets=[]
+          for call,row in d['target_call_provenance'].items():
+              if row.get('production_immediate_evidence_since_dispatch_start'):
+                  prod_in_targets.append({'call_va':call,'evidence':row['production_immediate_evidence_since_dispatch_start']})
+          prod_in_callers=[c for c in d['dispatcher_direct_callers'] if c.get('production_immediates')]
+          dispatcher_style = member_count >= 10 and same_edx >= 10
+          decision={
+              'R134_RUN_ID':35893681782,
+              'R134_JOB_ID':107292173174,
+              'R134_EVIDENCE_ARTIFACT_ID':10765049559,
+              'PCTOOLS_SHA256':'0e13801b29070f805869823e6db4ad56d70494b2621fb63c330cea1d69e9ca33',
+              'EXTENDONE_DISPATCHER_START':'0x41ea64',
+              'DIRECT_MEMBER_CALL_COUNT':member_count,
+              'DIRECT_MEMBER_CALLS_USING_SAME_EDX_ARG0_COUNT':same_edx,
+              'EXTENDONE_STRING_SIGNAL_PRESENT':extend_signal,
+              'QT_META_TEXT_SIGNAL_PRESENT':qt_meta_signal,
+              'STATIC_PATTERN_SUPPORTS_GENERIC_MEMBER_DISPATCHER':dispatcher_style,
+              'TARGET_BRANCHES_CONTAIN_PRODUCTION_18B4_06B7_IMMEDIATE_EVIDENCE':bool(prod_in_targets),
+              'DISPATCHER_CALLERS_CONTAIN_PRODUCTION_18B4_06B7_IMMEDIATE_EVIDENCE':bool(prod_in_callers),
+              'PRODUCTION_EVIDENCE_IN_TARGET_BRANCHES':prod_in_targets,
+              'PRODUCTION_EVIDENCE_IN_DISPATCHER_CALLERS':prod_in_callers,
+              'SN_VIDPID_ARGUMENT_LINKAGE_PROVEN':False,
+              'PCTOOLS_PRODUCTION_READONLY_ROUTE_PROVEN':False,
+              'READ_ONLY_IDENTIFY_PATH_STATICALLY_PROVEN_FOR_PRODUCTION':False,
+              'SAFE_READ_ONLY_STOCK_BACKUP_PROVEN':False,
+              'PRODUCTION_BOOTSTRAP_BRIDGE_PROVEN':False,
+              'PRODUCTION_RECOVERY_USB_IDENTITY_PROVEN':False,
+              'ANY_DISCOVERED_FRAME_AUTHORIZED_FOR_BOARD':False,
+              'AA55_LIVE_RETEST_ALLOWED':False,
+              'RUNTIME_0X11_ALLOWED':False,
+              'RUNTIME_0XFE_ALLOWED':False,
+              'VENDOR_BINARY_EXECUTED':False,
+              'USB_DEVICE_ACCESSED':False,
+              'BOARD_CONTACTED':False,
+              'FLASH_ALLOWED':False,
+              'IMPORTANT_INTERPRETATION':'A meta/member-dispatch pattern explains why R134 saw unresolved register arguments at the three callsites. It does not establish production USB identity or protocol safety.',
+              'NEXT':'If the dispatcher pattern is supported and no production identity linkage appears, close PCTools as an unproven production read-only route and pivot offline to the acquired DSP/ACPWorkbench package for production-specific recovery/backup/update evidence. No live transmission is authorized.'
+          }
+          (ev/'R135_DECISION.json').write_text(json.dumps(decision,indent=2,ensure_ascii=False)+'\n')
+          report=[
+              '# R135 PCTools ExtendOne meta-dispatch provenance static reverse','',
+              f'- direct member calls in dispatcher: {member_count}',
+              f'- calls using same EDX as arg0: {same_edx}',
+              f'- ExtendOne text signal present: {extend_signal}',
+              f'- Qt meta text signal present: {qt_meta_signal}',
+              f'- static generic-dispatcher pattern supported: {dispatcher_style}',
+              f'- production VID/PID immediate evidence in target branches: {bool(prod_in_targets)}',
+              f'- production VID/PID immediate evidence in dispatcher callers: {bool(prod_in_callers)}','',
+              '## Safety','- Offline static only.','- No vendor EXE executed.','- No USB/board access.',
+              '- AA55 / 0x11 / 0xFE / erase / program / flash remain blocked.','- FLASH_ALLOWED=NO']
+          (ev/'R135_REPORT_TH.md').write_text('\n'.join(report)+'\n')
+          print(json.dumps(decision,indent=2,ensure_ascii=False))
+          PY
+
+      - name: Package R135 evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /tmp/r135/evidence
+          zip -9 -r /tmp/R135_EXACT_PCTOOLS_EXTENDONE_METADISPATCH_PROVENANCE_STATIC_EVIDENCE.zip . >/dev/null
+          sha256sum /tmp/R135_EXACT_PCTOOLS_EXTENDONE_METADISPATCH_PROVENANCE_STATIC_EVIDENCE.zip > /tmp/R135_EXACT_PCTOOLS_EXTENDONE_METADISPATCH_PROVENANCE_STATIC_EVIDENCE.zip.sha256
+
+      - name: Upload R135 evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: R135-EXACT-PCTOOLS-EXTENDONE-METADISPATCH-PROVENANCE-STATIC-EVIDENCE
+          path: |
+            /tmp/R135_EXACT_PCTOOLS_EXTENDONE_METADISPATCH_PROVENANCE_STATIC_EVIDENCE.zip
+            /tmp/R135_EXACT_PCTOOLS_EXTENDONE_METADISPATCH_PROVENANCE_STATIC_EVIDENCE.zip.sha256
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Final fail-closed gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -F 'R135_VENDOR_BINARY_EXECUTED=NO' /tmp/r135/evidence/R135_SAFETY.txt
+          grep -F 'R135_USB_DEVICE_ACCESS=NO' /tmp/r135/evidence/R135_SAFETY.txt
+          grep -F 'R135_BOARD_CONTACT=NO' /tmp/r135/evidence/R135_SAFETY.txt
+          grep -F 'R135_AA55_SENT=NO' /tmp/r135/evidence/R135_SAFETY.txt
+          grep -F 'R135_RUNTIME_0X11_SENT=NO' /tmp/r135/evidence/R135_SAFETY.txt
+          grep -F 'R135_RUNTIME_0XFE_SENT=NO' /tmp/r135/evidence/R135_SAFETY.txt
+          grep -F '"FLASH_ALLOWED": false' /tmp/r135/evidence/R135_DECISION.json
+          echo R135_TARGETED_STATIC_REVERSE_COMPLETE=YES
+          echo FLASH_ALLOWED=NO
