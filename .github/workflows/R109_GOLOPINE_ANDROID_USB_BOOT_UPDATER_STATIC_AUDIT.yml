@@ -1,0 +1,510 @@
+name: R109 Official GoloPine Android USB boot updater static audit
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - ".github/workflows/R109_GOLOPINE_ANDROID_USB_BOOT_UPDATER_STATIC_AUDIT.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: r109-golopine-android-usb-static-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  OFFICIAL_PAGE: https://golodsp.com/7%E9%80%9A%E9%81%93%E9%9F%B3%E9%A2%91%E5%89%8D%E7%BA%A7/
+  LATEST_URL: https://golodsp.com/wp-content/uploads/2026/05/golopine_audio_turning_release_2026-04-01.apk_.zip
+  LEGACY_URL: https://golodsp.com/wp-content/uploads/2026/02/1Android-APP-golopine-tuning-250401.zip
+  PRODUCTION_VID_HEX: "6324"
+  PRODUCTION_PID_HEX: "1719"
+  FLASH_ALLOWED: "NO"
+
+jobs:
+  static-audit:
+    name: Android APK STATIC ONLY - NO APK EXECUTION - NO USB - NO BOARD - NO FLASH
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Immutable safety gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/r109/download /tmp/r109/latest /tmp/r109/legacy /tmp/r109/evidence
+          cat > /tmp/r109/evidence/R109_SAFETY.txt <<'EOF'
+          R109_MODE=STATIC_OFFLINE_ANALYSIS_AFTER_PUBLIC_DOWNLOAD
+          R109_APK_EXECUTED=NO
+          R109_NATIVE_LIBRARY_EXECUTED=NO
+          R109_USB_DEVICE_ACCESS=NO
+          R109_BOARD_CONTACT=NO
+          R109_AA55_SENT=NO
+          R109_LINEIN_AA55_SENT=NO
+          R109_RUNTIME_0X11_SENT=NO
+          R109_SEND_CHIPERAS_CODEDATA_BOOTDAT_CONSTDAT_CNFGDAT_BTUPDAT_UPINFO_CXXX=NO
+          R109_FLASH_READ_EXECUTED=NO
+          R109_FLASH_ERASE_EXECUTED=NO
+          R109_FLASH_WRITE_EXECUTED=NO
+          R109_ANY_DISCOVERED_USB_FRAME_AUTHORIZED_FOR_BP1048P4=NO
+          FINAL_REQUIRED_TRANSPORT=SAMSUNG_S25_PLUS_USB_C_DIRECT_TO_DSP_USB_C
+          HARDWARE_MODIFICATION=FORBIDDEN
+          FLASH_ALLOWED=NO
+          EOF
+
+      - name: Install static APK tooling
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+            file unzip zip binutils jq python3-pip libxml2-utils >/dev/null
+          python3 -m pip install --disable-pip-version-check --no-input \
+            androguard==4.1.3 lxml >/dev/null
+          python3 - <<'PY' > /tmp/r109/evidence/R109_TOOL_VERSIONS.txt
+          import androguard
+          print("androguard="+androguard.__version__)
+          PY
+          file --version | head -n1 >> /tmp/r109/evidence/R109_TOOL_VERSIONS.txt
+
+      - name: Download official GoloPine Android packages as data only
+        shell: bash
+        run: |
+          set -euo pipefail
+          UA='Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/140 Safari/537.36'
+
+          get_one() {
+            url="$1"; out="$2"; required="$3"
+            rm -f "$out"
+            curl --fail --location --retry 4 --retry-all-errors \
+              --connect-timeout 20 --max-time 180 \
+              -A "$UA" -e "$OFFICIAL_PAGE" "$url" -o "$out" || true
+            if [ ! -s "$out" ]; then
+              wget -q --timeout=30 --tries=3 \
+                --user-agent="$UA" --referer="$OFFICIAL_PAGE" \
+                -O "$out" "$url" || true
+            fi
+            if [ "$required" = yes ]; then
+              test -s "$out"
+            fi
+          }
+
+          get_one "$LATEST_URL" /tmp/r109/download/latest.zip yes
+          get_one "$LEGACY_URL" /tmp/r109/download/legacy.zip no
+
+          {
+            echo "OFFICIAL_PAGE=$OFFICIAL_PAGE"
+            echo "LATEST_URL=$LATEST_URL"
+            echo "LEGACY_URL=$LEGACY_URL"
+            echo "LATEST_SIZE=$(stat -c '%s' /tmp/r109/download/latest.zip)"
+            echo "LATEST_SHA256=$(sha256sum /tmp/r109/download/latest.zip | awk '{print $1}')"
+            echo "LATEST_FILETYPE=$(file -b /tmp/r109/download/latest.zip)"
+            if [ -s /tmp/r109/download/legacy.zip ]; then
+              echo "LEGACY_ACQUIRED=YES"
+              echo "LEGACY_SIZE=$(stat -c '%s' /tmp/r109/download/legacy.zip)"
+              echo "LEGACY_SHA256=$(sha256sum /tmp/r109/download/legacy.zip | awk '{print $1}')"
+              echo "LEGACY_FILETYPE=$(file -b /tmp/r109/download/legacy.zip)"
+            else
+              echo "LEGACY_ACQUIRED=NO"
+            fi
+          } > /tmp/r109/evidence/R109_SOURCE_PIN.txt
+          cat /tmp/r109/evidence/R109_SOURCE_PIN.txt
+
+      - name: Safely extract wrappers and identify APKs
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import zipfile, hashlib, json
+
+          def safe_extract(src, dst, required):
+              src=Path(src); dst=Path(dst)
+              if not src.exists() or src.stat().st_size==0:
+                  if required: raise SystemExit("required archive missing")
+                  return []
+              rows=[]; total=0
+              try:
+                  z=zipfile.ZipFile(src)
+              except Exception as e:
+                  if required: raise
+                  return [{"error":str(e)}]
+              with z:
+                  for i in z.infolist():
+                      name=i.filename.replace("\\","/")
+                      total += i.file_size
+                      if total > 800*1024*1024: raise SystemExit("archive expanded size guard")
+                      target=(dst/name).resolve()
+                      if not str(target).startswith(str(dst.resolve())+"/"):
+                          raise SystemExit("path traversal")
+                      rows.append({"name":name,"size":i.file_size,"compressed":i.compress_size})
+                  z.extractall(dst)
+              return rows
+
+          latest=safe_extract("/tmp/r109/download/latest.zip","/tmp/r109/latest",True)
+          legacy=safe_extract("/tmp/r109/download/legacy.zip","/tmp/r109/legacy",False)
+          Path("/tmp/r109/evidence/R109_WRAPPER_MEMBERS.json").write_text(
+              json.dumps({"latest":latest,"legacy":legacy},indent=2)+"\n"
+          )
+
+          apks=[]
+          for label,root in [("latest",Path("/tmp/r109/latest")),("legacy",Path("/tmp/r109/legacy"))]:
+              for p in root.rglob("*.apk"):
+                  b=p.read_bytes()
+                  apks.append({
+                    "label":label,"path":str(p),"size":len(b),
+                    "sha256":hashlib.sha256(b).hexdigest()
+                  })
+          Path("/tmp/r109/evidence/R109_APK_INVENTORY.json").write_text(
+              json.dumps(apks,indent=2)+"\n"
+          )
+          latest_apks=[x for x in apks if x["label"]=="latest"]
+          if not latest_apks: raise SystemExit("latest wrapper has no APK")
+          # Pick largest APK in each package; preserve original bytes, never execute.
+          latest_pick=max(latest_apks,key=lambda x:x["size"])
+          Path("/tmp/r109/latest_apk_path").write_text(latest_pick["path"])
+          legacy_apks=[x for x in apks if x["label"]=="legacy"]
+          if legacy_apks:
+              Path("/tmp/r109/legacy_apk_path").write_text(max(legacy_apks,key=lambda x:x["size"])["path"])
+          print(json.dumps(apks,indent=2))
+          PY
+
+      - name: Parse manifest and Android components
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import json
+          from androguard.core.apk import APK
+
+          out={}
+          for label,pathfile in [("latest","/tmp/r109/latest_apk_path"),("legacy","/tmp/r109/legacy_apk_path")]:
+              pf=Path(pathfile)
+              if not pf.exists(): continue
+              apkpath=pf.read_text().strip()
+              a=APK(apkpath)
+              out[label]={
+                "apk_path":apkpath,
+                "package":a.get_package(),
+                "version_name":a.get_androidversion_name(),
+                "version_code":a.get_androidversion_code(),
+                "min_sdk":a.get_min_sdk_version(),
+                "target_sdk":a.get_target_sdk_version(),
+                "permissions":sorted(a.get_permissions()),
+                "activities":sorted(a.get_activities()),
+                "services":sorted(a.get_services()),
+                "receivers":sorted(a.get_receivers()),
+                "providers":sorted(a.get_providers()),
+                "files":sorted(a.get_files()),
+              }
+          Path("/tmp/r109/evidence/R109_MANIFEST_COMPONENTS.json").write_text(
+              json.dumps(out,indent=2,ensure_ascii=False)+"\n"
+          )
+          PY
+
+      - name: Static DEX method audit for USB host and boot update paths
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import json,re
+          from androguard.core.apk import APK
+          from androguard.core.dex import DEX
+
+          TOKENS=[
+            "Landroid/hardware/usb/UsbManager;",
+            "Landroid/hardware/usb/UsbDevice;",
+            "Landroid/hardware/usb/UsbDeviceConnection;",
+            "Landroid/hardware/usb/UsbInterface;",
+            "Landroid/hardware/usb/UsbEndpoint;",
+            "->controlTransfer(",
+            "->bulkTransfer(",
+            "->claimInterface(",
+            "->requestPermission(",
+            "ACTION_USB_DEVICE_ATTACHED",
+            "ACTION_USB_DEVICE_DETACHED",
+            "firmware","upgrade","update","bootloader","recovery","flash","erase",
+            ".mva","MVA","chiperas","codedata","bootdat","constdat","cnfgdat","btupdat","upinfo","cxxx",
+            "6324","1719","0x6324","0x1719","25380","5913",
+            "AA55","55AA","0xaa55","0x55aa",
+          ]
+          RISK_RE=re.compile(r'firmware|upgrade|bootloader|recovery|flash|erase|\.mva|chiperas|codedata|bootdat|constdat|cnfgdat|btupdat|upinfo|cxxx',re.I)
+
+          result={}
+          for label,pf in [("latest",Path("/tmp/r109/latest_apk_path")),("legacy",Path("/tmp/r109/legacy_apk_path"))]:
+              if not pf.exists(): continue
+              apkpath=pf.read_text().strip()
+              a=APK(apkpath)
+              methods=[]
+              control=[]
+              risk=[]
+              prodid=[]
+              aa=[]
+              for dexname in [x for x in a.get_files() if re.fullmatch(r'classes\d*\.dex',x)]:
+                  raw=a.get_file(dexname)
+                  d=DEX(raw)
+                  for c in d.get_classes():
+                      cname=c.get_name()
+                      for m in c.get_methods():
+                          try:
+                              code=m.get_code()
+                              if code is None: continue
+                              lines=[]
+                              for ins in m.get_instructions():
+                                  try: line=f"{ins.get_name()} {ins.get_output()}"
+                                  except Exception: continue
+                                  lines.append(line)
+                              body="\n".join(lines)
+                          except Exception:
+                              continue
+                          hits=[t for t in TOKENS if t.lower() in body.lower()]
+                          if not hits: continue
+                          rec={
+                              "dex":dexname,"class":cname,"method":m.get_name(),
+                              "descriptor":m.get_descriptor(),"hits":hits,
+                              "instructions":lines[:3000]
+                          }
+                          methods.append(rec)
+                          if "->controlTransfer(" in body or "->bulkTransfer(" in body or "->claimInterface(" in body:
+                              control.append(rec)
+                          if RISK_RE.search(body):
+                              risk.append(rec)
+                          if re.search(r'0x6324|0x1719|\b25380\b|\b5913\b|6324|1719',body,re.I):
+                              prodid.append(rec)
+                          if re.search(r'AA55|55AA|0xaa55|0x55aa',body,re.I):
+                              aa.append(rec)
+
+              # Keep bounded evidence, but include whole interesting methods to recover request constants.
+              result[label]={
+                "interesting_method_count":len(methods),
+                "usb_io_method_count":len(control),
+                "risk_vocabulary_method_count":len(risk),
+                "production_id_method_count":len(prodid),
+                "aa55_text_method_count":len(aa),
+                "usb_io_methods":control[:200],
+                "risk_methods":risk[:200],
+                "production_id_methods":prodid[:100],
+                "aa55_methods":aa[:50],
+              }
+          Path("/tmp/r109/evidence/R109_DEX_USB_BOOT_METHODS.json").write_text(
+              json.dumps(result,indent=2,ensure_ascii=False)+"\n"
+          )
+          for label,v in result.items():
+              print(label, "usb_io",v["usb_io_method_count"],"risk",v["risk_vocabulary_method_count"],
+                    "prodid",v["production_id_method_count"],"aa55",v["aa55_text_method_count"])
+          PY
+
+      - name: Extract APK files for raw resource and native-library scan
+        shell: bash
+        run: |
+          set -euo pipefail
+          for label in latest legacy; do
+            pf="/tmp/r109/${label}_apk_path"
+            [ -f "$pf" ] || continue
+            apk="$(cat "$pf")"
+            mkdir -p "/tmp/r109/${label}_apk"
+            unzip -q "$apk" -d "/tmp/r109/${label}_apk"
+          done
+
+          : > /tmp/r109/evidence/R109_RAW_KEYWORD_HITS.txt
+          : > /tmp/r109/evidence/R109_NATIVE_LIBRARY_HITS.txt
+          : > /tmp/r109/evidence/R109_EMBEDDED_PAYLOAD_CANDIDATES.txt
+
+          for label in latest legacy; do
+            root="/tmp/r109/${label}_apk"
+            [ -d "$root" ] || continue
+            echo "===== $label RAW FILE SCAN =====" >> /tmp/r109/evidence/R109_RAW_KEYWORD_HITS.txt
+
+            find "$root" -type f -size -50M -print0 | while IFS= read -r -d '' f; do
+              strings -a -n 4 "$f" 2>/dev/null |
+              grep -Ein -C 2 \
+                'UsbManager|UsbDeviceConnection|controlTransfer|bulkTransfer|claimInterface|6324|1719|25380|5913|AA55|55AA|firmware|upgrade|bootloader|recovery|read.?back|backup|flash|erase|MVA|chiperas|codedata|bootdat|constdat|cnfgdat|btupdat|upinfo|cxxx' \
+                | sed "s#^#$label:$f:#" >> /tmp/r109/evidence/R109_RAW_KEYWORD_HITS.txt || true
+            done
+
+            find "$root/lib" -type f -name '*.so' -print0 2>/dev/null | while IFS= read -r -d '' so; do
+              echo "===== $label $so =====" >> /tmp/r109/evidence/R109_NATIVE_LIBRARY_HITS.txt
+              {
+                file "$so"
+                readelf -h "$so" 2>/dev/null | grep -E 'Class:|Machine:|Type:' || true
+                strings -a -n 4 "$so" 2>/dev/null |
+                  grep -Ei -C 2 \
+                    'usb|hid|controlTransfer|6324|1719|AA55|55AA|firmware|upgrade|bootloader|recovery|flash|erase|MVA|chiperas|codedata|bootdat|constdat|cnfgdat|btupdat|upinfo|cxxx' || true
+              } >> /tmp/r109/evidence/R109_NATIVE_LIBRARY_HITS.txt
+            done
+
+            find "$root" -type f \( \
+                -iname '*.mva' -o -iname '*.bin' -o -iname '*.hex' -o -iname '*.img' \
+                -o -iname '*.fw' -o -iname '*.rom' -o -iname '*firmware*' -o -iname '*boot*' \
+              \) -printf "$label\t%p\t%s\n" \
+              >> /tmp/r109/evidence/R109_EMBEDDED_PAYLOAD_CANDIDATES.txt || true
+          done
+
+      - name: Parse binary XML files for USB device filters where possible
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import json,re
+          from androguard.core.apk import APK
+          try:
+              from androguard.core.axml import AXMLPrinter
+          except Exception:
+              AXMLPrinter=None
+
+          rows=[]
+          for label,pf in [("latest",Path("/tmp/r109/latest_apk_path")),("legacy",Path("/tmp/r109/legacy_apk_path"))]:
+              if not pf.exists(): continue
+              a=APK(pf.read_text().strip())
+              for name in a.get_files():
+                  if not (name.startswith("res/xml/") and name.endswith(".xml")):
+                      continue
+                  raw=a.get_file(name)
+                  text=""
+                  if AXMLPrinter:
+                      try:
+                          text=AXMLPrinter(raw).get_xml().decode("utf-8","replace")
+                      except Exception:
+                          try:text=AXMLPrinter(raw).get_xml_obj().getroottree().getroot().text or ""
+                          except Exception:pass
+                  if not text:
+                      try:text=raw.decode("utf-8","replace")
+                      except:pass
+                  if re.search(r'usb|device|vendor-id|product-id|6324|1719|25380|5913',text,re.I):
+                      rows.append({"label":label,"file":name,"text":text[:30000]})
+          Path("/tmp/r109/evidence/R109_USB_XML_FILTERS.json").write_text(
+              json.dumps(rows,indent=2,ensure_ascii=False)+"\n"
+          )
+          print("USB_XML_FILTER_ROWS",len(rows))
+          PY
+
+      - name: Compare latest and legacy static surfaces
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import json
+
+          ev=Path("/tmp/r109/evidence")
+          dex=json.loads((ev/"R109_DEX_USB_BOOT_METHODS.json").read_text())
+          manifest=json.loads((ev/"R109_MANIFEST_COMPONENTS.json").read_text())
+          diff={"legacy_available":"legacy" in dex}
+          if "latest" in dex and "legacy" in dex:
+              for k in [
+                  "interesting_method_count","usb_io_method_count","risk_vocabulary_method_count",
+                  "production_id_method_count","aa55_text_method_count"
+              ]:
+                  diff[k+"_latest"]=dex["latest"][k]
+                  diff[k+"_legacy"]=dex["legacy"][k]
+                  diff[k+"_delta"]=dex["latest"][k]-dex["legacy"][k]
+              diff["latest_package"]=manifest.get("latest",{}).get("package")
+              diff["legacy_package"]=manifest.get("legacy",{}).get("package")
+              diff["latest_version"]=manifest.get("latest",{}).get("version_name")
+              diff["legacy_version"]=manifest.get("legacy",{}).get("version_name")
+          Path("/tmp/r109/evidence/R109_LATEST_LEGACY_DIFF.json").write_text(
+              json.dumps(diff,indent=2,ensure_ascii=False)+"\n"
+          )
+          PY
+
+      - name: Build fail-closed R109 decision
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import json,re
+
+          ev=Path("/tmp/r109/evidence")
+          dex=json.loads((ev/"R109_DEX_USB_BOOT_METHODS.json").read_text())
+          manifest=json.loads((ev/"R109_MANIFEST_COMPONENTS.json").read_text())
+          xml=json.loads((ev/"R109_USB_XML_FILTERS.json").read_text())
+          payload=(ev/"R109_EMBEDDED_PAYLOAD_CANDIDATES.txt").read_text(errors="replace").strip().splitlines()
+          raw=(ev/"R109_RAW_KEYWORD_HITS.txt").read_text(errors="replace")
+          native=(ev/"R109_NATIVE_LIBRARY_HITS.txt").read_text(errors="replace")
+          latest=dex.get("latest",{})
+
+          prod_xml=any(re.search(r'6324|1719|25380|5913',x.get("text",""),re.I) for x in xml)
+          prod_any=latest.get("production_id_method_count",0)>0 or prod_xml or bool(re.search(r'6324|1719|25380|5913',raw))
+          risky=latest.get("risk_vocabulary_method_count",0)
+          payloads=[x for x in payload if x.strip()]
+
+          d={
+            "OFFICIAL_GOLOPINE_ANDROID_LATEST_ACQUIRED":True,
+            "OFFICIAL_PAGE": "https://golodsp.com/7%E9%80%9A%E9%81%93%E9%9F%B3%E9%A2%91%E5%89%8D%E7%BA%A7/",
+            "LATEST_PACKAGE":manifest.get("latest",{}).get("package"),
+            "LATEST_VERSION":manifest.get("latest",{}).get("version_name"),
+            "ANDROID_USB_IO_METHOD_COUNT":latest.get("usb_io_method_count",0),
+            "ANDROID_PRODUCTION_6324_1719_EVIDENCE_PRESENT":prod_any,
+            "ANDROID_AA55_TEXT_METHOD_COUNT":latest.get("aa55_text_method_count",0),
+            "ANDROID_BOOT_UPDATE_RISK_VOCAB_METHOD_COUNT":risky,
+            "EMBEDDED_UPDATE_PAYLOAD_CANDIDATE_COUNT":len(payloads),
+            "USB_XML_FILTER_ROW_COUNT":len(xml),
+            "NATIVE_UPDATE_USB_KEYWORDS_PRESENT":bool(re.search(
+                r'firmware|upgrade|bootloader|recovery|flash|erase|6324|1719|usb|hid',native,re.I)),
+            "OFFICIAL_ANDROID_APP_PROVEN_FIRMWARE_UPDATER":False,
+            "PRODUCTION_BOOT_ENTRY_SEQUENCE_PROVEN":False,
+            "PRODUCTION_RECOVERY_USB_IDENTITY_PROVEN":False,
+            "SAFE_READ_ONLY_PRODUCTION_IDENTIFY_PROVEN":False,
+            "SAFE_READ_ONLY_STOCK_BACKUP_PROVEN":False,
+            "ANY_DISCOVERED_USB_FRAME_AUTHORIZED_FOR_BOARD":False,
+            "NEXT":"INTERPRET_EXACT_ANDROID_USB_CALLERS_AND_CONSTANTS_IF_PRESENT; OTHERWISE_PIVOT_AWAY_FROM_TUNING_APP",
+            "FLASH_ALLOWED":False
+          }
+          (ev/"R109_DECISION.json").write_text(json.dumps(d,indent=2,ensure_ascii=False)+"\n")
+          report=[
+            "# R109 Official GoloPine Android USB / boot / updater static audit",
+            "",
+            "Official Android packages are downloaded from the GoloPine 7-channel product page and analyzed as data only.",
+            "No APK or native library is executed and no USB device is accessed.",
+            "",
+            "```json",json.dumps(d,indent=2,ensure_ascii=False),"```",
+            "",
+            "Interpretation gate:",
+            "- USB tuning/control APIs do not by themselves prove firmware flashing capability.",
+            "- Runtime tuning frames are not boot/recovery frames.",
+            "- No discovered constant or frame is authorized for the production board.",
+            "- Final required route remains Samsung S25+ -> USB-C -> DSP USB-C with no hardware modification.",
+            "- No AA55 repeat, no runtime 0x11, no legacy flash commands.",
+            "- FLASH_ALLOWED=NO."
+          ]
+          (ev/"R109_REPORT.md").write_text("\n".join(report)+"\n")
+          print(json.dumps(d,indent=2,ensure_ascii=False))
+          PY
+
+      - name: Package evidence only - exclude APK binaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /tmp/r109/evidence
+          zip -9 -r /tmp/R109_GOLOPINE_ANDROID_USB_BOOT_UPDATER_STATIC_EVIDENCE.zip .
+          sha256sum /tmp/R109_GOLOPINE_ANDROID_USB_BOOT_UPDATER_STATIC_EVIDENCE.zip \
+            > /tmp/R109_GOLOPINE_ANDROID_USB_BOOT_UPDATER_STATIC_EVIDENCE.zip.sha256
+
+      - name: Upload R109 evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: R109-GOLOPINE-ANDROID-USB-BOOT-UPDATER-STATIC-EVIDENCE
+          path: |
+            /tmp/R109_GOLOPINE_ANDROID_USB_BOOT_UPDATER_STATIC_EVIDENCE.zip
+            /tmp/R109_GOLOPINE_ANDROID_USB_BOOT_UPDATER_STATIC_EVIDENCE.zip.sha256
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Final fail-closed gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -F 'R109_APK_EXECUTED=NO' /tmp/r109/evidence/R109_SAFETY.txt
+          grep -F 'R109_USB_DEVICE_ACCESS=NO' /tmp/r109/evidence/R109_SAFETY.txt
+          grep -F 'R109_ANY_DISCOVERED_USB_FRAME_AUTHORIZED_FOR_BP1048P4=NO' /tmp/r109/evidence/R109_SAFETY.txt
+          grep -F 'FLASH_ALLOWED=NO' /tmp/r109/evidence/R109_SAFETY.txt
+          cat /tmp/r109/evidence/R109_DECISION.json
+          echo R109_STATIC_AUDIT_COMPLETE=YES
+          echo FLASH_ALLOWED=NO
