@@ -1,0 +1,490 @@
+name: R128 exact PCTools V2.2.8 deep static reverse
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - ".github/workflows/R128_EXACT_PCTOOLS_V2_2_8_DEEP_STATIC_REVERSE.yml"
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: r128-exact-pctools-v228-static-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  FLASH_ALLOWED: "NO"
+  R127_RUN_ID: "35865759674"
+  R127_ACQUIRED_ARTIFACT_ID: "10751533100"
+  R127_ACQUIRED_ARTIFACT_NAME: "R127-ACQUIRED-PUBLIC-FILES"
+  R127_ACQUIRED_ARTIFACT_DIGEST: "sha256:43f60bf724744c488d3c3b0da147666b4091b7d74d3be6ebec6712e4b1b6983a"
+  R127_INNER_ZIP_SHA256: "d217dff170352179ee3d6a70b8e3a58b98b41ef2d365a4551daff4124ce21be6"
+  BT_NAME_RAR_SHA256: "c6b1fcb4d0e430c86c50e9ddf1007fa110f416c0570888060d693819164eccb8"
+  PCTOOLS_SHA256: "0e13801b29070f805869823e6db4ad56d70494b2621fb63c330cea1d69e9ca33"
+  UPGRADE_FLASH_SHA256: "bebb887b04fc724e1c459cce15d4395c78df3e098c54f06369ffe78b50aec073"
+  FLASHBOOT_UPDATEFILE_SHA256: "34acb64329dd0e952f490dc56624b6d8b7e0cc516a2f23ca5df6c48cf9e6a3d6"
+
+jobs:
+  deep_static:
+    name: DEEP STATIC ONLY - never execute vendor binary - no USB - no board
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Immutable safety gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/r128/input /tmp/r128/acquired /tmp/r128/unpacked /tmp/r128/evidence
+          cat > /tmp/r128/evidence/R128_SAFETY.txt <<'EOF'
+          R128_MODE=EXACT_PCTOOLS_DEEP_STATIC_REVERSE_ONLY
+          R128_VENDOR_BINARY_EXECUTED=NO
+          R128_INSTALLER_EXECUTED=NO
+          R128_USB_DEVICE_ACCESS=NO
+          R128_BOARD_CONTACT=NO
+          R128_AA55_SENT=NO
+          R128_RUNTIME_0X11_SENT=NO
+          R128_RUNTIME_0XFE_SENT=NO
+          R128_FLASHBOOT_COMMAND_SENT=NO
+          R128_FLASH_READ_EXECUTED=NO
+          R128_FLASH_ERASE_EXECUTED=NO
+          R128_FLASH_WRITE_EXECUTED=NO
+          R128_ANY_DISCOVERED_FRAME_AUTHORIZED_FOR_BOARD=NO
+          FINAL_REQUIRED_TRANSPORT=SAMSUNG_S25_PLUS_USB_C_DIRECT_TO_DSP_USB_C
+          HARDWARE_MODIFICATION=FORBIDDEN
+          REFERENCE_OR_TOOL_EVIDENCE_IS_NOT_PRODUCTION_PROOF=YES
+          FLASH_ALLOWED=NO
+          EOF
+
+      - name: Download pinned R127 acquired-files artifact as inert data
+        uses: actions/download-artifact@v4
+        with:
+          name: R127-ACQUIRED-PUBLIC-FILES
+          path: /tmp/r128/input
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          repository: Thanaporn-okn/OKN_DSP-apk
+          run-id: 35865759674
+
+      - name: Install static analysis tooling only
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+            file unzip p7zip-full binutils jq python3-pip >/dev/null
+          python3 -m pip install --disable-pip-version-check --no-input \
+            pefile capstone >/dev/null
+
+      - name: Verify R127 inner artifact and extract inert archives
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /tmp/r128/input
+          test -f R127_ACQUIRED_PUBLIC_FILES.zip
+          test -f R127_ACQUIRED_PUBLIC_FILES.zip.sha256
+          echo "${R127_INNER_ZIP_SHA256}  R127_ACQUIRED_PUBLIC_FILES.zip" | sha256sum -c -
+          unzip -q R127_ACQUIRED_PUBLIC_FILES.zip -d /tmp/r128/acquired
+
+          BT_RAR="$(find /tmp/r128/acquired -type f -name '*.rar' -path '*BT_NAME_TOOL*' -print -quit)"
+          test -n "$BT_RAR"
+          echo "${BT_NAME_RAR_SHA256}  ${BT_RAR}" | sha256sum -c -
+          mkdir -p /tmp/r128/unpacked/bt
+          7z x -y -o/tmp/r128/unpacked/bt "$BT_RAR" >/tmp/r128/evidence/R128_7Z_BT_EXTRACT.txt
+
+          PCTOOLS="$(find /tmp/r128/unpacked/bt -type f -name 'MV_AP82xx_BP10xx_PC_Tools_V2.2.8_20210205.exe' -print -quit)"
+          UPGRADE="$(find /tmp/r128/unpacked/bt -type f -name 'upgrade_flash.exe' -print -quit)"
+          FLASHBT="$(find /tmp/r128/unpacked/bt -type f -name 'Flashboot_UpDateFile.bt' -print -quit)"
+          test -n "$PCTOOLS" -a -n "$UPGRADE" -a -n "$FLASHBT"
+          echo "${PCTOOLS_SHA256}  ${PCTOOLS}" | sha256sum -c -
+          echo "${UPGRADE_FLASH_SHA256}  ${UPGRADE}" | sha256sum -c -
+          echo "${FLASHBOOT_UPDATEFILE_SHA256}  ${FLASHBT}" | sha256sum -c -
+
+          printf '%s\n' "$PCTOOLS" > /tmp/r128/PCTOOLS_PATH
+          printf '%s\n' "$UPGRADE" > /tmp/r128/UPGRADE_PATH
+          printf '%s\n' "$FLASHBT" > /tmp/r128/FLASHBT_PATH
+
+      - name: Record exact archive tree hashes sizes and types
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import hashlib, json, subprocess
+
+          root=Path('/tmp/r128/unpacked/bt')
+          rows=[]
+          for p in sorted(root.rglob('*')):
+              if not p.is_file():
+                  continue
+              data=p.read_bytes()
+              try:
+                  typ=subprocess.check_output(['file','-b',str(p)],text=True).strip()
+              except Exception:
+                  typ=''
+              rows.append({
+                  'path':str(p.relative_to(root)),
+                  'size':len(data),
+                  'sha256':hashlib.sha256(data).hexdigest(),
+                  'file_type':typ,
+              })
+          Path('/tmp/r128/evidence/R128_ARCHIVE_TREE.json').write_text(
+              json.dumps(rows,indent=2,ensure_ascii=False)+'\n')
+          PY
+
+      - name: Static PE imports sections resources and string inventory
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import hashlib, json, re, pefile
+
+          targets={
+              'pctools':Path(Path('/tmp/r128/PCTOOLS_PATH').read_text().strip()),
+              'upgrade_flash':Path(Path('/tmp/r128/UPGRADE_PATH').read_text().strip()),
+          }
+          key_re=re.compile(
+              r'AA55|55AA|HidD_|HidP_|SetupDi|VID_|PID_|vendor|product|'
+              r'MVA|flashboot|bootloader|recovery|upgrade|firmware|READSN|SN|'
+              r'chiperas|codedata|bootdat|constdat|cnfgdat|btupdat|upinfo|cxxx|'
+              r'ISOK\?FLASH|PSOK\?|BP1048|BP10|AP82|PCTools|PC_Tools|'
+              r'0633|5322|0288|7966|6324|1719|18B4|06B7', re.I)
+
+          out=[]
+          string_rows=[]
+          for label,p in targets.items():
+              data=p.read_bytes()
+              pe=pefile.PE(str(p),fast_load=False)
+              imports=[]
+              iat={}
+              for entry in getattr(pe,'DIRECTORY_ENTRY_IMPORT',[]):
+                  dll=entry.dll.decode('latin1','replace') if entry.dll else ''
+                  funcs=[]
+                  for imp in entry.imports:
+                      name=imp.name.decode('latin1','replace') if imp.name else f'ordinal:{imp.ordinal}'
+                      funcs.append({'name':name,'iat_va':hex(imp.address)})
+                      iat[name]=imp.address
+                  imports.append({'dll':dll,'functions':funcs})
+              sections=[]
+              for s in pe.sections:
+                  sections.append({
+                      'name':s.Name.rstrip(b'\0').decode('latin1','replace'),
+                      'virtual_address':hex(s.VirtualAddress),
+                      'virtual_size':int(s.Misc_VirtualSize),
+                      'raw_offset':int(s.PointerToRawData),
+                      'raw_size':int(s.SizeOfRawData),
+                      'characteristics':hex(s.Characteristics),
+                  })
+              out.append({
+                  'label':label,'path':str(p),'size':len(data),
+                  'sha256':hashlib.sha256(data).hexdigest(),
+                  'machine':hex(pe.FILE_HEADER.Machine),
+                  'timestamp':pe.FILE_HEADER.TimeDateStamp,
+                  'imagebase':hex(pe.OPTIONAL_HEADER.ImageBase),
+                  'entrypoint_rva':hex(pe.OPTIONAL_HEADER.AddressOfEntryPoint),
+                  'sections':sections,'imports':imports,
+              })
+
+              strings=[]
+              for m in re.finditer(rb'[\x20-\x7e]{5,}',data):
+                  s=m.group().decode('latin1','replace')
+                  if key_re.search(s):
+                      strings.append({'encoding':'ascii','file_offset':m.start(),'text':s[:2000]})
+              for m in re.finditer(rb'(?:[\x20-\x7e]\x00){5,}',data):
+                  raw=m.group()
+                  s=raw.decode('utf-16le','replace')
+                  if key_re.search(s):
+                      strings.append({'encoding':'utf16le','file_offset':m.start(),'text':s[:2000]})
+              string_rows.append({'label':label,'path':str(p),'hits':strings[:12000]})
+
+          Path('/tmp/r128/evidence/R128_PE_METADATA.json').write_text(json.dumps(out,indent=2)+'\n')
+          Path('/tmp/r128/evidence/R128_KEY_STRINGS.json').write_text(json.dumps(string_rows,indent=2,ensure_ascii=False)+'\n')
+          PY
+
+      - name: Deep static xrefs to HID imports and MVA updater strings
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import json,re,pefile
+          from capstone import Cs, CS_ARCH_X86, CS_MODE_32
+          from capstone.x86 import X86_OP_IMM, X86_OP_MEM
+
+          target_paths={
+              'pctools':Path(Path('/tmp/r128/PCTOOLS_PATH').read_text().strip()),
+              'upgrade_flash':Path(Path('/tmp/r128/UPGRADE_PATH').read_text().strip()),
+          }
+          wanted_imports={
+              'HidD_SetFeature','HidD_GetFeature','HidD_SetOutputReport','HidD_GetInputReport',
+              'HidP_GetCaps','SetupDiGetClassDevsW','CreateFileW','CreateFileA','ReadFile','WriteFile'
+          }
+          key_terms=re.compile(
+              r'MVA|Flashboot|flashboot|chiperas|codedata|bootdat|constdat|cnfgdat|btupdat|upinfo|'
+              r'upgrade start|Upgrade Finished|READSN|BPXX MVA|AP82XX MVA|Generate_MVA|PCTools_Config',re.I)
+
+          def strings_with_va(pe,data):
+              ans=[]
+              for enc,pat in [('ascii',rb'[\x20-\x7e]{5,}'),('utf16le',rb'(?:[\x20-\x7e]\x00){5,}')]:
+                  for m in re.finditer(pat,data):
+                      try:
+                          rva=pe.get_rva_from_offset(m.start())
+                      except Exception:
+                          continue
+                      if enc=='ascii': s=m.group().decode('latin1','replace')
+                      else: s=m.group().decode('utf-16le','replace')
+                      if key_terms.search(s):
+                          ans.append({'va':pe.OPTIONAL_HEADER.ImageBase+rva,'file_offset':m.start(),'encoding':enc,'text':s[:1000]})
+              return ans
+
+          all_out=[]
+          for label,p in target_paths.items():
+              data=p.read_bytes()
+              pe=pefile.PE(str(p),fast_load=False)
+              imagebase=pe.OPTIONAL_HEADER.ImageBase
+              iat={}
+              for e in getattr(pe,'DIRECTORY_ENTRY_IMPORT',[]):
+                  for imp in e.imports:
+                      if imp.name:
+                          n=imp.name.decode('latin1','replace')
+                          if n in wanted_imports:
+                              iat[imp.address]=n
+
+              text_sections=[s for s in pe.sections if s.Characteristics & 0x20000000]
+              md=Cs(CS_ARCH_X86,CS_MODE_32); md.detail=True
+              ins=[]
+              for s in text_sections:
+                  code=s.get_data()
+                  start=imagebase+s.VirtualAddress
+                  ins.extend(list(md.disasm(code,start)))
+              ins.sort(key=lambda x:x.address)
+
+              str_rows=strings_with_va(pe,data)
+              str_by_va={x['va']:x for x in str_rows}
+              callsites=[]
+              str_xrefs=[]
+              aa55_near=[]
+
+              for idx,ci in enumerate(ins):
+                  refs=[]
+                  imms=[]
+                  for op in ci.operands:
+                      if op.type==X86_OP_IMM:
+                          imms.append(op.imm)
+                      elif op.type==X86_OP_MEM and op.mem.disp:
+                          refs.append(op.mem.disp & 0xffffffff)
+                  import_names=[]
+                  for v in refs+imms:
+                      if v in iat: import_names.append(iat[v])
+                  if import_names:
+                      lo=max(0,idx-24); hi=min(len(ins),idx+25)
+                      ctx=[]
+                      aa=False; vv=False
+                      for x in ins[lo:hi]:
+                          t=f'{x.mnemonic} {x.op_str}'
+                          ctx.append({'va':hex(x.address),'text':t})
+                          if re.search(r'(^|[^0-9a-f])0xaa([^0-9a-f]|$)|\b170\b',t,re.I): aa=True
+                          if re.search(r'(^|[^0-9a-f])0x55([^0-9a-f]|$)|\b85\b',t,re.I): vv=True
+                      row={'call_va':hex(ci.address),'instruction':f'{ci.mnemonic} {ci.op_str}',
+                           'imports':sorted(set(import_names)),'context':ctx,
+                           'near_immediate_AA':aa,'near_immediate_55':vv}
+                      callsites.append(row)
+                      if aa and vv and any(n in ('HidD_SetFeature','HidD_GetFeature') for n in import_names):
+                          aa55_near.append(row)
+
+                  for v in refs+imms:
+                      if v in str_by_va:
+                          x=str_by_va[v]
+                          str_xrefs.append({'insn_va':hex(ci.address),'instruction':f'{ci.mnemonic} {ci.op_str}',**x})
+
+              all_out.append({
+                  'label':label,'path':str(p),
+                  'iat_targets':{hex(k):v for k,v in iat.items()},
+                  'hid_and_io_callsites':callsites,
+                  'key_string_xrefs':str_xrefs,
+                  'aa55_near_hid_feature_calls':aa55_near,
+              })
+
+          Path('/tmp/r128/evidence/R128_STATIC_XREFS.json').write_text(
+              json.dumps(all_out,indent=2,ensure_ascii=False)+'\n')
+          PY
+
+      - name: Search pinned USB identities and dangerous protocol literals as data only
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import json,struct,re
+
+          paths={
+              'pctools':Path(Path('/tmp/r128/PCTOOLS_PATH').read_text().strip()),
+              'upgrade_flash':Path(Path('/tmp/r128/UPGRADE_PATH').read_text().strip()),
+          }
+          ids={
+              'programmer_A_vid_dec_0633':633,
+              'programmer_A_pid_dec_5322':5322,
+              'programmer_B_vid_dec_0288':288,
+              'programmer_B_pid_dec_7966':7966,
+              'production_vid_dec_6324':6324,
+              'production_pid_dec_1719':1719,
+          }
+          text_needles=['0633','5322','0288','7966','6324','1719','18B4','06B7',
+                        'VID_','PID_','AA55','55AA','chiperas','codedata','bootdat','constdat',
+                        'cnfgdat','btupdat','upinfo','cxxx','ISOK?FLASH','PSOK?']
+          result=[]
+          for label,p in paths.items():
+              data=p.read_bytes()
+              row={'label':label,'path':str(p),'u16_le_hits':{},'ascii_hits':{}}
+              for name,val in ids.items():
+                  needle=struct.pack('<H',val)
+                  offs=[m.start() for m in re.finditer(re.escape(needle),data)]
+                  row['u16_le_hits'][name]={'value_dec':val,'value_hex':hex(val),'offsets':offs[:500],'count':len(offs)}
+              low=data.lower()
+              for s in text_needles:
+                  b=s.encode().lower()
+                  offs=[m.start() for m in re.finditer(re.escape(b),low)]
+                  row['ascii_hits'][s]={'offsets':offs[:500],'count':len(offs)}
+              result.append(row)
+          Path('/tmp/r128/evidence/R128_LITERAL_SEARCH.json').write_text(json.dumps(result,indent=2)+'\n')
+          PY
+
+      - name: Preserve Flashboot_UpDateFile.bt bytes as static evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          FLASHBT="$(cat /tmp/r128/FLASHBT_PATH)"
+          {
+            echo "path=$FLASHBT"
+            stat -c 'size=%s' "$FLASHBT"
+            sha256sum "$FLASHBT"
+            echo 'hex:'
+            xxd -g 1 "$FLASHBT"
+          } > /tmp/r128/evidence/R128_FLASHBOOT_UPDATEFILE_HEX.txt
+
+      - name: Build fail-closed R128 decision and Thai report
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import json, hashlib
+
+          ev=Path('/tmp/r128/evidence')
+          tree=json.loads((ev/'R128_ARCHIVE_TREE.json').read_text())
+          pe=json.loads((ev/'R128_PE_METADATA.json').read_text())
+          xrefs=json.loads((ev/'R128_STATIC_XREFS.json').read_text())
+          lits=json.loads((ev/'R128_LITERAL_SEARCH.json').read_text())
+
+          pct=next(x for x in pe if x['label']=='pctools')
+          upg=next(x for x in pe if x['label']=='upgrade_flash')
+          pct_imports={f['name'] for d in pct['imports'] for f in d['functions']}
+          upg_imports={f['name'] for d in upg['imports'] for f in d['functions']}
+          actual_mva=[x for x in tree if x['path'].lower().endswith('.mva')]
+          pct_x=next(x for x in xrefs if x['label']=='pctools')
+
+          prod_lit={}
+          for r in lits:
+              prod_lit[r['label']]={
+                  'vid6324_u16_count':r['u16_le_hits']['production_vid_dec_6324']['count'],
+                  'pid1719_u16_count':r['u16_le_hits']['production_pid_dec_1719']['count'],
+                  'ascii_6324_count':r['ascii_hits']['6324']['count'],
+                  'ascii_1719_count':r['ascii_hits']['1719']['count'],
+                  'ascii_18B4_count':r['ascii_hits']['18B4']['count'],
+                  'ascii_06B7_count':r['ascii_hits']['06B7']['count'],
+              }
+
+          decision={
+              'R127_RUN_ID':35865759674,
+              'R127_ACQUIRED_ARTIFACT_ID':10751533100,
+              'PCTOOLS_EXACT_FILE_FOUND':True,
+              'PCTOOLS_VERSION':'MV_AP82xx_BP10xx_PC_Tools_V2.2.8_20210205',
+              'PCTOOLS_SHA256':pct['sha256'],
+              'UPGRADE_FLASH_FILE_FOUND':True,
+              'UPGRADE_FLASH_SHA256':upg['sha256'],
+              'ACTUAL_MVA_FILE_COUNT':len(actual_mva),
+              'ACTUAL_MVA_FILES':actual_mva,
+              'PCTOOLS_HIDD_SETFEATURE_IMPORT':'HidD_SetFeature' in pct_imports,
+              'PCTOOLS_HIDD_GETFEATURE_IMPORT':'HidD_GetFeature' in pct_imports,
+              'PCTOOLS_HIDD_SETOUTPUTREPORT_IMPORT':'HidD_SetOutputReport' in pct_imports,
+              'UPGRADE_FLASH_HIDD_SETOUTPUTREPORT_IMPORT':'HidD_SetOutputReport' in upg_imports,
+              'UPGRADE_FLASH_HIDD_GETINPUTREPORT_IMPORT':'HidD_GetInputReport' in upg_imports,
+              'AA55_NEAR_HID_FEATURE_CALL_COUNT':len(pct_x['aa55_near_hid_feature_calls']),
+              'PRODUCTION_USB_ID_LITERAL_HITS':prod_lit,
+              'IMPORTANT_INTERPRETATION':'Literal/import/xref presence is static evidence only and is not proof that the production GoloPine board uses that path.',
+              'VENDOR_BINARY_EXECUTED':False,
+              'USB_DEVICE_ACCESSED':False,
+              'BOARD_CONTACTED':False,
+              'AA55_LIVE_RETEST_ALLOWED':False,
+              'RUNTIME_0X11_ALLOWED':False,
+              'RUNTIME_0XFE_ALLOWED':False,
+              'PRODUCTION_BOOTSTRAP_BRIDGE_PROVEN':False,
+              'PRODUCTION_RECOVERY_USB_IDENTITY_PROVEN':False,
+              'SAFE_READ_ONLY_STOCK_BACKUP_PROVEN':False,
+              'MVA_ACCEPTANCE_FOR_PRODUCTION_PROVEN':False,
+              'ANY_DISCOVERED_FRAME_AUTHORIZED_FOR_BOARD':False,
+              'FLASH_ALLOWED':False,
+              'NEXT':'Review exact HID callsites, key-string xrefs, Flashboot_UpDateFile.bt bytes, VID/PID literal context, and MVA parser xrefs. Only if a read-only identify/backup path is statically proven and production identity is independently matched should a separate safety review be considered; no live send is authorized here.'
+          }
+          (ev/'R128_DECISION.json').write_text(json.dumps(decision,indent=2,ensure_ascii=False)+'\n')
+
+          lines=[
+              '# R128 exact PCTools V2.2.8 deep static reverse',
+              '',
+              f'- PCTools exact SHA256: `{pct["sha256"]}`',
+              f'- upgrade_flash.exe SHA256: `{upg["sha256"]}`',
+              f'- actual .MVA files in acquired package: {len(actual_mva)}',
+              f'- PCTools imports HidD_SetFeature: {decision["PCTOOLS_HIDD_SETFEATURE_IMPORT"]}',
+              f'- PCTools imports HidD_GetFeature: {decision["PCTOOLS_HIDD_GETFEATURE_IMPORT"]}',
+              f'- PCTools imports HidD_SetOutputReport: {decision["PCTOOLS_HIDD_SETOUTPUTREPORT_IMPORT"]}',
+              f'- upgrade_flash imports HidD_SetOutputReport: {decision["UPGRADE_FLASH_HIDD_SETOUTPUTREPORT_IMPORT"]}',
+              f'- upgrade_flash imports HidD_GetInputReport: {decision["UPGRADE_FLASH_HIDD_GETINPUTREPORT_IMPORT"]}',
+              f'- AA/55 immediates near HID Feature call contexts: {decision["AA55_NEAR_HID_FEATURE_CALL_COUNT"]}',
+              '',
+              '## Safety',
+              '- Vendor EXE executed: NO',
+              '- USB/board accessed: NO',
+              '- AA55 live retest: BLOCKED',
+              '- 0x11 / 0xFE / flash-program commands: BLOCKED',
+              '- Reference/tool evidence is not production proof.',
+              '- FLASH_ALLOWED=NO',
+          ]
+          (ev/'R128_REPORT_TH.md').write_text('\n'.join(lines)+'\n')
+          PY
+
+          cat /tmp/r128/evidence/R128_DECISION.json
+
+      - name: Package evidence only
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /tmp/r128/evidence
+          zip -9 -r /tmp/R128_EXACT_PCTOOLS_V2_2_8_DEEP_STATIC_EVIDENCE.zip . >/dev/null
+          sha256sum /tmp/R128_EXACT_PCTOOLS_V2_2_8_DEEP_STATIC_EVIDENCE.zip \
+            > /tmp/R128_EXACT_PCTOOLS_V2_2_8_DEEP_STATIC_EVIDENCE.zip.sha256
+
+      - name: Upload R128 evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: R128-EXACT-PCTOOLS-V2-2-8-DEEP-STATIC-EVIDENCE
+          path: |
+            /tmp/R128_EXACT_PCTOOLS_V2_2_8_DEEP_STATIC_EVIDENCE.zip
+            /tmp/R128_EXACT_PCTOOLS_V2_2_8_DEEP_STATIC_EVIDENCE.zip.sha256
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Final fail-closed gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -F 'R128_VENDOR_BINARY_EXECUTED=NO' /tmp/r128/evidence/R128_SAFETY.txt
+          grep -F 'R128_USB_DEVICE_ACCESS=NO' /tmp/r128/evidence/R128_SAFETY.txt
+          grep -F 'R128_BOARD_CONTACT=NO' /tmp/r128/evidence/R128_SAFETY.txt
+          grep -F 'R128_AA55_SENT=NO' /tmp/r128/evidence/R128_SAFETY.txt
+          grep -F 'R128_RUNTIME_0X11_SENT=NO' /tmp/r128/evidence/R128_SAFETY.txt
+          grep -F 'R128_RUNTIME_0XFE_SENT=NO' /tmp/r128/evidence/R128_SAFETY.txt
+          grep -F '"FLASH_ALLOWED": false' /tmp/r128/evidence/R128_DECISION.json
+          echo R128_DEEP_STATIC_COMPLETE=YES
+          echo FLASH_ALLOWED=NO
