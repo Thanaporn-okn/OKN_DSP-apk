@@ -1,0 +1,368 @@
+name: R132 exact PCTools GetInputReport function dataflow static reverse
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - ".github/workflows/R132_EXACT_PCTOOLS_GETINPUTREPORT_FUNCTION_DATAFLOW_STATIC_REVERSE.yml"
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: r132-getinputreport-function-dataflow-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  FLASH_ALLOWED: "NO"
+  R127_RUN_ID: "35865759674"
+  R127_ACQUIRED_ARTIFACT_NAME: "R127-ACQUIRED-PUBLIC-FILES"
+  R127_INNER_ZIP_SHA256: "d217dff170352179ee3d6a70b8e3a58b98b41ef2d365a4551daff4124ce21be6"
+  BT_NAME_RAR_SHA256: "c6b1fcb4d0e430c86c50e9ddf1007fa110f416c0570888060d693819164eccb8"
+  PCTOOLS_SHA256: "0e13801b29070f805869823e6db4ad56d70494b2621fb63c330cea1d69e9ca33"
+  R131_RUN_ID: "35890052616"
+  R131_JOB_ID: "107279947770"
+  R131_EVIDENCE_ARTIFACT_ID: "10764790271"
+  R131_EVIDENCE_ARTIFACT_NAME: "R131-EXACT-PCTOOLS-HID-READ-CLASSIFICATION-STATIC-EVIDENCE"
+  R131_EVIDENCE_DIGEST: "sha256:6451ab6ab9f2306b24d8d580921ccc682fbcd1950641bf5c658ff5d297965960"
+
+jobs:
+  static_reverse:
+    name: STATIC ONLY - GetInputReport dataflow - no execution - no USB - no board
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Immutable safety gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/r132/input /tmp/r132/acquired /tmp/r132/unpacked/bt /tmp/r132/r131 /tmp/r132/evidence
+          cat > /tmp/r132/evidence/R132_SAFETY.txt <<'EOF'
+          R132_MODE=OFFLINE_GETINPUTREPORT_FUNCTION_DATAFLOW_STATIC_ONLY
+          R132_VENDOR_BINARY_EXECUTED=NO
+          R132_INSTALLER_EXECUTED=NO
+          R132_USB_DEVICE_ACCESS=NO
+          R132_BOARD_CONTACT=NO
+          R132_AA55_SENT=NO
+          R132_RUNTIME_0X11_SENT=NO
+          R132_RUNTIME_0XFE_SENT=NO
+          R132_FLASHBOOT_COMMAND_SENT=NO
+          R132_FLASH_READ_EXECUTED=NO
+          R132_FLASH_ERASE_EXECUTED=NO
+          R132_FLASH_WRITE_EXECUTED=NO
+          R132_ANY_DISCOVERED_FRAME_AUTHORIZED_FOR_BOARD=NO
+          FINAL_REQUIRED_TRANSPORT=SAMSUNG_S25_PLUS_USB_C_DIRECT_TO_DSP_USB_C
+          HARDWARE_MODIFICATION=FORBIDDEN
+          REFERENCE_OR_TOOL_EVIDENCE_IS_NOT_PRODUCTION_PROOF=YES
+          FLASH_ALLOWED=NO
+          EOF
+
+      - name: Download pinned R127 acquired files as inert data
+        uses: actions/download-artifact@v4
+        with:
+          name: R127-ACQUIRED-PUBLIC-FILES
+          path: /tmp/r132/input
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          repository: Thanaporn-okn/OKN_DSP-apk
+          run-id: 35865759674
+
+      - name: Download pinned R131 evidence for continuity only
+        uses: actions/download-artifact@v4
+        with:
+          name: R131-EXACT-PCTOOLS-HID-READ-CLASSIFICATION-STATIC-EVIDENCE
+          path: /tmp/r132/r131
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          repository: Thanaporn-okn/OKN_DSP-apk
+          run-id: 35890052616
+
+      - name: Install static tooling only
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq file unzip p7zip-full python3-pip >/dev/null
+          python3 -m pip install --disable-pip-version-check --no-input pefile capstone >/dev/null
+
+      - name: Verify pinned hashes and extract inert PCTools
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /tmp/r132/input
+          test -f R127_ACQUIRED_PUBLIC_FILES.zip
+          echo "${R127_INNER_ZIP_SHA256}  R127_ACQUIRED_PUBLIC_FILES.zip" | sha256sum -c -
+          unzip -q R127_ACQUIRED_PUBLIC_FILES.zip -d /tmp/r132/acquired
+          BT_RAR="$(find /tmp/r132/acquired -type f -name '*.rar' -path '*BT_NAME_TOOL*' -print -quit)"
+          test -n "$BT_RAR"
+          echo "${BT_NAME_RAR_SHA256}  ${BT_RAR}" | sha256sum -c -
+          7z x -y -o/tmp/r132/unpacked/bt "$BT_RAR" >/tmp/r132/evidence/R132_7Z_BT_EXTRACT.txt
+          PCTOOLS="$(find /tmp/r132/unpacked/bt -type f -name 'MV_AP82xx_BP10xx_PC_Tools_V2.2.8_20210205.exe' -print -quit)"
+          test -n "$PCTOOLS"
+          echo "${PCTOOLS_SHA256}  ${PCTOOLS}" | sha256sum -c -
+          printf '%s\n' "$PCTOOLS" > /tmp/r132/PCTOOLS_PATH
+
+          # Continuity only: preserve what R131 actually produced.
+          find /tmp/r132/r131 -maxdepth 1 -type f -printf '%f\n' | sort > /tmp/r132/evidence/R132_R131_ARTIFACT_FILES.txt
+
+      - name: Reconstruct target GetInputReport function dataflow
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import bisect, json, re, pefile
+          from capstone import Cs, CS_ARCH_X86, CS_MODE_32
+          from capstone.x86 import X86_OP_IMM, X86_OP_MEM, X86_REG_ESP, X86_REG_EBP
+
+          TARGETS={0x40af3e,0x40d146,0x40de10}
+          p=Path(Path('/tmp/r132/PCTOOLS_PATH').read_text().strip())
+          data=p.read_bytes(); pe=pefile.PE(str(p),fast_load=False); ib=pe.OPTIONAL_HEADER.ImageBase
+
+          read_names={'HidD_GetInputReport','HidD_GetFeature','HidP_GetCaps','ReadFile'}
+          write_names={'HidD_SetInputReport','HidD_SetOutputReport','HidD_SetFeature','WriteFile'}
+          enum_names={'HidD_GetHidGuid','HidD_GetPreparsedData','SetupDiGetClassDevsW','SetupDiEnumDeviceInterfaces','SetupDiGetDeviceInterfaceDetailW','CreateFileW','CreateFileA'}
+          interest=read_names|write_names|enum_names
+          iat={}
+          for e in getattr(pe,'DIRECTORY_ENTRY_IMPORT',[]):
+              for imp in e.imports:
+                  if imp.name:
+                      n=imp.name.decode('latin1','replace')
+                      if n in interest: iat[imp.address]=n
+
+          md=Cs(CS_ARCH_X86,CS_MODE_32); md.detail=True
+          ins=[]; exec_ranges=[]
+          for sec in pe.sections:
+              if sec.Characteristics & 0x20000000:
+                  lo=ib+sec.VirtualAddress
+                  hi=lo+max(int(sec.Misc_VirtualSize),int(sec.SizeOfRawData))
+                  exec_ranges.append((lo,hi))
+                  ins.extend(md.disasm(sec.get_data(),lo))
+          ins=sorted(ins,key=lambda x:x.address)
+          addrs=[x.address for x in ins]
+          idx={x.address:i for i,x in enumerate(ins)}
+          def is_exec(v): return any(a<=v<b for a,b in exec_ranges)
+          def vals(x):
+              out=[]
+              for op in x.operands:
+                  if op.type==X86_OP_IMM: out.append(op.imm & 0xffffffff)
+                  elif op.type==X86_OP_MEM and op.mem.disp: out.append(op.mem.disp & 0xffffffff)
+              return out
+          def api_names(x): return sorted({iat[v] for v in vals(x) if v in iat})
+
+          # Function starts: entrypoint + direct code call targets + classic EBP prologues.
+          starts={ib+pe.OPTIONAL_HEADER.AddressOfEntryPoint}
+          direct_callers={}
+          for x in ins:
+              if x.mnemonic=='call':
+                  for v in vals(x):
+                      if is_exec(v):
+                          starts.add(v); direct_callers.setdefault(v,[]).append(x.address)
+          for i in range(len(ins)-1):
+              if ins[i].mnemonic=='push' and ins[i].op_str=='ebp' and ins[i+1].mnemonic=='mov' and ins[i+1].op_str.replace(' ','')=='ebp,esp':
+                  starts.add(ins[i].address)
+          starts=sorted(starts)
+
+          def owner(va):
+              j=bisect.bisect_right(starts,va)-1
+              if j<0: return None,None
+              st=starts[j]
+              en=starts[j+1] if j+1<len(starts) else max(b for a,b in exec_ranges)
+              return st,en
+
+          # Pre-index all call/import/string references once.
+          string_re=re.compile(r'READ\s*SN|READSN|serial|version|identify|device|VID_|PID_|vendor|product|firmware|flash|erase|program|MVA|upgrade|AA55|55AA',re.I)
+          smap={}
+          for enc,pat in [('ascii',rb'[\x20-\x7e]{5,}'),('utf16le',rb'(?:[\x20-\x7e]\x00){5,}')]:
+              for m in re.finditer(pat,data):
+                  try: s=m.group().decode('latin1' if enc=='ascii' else 'utf-16le','replace')
+                  except Exception: continue
+                  if not string_re.search(s): continue
+                  try: va=ib+pe.get_rva_from_offset(m.start())
+                  except Exception: continue
+                  smap[va]={'encoding':enc,'text':s[:500],'file_offset':m.start()}
+
+          imports_by_fn={}; callees_by_fn={}; stringrefs_by_fn={}; immed_by_fn={}
+          for x in ins:
+              st,en=owner(x.address)
+              if st is None: continue
+              apis=api_names(x)
+              if apis:
+                  imports_by_fn.setdefault(st,[]).append({'va':hex(x.address),'apis':apis,'instruction':f'{x.mnemonic} {x.op_str}'})
+              if x.mnemonic=='call':
+                  for v in vals(x):
+                      if is_exec(v): callees_by_fn.setdefault(st,set()).add(v)
+              for v in vals(x):
+                  if v in smap:
+                      stringrefs_by_fn.setdefault(st,[]).append({'va':hex(x.address),**smap[v]})
+              for op in x.operands:
+                  if op.type==X86_OP_IMM and 0 <= op.imm <= 0xffff:
+                      immed_by_fn.setdefault(st,[]).append({'va':hex(x.address),'value':int(op.imm),'hex':hex(int(op.imm)),'instruction':f'{x.mnemonic} {x.op_str}'})
+
+          # Reverse caller map at function granularity.
+          callers_by_fn={}
+          for fst,chs in callees_by_fn.items():
+              for ch in chs: callers_by_fn.setdefault(ch,set()).add(fst)
+
+          danger=re.compile(r'flash|erase|program|mva|upgrade|chiperas|codedata|bootdat|constdat|cnfgdat|btupdat|upinfo|cxxx',re.I)
+          identify=re.compile(r'readsn|read\s*sn|serial|version|identify|device|vid_|pid_|vendor|product|firmware',re.I)
+
+          def fn_summary(st):
+              if st is None: return {}
+              imps=imports_by_fn.get(st,[])
+              names=sorted({n for row in imps for n in row['apis']})
+              refs=stringrefs_by_fn.get(st,[])
+              return {
+                  'start':hex(st),
+                  'end':hex(owner(st)[1]),
+                  'imports':names,
+                  'write_imports':sorted(set(names)&write_names),
+                  'read_imports':sorted(set(names)&read_names),
+                  'enum_imports':sorted(set(names)&enum_names),
+                  'identify_string_refs':[r for r in refs if identify.search(r['text'])][:80],
+                  'danger_string_refs':[r for r in refs if danger.search(r['text'])][:80],
+                  'callees':[hex(x) for x in sorted(callees_by_fn.get(st,set()))[:200]],
+                  'callers':[hex(x) for x in sorted(callers_by_fn.get(st,set()))[:200]],
+              }
+
+          rows=[]
+          for va in sorted(TARGETS):
+              if va not in idx:
+                  rows.append({'target_va':hex(va),'found':False}); continue
+              ci=idx[va]; x=ins[ci]
+              st,en=owner(va)
+              # call argument setup, bounded to current function and 50 instructions before call.
+              lo=max(bisect.bisect_left(addrs,st),ci-50)
+              pre=ins[lo:ci]
+              arg_setup=[]
+              for y in pre:
+                  txt=f'{y.mnemonic} {y.op_str}'
+                  if '[esp' in y.op_str or y.mnemonic in {'push','lea'}:
+                      arg_setup.append({'va':hex(y.address),'text':txt})
+              # report-buffer setup candidates: local stack writes/LEAs before the call.
+              buffer_setup=[]
+              for y in pre:
+                  if any(op.type==X86_OP_MEM and op.mem.base in {X86_REG_EBP,X86_REG_ESP} for op in y.operands):
+                      buffer_setup.append({'va':hex(y.address),'text':f'{y.mnemonic} {y.op_str}'})
+              # response validation: until first ret or 120 instructions, whichever comes first.
+              post=[]; response=[]
+              for y in ins[ci+1:min(len(ins),ci+121)]:
+                  if y.address>=en: break
+                  post.append({'va':hex(y.address),'text':f'{y.mnemonic} {y.op_str}'})
+                  if y.mnemonic in {'cmp','test','je','jne','jz','jnz','jb','ja','jbe','jae'}:
+                      response.append({'va':hex(y.address),'text':f'{y.mnemonic} {y.op_str}'})
+                  if y.mnemonic.startswith('ret'): break
+
+              fs=fn_summary(st)
+              child_summaries=[fn_summary(ch) for ch in sorted(callees_by_fn.get(st,set())) if ch in starts][:80]
+              caller_summaries=[fn_summary(ca) for ca in sorted(callers_by_fn.get(st,set())) if ca in starts][:80]
+              depth1_write=sorted({w for z in child_summaries+caller_summaries for w in z.get('write_imports',[])})
+              depth1_danger=sum((z.get('danger_string_refs',[]) for z in child_summaries+caller_summaries),[])
+              same_fn_write=fs.get('write_imports',[])
+              same_fn_danger=fs.get('danger_string_refs',[])
+              survives=not same_fn_write and not same_fn_danger and not depth1_write and not depth1_danger
+              rows.append({
+                  'target_va':hex(va),'found':True,'instruction':f'{x.mnemonic} {x.op_str}',
+                  'function':fs,
+                  'depth1_callee_summaries':child_summaries,
+                  'depth1_caller_summaries':caller_summaries,
+                  'argument_setup_last_50':arg_setup[-80:],
+                  'stack_buffer_setup_last_50':buffer_setup[-80:],
+                  'response_validation_first_120':response[:120],
+                  'post_call_context_first_120':post[:120],
+                  'same_function_write_coupled':bool(same_fn_write),
+                  'same_function_danger_context':bool(same_fn_danger),
+                  'depth1_write_coupled':bool(depth1_write),
+                  'depth1_danger_context':bool(depth1_danger),
+                  'tool_side_strict_pure_getinputreport_candidate':survives,
+                  'interpretation':'Offline tool-side static evidence only; candidate status does not authorize live use or prove production compatibility.'
+              })
+
+          out={
+              'pctools_sha256':'0e13801b29070f805869823e6db4ad56d70494b2621fb63c330cea1d69e9ca33',
+              'target_getinputreport_vas':[hex(x) for x in sorted(TARGETS)],
+              'targets':rows,
+          }
+          Path('/tmp/r132/evidence/R132_GETINPUTREPORT_DATAFLOW.json').write_text(json.dumps(out,indent=2,ensure_ascii=False)+'\n')
+          PY
+
+      - name: Build fail-closed R132 decision
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import json
+          ev=Path('/tmp/r132/evidence')
+          d=json.loads((ev/'R132_GETINPUTREPORT_DATAFLOW.json').read_text())
+          rows=d['targets']
+          found=[r for r in rows if r.get('found')]
+          strict=[r for r in found if r.get('tool_side_strict_pure_getinputreport_candidate')]
+          decision={
+              'R131_RUN_ID':35890052616,
+              'R131_JOB_ID':107279947770,
+              'R131_EVIDENCE_ARTIFACT_ID':10764790271,
+              'PCTOOLS_SHA256':'0e13801b29070f805869823e6db4ad56d70494b2621fb63c330cea1d69e9ca33',
+              'TARGET_GETINPUTREPORT_CALL_COUNT':len(rows),
+              'TARGET_GETINPUTREPORT_CALLS_FOUND':len(found),
+              'STRICT_TOOL_SIDE_PURE_GETINPUTREPORT_CANDIDATE_COUNT':len(strict),
+              'STRICT_TOOL_SIDE_PURE_GETINPUTREPORT_CANDIDATE_VAS':[r['target_va'] for r in strict],
+              'IMPORTANT_INTERPRETATION':'R132 expands R131 local-window classification to containing function plus direct caller/callee context. Even a surviving tool-side read candidate is not production proof and is not authorized for live transmission.',
+              'READ_ONLY_IDENTIFY_PATH_STATICALLY_PROVEN_FOR_PRODUCTION':False,
+              'SAFE_READ_ONLY_STOCK_BACKUP_PROVEN':False,
+              'PRODUCTION_BOOTSTRAP_BRIDGE_PROVEN':False,
+              'PRODUCTION_RECOVERY_USB_IDENTITY_PROVEN':False,
+              'ANY_DISCOVERED_FRAME_AUTHORIZED_FOR_BOARD':False,
+              'AA55_LIVE_RETEST_ALLOWED':False,
+              'RUNTIME_0X11_ALLOWED':False,
+              'RUNTIME_0XFE_ALLOWED':False,
+              'VENDOR_BINARY_EXECUTED':False,
+              'USB_DEVICE_ACCESSED':False,
+              'BOARD_CONTACTED':False,
+              'FLASH_ALLOWED':False,
+              'NEXT':('If strict tool-side GetInputReport candidates survive, statically recover exact Report ID/buffer length and response-byte meaning, and compare only with existing production evidence. Do not send anything live.' if strict else 'Close these PCTools GetInputReport candidates as safe production read-only routes and continue offline search for production-specific recovery/backup artifacts. Do not send anything live.')
+          }
+          (ev/'R132_DECISION.json').write_text(json.dumps(decision,indent=2)+'\n')
+          (ev/'R132_REPORT_TH.md').write_text(
+              '# R132 PCTools GetInputReport function dataflow static reverse\n\n'
+              f'- target GetInputReport calls: {len(rows)}\n'
+              f'- calls found in exact PCTools binary: {len(found)}\n'
+              f'- strict tool-side pure-read candidates after function + caller/callee check: {len(strict)}\n'
+              '- offline static analysis only\n'
+              '- no vendor binary executed; no USB/board access\n'
+              '- AA55 / 0x11 / 0xFE / erase / program / flash remain blocked\n'
+              '- FLASH_ALLOWED=NO\n')
+          print(json.dumps(decision,indent=2))
+          PY
+
+      - name: Package R132 evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /tmp/r132/evidence
+          zip -9 -r /tmp/R132_EXACT_PCTOOLS_GETINPUTREPORT_FUNCTION_DATAFLOW_STATIC_EVIDENCE.zip . >/dev/null
+          sha256sum /tmp/R132_EXACT_PCTOOLS_GETINPUTREPORT_FUNCTION_DATAFLOW_STATIC_EVIDENCE.zip > /tmp/R132_EXACT_PCTOOLS_GETINPUTREPORT_FUNCTION_DATAFLOW_STATIC_EVIDENCE.zip.sha256
+
+      - name: Upload R132 evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: R132-EXACT-PCTOOLS-GETINPUTREPORT-FUNCTION-DATAFLOW-STATIC-EVIDENCE
+          path: |
+            /tmp/R132_EXACT_PCTOOLS_GETINPUTREPORT_FUNCTION_DATAFLOW_STATIC_EVIDENCE.zip
+            /tmp/R132_EXACT_PCTOOLS_GETINPUTREPORT_FUNCTION_DATAFLOW_STATIC_EVIDENCE.zip.sha256
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Final fail-closed gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -F 'R132_VENDOR_BINARY_EXECUTED=NO' /tmp/r132/evidence/R132_SAFETY.txt
+          grep -F 'R132_USB_DEVICE_ACCESS=NO' /tmp/r132/evidence/R132_SAFETY.txt
+          grep -F 'R132_BOARD_CONTACT=NO' /tmp/r132/evidence/R132_SAFETY.txt
+          grep -F 'R132_AA55_SENT=NO' /tmp/r132/evidence/R132_SAFETY.txt
+          grep -F 'R132_RUNTIME_0X11_SENT=NO' /tmp/r132/evidence/R132_SAFETY.txt
+          grep -F 'R132_RUNTIME_0XFE_SENT=NO' /tmp/r132/evidence/R132_SAFETY.txt
+          grep -F '"FLASH_ALLOWED": false' /tmp/r132/evidence/R132_DECISION.json
+          echo R132_STATIC_DATAFLOW_COMPLETE=YES
+          echo FLASH_ALLOWED=NO
