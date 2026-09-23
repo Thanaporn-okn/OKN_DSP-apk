@@ -1,0 +1,622 @@
+name: R123 GoloPine Windows HidD_SetFeature exact xref closure static audit
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - ".github/workflows/R123_GOLOPINE_WINDOWS_HIDD_SETFEATURE_EXACT_XREF_CLOSURE_STATIC_AUDIT.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: r123-golopine-hidd-setfeature-xref-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  NEW_URL: "https://golodsp.com/wp-content/uploads/2026/05/golopine_audio_turning_release_2026-04-08.exe_.zip"
+  EXPECTED_NEW_ZIP_SHA256: "f14b0c4baad70a8b0d5dc3b2783819cc2ef6e1a9c6ec2adcf17f1557059edd2a"
+  EXPECTED_NEW_EXE_SHA256: "3ca54171c53f7badd963ffe6851b8b3e2faf8aee8ba2afcb7040990e22ae09b2"
+  FLASH_ALLOWED: "NO"
+
+jobs:
+  static-audit:
+    name: STATIC ONLY - exact HidD_SetFeature xref - no execution - no USB - no board
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+
+    steps:
+      - name: Immutable safety gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/r123/input /tmp/r123/pkg /tmp/r123/evidence
+          cat > /tmp/r123/evidence/R123_SAFETY.txt <<'EOF'
+          R123_MODE=STATIC_RAW_CIL_XREF_ONLY
+          R123_VENDOR_BINARY_EXECUTED=NO
+          R123_INSTALLER_EXECUTED=NO
+          R123_USB_DEVICE_ACCESS=NO
+          R123_BOARD_CONTACT=NO
+          R123_AA55_SENT=NO
+          R123_RUNTIME_0X11_SENT=NO
+          R123_FLASHBOOT_COMMAND_SENT=NO
+          R123_FLASH_READ_EXECUTED=NO
+          R123_FLASH_ERASE_EXECUTED=NO
+          R123_FLASH_WRITE_EXECUTED=NO
+          R123_ANY_DISCOVERED_FRAME_AUTHORIZED_FOR_BOARD=NO
+          FINAL_REQUIRED_TRANSPORT=SAMSUNG_S25_PLUS_USB_C_DIRECT_TO_DSP_USB_C
+          HARDWARE_MODIFICATION=FORBIDDEN
+          FLASH_ALLOWED=NO
+          EOF
+
+      - name: Install pinned static parsers
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+            curl p7zip-full jq python3-pip >/dev/null
+          python3 -m pip install --disable-pip-version-check --no-input \
+            "dnfile==0.18.0" "dncil==1.0.2" >/dev/null
+
+      - name: Acquire exact official executable
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 5 --retry-all-errors \
+            "$NEW_URL" -o /tmp/r123/input/new.zip
+          test "$(sha256sum /tmp/r123/input/new.zip | awk '{print $1}')" = "$EXPECTED_NEW_ZIP_SHA256"
+
+          7z x -y /tmp/r123/input/new.zip -o/tmp/r123/pkg >/dev/null
+          EXE="$(find /tmp/r123/pkg -type f -iname '*.exe' ! -path '*/__MACOSX/*' -print -quit)"
+          test -n "$EXE"
+          test "$(sha256sum "$EXE" | awk '{print $1}')" = "$EXPECTED_NEW_EXE_SHA256"
+
+          cp "$EXE" /tmp/r123/input/golopine.exe
+          chmod a-x /tmp/r123/input/golopine.exe || true
+
+          {
+            echo "ZIP_SHA256=$EXPECTED_NEW_ZIP_SHA256"
+            echo "EXE_SHA256=$EXPECTED_NEW_EXE_SHA256"
+            echo "PIN_MATCH=YES"
+          } > /tmp/r123/evidence/R123_BINARY_PIN.txt
+
+      - name: Parse all IL bodies and resolve exact MethodDef tokens
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import json, dnfile
+          from dnfile.enums import MetadataTables
+          from dncil.cil.body import CilMethodBody
+          from dncil.clr.token import Token, StringToken
+          from dncil.cil.body.reader import CilMethodBodyReaderBase
+
+          pe=dnfile.dnPE("/tmp/r123/input/golopine.exe")
+          out=Path("/tmp/r123/evidence")
+          mds=list(pe.net.mdtables.MethodDef.rows)
+          tds=list(pe.net.mdtables.TypeDef.rows)
+          tables={table.value:table.name for table in MetadataTables}
+
+          owner={}
+          for i,td in enumerate(tds):
+              try:
+                  start=int(td.MethodList[0].row_index)
+              except Exception:
+                  try: start=int(td.MethodList.row_index)
+                  except Exception: continue
+              if i+1<len(tds):
+                  try:
+                      end=int(tds[i+1].MethodList[0].row_index)-1
+                  except Exception:
+                      try: end=int(tds[i+1].MethodList.row_index)-1
+                      except Exception: end=len(mds)
+              else:
+                  end=len(mds)
+              fq=(str(td.TypeNamespace)+"."+str(td.TypeName)).strip(".")
+              for rid in range(start,end+1):
+                  owner[rid]=fq
+
+          # Resolve ImplMap / PInvoke imports first.
+          pinvoke_by_rid={}
+          implmap=pe.net.mdtables.ImplMap
+          if implmap:
+              for row in implmap.rows:
+                  try:
+                      mf=row.MemberForwarded.row
+                      if not isinstance(mf,dnfile.mdtable.MethodDefRow):
+                          continue
+                      rid=mds.index(mf)+1
+                      scope=str(row.ImportScope.row.Name)
+                      pinvoke_by_rid[rid]={
+                          "rid":rid,
+                          "token":hex(0x06000000|rid),
+                          "owner":owner.get(rid,""),
+                          "managed_name":str(mf.Name),
+                          "import_name":str(row.ImportName),
+                          "import_scope":scope,
+                      }
+                  except Exception:
+                      pass
+
+          setfeature_rids={
+              rid for rid,x in pinvoke_by_rid.items()
+              if x["import_name"].lower()=="hidd_setfeature"
+          }
+          getfeature_rids={
+              rid for rid,x in pinvoke_by_rid.items()
+              if x["import_name"].lower()=="hidd_getfeature"
+          }
+          setoutput_rids={
+              rid for rid,x in pinvoke_by_rid.items()
+              if x["import_name"].lower()=="hidd_setoutputreport"
+          }
+          getinput_rids={
+              rid for rid,x in pinvoke_by_rid.items()
+              if x["import_name"].lower()=="hidd_getinputreport"
+          }
+
+          class Reader(CilMethodBodyReaderBase):
+              def __init__(self,pe,row):
+                  self.pe=pe
+                  self.offset=pe.get_offset_from_rva(row.Rva)
+              def read(self,n):
+                  data=self.pe.get_data(self.pe.get_rva_from_offset(self.offset),n)
+                  self.offset+=n
+                  return data
+              def tell(self): return self.offset
+              def seek(self,o): self.offset=o; return o
+
+          def row_for(tok):
+              if not isinstance(tok,Token): return None
+              tn=tables.get(tok.table)
+              if not tn: return None
+              tab=getattr(pe.net.mdtables,tn,None)
+              if not tab: return None
+              try: return tab.rows[tok.rid-1]
+              except Exception: return None
+
+          def resolve(tok):
+              if isinstance(tok,StringToken):
+                  try:
+                      us=pe.net.user_strings.get(tok.rid)
+                      return {"kind":"user_string","value":us.value if us else None,"token":hex(tok.value)}
+                  except Exception:
+                      return {"kind":"user_string","value":None,"token":hex(tok.value)}
+              if not isinstance(tok,Token):
+                  return None
+              r=row_for(tok)
+              if r is None:
+                  return {"kind":"invalid","token":hex(tok.value)}
+              if isinstance(r,dnfile.mdtable.MethodDefRow):
+                  rid=tok.rid
+                  return {
+                      "kind":"MethodDef",
+                      "rid":rid,
+                      "token":hex(tok.value),
+                      "owner":owner.get(rid,""),
+                      "name":str(r.Name),
+                      "pinvoke":pinvoke_by_rid.get(rid)
+                  }
+              if isinstance(r,dnfile.mdtable.MemberRefRow):
+                  parent=""
+                  try:
+                      pr=r.Class.row
+                      if isinstance(pr,dnfile.mdtable.TypeRefRow):
+                          parent=(str(pr.TypeNamespace)+"."+str(pr.TypeName)).strip(".")
+                      elif isinstance(pr,dnfile.mdtable.TypeDefRow):
+                          parent=(str(pr.TypeNamespace)+"."+str(pr.TypeName)).strip(".")
+                  except Exception:
+                      pass
+                  return {
+                      "kind":"MemberRef","token":hex(tok.value),
+                      "parent":parent,"name":str(r.Name)
+                  }
+              if isinstance(r,dnfile.mdtable.MethodSpecRow):
+                  try:
+                      mr=r.Method.row
+                      if isinstance(mr,dnfile.mdtable.MethodDefRow):
+                          rid=mds.index(mr)+1
+                          return {
+                              "kind":"MethodSpec","target_kind":"MethodDef",
+                              "rid":rid,"token":hex(tok.value),
+                              "owner":owner.get(rid,""),"name":str(mr.Name),
+                              "pinvoke":pinvoke_by_rid.get(rid)
+                          }
+                  except Exception:
+                      pass
+                  return {"kind":"MethodSpec","token":hex(tok.value)}
+              if isinstance(r,dnfile.mdtable.FieldRow):
+                  return {"kind":"Field","token":hex(tok.value),"name":str(r.Name)}
+              return {"kind":type(r).__name__,"token":hex(tok.value)}
+
+          methods=[]
+          errors=[]
+          for rid,row in enumerate(mds,1):
+              try:
+                  if not row.Rva:
+                      continue
+                  if row.Flags.mdAbstract or row.Flags.mdPinvokeImpl:
+                      continue
+                  if not row.ImplFlags.miIL:
+                      continue
+                  body=CilMethodBody(Reader(pe,row))
+              except Exception as e:
+                  errors.append({
+                      "rid":rid,"owner":owner.get(rid,""),
+                      "name":str(row.Name),"error":type(e).__name__+": "+str(e)
+                  })
+                  continue
+
+              ins=[]
+              for x in body.instructions:
+                  op=x.operand
+                  if isinstance(op,int):
+                      operand=op
+                  elif isinstance(op,list):
+                      operand=op
+                  elif isinstance(op,Token):
+                      operand=hex(op.value)
+                  else:
+                      operand=str(op) if op is not None else None
+                  ins.append({
+                      "offset":int(x.offset),
+                      "mnemonic":str(x.mnemonic),
+                      "operand":operand,
+                      "resolved":resolve(op),
+                      "bytes":x.get_bytes().hex()
+                  })
+
+              methods.append({
+                  "rid":rid,"token":hex(0x06000000|rid),
+                  "owner":owner.get(rid,""),"name":str(row.Name),
+                  "rva":int(row.Rva or 0),
+                  "instructions":ins
+              })
+
+          out.joinpath("R123_PINVOKE_MAP.json").write_text(
+              json.dumps(list(pinvoke_by_rid.values()),indent=2,ensure_ascii=False)+"\n"
+          )
+          out.joinpath("R123_PARSE_ERRORS.json").write_text(
+              json.dumps(errors,indent=2,ensure_ascii=False)+"\n"
+          )
+          out.joinpath("R123_ALL_PARSED_METHODS.json").write_text(
+              json.dumps(methods,indent=2,ensure_ascii=False)+"\n"
+          )
+          out.joinpath("R123_TARGETS.json").write_text(
+              json.dumps({
+                  "HidD_SetFeature_rids":sorted(setfeature_rids),
+                  "HidD_GetFeature_rids":sorted(getfeature_rids),
+                  "HidD_SetOutputReport_rids":sorted(setoutput_rids),
+                  "HidD_GetInputReport_rids":sorted(getinput_rids)
+              },indent=2)+"\n"
+          )
+          print(json.dumps({
+              "parsed_methods":len(methods),
+              "parse_errors":len(errors),
+              "HidD_SetFeature_rids":sorted(setfeature_rids),
+              "HidD_GetFeature_rids":sorted(getfeature_rids),
+              "HidD_SetOutputReport_rids":sorted(setoutput_rids),
+              "HidD_GetInputReport_rids":sorted(getinput_rids)
+          },indent=2))
+          PY
+
+      - name: Find every direct or delegate xref to HID PInvoke targets
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import json
+
+          ev=Path("/tmp/r123/evidence")
+          methods=json.loads((ev/"R123_ALL_PARSED_METHODS.json").read_text())
+          targets=json.loads((ev/"R123_TARGETS.json").read_text())
+
+          groups={
+              "HidD_SetFeature":set(targets["HidD_SetFeature_rids"]),
+              "HidD_GetFeature":set(targets["HidD_GetFeature_rids"]),
+              "HidD_SetOutputReport":set(targets["HidD_SetOutputReport_rids"]),
+              "HidD_GetInputReport":set(targets["HidD_GetInputReport_rids"]),
+          }
+
+          xrefs=[]
+          for m in methods:
+              ins=m["instructions"]
+              for idx,x in enumerate(ins):
+                  r=x.get("resolved") or {}
+                  rid=r.get("rid")
+                  if rid is None:
+                      continue
+                  for target_name,rids in groups.items():
+                      if rid not in rids:
+                          continue
+                      lo=max(0,idx-60); hi=min(len(ins),idx+25)
+                      xrefs.append({
+                          "target":target_name,
+                          "caller_rid":m["rid"],
+                          "caller_owner":m["owner"],
+                          "caller_name":m["name"],
+                          "caller_rva":m["rva"],
+                          "xref_instruction_index":idx,
+                          "xref_mnemonic":x["mnemonic"],
+                          "xref_operand":x["operand"],
+                          "window":ins[lo:hi]
+                      })
+
+          ev.joinpath("R123_HID_PINVOKE_XREFS.json").write_text(
+              json.dumps(xrefs,indent=2,ensure_ascii=False)+"\n"
+          )
+
+          summary={k:sum(1 for x in xrefs if x["target"]==k) for k in groups}
+          ev.joinpath("R123_HID_PINVOKE_XREF_SUMMARY.json").write_text(
+              json.dumps(summary,indent=2)+"\n"
+          )
+          print(json.dumps(summary,indent=2))
+          PY
+
+      - name: Classify HidD_SetFeature caller payload construction
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import json,re
+
+          ev=Path("/tmp/r123/evidence")
+          xrefs=json.loads((ev/"R123_HID_PINVOKE_XREFS.json").read_text())
+
+          def const_value(i):
+              mn=i["mnemonic"].lower()
+              fixed={
+                  "ldc.i4.m1":-1,
+                  "ldc.i4.0":0,"ldc.i4.1":1,"ldc.i4.2":2,"ldc.i4.3":3,
+                  "ldc.i4.4":4,"ldc.i4.5":5,"ldc.i4.6":6,"ldc.i4.7":7,"ldc.i4.8":8
+              }
+              if mn in fixed: return fixed[mn]
+              if mn in ("ldc.i4","ldc.i4.s") and isinstance(i.get("operand"),int):
+                  return i["operand"]
+              return None
+
+          rows=[]
+          for x in xrefs:
+              if x["target"]!="HidD_SetFeature":
+                  continue
+              win=x["window"]
+              vals=[const_value(i) for i in win]
+              vals=[v for v in vals if v is not None]
+              strings=[
+                  (i.get("resolved") or {}).get("value")
+                  for i in win
+                  if (i.get("resolved") or {}).get("kind")=="user_string"
+              ]
+              strings=[str(s) for s in strings if s is not None]
+              text=" ".join(
+                  str((i.get("resolved") or {}).get(k,""))
+                  for i in win for k in ("kind","name","owner","parent","value")
+              )
+              aa=any(v in (170,-86) or (v & 0xffffffff)==0xaa for v in vals)
+              v55=any(v==85 or (v & 0xffffffff)==0x55 for v in vals)
+              len8=8 in vals
+              updater=bool(re.search(r"firmware|upgrade|boot|flash|mva|recovery",text+" "+" ".join(strings),re.I))
+              rows.append({
+                  "caller_rid":x["caller_rid"],
+                  "caller_owner":x["caller_owner"],
+                  "caller_name":x["caller_name"],
+                  "xref_mnemonic":x["xref_mnemonic"],
+                  "nearby_has_AA_constant":aa,
+                  "nearby_has_55_constant":v55,
+                  "nearby_has_length_8_constant":len8,
+                  "nearby_has_updater_semantics":updater,
+                  "nearby_constants":vals,
+                  "nearby_strings":strings,
+                  "window":win
+              })
+
+          ev.joinpath("R123_SETFEATURE_CALLER_CLASSIFICATION.json").write_text(
+              json.dumps(rows,indent=2,ensure_ascii=False)+"\n"
+          )
+          PY
+
+      - name: Find AA+55 methods and prove whether they reach HidD_SetFeature
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import json
+
+          ev=Path("/tmp/r123/evidence")
+          methods=json.loads((ev/"R123_ALL_PARSED_METHODS.json").read_text())
+          targets=json.loads((ev/"R123_TARGETS.json").read_text())
+          sf=set(targets["HidD_SetFeature_rids"])
+
+          def cval(i):
+              mn=i["mnemonic"].lower()
+              fixed={
+                  "ldc.i4.m1":-1,
+                  "ldc.i4.0":0,"ldc.i4.1":1,"ldc.i4.2":2,"ldc.i4.3":3,
+                  "ldc.i4.4":4,"ldc.i4.5":5,"ldc.i4.6":6,"ldc.i4.7":7,"ldc.i4.8":8
+              }
+              if mn in fixed: return fixed[mn]
+              if mn in ("ldc.i4","ldc.i4.s") and isinstance(i.get("operand"),int):
+                  return i["operand"]
+              return None
+
+          aa55=[]
+          for m in methods:
+              vals=[cval(i) for i in m["instructions"]]
+              vals=[v for v in vals if v is not None]
+              aa=any(v in (170,-86) or (v & 0xffffffff)==0xaa for v in vals)
+              v55=any(v==85 or (v & 0xffffffff)==0x55 for v in vals)
+              if not (aa and v55):
+                  continue
+              calls_sf=any(
+                  (i.get("resolved") or {}).get("rid") in sf
+                  for i in m["instructions"]
+              )
+              aa55.append({
+                  "rid":m["rid"],"owner":m["owner"],"name":m["name"],
+                  "rva":m["rva"],"calls_HidD_SetFeature":calls_sf
+              })
+
+          ev.joinpath("R123_AA55_METHODS_VS_SETFEATURE.json").write_text(
+              json.dumps(aa55,indent=2,ensure_ascii=False)+"\n"
+          )
+          PY
+
+      - name: Audit reflection and delegate paths to SetFeature symbol
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import json,re
+
+          ev=Path("/tmp/r123/evidence")
+          methods=json.loads((ev/"R123_ALL_PARSED_METHODS.json").read_text())
+
+          hits=[]
+          for m in methods:
+              for idx,i in enumerate(m["instructions"]):
+                  r=i.get("resolved") or {}
+                  if r.get("kind")!="user_string":
+                      continue
+                  s=str(r.get("value") or "")
+                  if re.search(r"HidD_SetFeature|SetFeature|wQMqbMG4IT",s,re.I):
+                      hits.append({
+                          "rid":m["rid"],"owner":m["owner"],"name":m["name"],
+                          "instruction_index":idx,"string":s
+                      })
+
+          ev.joinpath("R123_SETFEATURE_REFLECTION_STRING_HITS.json").write_text(
+              json.dumps(hits,indent=2,ensure_ascii=False)+"\n"
+          )
+          PY
+
+      - name: Build final Windows tuning-client closure decision
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import json
+
+          ev=Path("/tmp/r123/evidence")
+          targets=json.loads((ev/"R123_TARGETS.json").read_text())
+          xsum=json.loads((ev/"R123_HID_PINVOKE_XREF_SUMMARY.json").read_text())
+          sf=json.loads((ev/"R123_SETFEATURE_CALLER_CLASSIFICATION.json").read_text())
+          aa=json.loads((ev/"R123_AA55_METHODS_VS_SETFEATURE.json").read_text())
+          refl=json.loads((ev/"R123_SETFEATURE_REFLECTION_STRING_HITS.json").read_text())
+          errors=json.loads((ev/"R123_PARSE_ERRORS.json").read_text())
+
+          sf_calls=len(sf)
+          sf_aa=sum(1 for x in sf if x["nearby_has_AA_constant"])
+          sf_aa55=sum(1 for x in sf if x["nearby_has_AA_constant"] and x["nearby_has_55_constant"])
+          sf_update=sum(1 for x in sf if x["nearby_has_updater_semantics"])
+          aa_to_sf=sum(1 for x in aa if x["calls_HidD_SetFeature"])
+
+          closed=all([
+              len(errors)==0,
+              len(targets["HidD_SetFeature_rids"])==1,
+              sf_calls==0,
+              aa_to_sf==0,
+              len(refl)==0,
+              len(targets["HidD_GetFeature_rids"])==0,
+          ])
+
+          d={
+              "PINNED_OFFICIAL_GOLOPINE_08APR2026_WINDOWS_CLIENT":True,
+              "CIL_PARSE_ERROR_COUNT":len(errors),
+
+              "HIDD_SETFEATURE_PINVOKE_RIDS":targets["HidD_SetFeature_rids"],
+              "HIDD_GETFEATURE_PINVOKE_RIDS":targets["HidD_GetFeature_rids"],
+              "HIDD_SETOUTPUTREPORT_PINVOKE_RIDS":targets["HidD_SetOutputReport_rids"],
+              "HIDD_GETINPUTREPORT_PINVOKE_RIDS":targets["HidD_GetInputReport_rids"],
+
+              "HIDD_SETFEATURE_DIRECT_OR_DELEGATE_XREF_COUNT":xsum["HidD_SetFeature"],
+              "HIDD_GETFEATURE_DIRECT_OR_DELEGATE_XREF_COUNT":xsum["HidD_GetFeature"],
+              "HIDD_SETOUTPUTREPORT_XREF_COUNT":xsum["HidD_SetOutputReport"],
+              "HIDD_GETINPUTREPORT_XREF_COUNT":xsum["HidD_GetInputReport"],
+
+              "SETFEATURE_CALLER_COUNT":sf_calls,
+              "SETFEATURE_CALLERS_WITH_NEARBY_AA":sf_aa,
+              "SETFEATURE_CALLERS_WITH_NEARBY_AA_AND_55":sf_aa55,
+              "SETFEATURE_CALLERS_WITH_NEARBY_UPDATER_SEMANTICS":sf_update,
+
+              "AA55_METHOD_COUNT":len(aa),
+              "AA55_METHODS_CALLING_HIDD_SETFEATURE":aa_to_sf,
+              "SETFEATURE_REFLECTION_STRING_HIT_COUNT":len(refl),
+
+              "OFFICIAL_WINDOWS_TUNING_CLIENT_CLOSED_AS_REFERENCE_AA55_BOOTSTRAP_SOURCE":closed,
+
+              "INTERPRETATION":[
+                  "The presence of a HidD_SetFeature PInvoke declaration alone is not evidence that the application uses it.",
+                  "This audit searches every recoverable IL body for direct call, callvirt-like token use, ldftn/delegate token use, AA/55 constants, and reflection strings tied to that exact PInvoke MethodDef.",
+                  "HidD_SetOutputReport and HidD_GetInputReport are tracked separately because they can support ordinary HID tuning transport without implementing the reference Feature-report bootstrap."
+              ],
+
+              "PRODUCTION_BOOTSTRAP_BRIDGE_PROVEN":False,
+              "PRODUCTION_FLASHBOOT_REENUMERATION_PROVEN":False,
+              "PRODUCTION_RECOVERY_USB_IDENTITY_PROVEN":False,
+              "SAFE_READ_ONLY_STOCK_BACKUP_PROVEN":False,
+              "ANY_DISCOVERED_WRITE_AUTHORIZED_FOR_BOARD":False,
+
+              "NEXT":(
+                  "If closed=true, retire the official GoloPine Windows tuning client from bootstrap investigation and pivot to acquiring MV_AP82xx_BP10xx_PC_Tools V2.2.x or a production GoloPine firmware/update artifact. "
+                  "If HidD_SetFeature has a real caller, reverse only that exact caller offline and compare its buffer semantics with the reference AA->55 handshake."
+              ),
+              "FLASH_ALLOWED":False
+          }
+
+          ev.joinpath("R123_DECISION.json").write_text(
+              json.dumps(d,indent=2,ensure_ascii=False)+"\n"
+          )
+
+          report=[
+              "# R123 — exact HidD_SetFeature xref closure",
+              "",
+              "Static only; executable was never launched and no hardware was contacted.",
+              "",
+              "```json",
+              json.dumps(d,indent=2,ensure_ascii=False),
+              "```",
+              "",
+              "FLASH_ALLOWED=NO"
+          ]
+          ev.joinpath("R123_REPORT_TH.md").write_text("\n".join(report)+"\n")
+          print(json.dumps(d,indent=2,ensure_ascii=False))
+          PY
+
+      - name: Package focused evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -f /tmp/r123/evidence/R123_ALL_PARSED_METHODS.json
+          cd /tmp/r123/evidence
+          zip -9 -r /tmp/R123_GOLOPINE_WINDOWS_HIDD_SETFEATURE_XREF_CLOSURE_EVIDENCE.zip .
+          sha256sum /tmp/R123_GOLOPINE_WINDOWS_HIDD_SETFEATURE_XREF_CLOSURE_EVIDENCE.zip \
+            > /tmp/R123_GOLOPINE_WINDOWS_HIDD_SETFEATURE_XREF_CLOSURE_EVIDENCE.zip.sha256
+
+      - name: Upload evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: R123-GOLOPINE-WINDOWS-HIDD-SETFEATURE-XREF-CLOSURE-EVIDENCE
+          path: |
+            /tmp/R123_GOLOPINE_WINDOWS_HIDD_SETFEATURE_XREF_CLOSURE_EVIDENCE.zip
+            /tmp/R123_GOLOPINE_WINDOWS_HIDD_SETFEATURE_XREF_CLOSURE_EVIDENCE.zip.sha256
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Final fail-closed gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -F 'R123_VENDOR_BINARY_EXECUTED=NO' /tmp/r123/evidence/R123_SAFETY.txt
+          grep -F 'R123_USB_DEVICE_ACCESS=NO' /tmp/r123/evidence/R123_SAFETY.txt
+          grep -F 'R123_AA55_SENT=NO' /tmp/r123/evidence/R123_SAFETY.txt
+          grep -F 'R123_RUNTIME_0X11_SENT=NO' /tmp/r123/evidence/R123_SAFETY.txt
+          grep -F '"FLASH_ALLOWED": false' /tmp/r123/evidence/R123_DECISION.json
+          echo R123_STATIC_XREF_CLOSURE_COMPLETE=YES
+          echo FLASH_ALLOWED=NO
