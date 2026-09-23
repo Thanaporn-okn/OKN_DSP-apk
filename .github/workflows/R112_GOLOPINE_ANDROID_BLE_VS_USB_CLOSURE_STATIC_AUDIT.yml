@@ -1,0 +1,461 @@
+name: R112 GoloPine Android BLE-vs-USB closure static audit
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - ".github/workflows/R112_GOLOPINE_ANDROID_BLE_VS_USB_CLOSURE_STATIC_AUDIT.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: r112-golopine-android-ble-usb-closure-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  NEW_ANDROID_URL: "https://golodsp.com/wp-content/uploads/2026/05/golopine_audio_turning_release_2026-04-01.apk_.zip"
+  EXPECTED_NEW_ZIP_SHA256: "974f74fa99420875e64f50a9763f33f3b67a726755f8bfccd4549f944958d319"
+  EXPECTED_NEW_APK_SHA256: "6c2d977f66609b3217f1bd72460aacb299f841bc654bf39f4d209132ca92907c"
+  EXPECTED_LIBAPP_SHA256: "0342b22df07abc0806efee64af3bb7815471d03a2351732fa6146944ddf502e8"
+  PRODUCTION_RUNTIME_USB_VIDPID: "6324:1719"
+  FLASH_ALLOWED: "NO"
+
+jobs:
+  static-audit:
+    name: STATIC ONLY - classify BLE client vs USB updater - no execution - no board
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Immutable safety gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/r112/input /tmp/r112/pkg /tmp/r112/apk /tmp/r112/evidence
+          cat > /tmp/r112/evidence/R112_SAFETY.txt <<'EOF'
+          R112_MODE=STATIC_OFFLINE_ONLY
+          R112_APK_EXECUTED=NO
+          R112_NATIVE_LIB_EXECUTED=NO
+          R112_USB_DEVICE_ACCESS=NO
+          R112_BOARD_CONTACT=NO
+          R112_BLE_CONNECTION=NO
+          R112_AA55_SENT=NO
+          R112_RUNTIME_0X11_SENT=NO
+          R112_FLASH_READ_EXECUTED=NO
+          R112_FLASH_ERASE_EXECUTED=NO
+          R112_FLASH_WRITE_EXECUTED=NO
+          R112_ANY_DISCOVERED_WRITE_AUTHORIZED_FOR_BOARD=NO
+          FINAL_REQUIRED_TRANSPORT=SAMSUNG_S25_PLUS_USB_C_DIRECT_TO_DSP_USB_C
+          HARDWARE_MODIFICATION=FORBIDDEN
+          FLASH_ALLOWED=NO
+          EOF
+
+      - name: Install static tooling
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+            file unzip p7zip-full binutils jq python3-pip >/dev/null
+          python3 -m pip install --disable-pip-version-check --no-input androguard >/dev/null
+
+      - name: Acquire exact latest official Android package
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 5 --retry-all-errors \
+            "$NEW_ANDROID_URL" -o /tmp/r112/input/new.zip
+          test "$(sha256sum /tmp/r112/input/new.zip | awk '{print $1}')" = "$EXPECTED_NEW_ZIP_SHA256"
+
+          7z x -y /tmp/r112/input/new.zip -o/tmp/r112/pkg >/dev/null
+          APK="$(find /tmp/r112/pkg -type f -iname '*.apk' -print -quit)"
+          test -n "$APK"
+          test "$(sha256sum "$APK" | awk '{print $1}')" = "$EXPECTED_NEW_APK_SHA256"
+
+          cp "$APK" /tmp/r112/input/golopine.apk
+          unzip -q /tmp/r112/input/golopine.apk -d /tmp/r112/apk
+
+          test -f /tmp/r112/apk/lib/arm64-v8a/libapp.so
+          test "$(sha256sum /tmp/r112/apk/lib/arm64-v8a/libapp.so | awk '{print $1}')" = "$EXPECTED_LIBAPP_SHA256"
+
+          {
+            echo "ZIP_SHA256=$EXPECTED_NEW_ZIP_SHA256"
+            echo "APK_SHA256=$EXPECTED_NEW_APK_SHA256"
+            echo "LIBAPP_SHA256=$EXPECTED_LIBAPP_SHA256"
+            echo "PIN_MATCH=YES"
+          } > /tmp/r112/evidence/R112_BINARY_PIN.txt
+
+      - name: Manifest USB-vs-Bluetooth capability audit
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from androguard.core.apk import APK
+          from pathlib import Path
+          import json
+
+          a=APK("/tmp/r112/input/golopine.apk")
+          permissions=sorted(a.get_permissions())
+          features=sorted(str(x) for x in a.get_features())
+          files=sorted(a.get_files())
+
+          d={
+              "package":a.get_package(),
+              "version_name":a.get_androidversion_name(),
+              "version_code":a.get_androidversion_code(),
+              "permissions":permissions,
+              "features":features,
+              "has_bluetooth_permission":any("BLUETOOTH" in x for x in permissions),
+              "has_usb_permission_literal":any("USB" in x.upper() for x in permissions),
+              "has_usb_host_feature":any("usb.host" in x.lower() for x in features),
+              "has_usb_device_filter_resource":any(
+                  ("usb" in x.lower() and ("filter" in x.lower() or x.lower().endswith(".xml")))
+                  for x in files
+              ),
+          }
+          Path("/tmp/r112/evidence/R112_MANIFEST_CAPABILITIES.json").write_text(
+              json.dumps(d,indent=2,ensure_ascii=False)+"\n"
+          )
+          PY
+
+      - name: DEX exact USB host and Bluetooth platform API audit
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          from androguard.core.dex import DEX
+          import zipfile,re,json
+
+          exact_usb=[
+              "Landroid/hardware/usb/UsbManager;",
+              "Landroid/hardware/usb/UsbDevice;",
+              "Landroid/hardware/usb/UsbDeviceConnection;",
+              "Landroid/hardware/usb/UsbInterface;",
+              "Landroid/hardware/usb/UsbEndpoint;",
+              "controlTransfer","bulkTransfer","requestWait",
+              "android.hardware.usb.action.USB_DEVICE_ATTACHED",
+              "android.hardware.usb.action.USB_DEVICE_DETACHED",
+          ]
+          exact_ble=[
+              "Landroid/bluetooth/BluetoothGatt;",
+              "Landroid/bluetooth/BluetoothGattCharacteristic;",
+              "Landroid/bluetooth/BluetoothGattDescriptor;",
+              "setCharacteristicNotification","writeCharacteristic","writeDescriptor",
+          ]
+          exact_spp=[
+              "Landroid/bluetooth/BluetoothSocket;",
+              "createRfcommSocketToServiceRecord"
+          ]
+
+          out={"usb":{}, "ble":{}, "spp":{}}
+          with zipfile.ZipFile("/tmp/r112/input/golopine.apk") as z:
+              dexnames=sorted(n for n in z.namelist() if re.fullmatch(r"classes\d*\.dex",n))
+              strings=[]
+              methods=[]
+              for dn in dexnames:
+                  d=DEX(z.read(dn))
+                  strings += [str(x) for x in d.get_strings()]
+                  for c in d.get_classes():
+                      cn=c.get_name()
+                      for m in c.get_methods():
+                          methods.append(f"{cn}->{m.get_name()}{m.get_descriptor()}")
+
+          corpus=strings+methods
+          for t in exact_usb:
+              out["usb"][t]=[x[:1000] for x in corpus if t in x][:100]
+          for t in exact_ble:
+              out["ble"][t]=[x[:1000] for x in corpus if t in x][:100]
+          for t in exact_spp:
+              out["spp"][t]=[x[:1000] for x in corpus if t in x][:100]
+
+          out["usb_total_hits"]=sum(len(v) for v in out["usb"].values())
+          out["ble_total_hits"]=sum(len(v) for v in out["ble"].values())
+          out["spp_total_hits"]=sum(len(v) for v in out["spp"].values())
+
+          Path("/tmp/r112/evidence/R112_DEX_EXACT_PLATFORM_APIS.json").write_text(
+              json.dumps(out,indent=2,ensure_ascii=False)+"\n"
+          )
+          PY
+
+      - name: libapp exact strong-token audit
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import re,json
+
+          p=Path("/tmp/r112/apk/lib/arm64-v8a/libapp.so")
+          b=p.read_bytes()
+          strings=[(m.start(),m.group(0).decode("latin1","replace"))
+                   for m in re.finditer(rb"[\x20-\x7e]{4,}",b)]
+
+          groups={
+              "usb_strong":[
+                  "UsbManager","UsbDevice","UsbDeviceConnection","UsbInterface","UsbEndpoint",
+                  "controlTransfer","bulkTransfer","USB_DEVICE_ATTACHED","USB_DEVICE_DETACHED",
+                  "android.hardware.usb","libusb","hidapi","VID_","PID_","vendorId","productId"
+              ],
+              "boot_update_strong":[
+                  "bootloader","Bootloader","firmware update","Firmware Update",
+                  "firmware upgrade","Firmware Upgrade","recovery mode","Recovery Mode",
+                  "flash erase","Flash Erase","flash write","Flash Write","program flash",
+                  "chiperas","codedata","bootdat","constdat","cnfgdat","btupdat","upinfo"
+              ],
+              "ble_protocol":[
+                  "0000ab00-0000-1000-8000-00805f9b34fb",
+                  "0000ab01-0000-1000-8000-00805f9b34fb",
+                  "0000ab02-0000-1000-8000-00805f9b34fb",
+                  "0000ab03-0000-1000-8000-00805f9b34fb",
+                  "BluetoothCharacteristic","BluetoothService","BluetoothDescriptor",
+                  "bluetoothConnect","bluetoothScan"
+              ],
+              "possible_ota_exact":[
+                  "_Ota@"," OTA ","OtaService","OTAService","otaUpdate","OtaUpdate"
+              ],
+          }
+
+          out={}
+          for group,tokens in groups.items():
+              rows=[]
+              for token in tokens:
+                  vals=[{"offset":off,"text":s[:1000]} for off,s in strings if token in s]
+                  if vals:
+                      rows.append({"token":token,"hits":vals[:100]})
+              out[group]=rows
+
+          Path("/tmp/r112/evidence/R112_LIBAPP_STRONG_TOKENS.json").write_text(
+              json.dumps(out,indent=2,ensure_ascii=False)+"\n"
+          )
+          PY
+
+      - name: Disambiguate numeric 6324 and 1719 strings
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import re,json
+
+          p=Path("/tmp/r112/apk/lib/arm64-v8a/libapp.so")
+          b=p.read_bytes()
+          strings=[(m.start(),m.end(),m.group(0).decode("latin1","replace"))
+                   for m in re.finditer(rb"[\x20-\x7e]{4,}",b)]
+
+          usb_words=re.compile(
+              r"VID|PID|USB|UsbManager|UsbDevice|vendor.?id|product.?id|libusb|hidapi",
+              re.I
+          )
+          csv_numeric=re.compile(r"^[+\-]?\d+(?:\.\d+)?(?:,[+\-]?\d+(?:\.\d+)?){3,}$")
+
+          rows=[]
+          for token in ("6324","1719"):
+              for st,en,s in strings:
+                  if token not in s:
+                      continue
+                  idx=s.find(token)
+                  ctx_lo=max(0,st-512)
+                  ctx_hi=min(len(b),en+512)
+                  ctx=b[ctx_lo:ctx_hi]
+                  printable=" ".join(x.decode("latin1","replace")
+                      for x in re.findall(rb"[\x20-\x7e]{4,}",ctx))
+                  rows.append({
+                      "token":token,
+                      "offset":st+idx,
+                      "string":s[:800],
+                      "usb_context":bool(usb_words.search(printable)),
+                      "looks_numeric_csv":bool(csv_numeric.match(s)),
+                      "context_excerpt":printable[:1800]
+                  })
+
+          # Pair proximity in raw file. A true textual VID/PID configuration should normally
+          # have both numbers close to USB/vendor/product context, not thousands of unrelated
+          # DSP numeric-table occurrences.
+          pos6324=[m.start() for m in re.finditer(b"6324",b)]
+          pos1719=[m.start() for m in re.finditer(b"1719",b)]
+          pairs=[]
+          j=0
+          for a in pos6324:
+              nearest=sorted(pos1719,key=lambda x:abs(x-a))[:3]
+              for c in nearest:
+                  dist=abs(c-a)
+                  if dist<=4096:
+                      lo=max(0,min(a,c)-512); hi=min(len(b),max(a,c)+512)
+                      ctx=b[lo:hi]
+                      printable=" ".join(x.decode("latin1","replace")
+                          for x in re.findall(rb"[\x20-\x7e]{4,}",ctx))
+                      pairs.append({
+                          "offset_6324":a,"offset_1719":c,"distance":dist,
+                          "usb_context":bool(usb_words.search(printable)),
+                          "context_excerpt":printable[:1800]
+                      })
+
+          d={
+              "occurrence_count_6324":len(pos6324),
+              "occurrence_count_1719":len(pos1719),
+              "string_occurrences":rows[:1000],
+              "pair_within_4096_count":len(pairs),
+              "pair_with_usb_context_count":sum(1 for x in pairs if x["usb_context"]),
+              "closest_pairs":sorted(pairs,key=lambda x:x["distance"])[:100],
+          }
+          Path("/tmp/r112/evidence/R112_6324_1719_DISAMBIGUATION.json").write_text(
+              json.dumps(d,indent=2,ensure_ascii=False)+"\n"
+          )
+          PY
+
+      - name: Map string neighborhoods around AB00 AB01 AB02 AB03
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import re,json
+
+          p=Path("/tmp/r112/apk/lib/arm64-v8a/libapp.so")
+          b=p.read_bytes()
+          ss=[(m.start(),m.group(0).decode("latin1","replace"))
+              for m in re.finditer(rb"[\x20-\x7e]{4,}",b)]
+
+          uuids={
+              "AB00":"0000ab00-0000-1000-8000-00805f9b34fb",
+              "AB01":"0000ab01-0000-1000-8000-00805f9b34fb",
+              "AB02":"0000ab02-0000-1000-8000-00805f9b34fb",
+              "AB03":"0000ab03-0000-1000-8000-00805f9b34fb",
+          }
+          out={}
+          for name,u in uuids.items():
+              hits=[i for i,x in enumerate(ss) if u in x]
+              windows=[]
+              for i in hits:
+                  windows.append({
+                      "offset":ss[i][0],
+                      "strings":[{"offset":o,"text":s[:500]} for o,s in ss[max(0,i-20):i+21]]
+                  })
+              out[name]=windows
+
+          Path("/tmp/r112/evidence/R112_BLE_UUID_STRING_NEIGHBORHOODS.json").write_text(
+              json.dumps(out,indent=2,ensure_ascii=False)+"\n"
+          )
+          PY
+
+      - name: ELF metadata only
+        shell: bash
+        run: |
+          set -euo pipefail
+          LIB=/tmp/r112/apk/lib/arm64-v8a/libapp.so
+          file "$LIB" > /tmp/r112/evidence/R112_LIBAPP_FILE.txt
+          readelf -h "$LIB" > /tmp/r112/evidence/R112_LIBAPP_ELF_HEADER.txt
+          readelf -S "$LIB" > /tmp/r112/evidence/R112_LIBAPP_SECTIONS.txt
+          readelf -d "$LIB" > /tmp/r112/evidence/R112_LIBAPP_DYNAMIC.txt
+          readelf -Ws "$LIB" > /tmp/r112/evidence/R112_LIBAPP_SYMBOLS.txt || true
+
+      - name: Build fail-closed closure decision
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import json
+
+          ev=Path("/tmp/r112/evidence")
+          man=json.loads((ev/"R112_MANIFEST_CAPABILITIES.json").read_text())
+          dex=json.loads((ev/"R112_DEX_EXACT_PLATFORM_APIS.json").read_text())
+          strong=json.loads((ev/"R112_LIBAPP_STRONG_TOKENS.json").read_text())
+          nums=json.loads((ev/"R112_6324_1719_DISAMBIGUATION.json").read_text())
+          ble=json.loads((ev/"R112_BLE_UUID_STRING_NEIGHBORHOODS.json").read_text())
+
+          usb_native=sum(len(x["hits"]) for x in strong["usb_strong"])
+          updater_native=sum(len(x["hits"]) for x in strong["boot_update_strong"])
+          ota_native=sum(len(x["hits"]) for x in strong["possible_ota_exact"])
+
+          d={
+              "PINNED_OFFICIAL_1APR2026_APK":True,
+              "PACKAGE":man["package"],
+              "VERSION_NAME":man["version_name"],
+              "BLUETOOTH_PERMISSION_PRESENT":man["has_bluetooth_permission"],
+              "USB_HOST_FEATURE_PRESENT":man["has_usb_host_feature"],
+              "DEX_EXACT_USB_HOST_API_HITS":dex["usb_total_hits"],
+              "DEX_EXACT_BLE_API_HITS":dex["ble_total_hits"],
+              "DEX_EXACT_CLASSIC_SPP_API_HITS":dex["spp_total_hits"],
+              "LIBAPP_STRONG_USB_TOKEN_HITS":usb_native,
+              "LIBAPP_STRONG_BOOT_UPDATE_TOKEN_HITS":updater_native,
+              "LIBAPP_EXACT_OTA_TOKEN_HITS":ota_native,
+              "AB00_UUID_PRESENT":len(ble["AB00"])>0,
+              "AB01_UUID_PRESENT":len(ble["AB01"])>0,
+              "AB02_UUID_PRESENT":len(ble["AB02"])>0,
+              "AB03_UUID_PRESENT":len(ble["AB03"])>0,
+              "ASCII_6324_OCCURRENCES":nums["occurrence_count_6324"],
+              "ASCII_1719_OCCURRENCES":nums["occurrence_count_1719"],
+              "6324_1719_CLOSE_PAIR_WITH_USB_CONTEXT_COUNT":nums["pair_with_usb_context_count"],
+              "R111_6324_1719_WERE_PRODUCTION_ID_EVIDENCE":nums["pair_with_usb_context_count"]>0,
+              "OFFICIAL_ANDROID_APP_PROVEN_USB_FIRMWARE_UPDATER":False,
+              "PRODUCTION_BOOT_ENTRY_PROVEN":False,
+              "PRODUCTION_RECOVERY_USB_IDENTITY_PROVEN":False,
+              "SAFE_READ_ONLY_STOCK_BACKUP_PROVEN":False,
+              "ANY_DISCOVERED_WRITE_AUTHORIZED_FOR_BOARD":False,
+              "NEXT":"Close official Android client as BLE/runtime control unless strong USB/update evidence survives this exact audit; then search production-specific factory/updater/image packages outside the tuning clients.",
+              "FLASH_ALLOWED":False
+          }
+
+          # Classification is intentionally conservative.
+          if (
+              man["has_bluetooth_permission"]
+              and not man["has_usb_host_feature"]
+              and dex["usb_total_hits"]==0
+              and usb_native==0
+              and updater_native==0
+          ):
+              d["OFFICIAL_ANDROID_CLIENT_CLASSIFICATION"]="BLE_RUNTIME_TUNING_CLIENT"
+          else:
+              d["OFFICIAL_ANDROID_CLIENT_CLASSIFICATION"]="UNRESOLVED_NEEDS_STATIC_XREF"
+
+          (ev/"R112_DECISION.json").write_text(json.dumps(d,indent=2,ensure_ascii=False)+"\n")
+          report=[
+              "# R112 GoloPine Android BLE-vs-USB closure",
+              "",
+              "Static/offline only. No APK/native code executed and no hardware contacted.",
+              "",
+              "```json",
+              json.dumps(d,indent=2,ensure_ascii=False),
+              "```",
+              "",
+              "Important: numeric occurrences of 6324/1719 are not accepted as VID/PID evidence unless they occur together with explicit USB/vendor/product context.",
+              "",
+              "FLASH_ALLOWED=NO"
+          ]
+          (ev/"R112_REPORT.md").write_text("\n".join(report)+"\n")
+          print(json.dumps(d,indent=2,ensure_ascii=False))
+          PY
+
+      - name: Package evidence only
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /tmp/r112/evidence
+          zip -9 -r /tmp/R112_GOLOPINE_ANDROID_BLE_USB_CLOSURE_EVIDENCE.zip .
+          sha256sum /tmp/R112_GOLOPINE_ANDROID_BLE_USB_CLOSURE_EVIDENCE.zip \
+            > /tmp/R112_GOLOPINE_ANDROID_BLE_USB_CLOSURE_EVIDENCE.zip.sha256
+
+      - name: Upload evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: R112-GOLOPINE-ANDROID-BLE-USB-CLOSURE-EVIDENCE
+          path: |
+            /tmp/R112_GOLOPINE_ANDROID_BLE_USB_CLOSURE_EVIDENCE.zip
+            /tmp/R112_GOLOPINE_ANDROID_BLE_USB_CLOSURE_EVIDENCE.zip.sha256
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Final fail-closed gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -F 'R112_APK_EXECUTED=NO' /tmp/r112/evidence/R112_SAFETY.txt
+          grep -F 'R112_USB_DEVICE_ACCESS=NO' /tmp/r112/evidence/R112_SAFETY.txt
+          grep -F 'R112_ANY_DISCOVERED_WRITE_AUTHORIZED_FOR_BOARD=NO' /tmp/r112/evidence/R112_SAFETY.txt
+          grep -F '"FLASH_ALLOWED": false' /tmp/r112/evidence/R112_DECISION.json
+          cat /tmp/r112/evidence/R112_DECISION.json
+          echo R112_STATIC_CLOSURE_COMPLETE=YES
+          echo FLASH_ALLOWED=NO
