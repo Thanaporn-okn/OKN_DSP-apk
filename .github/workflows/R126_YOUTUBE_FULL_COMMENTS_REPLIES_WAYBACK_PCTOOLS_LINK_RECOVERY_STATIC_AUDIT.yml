@@ -1,0 +1,892 @@
+name: R126 YouTube full comments replies and Wayback PCTools link recovery static audit
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - ".github/workflows/R126_YOUTUBE_FULL_COMMENTS_REPLIES_WAYBACK_PCTOOLS_LINK_RECOVERY_STATIC_AUDIT.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: r126-youtube-full-comment-link-recovery-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  VIDEO_ID: "oSIWbddW7Rc"
+  VIDEO_URL: "https://www.youtube.com/watch?v=oSIWbddW7Rc"
+  FLASH_ALLOWED: "NO"
+
+jobs:
+  recover:
+    name: STATIC PUBLIC LINK RECOVERY ONLY - comments/replies/archive - no USB - no board
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+
+    steps:
+      - name: Immutable safety gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/r126/raw /tmp/r126/downloads /tmp/r126/evidence
+          cat > /tmp/r126/evidence/R126_SAFETY.txt <<'EOF'
+          R126_MODE=PUBLIC_METADATA_COMMENTS_REPLIES_ARCHIVE_AND_LINK_RECOVERY_ONLY
+          R126_VENDOR_BINARY_EXECUTED=NO
+          R126_INSTALLER_EXECUTED=NO
+          R126_USB_DEVICE_ACCESS=NO
+          R126_BOARD_CONTACT=NO
+          R126_BLE_CONNECTION=NO
+          R126_AA55_SENT=NO
+          R126_RUNTIME_0X11_SENT=NO
+          R126_FLASHBOOT_COMMAND_SENT=NO
+          R126_FLASH_READ_EXECUTED=NO
+          R126_FLASH_ERASE_EXECUTED=NO
+          R126_FLASH_WRITE_EXECUTED=NO
+          R126_ANY_DISCOVERED_FRAME_AUTHORIZED_FOR_BOARD=NO
+          FINAL_REQUIRED_TRANSPORT=SAMSUNG_S25_PLUS_USB_C_DIRECT_TO_DSP_USB_C
+          HARDWARE_MODIFICATION=FORBIDDEN
+          FLASH_ALLOWED=NO
+          EOF
+
+      - name: Install public acquisition tooling
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+            curl jq file unzip p7zip-full binutils python3-pip >/dev/null
+          python3 -m pip install --disable-pip-version-check --no-input \
+            requests gdown pefile beautifulsoup4 >/dev/null
+
+      - name: Fetch current public watch page and Invidious instance list
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          curl --location --retry 3 --retry-all-errors \
+            --connect-timeout 20 --max-time 60 \
+            -A 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/140 Safari/537.36' \
+            -H 'Accept-Language: en-US,en;q=0.9' \
+            "$VIDEO_URL" \
+            -o /tmp/r126/raw/watch.html || true
+
+          curl --location --retry 3 --retry-all-errors \
+            --connect-timeout 20 --max-time 45 \
+            "https://api.invidious.io/instances.json?sort_by=health" \
+            -o /tmp/r126/raw/invidious_instances.json || true
+
+          {
+            for f in /tmp/r126/raw/watch.html /tmp/r126/raw/invidious_instances.json; do
+              if [ -f "$f" ]; then
+                echo "$(basename "$f") bytes=$(stat -c '%s' "$f") sha256=$(sha256sum "$f" | awk '{print $1}')"
+              fi
+            done
+          } > /tmp/r126/evidence/R126_FETCH_STATUS.txt
+
+      - name: Exhaust Invidious top-level comments and reply continuations
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          from urllib.parse import urlparse, unquote, parse_qs
+          from bs4 import BeautifulSoup
+          import requests, json, re, html, time
+
+          raw=Path("/tmp/r126/raw")
+          ev=Path("/tmp/r126/evidence")
+          vid="oSIWbddW7Rc"
+
+          try:
+              instances=json.loads((raw/"invidious_instances.json").read_text())
+          except Exception:
+              instances=[]
+
+          bases=[]
+          for item in instances:
+              if not isinstance(item,list) or len(item)<2:
+                  continue
+              host,info=item
+              if not isinstance(info,dict):
+                  continue
+              if info.get("api") is False or info.get("type")=="onion":
+                  continue
+              uri=info.get("uri") or ("https://"+host)
+              if isinstance(uri,str) and uri.startswith("http"):
+                  bases.append(uri.rstrip("/"))
+              if len(bases)>=35:
+                  break
+
+          # Put the instance that worked in R125 first, without depending on it.
+          preferred="https://invidious.f5.si"
+          if preferred in bases:
+              bases.remove(preferred)
+          bases.insert(0,preferred)
+
+          url_re=re.compile(r'https?://[^\s<>"\'\]\)]+',re.I)
+          bare_share_re=re.compile(
+              r'(?:(?:drive\.google\.com|docs\.google\.com|mega\.nz|mediafire\.com|'
+              r'dropbox\.com|1drv\.ms|onedrive\.live\.com|pan\.baidu\.com|gofile\.io|'
+              r'pixeldrain\.com|4shared\.com|box\.com)/[^\s<>"\'\]]+)',
+              re.I
+          )
+
+          def normalize_url(u):
+              u=html.unescape(str(u)).replace("\\u0026","&").replace("\\/","/")
+              u=u.rstrip(".,;:!?'\"")
+              if not re.match(r'^https?://',u,re.I):
+                  u="https://"+u
+              try:
+                  p=urlparse(u)
+                  q=parse_qs(p.query)
+                  if ("youtube.com/redirect" in u or "google.com/url" in u) and "q" in q:
+                      u=unquote(q["q"][0])
+              except Exception:
+                  pass
+              return u
+
+          def content_to_text(c):
+              if c is None:
+                  return ""
+              if isinstance(c,str):
+                  # contentHtml may include anchors
+                  try:
+                      soup=BeautifulSoup(c,"html.parser")
+                      return soup.get_text(" ",strip=True)
+                  except Exception:
+                      return c
+              return str(c)
+
+          comments={}
+          urls=[]
+          attempts=[]
+          expected_count=None
+          used_base=None
+
+          def add_urls(source,text_or_html):
+              s=html.unescape(str(text_or_html or "")).replace("\\u0026","&").replace("\\/","/")
+              for u in url_re.findall(s):
+                  urls.append({"source":source,"url":normalize_url(u)})
+              for u in bare_share_re.findall(s):
+                  urls.append({"source":source,"url":normalize_url(u)})
+              try:
+                  soup=BeautifulSoup(s,"html.parser")
+                  for a in soup.find_all("a",href=True):
+                      urls.append({"source":source,"url":normalize_url(a["href"])})
+              except Exception:
+                  pass
+
+          def absorb_comment(c,source):
+              if not isinstance(c,dict):
+                  return []
+              cid=str(c.get("commentId") or c.get("id") or "")
+              author=str(c.get("author") or "")
+              content=c.get("content")
+              if not content:
+                  content=c.get("contentHtml")
+              text=content_to_text(content)
+              key=cid or (author+"|"+text)
+              if key and key not in comments:
+                  comments[key]={
+                      "id":cid,
+                      "author":author,
+                      "text":text,
+                      "source":source,
+                      "replyCount":c.get("replyCount"),
+                  }
+              add_urls(source+":"+cid,content or text)
+
+              reply_tokens=[]
+              replies=c.get("replies")
+              if isinstance(replies,dict):
+                  tok=replies.get("continuation")
+                  if isinstance(tok,str) and tok:
+                      reply_tokens.append(tok)
+                  nested=replies.get("comments")
+                  if isinstance(nested,list):
+                      for rc in nested:
+                          absorb_comment(rc,source+":embedded_reply")
+              return reply_tokens
+
+          def get_json(session,url,params=None,timeout=20):
+              r=session.get(url,params=params,timeout=timeout,headers={"User-Agent":"Mozilla/5.0"})
+              return r
+
+          # Try healthy instances until one returns the expected comments API.
+          for base in bases:
+              session=requests.Session()
+              endpoint=f"{base}/api/v1/comments/{vid}"
+              try:
+                  r=get_json(session,endpoint,{"sort_by":"top"})
+                  attempts.append({"base":base,"stage":"initial_top","status":r.status_code,"bytes":len(r.content),"head":r.text[:500]})
+                  if not r.ok:
+                      continue
+                  obj=r.json()
+                  if not isinstance(obj,dict) or "comments" not in obj:
+                      continue
+                  used_base=base
+                  expected_count=obj.get("commentCount")
+                  break
+              except Exception as e:
+                  attempts.append({"base":base,"stage":"initial_top","error":repr(e)})
+                  continue
+
+          if used_base:
+              session=requests.Session()
+              endpoint=f"{used_base}/api/v1/comments/{vid}"
+
+              # Paginate both "top" and "new" ordering. Dedupe by comment ID/text.
+              for sort in ("top","new"):
+                  continuation=None
+                  seen_tokens=set()
+                  for page in range(1,31):
+                      params={"sort_by":sort}
+                      if continuation:
+                          params["continuation"]=continuation
+                      try:
+                          r=get_json(session,endpoint,params)
+                          attempts.append({
+                              "base":used_base,"stage":"top_level",
+                              "sort":sort,"page":page,
+                              "status":r.status_code,"bytes":len(r.content),
+                              "head":r.text[:250]
+                          })
+                          if not r.ok:
+                              break
+                          obj=r.json()
+                      except Exception as e:
+                          attempts.append({"base":used_base,"stage":"top_level","sort":sort,"page":page,"error":repr(e)})
+                          break
+
+                      reply_tokens=[]
+                      for c in obj.get("comments") or []:
+                          reply_tokens.extend(absorb_comment(c,f"invidious:{used_base}:{sort}:p{page}"))
+
+                      # Fetch reply continuation chains for each visible parent.
+                      for rt in reply_tokens[:200]:
+                          if not rt:
+                              continue
+                          seen_reply=set()
+                          tok=rt
+                          for rp in range(1,11):
+                              if tok in seen_reply:
+                                  break
+                              seen_reply.add(tok)
+                              try:
+                                  rr=get_json(session,endpoint,{"continuation":tok})
+                                  attempts.append({
+                                      "base":used_base,"stage":"reply",
+                                      "sort":sort,"page":page,"reply_page":rp,
+                                      "status":rr.status_code,"bytes":len(rr.content),
+                                      "head":rr.text[:180]
+                                  })
+                                  if not rr.ok:
+                                      break
+                                  robj=rr.json()
+                              except Exception as e:
+                                  attempts.append({"base":used_base,"stage":"reply","error":repr(e)})
+                                  break
+
+                              nested_tokens=[]
+                              for rc in robj.get("comments") or []:
+                                  nested_tokens.extend(absorb_comment(rc,f"invidious:{used_base}:reply"))
+                              nt=robj.get("continuation")
+                              if not isinstance(nt,str) or not nt or nt in seen_reply:
+                                  break
+                              tok=nt
+
+                      continuation=obj.get("continuation")
+                      if not isinstance(continuation,str) or not continuation or continuation in seen_tokens:
+                          break
+                      seen_tokens.add(continuation)
+
+          # de-duplicate URLs
+          out_urls=[]
+          seen=set()
+          for x in urls:
+              u=x.get("url","")
+              if not u or u in seen:
+                  continue
+              seen.add(u)
+              out_urls.append(x)
+
+          ev.joinpath("R126_INVIDIOUS_ATTEMPTS.json").write_text(
+              json.dumps(attempts,indent=2,ensure_ascii=False)+"\n"
+          )
+          ev.joinpath("R126_INVIDIOUS_COMMENTS_ALL.json").write_text(
+              json.dumps(list(comments.values()),indent=2,ensure_ascii=False)+"\n"
+          )
+          ev.joinpath("R126_INVIDIOUS_URLS.json").write_text(
+              json.dumps(out_urls,indent=2,ensure_ascii=False)+"\n"
+          )
+          ev.joinpath("R126_INVIDIOUS_SUMMARY.json").write_text(
+              json.dumps({
+                  "used_base":used_base,
+                  "expected_comment_count":expected_count,
+                  "unique_comments_recovered":len(comments),
+                  "unique_urls_recovered":len(out_urls)
+              },indent=2,ensure_ascii=False)+"\n"
+          )
+          print(json.dumps({
+              "used_base":used_base,
+              "expected_comment_count":expected_count,
+              "unique_comments_recovered":len(comments),
+              "unique_urls_recovered":len(out_urls)
+          },indent=2))
+          PY
+
+      - name: Recover current YouTube Innertube comment entities and URLs
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          from urllib.parse import urlparse,parse_qs,unquote
+          import requests,re,json,html
+
+          raw=Path("/tmp/r126/raw")
+          ev=Path("/tmp/r126/evidence")
+          watch=(raw/"watch.html").read_text(errors="replace") if (raw/"watch.html").exists() else ""
+
+          def grab(pat):
+              m=re.search(pat,watch)
+              return m.group(1) if m else None
+
+          api_key=grab(r'"INNERTUBE_API_KEY":"([^"]+)"')
+          ver=grab(r'"INNERTUBE_CLIENT_VERSION":"([^"]+)"')
+          visitor=grab(r'"VISITOR_DATA":"([^"]+)"')
+
+          cfg={"api_key_found":bool(api_key),"client_version":ver,"visitor_data_found":bool(visitor)}
+          ev.joinpath("R126_INNERTUBE_CONFIG.json").write_text(json.dumps(cfg,indent=2)+"\n")
+
+          comments={}
+          urls=[]
+          attempts=[]
+          tokens=[]
+          token_seen=set()
+
+          url_re=re.compile(r'https?://[^\s<>"\'\]\)]+',re.I)
+
+          def add_url(src,u):
+              if not isinstance(u,str):
+                  return
+              u=html.unescape(u).replace("\\u0026","&").replace("\\/","/").rstrip(".,;:!?'\"")
+              try:
+                  p=urlparse(u); q=parse_qs(p.query)
+                  if "youtube.com/redirect" in u and "q" in q:
+                      u=unquote(q["q"][0])
+              except Exception:
+                  pass
+              if u.startswith("http"):
+                  urls.append({"source":src,"url":u})
+
+          def simple_text(x):
+              if isinstance(x,str): return x
+              if not isinstance(x,dict): return ""
+              if isinstance(x.get("simpleText"),str):
+                  return x["simpleText"]
+              if isinstance(x.get("runs"),list):
+                  return "".join(str(r.get("text") or "") for r in x["runs"] if isinstance(r,dict))
+              return ""
+
+          def collect(obj,path="root"):
+              if isinstance(obj,dict):
+                  # legacy schema
+                  cr=obj.get("commentRenderer")
+                  if isinstance(cr,dict):
+                      cid=str(cr.get("commentId") or "")
+                      text=simple_text(cr.get("contentText") or {})
+                      author=simple_text(cr.get("authorText") or {})
+                      if cid or text:
+                          comments[cid or (author+"|"+text)]={"id":cid,"author":author,"text":text,"source":"innertube:commentRenderer"}
+                      for m in url_re.findall(text):
+                          add_url("innertube:commentRenderer:"+cid,m)
+
+                  # 2026 entity schema
+                  ep=obj.get("commentEntityPayload")
+                  if isinstance(ep,dict):
+                      props=ep.get("properties") if isinstance(ep.get("properties"),dict) else {}
+                      content=props.get("content")
+                      if isinstance(content,dict):
+                          text=simple_text(content)
+                      else:
+                          text=str(content or "")
+                      cid=str(props.get("commentId") or ep.get("commentId") or "")
+                      author=""
+                      for k in ("author","authorButton"):
+                          a=props.get(k)
+                          if isinstance(a,dict):
+                              author=simple_text(a) or simple_text(a.get("displayName") or {})
+                              if author: break
+                      if cid or text:
+                          comments[cid or (author+"|"+text)]={"id":cid,"author":author,"text":text,"source":"innertube:commentEntityPayload"}
+                      for m in url_re.findall(text):
+                          add_url("innertube:commentEntityPayload:"+cid,m)
+
+                  # URL endpoints can preserve external links even when visible text is shortened.
+                  ue=obj.get("urlEndpoint")
+                  if isinstance(ue,dict):
+                      add_url("innertube:urlEndpoint",ue.get("url"))
+
+                  cc=obj.get("continuationCommand")
+                  if isinstance(cc,dict):
+                      tok=cc.get("token")
+                      if isinstance(tok,str) and tok and tok not in token_seen:
+                          token_seen.add(tok)
+                          tokens.append(tok)
+
+                  for k,v in obj.items():
+                      collect(v,path+"/"+str(k))
+              elif isinstance(obj,list):
+                  for i,v in enumerate(obj):
+                      collect(v,path+f"/{i}")
+              elif isinstance(obj,str):
+                  if obj.startswith("http"):
+                      add_url("innertube:string",obj)
+
+          if api_key:
+              headers={
+                  "User-Agent":"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/140 Safari/537.36",
+                  "Content-Type":"application/json",
+                  "Origin":"https://www.youtube.com",
+                  "Referer":"https://www.youtube.com/watch?v=oSIWbddW7Rc"
+              }
+              if visitor:
+                  headers["X-Goog-Visitor-Id"]=visitor
+
+              context={"client":{"clientName":"WEB","clientVersion":ver or "2.20260922.01.00","hl":"en","gl":"US"}}
+              endpoint=f"https://www.youtube.com/youtubei/v1/next?key={api_key}"
+
+              try:
+                  r=requests.post(endpoint,headers=headers,json={"context":context,"videoId":"oSIWbddW7Rc"},timeout=30)
+                  attempts.append({"stage":"initial","status":r.status_code,"bytes":len(r.content),"head":r.text[:300]})
+                  if r.ok:
+                      collect(r.json())
+              except Exception as e:
+                  attempts.append({"stage":"initial","error":repr(e)})
+
+              # Follow many tokens, but prioritize responses that actually contain comments.
+              queue=list(tokens)
+              processed=set()
+              for attempt in range(1,41):
+                  if not queue:
+                      break
+                  tok=queue.pop(0)
+                  if tok in processed:
+                      continue
+                  processed.add(tok)
+                  try:
+                      r=requests.post(endpoint,headers=headers,json={"context":context,"continuation":tok},timeout=30)
+                      body=r.text
+                      attempts.append({
+                          "stage":"continuation","attempt":attempt,
+                          "status":r.status_code,"bytes":len(r.content),
+                          "has_commentEntityPayload":"commentEntityPayload" in body,
+                          "has_commentRenderer":"commentRenderer" in body,
+                          "head":body[:250]
+                      })
+                      if not r.ok:
+                          continue
+                      before_tokens=set(token_seen)
+                      collect(r.json())
+                      for nt in tokens:
+                          if nt not in processed and nt not in queue:
+                              queue.append(nt)
+                  except Exception as e:
+                      attempts.append({"stage":"continuation","attempt":attempt,"error":repr(e)})
+
+          # dedupe URLs
+          out_urls=[]
+          seen=set()
+          for x in urls:
+              u=x.get("url","")
+              if not u or u in seen:
+                  continue
+              seen.add(u)
+              out_urls.append(x)
+
+          ev.joinpath("R126_INNERTUBE_ATTEMPTS.json").write_text(json.dumps(attempts,indent=2,ensure_ascii=False)+"\n")
+          ev.joinpath("R126_INNERTUBE_COMMENTS_ALL.json").write_text(json.dumps(list(comments.values()),indent=2,ensure_ascii=False)+"\n")
+          ev.joinpath("R126_INNERTUBE_URLS.json").write_text(json.dumps(out_urls,indent=2,ensure_ascii=False)+"\n")
+          ev.joinpath("R126_INNERTUBE_SUMMARY.json").write_text(
+              json.dumps({
+                  "unique_comments_recovered":len(comments),
+                  "unique_urls_recovered":len(out_urls),
+                  "continuation_tokens_seen":len(token_seen),
+                  "continuation_tokens_processed":len(processed)
+              },indent=2)+"\n"
+          )
+          PY
+
+      - name: Query Internet Archive for historical watch-page snapshots
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          from urllib.parse import quote
+          import requests,json,re,html,time
+
+          ev=Path("/tmp/r126/evidence")
+          cdx_url="https://web.archive.org/cdx/search/cdx"
+          params={
+              "url":"www.youtube.com/watch?v=oSIWbddW7Rc",
+              "output":"json",
+              "fl":"timestamp,original,statuscode,digest",
+              "filter":"statuscode:200",
+              "collapse":"digest",
+              "limit":"200"
+          }
+          status=[]
+          snapshots=[]
+          urls=[]
+
+          try:
+              r=requests.get(cdx_url,params=params,timeout=40,headers={"User-Agent":"Mozilla/5.0"})
+              status.append({"stage":"cdx","status":r.status_code,"bytes":len(r.content),"head":r.text[:500]})
+              data=r.json() if r.ok else []
+          except Exception as e:
+              status.append({"stage":"cdx","error":repr(e)})
+              data=[]
+
+          rows=[]
+          if isinstance(data,list) and data:
+              header=data[0] if isinstance(data[0],list) else []
+              for x in data[1:]:
+                  if isinstance(x,list) and len(x)>=4:
+                      rows.append(dict(zip(header,x)))
+
+          # Fetch up to 12 strategically sampled snapshots: earliest, latest, and evenly spaced.
+          picks=[]
+          if rows:
+              idxs={0,len(rows)-1}
+              for k in range(1,11):
+                  idxs.add(round((len(rows)-1)*k/11))
+              for i in sorted(idxs):
+                  if 0<=i<len(rows):
+                      picks.append(rows[i])
+
+          url_re=re.compile(r'https?://[^\s<>"\'\]\)]+',re.I)
+          share_re=re.compile(
+              r'(?:drive\.google\.com|docs\.google\.com|mega\.nz|mediafire\.com|dropbox\.com|'
+              r'1drv\.ms|onedrive\.live\.com|pan\.baidu\.com|gofile\.io|pixeldrain\.com|'
+              r'4shared\.com|box\.com)/[^\s<>"\'\]]+',
+              re.I
+          )
+
+          for row in picks:
+              ts=row.get("timestamp","")
+              orig=row.get("original","https://www.youtube.com/watch?v=oSIWbddW7Rc")
+              snap=f"https://web.archive.org/web/{ts}id_/{orig}"
+              try:
+                  rr=requests.get(snap,timeout=45,headers={"User-Agent":"Mozilla/5.0"})
+                  status.append({"stage":"snapshot","timestamp":ts,"status":rr.status_code,"bytes":len(rr.content),"head":rr.text[:200]})
+                  if not rr.ok:
+                      continue
+                  text=html.unescape(rr.text).replace("\\u0026","&").replace("\\/","/")
+                  found=[]
+                  for u in url_re.findall(text):
+                      found.append(u.rstrip(".,;:!?'\""))
+                  for u in share_re.findall(text):
+                      if not u.startswith("http"):
+                          u="https://"+u
+                      found.append(u.rstrip(".,;:!?'\""))
+                  snapshots.append({"timestamp":ts,"original":orig,"snapshot_url":snap,"urls":sorted(set(found))})
+              except Exception as e:
+                  status.append({"stage":"snapshot","timestamp":ts,"error":repr(e)})
+
+          ev.joinpath("R126_WAYBACK_CDX_ROWS.json").write_text(json.dumps(rows,indent=2,ensure_ascii=False)+"\n")
+          ev.joinpath("R126_WAYBACK_SNAPSHOT_URLS.json").write_text(json.dumps(snapshots,indent=2,ensure_ascii=False)+"\n")
+          ev.joinpath("R126_WAYBACK_STATUS.json").write_text(json.dumps(status,indent=2,ensure_ascii=False)+"\n")
+          PY
+
+      - name: Merge comments and URLs then identify target software evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          from urllib.parse import urlparse
+          import json,re
+
+          ev=Path("/tmp/r126/evidence")
+
+          def load(n,d):
+              try: return json.loads((ev/n).read_text())
+              except Exception: return d
+
+          comments=[]
+          comments.extend(load("R126_INVIDIOUS_COMMENTS_ALL.json",[]))
+          comments.extend(load("R126_INNERTUBE_COMMENTS_ALL.json",[]))
+
+          # comment de-dupe
+          cuniq=[]
+          seen=set()
+          for c in comments:
+              key=(c.get("id") or "", c.get("text") or "")
+              if key in seen: continue
+              seen.add(key); cuniq.append(c)
+
+          urls=[]
+          urls.extend(load("R126_INVIDIOUS_URLS.json",[]))
+          urls.extend(load("R126_INNERTUBE_URLS.json",[]))
+          for snap in load("R126_WAYBACK_SNAPSHOT_URLS.json",[]):
+              for u in snap.get("urls",[]):
+                  urls.append({"source":"wayback:"+snap.get("timestamp",""),"url":u})
+
+          # Watch HTML URLs too.
+          watch=Path("/tmp/r126/raw/watch.html")
+          if watch.exists():
+              text=watch.read_text(errors="replace").replace("\\u0026","&").replace("\\/","/")
+              for m in re.finditer(r'https?://[^\s<>"\'\]\)]+',text,re.I):
+                  urls.append({"source":"current_watch_html","url":m.group(0).rstrip(".,;:!?'\"")})
+
+          uuniq=[]
+          seen_u=set()
+          for x in urls:
+              u=str(x.get("url") or "")
+              if not u.startswith("http") or u in seen_u:
+                  continue
+              seen_u.add(u); uuniq.append({"source":x.get("source"),"url":u})
+
+          share_hosts=(
+              "drive.google.com","docs.google.com","mega.nz","dropbox.com","mediafire.com",
+              "onedrive.live.com","1drv.ms","pan.baidu.com","gofile.io","pixeldrain.com",
+              "4shared.com","box.com","terabox.com","1024tera.com","fshare.vn"
+          )
+          shares=[
+              x for x in uuniq
+              if any(h in urlparse(x["url"]).netloc.lower() for h in share_hosts)
+          ]
+
+          term_re=re.compile(
+              r'phần\s*mềm|software|đổi\s*tên|bluetooth|blue|PCTool|PC\s*Tool|'
+              r'BP10|BP1048|MV_AP82|V2\.2|download|link|firmware|flash|nạp',
+              re.I
+          )
+          target_comments=[c for c in cuniq if term_re.search(c.get("text",""))]
+
+          ev.joinpath("R126_COMMENTS_MERGED.json").write_text(json.dumps(cuniq,indent=2,ensure_ascii=False)+"\n")
+          ev.joinpath("R126_TARGET_COMMENTS.json").write_text(json.dumps(target_comments,indent=2,ensure_ascii=False)+"\n")
+          ev.joinpath("R126_ALL_URLS_MERGED.json").write_text(json.dumps(uuniq,indent=2,ensure_ascii=False)+"\n")
+          ev.joinpath("R126_FILESHARE_URLS.json").write_text(json.dumps(shares,indent=2,ensure_ascii=False)+"\n")
+
+          print(json.dumps({
+              "unique_comments":len(cuniq),
+              "target_comments":len(target_comments),
+              "unique_urls":len(uuniq),
+              "fileshare_urls":shares
+          },indent=2,ensure_ascii=False))
+          PY
+
+      - name: Acquire public Google Drive targets as inert data
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          from urllib.parse import urlparse
+          import json,subprocess,hashlib
+
+          ev=Path("/tmp/r126/evidence")
+          out=Path("/tmp/r126/downloads")
+          shares=json.loads((ev/"R126_FILESHARE_URLS.json").read_text())
+          rows=[]
+
+          for idx,x in enumerate(shares):
+              u=x["url"]
+              host=urlparse(u).netloc.lower()
+              before={str(p) for p in out.rglob("*") if p.is_file()}
+              attempts=[]
+
+              if "drive.google.com" in host or "docs.google.com" in host:
+                  cmds=[
+                      ["gdown","--fuzzy","--continue",u,"-O",str(out/f"gdrive_{idx:03d}")],
+                      ["gdown","--folder","--fuzzy","--continue",u,"-O",str(out/f"gdrive_folder_{idx:03d}")],
+                  ]
+                  for args in cmds:
+                      try:
+                          cp=subprocess.run(args,capture_output=True,text=True,timeout=240)
+                          attempts.append({"rc":cp.returncode,"stdout":cp.stdout[-5000:],"stderr":cp.stderr[-5000:]})
+                          if cp.returncode==0:
+                              break
+                      except Exception as e:
+                          attempts.append({"error":repr(e)})
+              else:
+                  attempts.append({"skipped":"R126 automatic downloader is limited to Google Drive; URL retained as evidence"})
+
+              after=[p for p in out.rglob("*") if p.is_file() and str(p) not in before]
+              files=[]
+              for p in after:
+                  files.append({
+                      "path":str(p.relative_to(out)),
+                      "size":p.stat().st_size,
+                      "sha256":hashlib.sha256(p.read_bytes()).hexdigest()
+                  })
+              rows.append({"source":x.get("source"),"url":u,"attempts":attempts,"files":files})
+
+          ev.joinpath("R126_DOWNLOAD_RESULTS.json").write_text(json.dumps(rows,indent=2,ensure_ascii=False)+"\n")
+          PY
+
+      - name: Static inspect acquired files and nested archive names
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import re,json,hashlib,subprocess
+
+          root=Path("/tmp/r126/downloads")
+          ev=Path("/tmp/r126/evidence")
+          key=re.compile(
+              r'MV_AP82|BP10|BP1048|PCTool|PC_Tool|V2\.2|MVA|'
+              r'PCTools_Config|BT_InfoConfig|Upgrade Finished|READSN|'
+              r'flashboot|HidD_SetFeature|HidD_GetFeature|'
+              r'chiperas|codedata|bootdat|constdat|cnfgdat|btupdat|upinfo',
+              re.I
+          )
+
+          rows=[]
+          for p in sorted(root.rglob("*")):
+              if not p.is_file(): continue
+              data=p.read_bytes()
+              try:
+                  typ=subprocess.check_output(["file","-b",str(p)],text=True).strip()
+              except Exception:
+                  typ=""
+              strings=[m.group(0).decode("latin1","replace") for m in re.finditer(rb"[\x20-\x7e]{5,}",data)]
+              hits=[s[:1000] for s in strings if key.search(s)][:1000]
+              entries=[]
+              try:
+                  cp=subprocess.run(["7z","l","-slt",str(p)],capture_output=True,text=True,timeout=60)
+                  if cp.returncode==0:
+                      entries=[line[7:].strip() for line in cp.stdout.splitlines() if line.startswith("Path = ")][:10000]
+              except Exception:
+                  pass
+              rows.append({
+                  "path":str(p.relative_to(root)),
+                  "size":len(data),
+                  "sha256":hashlib.sha256(data).hexdigest(),
+                  "file_type":typ,
+                  "keyword_string_hits":hits,
+                  "archive_entries":entries,
+                  "interesting_archive_entries":[x for x in entries if key.search(x)][:2000]
+              })
+
+          ev.joinpath("R126_STATIC_FILE_INVENTORY.json").write_text(json.dumps(rows,indent=2,ensure_ascii=False)+"\n")
+          PY
+
+      - name: Build recovery decision
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import json,re
+
+          ev=Path("/tmp/r126/evidence")
+
+          def load(n,d):
+              try: return json.loads((ev/n).read_text())
+              except Exception: return d
+
+          invsum=load("R126_INVIDIOUS_SUMMARY.json",{})
+          innsum=load("R126_INNERTUBE_SUMMARY.json",{})
+          comments=load("R126_COMMENTS_MERGED.json",[])
+          target=load("R126_TARGET_COMMENTS.json",[])
+          shares=load("R126_FILESHARE_URLS.json",[])
+          dl=load("R126_DOWNLOAD_RESULTS.json",[])
+          files=load("R126_STATIC_FILE_INVENTORY.json",[])
+          way=load("R126_WAYBACK_CDX_ROWS.json",[])
+
+          acquired=sum(len(x.get("files",[])) for x in dl)
+          strong=[]
+          for f in files:
+              blob=" ".join(f.get("keyword_string_hits",[]))+" "+" ".join(f.get("interesting_archive_entries",[]))+" "+f.get("path","")
+              if re.search(r'MV_AP82|BP10|PCTool|PC_Tool|PCTools_Config|BT_InfoConfig|flashboot',blob,re.I):
+                  strong.append(f)
+
+          expected=invsum.get("expected_comment_count")
+          recovered=len(comments)
+          comment_surface_reasonably_exhausted=bool(expected and recovered>=int(expected)*0.85)
+
+          d={
+              "VIDEO_ID":"oSIWbddW7Rc",
+              "INVIDIOUS_SUMMARY":invsum,
+              "INNERTUBE_SUMMARY":innsum,
+              "WAYBACK_CDX_ROW_COUNT":len(way),
+
+              "UNIQUE_COMMENT_COUNT":recovered,
+              "TARGET_COMMENT_COUNT":len(target),
+              "TARGET_COMMENTS":target[:200],
+
+              "FILESHARE_URL_COUNT":len(shares),
+              "FILESHARE_URLS":shares,
+
+              "ACQUIRED_FILE_COUNT":acquired,
+              "STATIC_FILE_COUNT":len(files),
+              "STRONG_PCTOOLS_FILE_COUNT":len(strong),
+              "STRONG_PCTOOLS_FILES":strong[:50],
+
+              "COMMENT_SURFACE_REASONABLY_EXHAUSTED":comment_surface_reasonably_exhausted,
+              "PCTOOLS_BINARY_PUBLICLY_ACQUIRED":len(strong)>0,
+
+              "VENDOR_BINARY_EXECUTED":False,
+              "USB_DEVICE_ACCESSED":False,
+              "BOARD_CONTACTED":False,
+
+              "PRODUCTION_GOLOPINE_BOOTSTRAP_PROVEN":False,
+              "PRODUCTION_FLASHBOOT_REENUMERATION_PROVEN":False,
+              "PRODUCTION_RECOVERY_USB_IDENTITY_PROVEN":False,
+              "SAFE_READ_ONLY_STOCK_BACKUP_PROVEN":False,
+              "ANY_DISCOVERED_WRITE_AUTHORIZED_FOR_BOARD":False,
+
+              "NEXT":(
+                  "If a strong linked file is acquired, pin its SHA256 and deep-static reverse only. "
+                  "If most/all 141 comments plus replies are recovered and no live file-share URL remains, close the YouTube acquisition path as currently dead and pivot to vendor/Chinese archive mirrors for MV_AP82xx_BP10xx_PC_Tools V2.2.x. "
+                  "Do not repeat AA55."
+              ),
+              "FLASH_ALLOWED":False
+          }
+
+          ev.joinpath("R126_DECISION.json").write_text(json.dumps(d,indent=2,ensure_ascii=False)+"\n")
+          ev.joinpath("R126_REPORT_TH.md").write_text(
+              "# R126 — full comments/replies/Wayback link recovery\n\n"
+              + "```json\n"+json.dumps(d,indent=2,ensure_ascii=False)+"\n```\n\n"
+              + "Public/static acquisition only. No executable was launched and no hardware was contacted.\n\n"
+              + "FLASH_ALLOWED=NO\n"
+          )
+          print(json.dumps(d,indent=2,ensure_ascii=False))
+          PY
+
+      - name: Package evidence only
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /tmp/r126/evidence
+          zip -9 -r /tmp/R126_YOUTUBE_FULL_LINK_RECOVERY_EVIDENCE.zip .
+          sha256sum /tmp/R126_YOUTUBE_FULL_LINK_RECOVERY_EVIDENCE.zip \
+            > /tmp/R126_YOUTUBE_FULL_LINK_RECOVERY_EVIDENCE.zip.sha256
+
+      - name: Upload evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: R126-YOUTUBE-FULL-LINK-RECOVERY-EVIDENCE
+          path: |
+            /tmp/R126_YOUTUBE_FULL_LINK_RECOVERY_EVIDENCE.zip
+            /tmp/R126_YOUTUBE_FULL_LINK_RECOVERY_EVIDENCE.zip.sha256
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Final fail-closed gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -F 'R126_VENDOR_BINARY_EXECUTED=NO' /tmp/r126/evidence/R126_SAFETY.txt
+          grep -F 'R126_USB_DEVICE_ACCESS=NO' /tmp/r126/evidence/R126_SAFETY.txt
+          grep -F 'R126_AA55_SENT=NO' /tmp/r126/evidence/R126_SAFETY.txt
+          grep -F 'R126_RUNTIME_0X11_SENT=NO' /tmp/r126/evidence/R126_SAFETY.txt
+          grep -F '"FLASH_ALLOWED": false' /tmp/r126/evidence/R126_DECISION.json
+          echo R126_PUBLIC_RECOVERY_COMPLETE=YES
+          echo FLASH_ALLOWED=NO
