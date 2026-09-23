@@ -1,0 +1,393 @@
+name: R115 BP10xx PCTools direct-USB updater discovery static audit
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - ".github/workflows/R115_BP10XX_PCTOOLS_DIRECT_USB_UPDATER_DISCOVERY_STATIC_AUDIT.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: r115-bp10xx-pctools-discovery-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PCTOOLS_BASE_NAME: "MV_AP82xx_BP10xx_PC_Tools"
+  PCTOOLS_VERSION_TARGET: "V2.2.8"
+  FLASH_ALLOWED: "NO"
+
+jobs:
+  discover:
+    name: STATIC PUBLIC-EVIDENCE ONLY - no execution - no USB - no board
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+
+    steps:
+      - name: Immutable safety gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/r115/raw /tmp/r115/evidence
+          cat > /tmp/r115/evidence/R115_SAFETY.txt <<'EOF'
+          R115_MODE=STATIC_PUBLIC_EVIDENCE_ONLY
+          R115_VENDOR_BINARY_EXECUTED=NO
+          R115_INSTALLER_EXECUTED=NO
+          R115_USB_DEVICE_ACCESS=NO
+          R115_BOARD_CONTACT=NO
+          R115_BLE_CONNECTION=NO
+          R115_AA55_SENT=NO
+          R115_RUNTIME_0X11_SENT=NO
+          R115_CONTROL_0XFE_SENT=NO
+          R115_FLASH_READ_EXECUTED=NO
+          R115_FLASH_ERASE_EXECUTED=NO
+          R115_FLASH_WRITE_EXECUTED=NO
+          R115_ANY_DISCOVERED_FRAME_AUTHORIZED_FOR_BOARD=NO
+          FINAL_REQUIRED_TRANSPORT=SAMSUNG_S25_PLUS_USB_C_DIRECT_TO_DSP_USB_C
+          HARDWARE_MODIFICATION=FORBIDDEN
+          FLASH_ALLOWED=NO
+          EOF
+
+      - name: Install discovery tooling
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+            curl jq file unzip p7zip-full python3-pip >/dev/null
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq megatools >/dev/null 2>&1 || true
+
+      - name: Fetch public PCTools protocol/manual evidence pages
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          curl --location --retry 3 --retry-all-errors \
+            'https://www.scribd.com/document/990877502/%E5%B1%B1%E6%99%AFMV-AP82xx-BP10xx-PCTools%E5%8D%87%E7%BA%A7%E5%B7%A5%E5%85%B7%E4%BD%BF%E7%94%A8%E8%AF%B4%E6%98%8E%E6%96%87%E6%A1%A3-v0-0-8' \
+            -o /tmp/r115/raw/pctools_manual_page.html || true
+
+          curl --location --retry 3 --retry-all-errors \
+            'https://www.scribd.com/document/1013263124/%E5%9B%BA%E4%BB%B6%E4%B8%8E%E7%94%A8%E6%88%B7%E5%BA%94%E7%94%A8%E7%A8%8B%E5%BA%8F%E9%80%9A%E4%BF%A1%E5%8D%8F%E8%AE%AEV3-15-1' \
+            -o /tmp/r115/raw/firmware_protocol_page.html || true
+
+          curl --location --retry 3 --retry-all-errors \
+            'https://damodev.csdn.net/68638131b93e2f4179622da8.html' \
+            -o /tmp/r115/raw/bp10xx_dev_article.html || true
+
+          curl --location --retry 3 --retry-all-errors \
+            'https://usmi.mybb.ru/viewtopic.php?id=70&p=2' \
+            -o /tmp/r115/raw/community_bp10xx_page.html || true
+
+          {
+            for f in /tmp/r115/raw/*; do
+              [ -f "$f" ] || continue
+              echo "$(basename "$f") bytes=$(stat -c '%s' "$f") sha256=$(sha256sum "$f" | awk '{print $1}')"
+            done
+          } > /tmp/r115/evidence/R115_SOURCE_FETCH_STATUS.txt
+
+      - name: Extract exact evidence terms from fetched pages
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import re,json,html
+
+          pats = {
+              "pctools_name": re.compile(r"MV_AP82xx_BP10xx_PC_Tools(?:_V?[\d.]+)?", re.I),
+              "pctools_versions": re.compile(r"V2\.2(?:\.[0-9]+)?", re.I),
+              "config_names": re.compile(r"(?:BT_InfoConfig|PCTools_Config|Template_BT_InfoConfig|Template_PCTools_Config)\.ini", re.I),
+              "usb_hid": re.compile(r"USB|HID", re.I),
+              "mva": re.compile(r"\.MVA|MVA文件|MVA file", re.I),
+              "flashboot": re.compile(r"flashboot", re.I),
+              "readsn": re.compile(r"READSN|读取设备SN|read.*SN", re.I),
+              "ctrl_0x11": re.compile(r"0x11", re.I),
+              "ctrl_0xfe": re.compile(r"0xFE", re.I),
+              "frame_start": re.compile(r"0xA5.{0,80}0x5A|A5.{0,80}5A", re.I|re.S),
+              "frame_end": re.compile(r"0x16", re.I),
+              "danger_words": re.compile(r"全擦除|erase|烧录|write|flash", re.I),
+          }
+
+          out={}
+          for p in sorted(Path("/tmp/r115/raw").glob("*")):
+              if not p.is_file(): continue
+              raw=p.read_text(errors="replace")
+              text=html.unescape(re.sub(r"<[^>]+>"," ",raw))
+              text=re.sub(r"\s+"," ",text)
+              row={}
+              for k,pat in pats.items():
+                  vals=[]
+                  for m in pat.finditer(text):
+                      a=max(0,m.start()-180); z=min(len(text),m.end()+260)
+                      vals.append(text[a:z])
+                      if len(vals)>=100: break
+                  row[k]=vals
+              out[p.name]=row
+
+          Path("/tmp/r115/evidence/R115_SOURCE_TERM_EVIDENCE.json").write_text(
+              json.dumps(out,indent=2,ensure_ascii=False)+"\n"
+          )
+          PY
+
+      - name: Search GitHub public code for exact PCTools names
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import subprocess,json,urllib.parse,os
+
+          queries=[
+              '"MV_AP82xx_BP10xx_PC_Tools"',
+              '"PCTools_Config.ini" BP10xx',
+              '"BT_InfoConfig.ini" BP10xx',
+              '"Upgrade Finished,OK!"',
+              '"READSN" BP10xx',
+          ]
+
+          results=[]
+          token=os.environ.get("GH_TOKEN","")
+          headers=["-H",f"Authorization: Bearer {token}"] if token else []
+
+          for q in queries:
+              url="https://api.github.com/search/code?q="+urllib.parse.quote(q)+"&per_page=50"
+              cp=subprocess.run(
+                  ["curl","--silent","--show-error","--location",*headers,
+                   "-H","Accept: application/vnd.github+json",url],
+                  capture_output=True,text=True
+              )
+              item={"query":q,"curl_rc":cp.returncode}
+              try:
+                  obj=json.loads(cp.stdout)
+                  item["total_count"]=obj.get("total_count")
+                  item["message"]=obj.get("message")
+                  item["items"]=[
+                      {
+                          "name":x.get("name"),
+                          "path":x.get("path"),
+                          "html_url":x.get("html_url"),
+                          "repository":(x.get("repository") or {}).get("full_name")
+                      }
+                      for x in obj.get("items",[])[:50]
+                  ]
+              except Exception:
+                  item["raw"]=cp.stdout[:5000]
+              results.append(item)
+
+          Path("/tmp/r115/evidence/R115_GITHUB_CODE_SEARCH.json").write_text(
+              json.dumps(results,indent=2,ensure_ascii=False)+"\n"
+          )
+          PY
+
+      - name: Search Internet Archive CDX for exact PCTools filenames
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import subprocess,json,urllib.parse
+
+          patterns=[
+              "*MV_AP82xx_BP10xx_PC_Tools*",
+              "*BP10xx_PC_Tools*",
+              "*PCTools_Config.ini*",
+              "*BT_InfoConfig.ini*",
+          ]
+          out=[]
+          for pat in patterns:
+              url=(
+                  "https://web.archive.org/cdx/search/cdx?"
+                  "url="+urllib.parse.quote(pat,safe="*")+
+                  "&output=json&fl=timestamp,original,statuscode,mimetype,digest,length"
+                  "&filter=statuscode:200&collapse=urlkey&limit=200"
+              )
+              cp=subprocess.run(
+                  ["curl","--silent","--show-error","--location","--retry","3",
+                   "--retry-all-errors",url],
+                  capture_output=True,text=True
+              )
+              row={"pattern":pat,"curl_rc":cp.returncode}
+              try:
+                  row["rows"]=json.loads(cp.stdout)
+              except Exception:
+                  row["raw"]=cp.stdout[:10000]
+              out.append(row)
+
+          Path("/tmp/r115/evidence/R115_INTERNET_ARCHIVE_CDX.json").write_text(
+              json.dumps(out,indent=2,ensure_ascii=False)+"\n"
+          )
+          PY
+
+      - name: List known public MVAssistant MEGA folder for related PCTools artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            echo "MEGA_PUBLIC_FOLDER=https://mega.nz/folder/SM0CkRLJ#I8VIZsfktCmYi4NseTgo6Q"
+            if command -v megals >/dev/null 2>&1; then
+              megals --reload 'https://mega.nz/folder/SM0CkRLJ#I8VIZsfktCmYi4NseTgo6Q' 2>&1 || true
+            else
+              echo "MEGATOOLS_NOT_AVAILABLE"
+            fi
+          } > /tmp/r115/evidence/R115_MEGA_FOLDER_LISTING.txt
+
+      - name: Search public repository index for BP10xx SDK and PCTools references
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import subprocess,json,urllib.parse,os
+
+          queries=[
+              'BP1048P4',
+              'MVSilicon BP10xx SDK',
+              'BP10xx MVAssistant',
+              'MV_AP82xx_BP10xx',
+          ]
+          token=os.environ.get("GH_TOKEN","")
+          headers=["-H",f"Authorization: Bearer {token}"] if token else []
+          out=[]
+          for q in queries:
+              url="https://api.github.com/search/repositories?q="+urllib.parse.quote(q)+"&per_page=50"
+              cp=subprocess.run(
+                  ["curl","--silent","--show-error","--location",*headers,
+                   "-H","Accept: application/vnd.github+json",url],
+                  capture_output=True,text=True
+              )
+              row={"query":q,"curl_rc":cp.returncode}
+              try:
+                  obj=json.loads(cp.stdout)
+                  row["total_count"]=obj.get("total_count")
+                  row["items"]=[
+                      {
+                          "full_name":x.get("full_name"),
+                          "html_url":x.get("html_url"),
+                          "description":x.get("description"),
+                          "default_branch":x.get("default_branch"),
+                      }
+                      for x in obj.get("items",[])[:50]
+                  ]
+              except Exception:
+                  row["raw"]=cp.stdout[:5000]
+              out.append(row)
+          Path("/tmp/r115/evidence/R115_GITHUB_REPOSITORY_SEARCH.json").write_text(
+              json.dumps(out,indent=2,ensure_ascii=False)+"\n"
+          )
+          PY
+
+      - name: Build protocol and updater discovery decision
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import json,re
+
+          ev=Path("/tmp/r115/evidence")
+          terms=json.loads((ev/"R115_SOURCE_TERM_EVIDENCE.json").read_text())
+          gh=json.loads((ev/"R115_GITHUB_CODE_SEARCH.json").read_text())
+          ia=json.loads((ev/"R115_INTERNET_ARCHIVE_CDX.json").read_text())
+          mega=(ev/"R115_MEGA_FOLDER_LISTING.txt").read_text(errors="replace")
+          repos=json.loads((ev/"R115_GITHUB_REPOSITORY_SEARCH.json").read_text())
+
+          flattened=json.dumps(terms,ensure_ascii=False)
+
+          pctools_doc_seen=bool(re.search(r"MV_AP82xx_BP10xx_PC_Tools",flattened,re.I))
+          usb_hid_doc_seen=("USB" in flattened and "HID" in flattened)
+          mva_doc_seen=bool(re.search(r"MVA",flattened,re.I))
+          flashboot_doc_seen=bool(re.search(r"flashboot",flattened,re.I))
+          ctrl11_doc_seen="0x11" in flattened
+          ctrlfe_doc_seen="0xFE" in flattened
+
+          github_hits=sum(len(x.get("items",[])) for x in gh)
+          ia_hits=0
+          for x in ia:
+              rows=x.get("rows")
+              if isinstance(rows,list):
+                  ia_hits += max(0,len(rows)-1)  # first CDX row is often header
+          mega_pctools=bool(re.search(r"PCTools|PC_Tools|MV_AP82xx_BP10xx",mega,re.I))
+
+          d={
+              "PUBLIC_DOCUMENT_NAMES_MV_AP82XX_BP10XX_PC_TOOLS":pctools_doc_seen,
+              "PUBLIC_DOCUMENT_INDICATES_USB_HID":usb_hid_doc_seen,
+              "PUBLIC_DOCUMENT_INDICATES_MVA_UPGRADE":mva_doc_seen,
+              "PUBLIC_DOCUMENT_INDICATES_FLASHBOOT":flashboot_doc_seen,
+              "PUBLIC_PROTOCOL_DOCUMENT_CONTAINS_CONTROL_0X11":ctrl11_doc_seen,
+              "PUBLIC_PROTOCOL_DOCUMENT_CONTAINS_CONTROL_0XFE":ctrlfe_doc_seen,
+              "GITHUB_EXACT_CODE_SEARCH_HIT_COUNT":github_hits,
+              "INTERNET_ARCHIVE_CDX_HIT_COUNT":ia_hits,
+              "MEGA_LISTING_HAS_PCTOOLS_NAME":mega_pctools,
+              "PCTOOLS_BINARY_LOCATED":bool(github_hits or ia_hits or mega_pctools),
+              "EVIDENCE_INTERPRETATION":[
+                  "The public manual describes MV_AP82xx_BP10xx_PC_Tools as a USB-connected MVA upgrade/device-information tool.",
+                  "The public protocol document describes USB as HID and states UART/USB use the same protocol framing.",
+                  "Control 0x11 must remain blocked from live experiments because the same control family includes programming-related operations.",
+                  "Control 0xFE is firmware-upgrade related and must remain blocked.",
+                  "These generic BPxx documents are not proof that the GoloPine production firmware accepts the same update path."
+              ],
+              "PRODUCTION_GOLOPINE_FIRST_BOOTSTRAP_PROVEN":False,
+              "PRODUCTION_GOLOPINE_RECOVERY_USB_IDENTITY_PROVEN":False,
+              "SAFE_READ_ONLY_STOCK_BACKUP_PROVEN":False,
+              "PCTOOLS_PROTOCOL_AUTHORIZED_FOR_LIVE_BOARD":False,
+              "NEXT":(
+                  "If a PCTools binary/archive was located, pin and deep-static reverse its HID discovery, report framing, MVA parser, read-only identify/READSN path, and flashboot transition without executing it. "
+                  "If not located, preserve the exact V2.2.8 tool identity and continue binary acquisition from vendor/agent/support channels."
+              ),
+              "FLASH_ALLOWED":False
+          }
+
+          (ev/"R115_DECISION.json").write_text(json.dumps(d,indent=2,ensure_ascii=False)+"\n")
+          report=[
+              "# R115 BP10xx PCTools direct-USB updater discovery",
+              "",
+              "Static/public evidence only; no downloaded program is executed and no hardware is contacted.",
+              "",
+              "```json",
+              json.dumps(d,indent=2,ensure_ascii=False),
+              "```",
+              "",
+              "Safety: do not live-test 0x11 or 0xFE on the production GoloPine board.",
+              "",
+              "FLASH_ALLOWED=NO",
+          ]
+          (ev/"R115_REPORT.md").write_text("\n".join(report)+"\n")
+          print(json.dumps(d,indent=2,ensure_ascii=False))
+          PY
+
+      - name: Package evidence only
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /tmp/r115/evidence
+          zip -9 -r /tmp/R115_BP10XX_PCTOOLS_DISCOVERY_EVIDENCE.zip .
+          sha256sum /tmp/R115_BP10XX_PCTOOLS_DISCOVERY_EVIDENCE.zip \
+            > /tmp/R115_BP10XX_PCTOOLS_DISCOVERY_EVIDENCE.zip.sha256
+
+      - name: Upload evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: R115-BP10XX-PCTOOLS-DISCOVERY-EVIDENCE
+          path: |
+            /tmp/R115_BP10XX_PCTOOLS_DISCOVERY_EVIDENCE.zip
+            /tmp/R115_BP10XX_PCTOOLS_DISCOVERY_EVIDENCE.zip.sha256
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Final fail-closed gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -F 'R115_VENDOR_BINARY_EXECUTED=NO' /tmp/r115/evidence/R115_SAFETY.txt
+          grep -F 'R115_USB_DEVICE_ACCESS=NO' /tmp/r115/evidence/R115_SAFETY.txt
+          grep -F 'R115_RUNTIME_0X11_SENT=NO' /tmp/r115/evidence/R115_SAFETY.txt
+          grep -F 'R115_CONTROL_0XFE_SENT=NO' /tmp/r115/evidence/R115_SAFETY.txt
+          grep -F '"FLASH_ALLOWED": false' /tmp/r115/evidence/R115_DECISION.json
+          cat /tmp/r115/evidence/R115_DECISION.json
+          echo R115_STATIC_DISCOVERY_COMPLETE=YES
+          echo FLASH_ALLOWED=NO
