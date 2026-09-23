@@ -1,0 +1,343 @@
+name: R134 exact PCTools caller VIDPID SN linkage static reverse
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - ".github/workflows/R134_EXACT_PCTOOLS_CALLER_VIDPID_SN_LINKAGE_STATIC_REVERSE.yml"
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: r134-pctools-caller-vidpid-sn-linkage-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  FLASH_ALLOWED: "NO"
+  R127_RUN_ID: "35865759674"
+  R127_ACQUIRED_ARTIFACT_NAME: "R127-ACQUIRED-PUBLIC-FILES"
+  R127_INNER_ZIP_SHA256: "d217dff170352179ee3d6a70b8e3a58b98b41ef2d365a4551daff4124ce21be6"
+  BT_NAME_RAR_SHA256: "c6b1fcb4d0e430c86c50e9ddf1007fa110f416c0570888060d693819164eccb8"
+  PCTOOLS_SHA256: "0e13801b29070f805869823e6db4ad56d70494b2621fb63c330cea1d69e9ca33"
+  R133_RUN_ID: "35892756305"
+  R133_JOB_ID: "107289028379"
+  R133_EVIDENCE_ARTIFACT_ID: "10765627730"
+  R133_EVIDENCE_ARTIFACT_NAME: "R133-EXACT-PCTOOLS-GETINPUTREPORT-REPORTID-RESPONSE-STATIC-EVIDENCE"
+  R133_EVIDENCE_DIGEST: "sha256:79317c3e342a23936774ef0d0267f754185984f99b87f154317c909449304b11"
+
+jobs:
+  static_reverse:
+    name: STATIC ONLY - caller VIDPID and SN linkage - no execution - no USB - no board
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Immutable safety gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/r134/input /tmp/r134/acquired /tmp/r134/unpacked/bt /tmp/r134/r133 /tmp/r134/evidence
+          cat > /tmp/r134/evidence/R134_SAFETY.txt <<'EOF'
+          R134_MODE=TARGETED_CALLER_VIDPID_SN_LINKAGE_STATIC_ONLY
+          R134_VENDOR_BINARY_EXECUTED=NO
+          R134_INSTALLER_EXECUTED=NO
+          R134_USB_DEVICE_ACCESS=NO
+          R134_BOARD_CONTACT=NO
+          R134_AA55_SENT=NO
+          R134_RUNTIME_0X11_SENT=NO
+          R134_RUNTIME_0XFE_SENT=NO
+          R134_FLASHBOOT_COMMAND_SENT=NO
+          R134_FLASH_READ_EXECUTED=NO
+          R134_FLASH_ERASE_EXECUTED=NO
+          R134_FLASH_WRITE_EXECUTED=NO
+          R134_ANY_DISCOVERED_FRAME_AUTHORIZED_FOR_BOARD=NO
+          FINAL_REQUIRED_TRANSPORT=SAMSUNG_S25_PLUS_USB_C_DIRECT_TO_DSP_USB_C
+          HARDWARE_MODIFICATION=FORBIDDEN
+          REFERENCE_OR_TOOL_EVIDENCE_IS_NOT_PRODUCTION_PROOF=YES
+          FLASH_ALLOWED=NO
+          EOF
+
+      - name: Download pinned R127 acquired files as inert data
+        uses: actions/download-artifact@v4
+        with:
+          name: R127-ACQUIRED-PUBLIC-FILES
+          path: /tmp/r134/input
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          repository: Thanaporn-okn/OKN_DSP-apk
+          run-id: 35865759674
+
+      - name: Download pinned R133 evidence for continuity only
+        uses: actions/download-artifact@v4
+        with:
+          name: R133-EXACT-PCTOOLS-GETINPUTREPORT-REPORTID-RESPONSE-STATIC-EVIDENCE
+          path: /tmp/r134/r133
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          repository: Thanaporn-okn/OKN_DSP-apk
+          run-id: 35892756305
+
+      - name: Install static tooling only
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq file unzip p7zip-full python3-pip >/dev/null
+          python3 -m pip install --disable-pip-version-check --no-input pefile capstone >/dev/null
+
+      - name: Verify pinned hashes and extract inert PCTools
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /tmp/r134/input
+          test -f R127_ACQUIRED_PUBLIC_FILES.zip
+          echo "${R127_INNER_ZIP_SHA256}  R127_ACQUIRED_PUBLIC_FILES.zip" | sha256sum -c -
+          unzip -q R127_ACQUIRED_PUBLIC_FILES.zip -d /tmp/r134/acquired
+          BT_RAR="$(find /tmp/r134/acquired -type f -name '*.rar' -path '*BT_NAME_TOOL*' -print -quit)"
+          test -n "$BT_RAR"
+          echo "${BT_NAME_RAR_SHA256}  ${BT_RAR}" | sha256sum -c -
+          7z x -y -o/tmp/r134/unpacked/bt "$BT_RAR" >/tmp/r134/evidence/R134_7Z_BT_EXTRACT.txt
+          PCTOOLS="$(find /tmp/r134/unpacked/bt -type f -name 'MV_AP82xx_BP10xx_PC_Tools_V2.2.8_20210205.exe' -print -quit)"
+          test -n "$PCTOOLS"
+          echo "${PCTOOLS_SHA256}  ${PCTOOLS}" | sha256sum -c -
+          printf '%s\n' "$PCTOOLS" > /tmp/r134/PCTOOLS_PATH
+          find /tmp/r134/r133 -maxdepth 1 -type f -printf '%f\n' | sort > /tmp/r134/evidence/R134_R133_ARTIFACT_FILES.txt
+
+      - name: Trace callers arguments and exact production VID PID linkage
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import json,re,struct,pefile,bisect
+          from capstone import Cs,CS_ARCH_X86,CS_MODE_32
+          from capstone.x86 import X86_OP_IMM,X86_OP_MEM,X86_OP_REG,X86_REG_ESP
+
+          p=Path(Path('/tmp/r134/PCTOOLS_PATH').read_text().strip())
+          pe=pefile.PE(str(p),fast_load=False); ib=pe.OPTIONAL_HEADER.ImageBase
+          data=p.read_bytes()
+          TARGETS={
+              0x40a920:'generic_get_data_fn',
+              0x40cb24:'burn_data_fn',
+              0x40d7d4:'sn_get_data_fn',
+          }
+          PROD_VID=0x18B4
+          PROD_PID=0x06B7
+
+          md=Cs(CS_ARCH_X86,CS_MODE_32); md.detail=True
+          ins=[]; exec_ranges=[]
+          for s in pe.sections:
+              if s.Characteristics & 0x20000000:
+                  lo=ib+s.VirtualAddress; hi=lo+max(int(s.Misc_VirtualSize),int(s.SizeOfRawData))
+                  exec_ranges.append((lo,hi))
+                  ins.extend(md.disasm(s.get_data(),lo))
+          ins=sorted(ins,key=lambda x:x.address)
+          by_va={x.address:i for i,x in enumerate(ins)}
+          def is_exec(v): return any(a<=v<b for a,b in exec_ranges)
+          def vals(x):
+              out=[]
+              for op in x.operands:
+                  if op.type==X86_OP_IMM: out.append(op.imm & 0xffffffff)
+                  elif op.type==X86_OP_MEM and op.mem.disp: out.append(op.mem.disp & 0xffffffff)
+              return out
+
+          # Build approximate function starts from entrypoint + direct call targets.
+          starts={ib+pe.OPTIONAL_HEADER.AddressOfEntryPoint}
+          direct_calls=[]
+          for i,x in enumerate(ins):
+              if x.mnemonic!='call': continue
+              for v in vals(x):
+                  if is_exec(v):
+                      starts.add(v); direct_calls.append((i,x.address,v))
+          starts=sorted(starts)
+          def owner(va):
+              j=bisect.bisect_right(starts,va)-1
+              return starts[j] if j>=0 else None
+          def fend(st):
+              j=bisect.bisect_left(starts,st)
+              return starts[j+1] if j+1<len(starts) else max(b for _,b in exec_ranges)
+
+          # String VA map for role/context labels.
+          strings={}
+          for enc,pat in [('ascii',rb'[\x20-\x7e]{5,}'),('utf16le',rb'(?:[\x20-\x7e]\x00){5,}')]:
+              for m in re.finditer(pat,data):
+                  try:
+                      txt=m.group().decode('latin1' if enc=='ascii' else 'utf-16le','replace')
+                      va=ib+pe.get_rva_from_offset(m.start())
+                  except Exception: continue
+                  strings[va]=txt[:500]
+
+          def context_strings(st,en):
+              out=[]; seen=set()
+              for x in ins:
+                  if x.address<st: continue
+                  if x.address>=en: break
+                  for v in vals(x):
+                      if v in strings and strings[v] not in seen:
+                          seen.add(strings[v]); out.append({'va':hex(x.address),'text':strings[v]})
+              return out[:120]
+
+          # Simple backwards argument recovery for cdecl/stdcall style writes to [esp+off] and pushes.
+          def recover_args(call_idx,window=100):
+              reg_const={}; stack={}; pushes=[]; evidence=[]
+              lo=max(0,call_idx-window)
+              for x in ins[lo:call_idx]:
+                  if x.mnemonic=='mov' and len(x.operands)==2:
+                      dst,src=x.operands
+                      if dst.type==X86_OP_REG:
+                          if src.type==X86_OP_IMM:
+                              reg_const[dst.reg]=src.imm & 0xffffffff
+                          elif src.type==X86_OP_REG and src.reg in reg_const:
+                              reg_const[dst.reg]=reg_const[src.reg]
+                          else:
+                              reg_const.pop(dst.reg,None)
+                      elif dst.type==X86_OP_MEM and dst.mem.base==X86_REG_ESP:
+                          off=int(dst.mem.disp)
+                          val=None; srcdesc='unknown'
+                          if src.type==X86_OP_IMM:
+                              val=src.imm & 0xffffffff; srcdesc='imm'
+                          elif src.type==X86_OP_REG and src.reg in reg_const:
+                              val=reg_const[src.reg]; srcdesc='reg_const'
+                          stack[off]={'value':val,'source':srcdesc,'va':hex(x.address),'text':f'{x.mnemonic} {x.op_str}'}
+                  elif x.mnemonic=='push' and len(x.operands)==1:
+                      op=x.operands[0]; val=None; srcdesc='unknown'
+                      if op.type==X86_OP_IMM: val=op.imm & 0xffffffff; srcdesc='imm'
+                      elif op.type==X86_OP_REG and op.reg in reg_const: val=reg_const[op.reg]; srcdesc='reg_const'
+                      pushes.append({'value':val,'source':srcdesc,'va':hex(x.address),'text':f'{x.mnemonic} {x.op_str}'})
+                  # capture all production constants nearby even if not proven as args
+                  for op in x.operands:
+                      if op.type==X86_OP_IMM and (op.imm & 0xffffffff) in {PROD_VID,PROD_PID}:
+                          evidence.append({'va':hex(x.address),'value':op.imm & 0xffffffff,'text':f'{x.mnemonic} {x.op_str}'})
+              return {'stack_args':{str(k):v for k,v in sorted(stack.items())},'pushes_last_20':pushes[-20:],'production_constant_evidence':evidence}
+
+          rows=[]
+          for target,label in TARGETS.items():
+              target_calls=[(i,va) for i,va,dst in direct_calls if dst==target]
+              raw_ptr_offsets=[]; needle=struct.pack('<I',target)
+              pos=0
+              while True:
+                  pos=data.find(needle,pos)
+                  if pos<0: break
+                  raw_ptr_offsets.append(pos); pos+=1
+              calls=[]
+              for i,va in target_calls:
+                  st=owner(va); en=fend(st) if st else None
+                  args=recover_args(i,120)
+                  vals_known=[z['value'] for z in args['stack_args'].values() if z.get('value') is not None]
+                  vals_known += [z['value'] for z in args['pushes_last_20'] if z.get('value') is not None]
+                  prod_vid=PROD_VID in vals_known
+                  prod_pid=PROD_PID in vals_known
+                  calls.append({
+                      'call_va':hex(va),'caller_function_start':hex(st) if st else None,'caller_function_end':hex(en) if en else None,
+                      'recovered_args':args,
+                      'known_values_hex':[hex(v) for v in vals_known[-40:]],
+                      'production_vid_seen_as_recovered_arg':prod_vid,
+                      'production_pid_seen_as_recovered_arg':prod_pid,
+                      'production_vid_pid_both_seen_as_recovered_args':prod_vid and prod_pid,
+                      'caller_strings':context_strings(st,en) if st and en else [],
+                      'local_context':[{'va':hex(z.address),'text':f'{z.mnemonic} {z.op_str}'} for z in ins[max(0,i-80):min(len(ins),i+30)]],
+                  })
+              fn_end=fend(target) if target in starts else None
+              rows.append({
+                  'target_va':hex(target),'role_label':label,
+                  'direct_call_count':len(calls),'direct_calls':calls,
+                  'raw_dword_pointer_file_offsets':raw_ptr_offsets[:200],
+                  'target_function_strings':context_strings(target,fn_end) if fn_end else [],
+              })
+
+          out={'pctools_sha256':'0e13801b29070f805869823e6db4ad56d70494b2621fb63c330cea1d69e9ca33',
+               'production_vid':hex(PROD_VID),'production_pid':hex(PROD_PID),'targets':rows}
+          Path('/tmp/r134/evidence/R134_CALLER_VIDPID_SN_LINKAGE.json').write_text(json.dumps(out,indent=2,ensure_ascii=False)+'\n')
+          PY
+
+      - name: Build fail-closed R134 decision and report
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import json,re
+          ev=Path('/tmp/r134/evidence')
+          d=json.loads((ev/'R134_CALLER_VIDPID_SN_LINKAGE.json').read_text())
+          by={r['target_va']:r for r in d['targets']}
+          generic=by.get('0x40a920',{})
+          burn=by.get('0x40cb24',{})
+          sn=by.get('0x40d7d4',{})
+          def texts(row): return [x['text'] for x in row.get('target_function_strings',[])]
+          sn_tool=any('SN Get_Data:' in x for x in texts(sn))
+          burn_markers=any(re.search(r'BurnDataResult|Burn OK',x,re.I) for x in texts(burn))
+          allcalls=[c for r in d['targets'] for c in r.get('direct_calls',[])]
+          prodlinks=[c for c in allcalls if c.get('production_vid_pid_both_seen_as_recovered_args')]
+          sn_prodlinks=[c for c in sn.get('direct_calls',[]) if c.get('production_vid_pid_both_seen_as_recovered_args')]
+          decision={
+            'R133_RUN_ID':35892756305,
+            'R133_JOB_ID':107289028379,
+            'R133_EVIDENCE_ARTIFACT_ID':10765627730,
+            'PCTOOLS_SHA256':'0e13801b29070f805869823e6db4ad56d70494b2621fb63c330cea1d69e9ca33',
+            'TOOL_SIDE_SN_GET_DATA_FUNCTION_STATICALLY_IDENTIFIED':sn_tool,
+            'TOOL_SIDE_BURN_FUNCTION_HAS_BURN_MARKERS':burn_markers,
+            'GENERIC_FUNCTION_DIRECT_CALL_COUNT':generic.get('direct_call_count',0),
+            'BURN_FUNCTION_DIRECT_CALL_COUNT':burn.get('direct_call_count',0),
+            'SN_FUNCTION_DIRECT_CALL_COUNT':sn.get('direct_call_count',0),
+            'ANY_CALLSITE_RECOVERS_BOTH_PRODUCTION_18B4_06B7_AS_ARGS':bool(prodlinks),
+            'SN_CALLSITE_RECOVERS_BOTH_PRODUCTION_18B4_06B7_AS_ARGS':bool(sn_prodlinks),
+            'SN_PRODUCTION_LINK_CALLS':[{'call_va':c['call_va'],'caller_function_start':c['caller_function_start']} for c in sn_prodlinks],
+            'IMPORTANT_INTERPRETATION':'Caller argument recovery is offline static tool evidence only. Even an exact VID/PID match would not prove production protocol safety or authorize any HID transfer.',
+            'READ_ONLY_IDENTIFY_PATH_STATICALLY_PROVEN_FOR_PRODUCTION':False,
+            'SAFE_READ_ONLY_STOCK_BACKUP_PROVEN':False,
+            'PRODUCTION_BOOTSTRAP_BRIDGE_PROVEN':False,
+            'PRODUCTION_RECOVERY_USB_IDENTITY_PROVEN':False,
+            'ANY_DISCOVERED_FRAME_AUTHORIZED_FOR_BOARD':False,
+            'AA55_LIVE_RETEST_ALLOWED':False,
+            'RUNTIME_0X11_ALLOWED':False,
+            'RUNTIME_0XFE_ALLOWED':False,
+            'VENDOR_BINARY_EXECUTED':False,
+            'USB_DEVICE_ACCESSED':False,
+            'BOARD_CONTACTED':False,
+            'FLASH_ALLOWED':False,
+            'NEXT':('Statically inspect the exact SN callsite argument/dataflow and report-buffer initialization further; do not transmit anything live.' if sn_prodlinks else 'No direct production VID/PID linkage to the tool-side SN getter was proven by recovered caller arguments. Treat PCTools as unproven for production read-only use and pivot offline to production-specific recovery/backup artifacts or firmware evidence.'),
+          }
+          (ev/'R134_DECISION.json').write_text(json.dumps(decision,indent=2,ensure_ascii=False)+'\n')
+          report=[
+            '# R134 PCTools caller VID/PID + SN linkage static reverse','',
+            f'- tool-side SN Get_Data function identified: {sn_tool}',
+            f'- burn function markers found: {burn_markers}',
+            f'- SN direct callers: {sn.get("direct_call_count",0)}',
+            f'- SN caller with both production 0x18B4/0x06B7 recovered as args: {len(sn_prodlinks)}','',
+            '## Safety','- Offline static only.','- No vendor EXE executed.','- No USB/board access.',
+            '- AA55 / 0x11 / 0xFE / erase / program / flash remain blocked.','- FLASH_ALLOWED=NO']
+          (ev/'R134_REPORT_TH.md').write_text('\n'.join(report)+'\n')
+          print(json.dumps(decision,indent=2,ensure_ascii=False))
+          PY
+
+      - name: Package R134 evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /tmp/r134/evidence
+          zip -9 -r /tmp/R134_EXACT_PCTOOLS_CALLER_VIDPID_SN_LINKAGE_STATIC_EVIDENCE.zip . >/dev/null
+          sha256sum /tmp/R134_EXACT_PCTOOLS_CALLER_VIDPID_SN_LINKAGE_STATIC_EVIDENCE.zip > /tmp/R134_EXACT_PCTOOLS_CALLER_VIDPID_SN_LINKAGE_STATIC_EVIDENCE.zip.sha256
+
+      - name: Upload R134 evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: R134-EXACT-PCTOOLS-CALLER-VIDPID-SN-LINKAGE-STATIC-EVIDENCE
+          path: |
+            /tmp/R134_EXACT_PCTOOLS_CALLER_VIDPID_SN_LINKAGE_STATIC_EVIDENCE.zip
+            /tmp/R134_EXACT_PCTOOLS_CALLER_VIDPID_SN_LINKAGE_STATIC_EVIDENCE.zip.sha256
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Final fail-closed gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -F 'R134_VENDOR_BINARY_EXECUTED=NO' /tmp/r134/evidence/R134_SAFETY.txt
+          grep -F 'R134_USB_DEVICE_ACCESS=NO' /tmp/r134/evidence/R134_SAFETY.txt
+          grep -F 'R134_BOARD_CONTACT=NO' /tmp/r134/evidence/R134_SAFETY.txt
+          grep -F 'R134_AA55_SENT=NO' /tmp/r134/evidence/R134_SAFETY.txt
+          grep -F 'R134_RUNTIME_0X11_SENT=NO' /tmp/r134/evidence/R134_SAFETY.txt
+          grep -F 'R134_RUNTIME_0XFE_SENT=NO' /tmp/r134/evidence/R134_SAFETY.txt
+          grep -F '"FLASH_ALLOWED": false' /tmp/r134/evidence/R134_DECISION.json
+          echo R134_TARGETED_STATIC_REVERSE_COMPLETE=YES
+          echo FLASH_ALLOWED=NO
