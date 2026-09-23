@@ -1,0 +1,451 @@
+name: R111 GoloPine official Android production transport static audit
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - ".github/workflows/R111_GOLOPINE_OFFICIAL_ANDROID_PRODUCTION_TRANSPORT_STATIC_AUDIT.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: r111-golopine-android-static-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  OFFICIAL_PAGE: "https://golodsp.com/7%E9%80%9A%E9%81%93%E9%9F%B3%E9%A2%91%E5%89%8D%E7%BA%A7/"
+  OLD_ANDROID_URL: "https://golodsp.com/wp-content/uploads/2026/02/1Android-APP-golopine-tuning-250401.zip"
+  NEW_ANDROID_URL: "https://golodsp.com/wp-content/uploads/2026/05/golopine_audio_turning_release_2026-04-01.apk_.zip"
+  PRODUCTION_USB_VIDPID: "6324:1719"
+  FLASH_ALLOWED: "NO"
+
+jobs:
+  static-audit:
+    name: STATIC ONLY - official Android APK - no app execution - no USB - no board
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+
+    steps:
+      - name: Immutable safety gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/r111/input /tmp/r111/old /tmp/r111/new /tmp/r111/evidence
+          cat > /tmp/r111/evidence/R111_SAFETY.txt <<'EOF'
+          R111_MODE=STATIC_OFFLINE_ONLY
+          R111_APK_EXECUTED=NO
+          R111_NATIVE_LIBRARY_EXECUTED=NO
+          R111_USB_DEVICE_ACCESS=NO
+          R111_BOARD_CONTACT=NO
+          R111_BLE_CONNECTION=NO
+          R111_AA55_SENT=NO
+          R111_RUNTIME_0X11_SENT=NO
+          R111_FLASH_READ_EXECUTED=NO
+          R111_FLASH_ERASE_EXECUTED=NO
+          R111_FLASH_WRITE_EXECUTED=NO
+          R111_ANY_DISCOVERED_FRAME_AUTHORIZED_FOR_BOARD=NO
+          FINAL_REQUIRED_TRANSPORT=SAMSUNG_S25_PLUS_USB_C_DIRECT_TO_DSP_USB_C
+          HARDWARE_MODIFICATION=FORBIDDEN
+          FLASH_ALLOWED=NO
+          EOF
+
+      - name: Install static tooling
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+            file unzip p7zip-full binutils jq python3-pip >/dev/null
+          python3 -m pip install --disable-pip-version-check --no-input androguard >/dev/null
+
+      - name: Acquire official Android packages as data only
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 5 --retry-all-errors \
+            "$OLD_ANDROID_URL" -o /tmp/r111/input/old.zip
+          curl --fail --location --retry 5 --retry-all-errors \
+            "$NEW_ANDROID_URL" -o /tmp/r111/input/new.zip
+
+          {
+            echo "OFFICIAL_PAGE=$OFFICIAL_PAGE"
+            echo "OLD_ANDROID_URL=$OLD_ANDROID_URL"
+            echo "NEW_ANDROID_URL=$NEW_ANDROID_URL"
+            echo "OLD_ZIP_SHA256=$(sha256sum /tmp/r111/input/old.zip | awk '{print $1}')"
+            echo "NEW_ZIP_SHA256=$(sha256sum /tmp/r111/input/new.zip | awk '{print $1}')"
+            echo "OLD_ZIP_SIZE=$(stat -c '%s' /tmp/r111/input/old.zip)"
+            echo "NEW_ZIP_SIZE=$(stat -c '%s' /tmp/r111/input/new.zip)"
+          } > /tmp/r111/evidence/R111_PACKAGE_PIN.txt
+
+          7z x -y /tmp/r111/input/old.zip -o/tmp/r111/old >/dev/null
+          7z x -y /tmp/r111/input/new.zip -o/tmp/r111/new >/dev/null
+
+          OLD_APK="$(find /tmp/r111/old -type f -iname '*.apk' -print -quit)"
+          NEW_APK="$(find /tmp/r111/new -type f -iname '*.apk' -print -quit)"
+          test -n "$OLD_APK"
+          test -n "$NEW_APK"
+
+          cp "$OLD_APK" /tmp/r111/input/old.apk
+          cp "$NEW_APK" /tmp/r111/input/new.apk
+          chmod a-x /tmp/r111/input/old.apk /tmp/r111/input/new.apk || true
+
+          {
+            echo "OLD_APK_SHA256=$(sha256sum /tmp/r111/input/old.apk | awk '{print $1}')"
+            echo "NEW_APK_SHA256=$(sha256sum /tmp/r111/input/new.apk | awk '{print $1}')"
+            echo "OLD_APK_SIZE=$(stat -c '%s' /tmp/r111/input/old.apk)"
+            echo "NEW_APK_SIZE=$(stat -c '%s' /tmp/r111/input/new.apk)"
+          } >> /tmp/r111/evidence/R111_PACKAGE_PIN.txt
+
+      - name: APK manifest permissions components and USB declarations
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          from androguard.core.apk import APK
+          import json, hashlib
+
+          out={}
+          for label in ("old","new"):
+              p=Path(f"/tmp/r111/input/{label}.apk")
+              a=APK(str(p))
+              out[label]={
+                  "sha256":hashlib.sha256(p.read_bytes()).hexdigest(),
+                  "package":a.get_package(),
+                  "version_name":a.get_androidversion_name(),
+                  "version_code":a.get_androidversion_code(),
+                  "min_sdk":a.get_min_sdk_version(),
+                  "target_sdk":a.get_target_sdk_version(),
+                  "permissions":sorted(a.get_permissions()),
+                  "activities":sorted(a.get_activities()),
+                  "services":sorted(a.get_services()),
+                  "receivers":sorted(a.get_receivers()),
+                  "providers":sorted(a.get_providers()),
+                  "features":sorted(str(x) for x in a.get_features()),
+                  "files":sorted(a.get_files()),
+              }
+          Path("/tmp/r111/evidence/R111_APK_MANIFEST_INVENTORY.json").write_text(
+              json.dumps(out,indent=2,ensure_ascii=False)+"\n"
+          )
+          PY
+
+      - name: Extract APKs and hash native libraries assets and resources
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/r111/old_apk /tmp/r111/new_apk
+          unzip -q /tmp/r111/input/old.apk -d /tmp/r111/old_apk
+          unzip -q /tmp/r111/input/new.apk -d /tmp/r111/new_apk
+
+          python3 - <<'PY'
+          from pathlib import Path
+          import hashlib,json,subprocess
+
+          rows=[]
+          for label in ("old","new"):
+              root=Path(f"/tmp/r111/{label}_apk")
+              for p in sorted(root.rglob("*")):
+                  if not p.is_file(): continue
+                  rel=str(p.relative_to(root))
+                  if not (
+                      rel.startswith("lib/") or rel.startswith("assets/") or
+                      rel.startswith("res/raw") or rel.endswith(".dex") or
+                      rel.endswith(".so") or rel.endswith(".bin") or
+                      rel.endswith(".mva") or rel.endswith(".dat") or
+                      rel.endswith(".json")
+                  ):
+                      continue
+                  b=p.read_bytes()
+                  try:
+                      typ=subprocess.check_output(["file","-b",str(p)],text=True).strip()
+                  except Exception:
+                      typ=""
+                  rows.append({
+                      "package":label,
+                      "path":rel,
+                      "size":len(b),
+                      "sha256":hashlib.sha256(b).hexdigest(),
+                      "file_type":typ,
+                  })
+          Path("/tmp/r111/evidence/R111_APK_PAYLOAD_INVENTORY.json").write_text(
+              json.dumps(rows,indent=2,ensure_ascii=False)+"\n"
+          )
+          PY
+
+      - name: DEX class method and string semantic audit
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          from androguard.core.dex import DEX
+          import json,re,zipfile
+
+          cats={
+            "production_usb":re.compile(r"6324|1719|vendor.?id|product.?id",re.I),
+            "usb_host":re.compile(r"UsbManager|UsbDevice|UsbInterface|UsbEndpoint|UsbDeviceConnection|controlTransfer|bulkTransfer|requestWait|USB_DEVICE_ATTACHED|android\.hardware\.usb\.host",re.I),
+            "hid":re.compile(r"HID|hidraw|report.?descriptor|SET_REPORT|GET_REPORT|FeatureReport",re.I),
+            "firmware_update":re.compile(r"firmware|bootloader|recovery|upgrade|update.?firmware|firmware.?update|OTA",re.I),
+            "flash_destructive":re.compile(r"chiperas|codedata|bootdat|constdat|cnfgdat|btupdat|upinfo|erase|flash.?write|program.?flash",re.I),
+            "image_format":re.compile(r"\.mva\b|\.bin\b|MVA1|MVB1X|01PKG|02PKG|03PKG|04PKG|05PKG|CRC|checksum|signature",re.I),
+            "ble_golopine":re.compile(r"AB00|AB01|AB02|AB03|0000ab0[0-3]|BluetoothGatt|writeCharacteristic|setCharacteristicNotification|writeDescriptor",re.I),
+            "known_auth":re.compile(r"631C062443FD3844558001F3EDA0CCF8|2AAF948632A59FF8F2B23E6E4193FD21|AES/CFB8",re.I),
+            "classic_spp":re.compile(r"00001101-0000-1000-8000-00805F9B34FB|BluetoothSocket|RFCOMM|SPP",re.I),
+          }
+
+          allout={}
+          for label in ("old","new"):
+              apk=Path(f"/tmp/r111/input/{label}.apk")
+              hits={k:[] for k in cats}
+              classes=set()
+              methods=[]
+              with zipfile.ZipFile(apk) as z:
+                  dexnames=sorted(n for n in z.namelist() if re.fullmatch(r"classes\d*\.dex",n))
+                  for dn in dexnames:
+                      d=DEX(z.read(dn))
+                      for s in d.get_strings():
+                          sv=str(s)
+                          for k,pat in cats.items():
+                              if pat.search(sv):
+                                  hits[k].append({"source":dn,"kind":"string","value":sv[:800]})
+                      for c in d.get_classes():
+                          cn=c.get_name()
+                          classes.add(cn)
+                          if any(pat.search(cn) for pat in cats.values()):
+                              methods.append({"source":dn,"class":cn,"method":"<class-name-hit>"})
+                          for m in c.get_methods():
+                              mn=m.get_name()
+                              desc=m.get_descriptor()
+                              combo=f"{cn}->{mn}{desc}"
+                              if any(pat.search(combo) for pat in cats.values()):
+                                  methods.append({"source":dn,"class":cn,"method":mn,"descriptor":desc})
+              allout[label]={
+                  "class_count":len(classes),
+                  "semantic_hits":{k:v[:500] for k,v in hits.items()},
+                  "interesting_methods":methods[:2000],
+              }
+          Path("/tmp/r111/evidence/R111_DEX_SEMANTICS.json").write_text(
+              json.dumps(allout,indent=2,ensure_ascii=False)+"\n"
+          )
+          PY
+
+      - name: Native library static strings audit
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import re,json,hashlib
+
+          pats={
+            "production_usb":re.compile(r"6324|1719|VID_|PID_",re.I),
+            "usb":re.compile(r"libusb|usb_|USB|hidraw|HID",re.I),
+            "firmware":re.compile(r"firmware|bootloader|recovery|upgrade|OTA",re.I),
+            "flash":re.compile(r"chiperas|codedata|bootdat|constdat|cnfgdat|btupdat|upinfo|erase|flash|program",re.I),
+            "image":re.compile(r"MVA|MVB1X|01PKG|02PKG|03PKG|04PKG|05PKG|CRC|checksum|signature",re.I),
+            "ble":re.compile(r"AB00|AB01|AB02|AB03|AES|CFB8|Bluetooth",re.I),
+          }
+          rows=[]
+          for label in ("old","new"):
+              root=Path(f"/tmp/r111/{label}_apk")
+              for p in sorted(root.rglob("*.so")):
+                  b=p.read_bytes()
+                  strings=[x.decode("latin1","replace") for x in re.findall(rb"[\x20-\x7e]{5,}",b)]
+                  h={}
+                  for k,pat in pats.items():
+                      vals=[s[:500] for s in strings if pat.search(s)]
+                      if vals: h[k]=vals[:200]
+                  rows.append({
+                      "package":label,
+                      "path":str(p.relative_to(root)),
+                      "sha256":hashlib.sha256(b).hexdigest(),
+                      "size":len(b),
+                      "hits":h,
+                  })
+          Path("/tmp/r111/evidence/R111_NATIVE_LIB_STATIC_STRINGS.json").write_text(
+              json.dumps(rows,indent=2,ensure_ascii=False)+"\n"
+          )
+          PY
+
+      - name: Assets raw resources and whole-APK byte-pattern audit
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import re,json
+
+          tokens=[
+              b"6324",b"1719",
+              b"\x24\x63",b"\x19\x17",
+              b"chiperas",b"codedata",b"bootdat",b"constdat",b"cnfgdat",b"btupdat",b"upinfo",
+              b"MVB1X",b"01PKG",b"02PKG",b"03PKG",b"04PKG",b"05PKG",
+              b"0000ab00",b"0000ab01",b"0000ab02",b"0000ab03",
+              bytes.fromhex("631C062443FD3844558001F3EDA0CCF8"),
+              bytes.fromhex("2AAF948632A59FF8F2B23E6E4193FD21"),
+          ]
+          out={}
+          for label in ("old","new"):
+              root=Path(f"/tmp/r111/{label}_apk")
+              rows=[]
+              for p in sorted(root.rglob("*")):
+                  if not p.is_file(): continue
+                  b=p.read_bytes()
+                  th=[]
+                  for t in tokens:
+                      n=b.lower().count(t.lower()) if all(32 <= x <= 126 for x in t) else b.count(t)
+                      if n:
+                          th.append({"token_hex":t.hex(),"token_ascii":t.decode("ascii","replace"),"count":n})
+                  if th:
+                      rows.append({"path":str(p.relative_to(root)),"hits":th})
+              out[label]=rows
+          Path("/tmp/r111/evidence/R111_WHOLE_APK_PATTERN_HITS.json").write_text(
+              json.dumps(out,indent=2,ensure_ascii=False)+"\n"
+          )
+          PY
+
+      - name: Compare old and latest Android transport surfaces
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import json
+
+          dex=json.loads(Path("/tmp/r111/evidence/R111_DEX_SEMANTICS.json").read_text())
+          man=json.loads(Path("/tmp/r111/evidence/R111_APK_MANIFEST_INVENTORY.json").read_text())
+          native=json.loads(Path("/tmp/r111/evidence/R111_NATIVE_LIB_STATIC_STRINGS.json").read_text())
+          patterns=json.loads(Path("/tmp/r111/evidence/R111_WHOLE_APK_PATTERN_HITS.json").read_text())
+
+          def count(label,cat):
+              return len(dex[label]["semantic_hits"].get(cat,[]))
+
+          def perms(label, needle):
+              return [x for x in man[label]["permissions"] if needle.lower() in x.lower()]
+
+          d={
+              "OLD_PACKAGE":man["old"]["package"],
+              "NEW_PACKAGE":man["new"]["package"],
+              "OLD_VERSION_NAME":man["old"]["version_name"],
+              "NEW_VERSION_NAME":man["new"]["version_name"],
+              "OLD_USB_PERMISSION_HITS":perms("old","usb"),
+              "NEW_USB_PERMISSION_HITS":perms("new","usb"),
+              "OLD_BLUETOOTH_PERMISSION_HITS":perms("old","bluetooth"),
+              "NEW_BLUETOOTH_PERMISSION_HITS":perms("new","bluetooth"),
+              "DEX_HIT_COUNTS":{
+                  label:{cat:count(label,cat) for cat in dex[label]["semantic_hits"]}
+                  for label in ("old","new")
+              },
+              "NATIVE_LIB_COUNT":{
+                  label:sum(1 for x in native if x["package"]==label)
+                  for label in ("old","new")
+              },
+              "WHOLE_APK_PATTERN_FILE_COUNT":{
+                  label:len(patterns[label]) for label in ("old","new")
+              }
+          }
+          Path("/tmp/r111/evidence/R111_OLD_NEW_TRANSPORT_DIFF.json").write_text(
+              json.dumps(d,indent=2,ensure_ascii=False)+"\n"
+          )
+          PY
+
+      - name: Build fail-closed production-path decision
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import json
+
+          ev=Path("/tmp/r111/evidence")
+          man=json.loads((ev/"R111_APK_MANIFEST_INVENTORY.json").read_text())
+          dex=json.loads((ev/"R111_DEX_SEMANTICS.json").read_text())
+          native=json.loads((ev/"R111_NATIVE_LIB_STATIC_STRINGS.json").read_text())
+          pats=json.loads((ev/"R111_WHOLE_APK_PATTERN_HITS.json").read_text())
+          diff=json.loads((ev/"R111_OLD_NEW_TRANSPORT_DIFF.json").read_text())
+
+          def c(label,cat):
+              return len(dex[label]["semantic_hits"].get(cat,[]))
+          def native_cat(label,cat):
+              return sum(len(x["hits"].get(cat,[])) for x in native if x["package"]==label)
+          def has_pat(label,ascii_text):
+              hx=ascii_text.encode().hex()
+              return any(any(h["token_hex"]==hx for h in r["hits"]) for r in pats[label])
+
+          d={
+              "OFFICIAL_ANDROID_OLD_ANALYZED":True,
+              "OFFICIAL_ANDROID_LATEST_1APR2026_ANALYZED":True,
+              "LATEST_PACKAGE":man["new"]["package"],
+              "LATEST_VERSION_NAME":man["new"]["version_name"],
+              "LATEST_DEX_USB_HOST_HITS":c("new","usb_host"),
+              "LATEST_DEX_HID_HITS":c("new","hid"),
+              "LATEST_DEX_FIRMWARE_UPDATE_HITS":c("new","firmware_update"),
+              "LATEST_DEX_FLASH_DESTRUCTIVE_HITS":c("new","flash_destructive"),
+              "LATEST_DEX_IMAGE_FORMAT_HITS":c("new","image_format"),
+              "LATEST_DEX_BLE_GOLOPINE_HITS":c("new","ble_golopine"),
+              "LATEST_DEX_KNOWN_AUTH_HITS":c("new","known_auth"),
+              "LATEST_NATIVE_USB_HITS":native_cat("new","usb"),
+              "LATEST_NATIVE_FIRMWARE_HITS":native_cat("new","firmware"),
+              "LATEST_NATIVE_FLASH_HITS":native_cat("new","flash"),
+              "LATEST_HAS_AB00_LITERAL":has_pat("new","0000ab00"),
+              "LATEST_HAS_AB01_LITERAL":has_pat("new","0000ab01"),
+              "LATEST_HAS_AB02_LITERAL":has_pat("new","0000ab02"),
+              "LATEST_HAS_AB03_LITERAL":has_pat("new","0000ab03"),
+              "LATEST_HAS_PRODUCTION_6324_LITERAL":has_pat("new","6324"),
+              "LATEST_HAS_PRODUCTION_1719_LITERAL":has_pat("new","1719"),
+              "OLD_NEW_DIFF":diff,
+              "PRODUCTION_USB_BOOT_ENTRY_PROVEN":False,
+              "PRODUCTION_RECOVERY_USB_IDENTITY_PROVEN":False,
+              "EXACT_USB_FIRMWARE_TRANSPORT_PROVEN":False,
+              "SAFE_READ_ONLY_STOCK_BACKUP_PROVEN":False,
+              "ANY_DISCOVERED_WRITE_AUTHORIZED_FOR_BOARD":False,
+              "NEXT":"If Android app contains USB/update code, deep-xref that exact path offline. If it is BLE-only tuning, close official client surfaces and search production factory/updater/package evidence instead.",
+              "FLASH_ALLOWED":False
+          }
+          (ev/"R111_DECISION.json").write_text(json.dumps(d,indent=2,ensure_ascii=False)+"\n")
+          report=[
+              "# R111 official GoloPine Android static audit",
+              "",
+              "Official Android packages only. Static/offline; APK and native libraries are never executed.",
+              "",
+              "```json",
+              json.dumps(d,indent=2,ensure_ascii=False),
+              "```",
+              "",
+              "FLASH_ALLOWED=NO"
+          ]
+          (ev/"R111_REPORT.md").write_text("\n".join(report)+"\n")
+          print(json.dumps(d,indent=2,ensure_ascii=False))
+          PY
+
+      - name: Package evidence only
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /tmp/r111/evidence
+          zip -9 -r /tmp/R111_GOLOPINE_ANDROID_STATIC_EVIDENCE.zip .
+          sha256sum /tmp/R111_GOLOPINE_ANDROID_STATIC_EVIDENCE.zip \
+            > /tmp/R111_GOLOPINE_ANDROID_STATIC_EVIDENCE.zip.sha256
+
+      - name: Upload evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: R111-GOLOPINE-OFFICIAL-ANDROID-STATIC-EVIDENCE
+          path: |
+            /tmp/R111_GOLOPINE_ANDROID_STATIC_EVIDENCE.zip
+            /tmp/R111_GOLOPINE_ANDROID_STATIC_EVIDENCE.zip.sha256
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Final fail-closed gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -F 'R111_APK_EXECUTED=NO' /tmp/r111/evidence/R111_SAFETY.txt
+          grep -F 'R111_USB_DEVICE_ACCESS=NO' /tmp/r111/evidence/R111_SAFETY.txt
+          grep -F 'R111_ANY_DISCOVERED_FRAME_AUTHORIZED_FOR_BOARD=NO' /tmp/r111/evidence/R111_SAFETY.txt
+          grep -F '"FLASH_ALLOWED": false' /tmp/r111/evidence/R111_DECISION.json
+          cat /tmp/r111/evidence/R111_DECISION.json
+          echo R111_STATIC_AUDIT_COMPLETE=YES
+          echo FLASH_ALLOWED=NO
