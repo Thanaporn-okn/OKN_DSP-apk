@@ -1,0 +1,545 @@
+name: R120 GoloPine Windows AA55 Feature-updater path static audit
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - ".github/workflows/R120_GOLOPINE_WINDOWS_AA55_FEATURE_UPDATER_PATH_STATIC_AUDIT.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: r120-golopine-windows-aa55-feature-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  NEW_URL: "https://golodsp.com/wp-content/uploads/2026/05/golopine_audio_turning_release_2026-04-08.exe_.zip"
+  EXPECTED_NEW_ZIP_SHA256: "f14b0c4baad70a8b0d5dc3b2783819cc2ef6e1a9c6ec2adcf17f1557059edd2a"
+  EXPECTED_NEW_EXE_SHA256: "3ca54171c53f7badd963ffe6851b8b3e2faf8aee8ba2afcb7040990e22ae09b2"
+  FLASH_ALLOWED: "NO"
+
+jobs:
+  static-audit:
+    name: STATIC ONLY - official Windows client - no execution - no USB - no board
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+
+    steps:
+      - name: Immutable safety gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/r120/input /tmp/r120/pkg /tmp/r120/evidence
+          cat > /tmp/r120/evidence/R120_SAFETY.txt <<'EOF'
+          R120_MODE=STATIC_OFFLINE_ONLY
+          R120_VENDOR_BINARY_EXECUTED=NO
+          R120_INSTALLER_EXECUTED=NO
+          R120_USB_DEVICE_ACCESS=NO
+          R120_BOARD_CONTACT=NO
+          R120_AA55_SENT=NO
+          R120_RUNTIME_0X11_SENT=NO
+          R120_FLASHBOOT_COMMAND_SENT=NO
+          R120_FLASH_READ_EXECUTED=NO
+          R120_FLASH_ERASE_EXECUTED=NO
+          R120_FLASH_WRITE_EXECUTED=NO
+          R120_ANY_DISCOVERED_FRAME_AUTHORIZED_FOR_BOARD=NO
+          FINAL_REQUIRED_TRANSPORT=SAMSUNG_S25_PLUS_USB_C_DIRECT_TO_DSP_USB_C
+          HARDWARE_MODIFICATION=FORBIDDEN
+          FLASH_ALLOWED=NO
+          EOF
+
+      - name: Install static tooling
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+            curl file unzip p7zip-full binutils jq mono-utils python3-pip >/dev/null
+          python3 -m pip install --disable-pip-version-check --no-input pefile dnfile >/dev/null
+
+      - name: Acquire exact official 08Apr2026 Windows client
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 5 --retry-all-errors \
+            "$NEW_URL" -o /tmp/r120/input/new.zip
+
+          test "$(sha256sum /tmp/r120/input/new.zip | awk '{print $1}')" = "$EXPECTED_NEW_ZIP_SHA256"
+
+          7z x -y /tmp/r120/input/new.zip -o/tmp/r120/pkg >/dev/null
+
+          EXE="$(find /tmp/r120/pkg -type f -iname '*.exe' ! -path '*/__MACOSX/*' -print -quit)"
+          test -n "$EXE"
+          test "$(sha256sum "$EXE" | awk '{print $1}')" = "$EXPECTED_NEW_EXE_SHA256"
+
+          cp "$EXE" /tmp/r120/input/golopine.exe
+          chmod a-x /tmp/r120/input/golopine.exe || true
+
+          {
+            echo "ZIP_SHA256=$EXPECTED_NEW_ZIP_SHA256"
+            echo "EXE_SHA256=$EXPECTED_NEW_EXE_SHA256"
+            echo "EXE_SIZE=$(stat -c '%s' /tmp/r120/input/golopine.exe)"
+            echo "PIN_MATCH=YES"
+          } > /tmp/r120/evidence/R120_BINARY_PIN.txt
+
+      - name: Inventory package and PE CLR metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          7z l /tmp/r120/input/golopine.exe > /tmp/r120/evidence/R120_7Z_EXE_LISTING.txt 2>&1 || true
+          file /tmp/r120/input/golopine.exe > /tmp/r120/evidence/R120_FILE_TYPE.txt
+
+          python3 - <<'PY'
+          from pathlib import Path
+          import pefile,json,hashlib
+
+          p=Path("/tmp/r120/input/golopine.exe")
+          pe=pefile.PE(str(p),fast_load=False)
+          clr=pe.OPTIONAL_HEADER.DATA_DIRECTORY[14]
+
+          imports=[]
+          if hasattr(pe,"DIRECTORY_ENTRY_IMPORT"):
+              for ent in pe.DIRECTORY_ENTRY_IMPORT:
+                  dll=ent.dll.decode(errors="replace")
+                  names=[]
+                  for imp in ent.imports:
+                      names.append(
+                          imp.name.decode(errors="replace")
+                          if imp.name else f"ord:{imp.ordinal}"
+                      )
+                  imports.append({"dll":dll,"imports":names})
+
+          secs=[]
+          for s in pe.sections:
+              raw=p.read_bytes()[s.PointerToRawData:s.PointerToRawData+s.SizeOfRawData]
+              secs.append({
+                  "name":s.Name.rstrip(b"\0").decode(errors="replace"),
+                  "rva":hex(s.VirtualAddress),
+                  "raw_size":int(s.SizeOfRawData),
+                  "virtual_size":int(s.Misc_VirtualSize),
+                  "sha256":hashlib.sha256(raw).hexdigest(),
+              })
+
+          d={
+              "sha256":hashlib.sha256(p.read_bytes()).hexdigest(),
+              "machine":hex(pe.FILE_HEADER.Machine),
+              "entrypoint_rva":hex(pe.OPTIONAL_HEADER.AddressOfEntryPoint),
+              "imagebase":hex(pe.OPTIONAL_HEADER.ImageBase),
+              "clr_rva":hex(clr.VirtualAddress),
+              "clr_size":int(clr.Size),
+              "is_managed":bool(clr.VirtualAddress and clr.Size),
+              "imports":imports,
+              "sections":secs,
+          }
+          Path("/tmp/r120/evidence/R120_PE_METADATA.json").write_text(
+              json.dumps(d,indent=2,ensure_ascii=False)+"\n"
+          )
+          PY
+
+      - name: Extract managed metadata and IL
+        shell: bash
+        run: |
+          set -euo pipefail
+          EXE=/tmp/r120/input/golopine.exe
+          monodis --assembly "$EXE" > /tmp/r120/evidence/R120_ASSEMBLY.txt 2>&1 || true
+          monodis --assemblyref "$EXE" > /tmp/r120/evidence/R120_ASSEMBLYREF.txt 2>&1 || true
+          monodis --typedef "$EXE" > /tmp/r120/evidence/R120_TYPEDEF.txt 2>&1 || true
+          monodis --method "$EXE" > /tmp/r120/evidence/R120_METHODS.txt 2>&1 || true
+          monodis --userstrings "$EXE" > /tmp/r120/evidence/R120_USERSTRINGS.txt 2>&1 || true
+          monodis --manifest "$EXE" > /tmp/r120/evidence/R120_MANIFEST.txt 2>&1 || true
+          monodis "$EXE" > /tmp/r120/R120_FULL.il 2>&1 || true
+
+          {
+            echo "FULL_IL_BYTES=$(stat -c '%s' /tmp/r120/R120_FULL.il)"
+            echo "TYPEDEF_BYTES=$(stat -c '%s' /tmp/r120/evidence/R120_TYPEDEF.txt)"
+            echo "METHOD_BYTES=$(stat -c '%s' /tmp/r120/evidence/R120_METHODS.txt)"
+          } > /tmp/r120/evidence/R120_MONODIS_STATUS.txt
+
+      - name: Search exact HID Feature and updater symbols
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import re,json
+
+          files={
+              "il":Path("/tmp/r120/R120_FULL.il"),
+              "methods":Path("/tmp/r120/evidence/R120_METHODS.txt"),
+              "typedef":Path("/tmp/r120/evidence/R120_TYPEDEF.txt"),
+              "userstrings":Path("/tmp/r120/evidence/R120_USERSTRINGS.txt"),
+              "manifest":Path("/tmp/r120/evidence/R120_MANIFEST.txt"),
+          }
+
+          pats={
+              "feature_api":re.compile(
+                  r"GetFeature|SetFeature|FeatureReport|GetFeatureReport|SetFeatureReport|"
+                  r"ReadFeature|WriteFeature|HidD_GetFeature|HidD_SetFeature",
+                  re.I
+              ),
+              "hid_types":re.compile(
+                  r"HidDevice|HidReporterDeviceInfo|HIDDevice|HidReport|HIDReport|"
+                  r"USBHID|HidSharp|HidLibrary",
+                  re.I
+              ),
+              "win_hid_api":re.compile(
+                  r"hid\.dll|setupapi\.dll|HidD_|SetupDi|CreateFile|DeviceIoControl|"
+                  r"ReadFile|WriteFile",
+                  re.I
+              ),
+              "updater_terms":re.compile(
+                  r"firmware|bootloader|flashboot|recovery|upgrade|updater|"
+                  r"firmware.?update|firmware.?upgrade|\.mva\b",
+                  re.I
+              ),
+              "production_ids":re.compile(r"6324|1719|18B4|06B7",re.I),
+              "pctools_terms":re.compile(
+                  r"MV_AP82xx_BP10xx|PCTools|pc_upgrade|start_up_grate|"
+                  r"AppResourceUsbDevice",
+                  re.I
+              ),
+          }
+
+          out={}
+          for name,p in files.items():
+              t=p.read_text(errors="replace") if p.exists() else ""
+              row={}
+              for cat,pat in pats.items():
+                  vals=[]
+                  for m in pat.finditer(t):
+                      a=max(0,m.start()-500); z=min(len(t),m.end()+1000)
+                      vals.append(t[a:z])
+                      if len(vals)>=300: break
+                  row[cat]=vals
+              out[name]=row
+
+          Path("/tmp/r120/evidence/R120_HID_FEATURE_SYMBOL_HITS.json").write_text(
+              json.dumps(out,indent=2,ensure_ascii=False)+"\n"
+          )
+          PY
+
+      - name: Method-level IL classification for AA55 and Feature usage
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import re,json
+
+          t=Path("/tmp/r120/R120_FULL.il").read_text(errors="replace")
+
+          # Split on monodis method blocks heuristically.
+          starts=[m.start() for m in re.finditer(r'(?m)^\s*\.method\b',t)]
+          blocks=[]
+          for i,s in enumerate(starts):
+              e=starts[i+1] if i+1<len(starts) else len(t)
+              blocks.append(t[s:e])
+
+          feature=re.compile(
+              r'GetFeature|SetFeature|FeatureReport|HidD_GetFeature|HidD_SetFeature|'
+              r'WriteFeature|ReadFeature',
+              re.I
+          )
+          hid=re.compile(
+              r'HidDevice|HidReporterDeviceInfo|USBHID|HidReport|HidSharp|HidLibrary',
+              re.I
+          )
+          # IL encodings can render 170 either as decimal 170, hex 0xaa, or signed int8 -86.
+          aa=re.compile(r'ldc\.i4(?:\.s)?\s+(?:170|0x0*aa|-86)\b|0x0*aa\b',re.I)
+          v55=re.compile(r'ldc\.i4(?:\.s)?\s+(?:85|0x0*55)\b|0x0*55\b',re.I)
+          updater=re.compile(r'firmware|bootloader|flashboot|upgrade|recovery|\.mva\b',re.I)
+
+          rows=[]
+          for b in blocks:
+              if not (feature.search(b) or hid.search(b) or (aa.search(b) and v55.search(b)) or updater.search(b)):
+                  continue
+              hdr="\n".join(b.splitlines()[:8])
+              rows.append({
+                  "header":hdr[:2000],
+                  "has_feature_api":bool(feature.search(b)),
+                  "has_hid_type":bool(hid.search(b)),
+                  "has_aa_constant":bool(aa.search(b)),
+                  "has_55_constant":bool(v55.search(b)),
+                  "has_updater_term":bool(updater.search(b)),
+                  "body":b[:25000],
+              })
+
+          Path("/tmp/r120/evidence/R120_METHOD_LEVEL_IL.json").write_text(
+              json.dumps(rows[:1000],indent=2,ensure_ascii=False)+"\n"
+          )
+          PY
+
+      - name: Raw PE AA55 plus HID-context scan
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import re,json
+
+          p=Path("/tmp/r120/input/golopine.exe")
+          b=p.read_bytes()
+
+          strings=[(m.start(),m.group(0).decode("latin1","replace"))
+                   for m in re.finditer(rb"[\x20-\x7e]{4,}",b)]
+
+          ctxpat=re.compile(
+              r'Feature|HID|HidDevice|HidReporter|USB|GetReport|SetReport|'
+              r'firmware|bootloader|flashboot|upgrade|PCTools',
+              re.I
+          )
+
+          token_hits=[]
+          for token in ("AA","55","0xAA","0x55","170","85","55AA","AA55"):
+              for i,(off,s) in enumerate(strings):
+                  if token not in s:
+                      continue
+                  lo=max(0,i-20); hi=min(len(strings),i+21)
+                  joined=" | ".join(x[1] for x in strings[lo:hi])
+                  if ctxpat.search(joined):
+                      token_hits.append({
+                          "token":token,
+                          "offset":off,
+                          "string":s[:500],
+                          "context":joined[:5000],
+                      })
+
+          # Raw byte pair counts are evidence only, not protocol attribution.
+          d={
+              "raw_AA55_count":b.count(bytes([0xAA,0x55])),
+              "raw_55AA_count":b.count(bytes([0x55,0xAA])),
+              "ascii_hid_context_token_hits":token_hits[:1000],
+          }
+          Path("/tmp/r120/evidence/R120_RAW_AA55_CONTEXT.json").write_text(
+              json.dumps(d,indent=2,ensure_ascii=False)+"\n"
+          )
+          PY
+
+      - name: Enumerate managed types and methods with dnfile
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import dnfile,json,re
+
+          p="/tmp/r120/input/golopine.exe"
+          interesting=re.compile(
+              r'hid|usb|feature|report|firmware|upgrade|update|boot|flash|recovery|'
+              r'device|transport|pctool|mva',
+              re.I
+          )
+
+          out={"types":[],"methods":[],"resources":[],"errors":[]}
+          try:
+              pe=dnfile.dnPE(p)
+              if not getattr(pe,"net",None):
+                  out["errors"].append("NO_DOTNET_METADATA")
+              else:
+                  td=pe.net.mdtables.TypeDef
+                  if td:
+                      for row in td:
+                          try:
+                              ns=str(row.TypeNamespace or "")
+                              name=str(row.TypeName or "")
+                              fq=(ns+"."+name).strip(".")
+                              if interesting.search(fq):
+                                  out["types"].append(fq)
+                          except Exception as e:
+                              out["errors"].append("TYPE:"+repr(e))
+
+                  md=pe.net.mdtables.MethodDef
+                  if md:
+                      for row in md:
+                          try:
+                              name=str(row.Name or "")
+                              if interesting.search(name):
+                                  out["methods"].append({
+                                      "name":name,
+                                      "rva":int(row.Rva or 0),
+                                  })
+                          except Exception as e:
+                              out["errors"].append("METHOD:"+repr(e))
+
+                  mr=pe.net.mdtables.ManifestResource
+                  if mr:
+                      for row in mr:
+                          try:
+                              out["resources"].append({
+                                  "name":str(row.Name or ""),
+                                  "offset":int(row.Offset or 0),
+                                  "flags":str(row.Flags),
+                              })
+                          except Exception as e:
+                              out["errors"].append("RESOURCE:"+repr(e))
+          except Exception as e:
+              out["errors"].append("PE:"+repr(e))
+
+          Path("/tmp/r120/evidence/R120_DNFILE_INTERESTING.json").write_text(
+              json.dumps(out,indent=2,ensure_ascii=False)+"\n"
+          )
+          PY
+
+      - name: Inspect package siblings and embedded-looking payload names
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import json,hashlib,re,subprocess
+
+          root=Path("/tmp/r120/pkg")
+          rows=[]
+          pat=re.compile(
+              r'hid|usb|feature|firmware|upgrade|boot|flash|recovery|pctool|mva|dll|exe',
+              re.I
+          )
+
+          for p in sorted(root.rglob("*")):
+              if not p.is_file():
+                  continue
+              rel=str(p.relative_to(root))
+              if not pat.search(rel):
+                  continue
+              try:
+                  typ=subprocess.check_output(["file","-b",str(p)],text=True).strip()
+              except Exception:
+                  typ=""
+              rows.append({
+                  "path":rel,
+                  "size":p.stat().st_size,
+                  "sha256":hashlib.sha256(p.read_bytes()).hexdigest(),
+                  "file_type":typ,
+              })
+
+          Path("/tmp/r120/evidence/R120_PACKAGE_RELEVANT_FILES.json").write_text(
+              json.dumps(rows,indent=2,ensure_ascii=False)+"\n"
+          )
+          PY
+
+      - name: Build fail-closed decision
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import json,re
+
+          ev=Path("/tmp/r120/evidence")
+          hits=json.loads((ev/"R120_HID_FEATURE_SYMBOL_HITS.json").read_text())
+          methods=json.loads((ev/"R120_METHOD_LEVEL_IL.json").read_text())
+          raw=json.loads((ev/"R120_RAW_AA55_CONTEXT.json").read_text())
+          dn=json.loads((ev/"R120_DNFILE_INTERESTING.json").read_text())
+          pkg=json.loads((ev/"R120_PACKAGE_RELEVANT_FILES.json").read_text())
+
+          def count(cat):
+              return sum(len(section.get(cat,[])) for section in hits.values())
+
+          feature_methods=[x for x in methods if x["has_feature_api"]]
+          hid_methods=[x for x in methods if x["has_hid_type"]]
+          aa55_methods=[x for x in methods if x["has_aa_constant"] and x["has_55_constant"]]
+          bridge_methods=[
+              x for x in methods
+              if x["has_feature_api"] and x["has_aa_constant"] and x["has_55_constant"]
+          ]
+          updater_methods=[x for x in methods if x["has_updater_term"]]
+
+          d={
+              "PINNED_OFFICIAL_GOLOPINE_08APR2026_WINDOWS_CLIENT":True,
+              "FEATURE_API_TEXT_HIT_COUNT":count("feature_api"),
+              "HID_TYPE_TEXT_HIT_COUNT":count("hid_types"),
+              "WIN_HID_API_TEXT_HIT_COUNT":count("win_hid_api"),
+              "UPDATER_TERM_TEXT_HIT_COUNT":count("updater_terms"),
+              "PRODUCTION_ID_TEXT_HIT_COUNT":count("production_ids"),
+              "PCTOOLS_TERM_TEXT_HIT_COUNT":count("pctools_terms"),
+
+              "METHODS_WITH_FEATURE_API":len(feature_methods),
+              "METHODS_WITH_HID_TYPES":len(hid_methods),
+              "METHODS_WITH_BOTH_AA_AND_55_CONSTANTS":len(aa55_methods),
+              "METHODS_WITH_FEATURE_PLUS_AA_PLUS_55":len(bridge_methods),
+              "METHODS_WITH_UPDATER_TERMS":len(updater_methods),
+
+              "RAW_AA55_BYTE_PAIR_COUNT":raw["raw_AA55_count"],
+              "RAW_55AA_BYTE_PAIR_COUNT":raw["raw_55AA_count"],
+              "ASCII_AA55_HID_CONTEXT_HIT_COUNT":len(raw["ascii_hid_context_token_hits"]),
+
+              "DNFILE_INTERESTING_TYPES":dn["types"][:200],
+              "DNFILE_INTERESTING_METHODS":dn["methods"][:500],
+              "PACKAGE_RELEVANT_FILES":pkg,
+
+              "REFERENCE_BOOTSTRAP_EXPECTATION":{
+                  "set_feature_first_byte":"AA",
+                  "state":"pc_upgrade=1",
+                  "next_get_feature_first_byte":"55",
+                  "bootstrap_call":"start_up_grate(AppResourceUsbDevice)"
+              },
+
+              "OFFICIAL_TUNING_CLIENT_CONTAINS_REFERENCE_STYLE_AA55_FEATURE_BOOTSTRAP_METHOD":len(bridge_methods)>0,
+              "OFFICIAL_TUNING_CLIENT_CONTAINS_PROVEN_FIRMWARE_UPDATER_PATH":False,
+
+              "PRODUCTION_BOOTSTRAP_BRIDGE_PROVEN":False,
+              "PRODUCTION_FLASHBOOT_REENUMERATION_PROVEN":False,
+              "PRODUCTION_RECOVERY_USB_IDENTITY_PROVEN":False,
+              "SAFE_READ_ONLY_STOCK_BACKUP_PROVEN":False,
+              "ANY_DISCOVERED_WRITE_AUTHORIZED_FOR_BOARD":False,
+
+              "NEXT":(
+                  "If an exact Feature+AA+55 method is present, deep-static xref that method and its HID report buffer layout only. "
+                  "If absent, close the official GoloPine tuning client as not containing the PC bootstrap path and continue acquisition of MV_AP82xx_BP10xx_PC_Tools or production firmware/update artifacts."
+              ),
+              "FLASH_ALLOWED":False
+          }
+
+          (ev/"R120_DECISION.json").write_text(
+              json.dumps(d,indent=2,ensure_ascii=False)+"\n"
+          )
+
+          report=[
+              "# R120 GoloPine Windows AA55 Feature/updater path static audit",
+              "",
+              "Static only. The official executable is never run and no hardware is contacted.",
+              "",
+              "```json",
+              json.dumps(d,indent=2,ensure_ascii=False),
+              "```",
+              "",
+              "No AA55 or other live bootstrap test is authorized.",
+              "",
+              "FLASH_ALLOWED=NO",
+          ]
+          (ev/"R120_REPORT_TH.md").write_text("\n".join(report)+"\n")
+          print(json.dumps(d,indent=2,ensure_ascii=False))
+          PY
+
+      - name: Package focused evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -f /tmp/r120/R120_FULL.il
+          cd /tmp/r120/evidence
+          zip -9 -r /tmp/R120_GOLOPINE_WINDOWS_AA55_FEATURE_STATIC_EVIDENCE.zip .
+          sha256sum /tmp/R120_GOLOPINE_WINDOWS_AA55_FEATURE_STATIC_EVIDENCE.zip \
+            > /tmp/R120_GOLOPINE_WINDOWS_AA55_FEATURE_STATIC_EVIDENCE.zip.sha256
+
+      - name: Upload evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: R120-GOLOPINE-WINDOWS-AA55-FEATURE-STATIC-EVIDENCE
+          path: |
+            /tmp/R120_GOLOPINE_WINDOWS_AA55_FEATURE_STATIC_EVIDENCE.zip
+            /tmp/R120_GOLOPINE_WINDOWS_AA55_FEATURE_STATIC_EVIDENCE.zip.sha256
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Final fail-closed gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -F 'R120_VENDOR_BINARY_EXECUTED=NO' /tmp/r120/evidence/R120_SAFETY.txt
+          grep -F 'R120_USB_DEVICE_ACCESS=NO' /tmp/r120/evidence/R120_SAFETY.txt
+          grep -F 'R120_AA55_SENT=NO' /tmp/r120/evidence/R120_SAFETY.txt
+          grep -F 'R120_RUNTIME_0X11_SENT=NO' /tmp/r120/evidence/R120_SAFETY.txt
+          grep -F '"FLASH_ALLOWED": false' /tmp/r120/evidence/R120_DECISION.json
+          echo R120_STATIC_AUDIT_COMPLETE=YES
+          echo FLASH_ALLOWED=NO
