@@ -1,0 +1,579 @@
+name: R124 YouTube linked BP10xx PCTools acquisition static audit
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - ".github/workflows/R124_YOUTUBE_LINKED_BP10XX_PCTOOLS_ACQUISITION_STATIC_AUDIT.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: r124-youtube-pctools-acquisition-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  VIDEO_ID: "oSIWbddW7Rc"
+  VIDEO_URL: "https://www.youtube.com/watch?v=oSIWbddW7Rc"
+  FLASH_ALLOWED: "NO"
+
+jobs:
+  acquire-static:
+    name: STATIC PUBLIC ACQUISITION ONLY - no execution - no USB - no board
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+
+    steps:
+      - name: Immutable safety gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/r124/raw /tmp/r124/downloads /tmp/r124/evidence
+          cat > /tmp/r124/evidence/R124_SAFETY.txt <<'EOF'
+          R124_MODE=PUBLIC_LINK_ACQUISITION_AND_STATIC_INSPECTION_ONLY
+          R124_VENDOR_BINARY_EXECUTED=NO
+          R124_INSTALLER_EXECUTED=NO
+          R124_USB_DEVICE_ACCESS=NO
+          R124_BOARD_CONTACT=NO
+          R124_BLE_CONNECTION=NO
+          R124_AA55_SENT=NO
+          R124_RUNTIME_0X11_SENT=NO
+          R124_FLASHBOOT_COMMAND_SENT=NO
+          R124_FLASH_READ_EXECUTED=NO
+          R124_FLASH_ERASE_EXECUTED=NO
+          R124_FLASH_WRITE_EXECUTED=NO
+          R124_ANY_DISCOVERED_FRAME_AUTHORIZED_FOR_BOARD=NO
+          FINAL_REQUIRED_TRANSPORT=SAMSUNG_S25_PLUS_USB_C_DIRECT_TO_DSP_USB_C
+          HARDWARE_MODIFICATION=FORBIDDEN
+          FLASH_ALLOWED=NO
+          EOF
+
+      - name: Install public-link and static tooling
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+            curl jq file unzip p7zip-full binutils python3-pip >/dev/null
+          python3 -m pip install --disable-pip-version-check --no-input \
+            yt-dlp gdown pefile >/dev/null
+          {
+            yt-dlp --version || true
+            python3 - <<'PY'
+          import importlib.metadata
+          for n in ("yt-dlp","gdown","pefile"):
+              try: print(n,importlib.metadata.version(n))
+              except Exception: pass
+          PY
+          } > /tmp/r124/evidence/R124_TOOL_VERSIONS.txt
+
+      - name: Capture public YouTube metadata and comments
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # Do not download media. Only public metadata/comments.
+          set +e
+          yt-dlp \
+            --skip-download \
+            --write-info-json \
+            --write-comments \
+            --no-playlist \
+            --extractor-args "youtube:comment_sort=top;max_comments=1000,200,1000,200" \
+            -o "/tmp/r124/raw/video.%(ext)s" \
+            "$VIDEO_URL" \
+            > /tmp/r124/evidence/R124_YTDLP_STDOUT.txt \
+            2> /tmp/r124/evidence/R124_YTDLP_STDERR.txt
+          RC=$?
+          set -e
+
+          INFO="$(find /tmp/r124/raw -maxdepth 1 -type f -name '*.info.json' -print -quit)"
+          {
+            echo "VIDEO_ID=$VIDEO_ID"
+            echo "VIDEO_URL=$VIDEO_URL"
+            echo "YTDLP_RC=$RC"
+            if [ -n "$INFO" ]; then
+              echo "INFO_JSON=$INFO"
+              echo "INFO_JSON_BYTES=$(stat -c '%s' "$INFO")"
+            else
+              echo "INFO_JSON="
+              echo "INFO_JSON_BYTES=0"
+            fi
+          } > /tmp/r124/evidence/R124_YOUTUBE_CAPTURE_STATUS.txt
+
+          # Also retain raw watch HTML if public GET is available.
+          curl --location --retry 3 --retry-all-errors \
+            -A 'Mozilla/5.0' \
+            "$VIDEO_URL" \
+            -o /tmp/r124/raw/watch.html || true
+
+      - name: Extract all public URLs from video metadata comments and watch page
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          from urllib.parse import unquote,urlparse,parse_qs
+          import json,re,html
+
+          root=Path("/tmp/r124/raw")
+          evidence=Path("/tmp/r124/evidence")
+
+          sources=[]
+          info=next(root.glob("*.info.json"),None)
+          metadata={}
+          comments=[]
+
+          if info:
+              try:
+                  obj=json.loads(info.read_text(errors="replace"))
+                  metadata={
+                      "id":obj.get("id"),
+                      "title":obj.get("title"),
+                      "channel":obj.get("channel") or obj.get("uploader"),
+                      "upload_date":obj.get("upload_date"),
+                      "description":obj.get("description"),
+                      "webpage_url":obj.get("webpage_url"),
+                      "comment_count":obj.get("comment_count"),
+                  }
+                  sources.append(("description",str(obj.get("description") or "")))
+                  for c in obj.get("comments") or []:
+                      text=str(c.get("text") or "")
+                      comments.append({
+                          "id":c.get("id"),
+                          "author":c.get("author"),
+                          "timestamp":c.get("timestamp"),
+                          "text":text,
+                          "parent":c.get("parent"),
+                      })
+                      sources.append(("comment:"+str(c.get("id")),text))
+              except Exception as e:
+                  metadata={"parse_error":repr(e)}
+
+          watch=root/"watch.html"
+          if watch.exists():
+              sources.append(("watch.html",watch.read_text(errors="replace")))
+
+          url_re=re.compile(r'https?://[^\s<>"\'\]\)]+',re.I)
+          extracted=[]
+          seen=set()
+          for src,text in sources:
+              text=html.unescape(text)
+              for u in url_re.findall(text):
+                  u=u.rstrip(".,;:!?'\"")
+                  # unwrap common YouTube redirect
+                  try:
+                      q=parse_qs(urlparse(u).query)
+                      if "q" in q and ("youtube.com/redirect" in u or "google.com/url" in u):
+                          u=unquote(q["q"][0])
+                  except Exception:
+                      pass
+                  key=(src,u)
+                  if key in seen: continue
+                  seen.add(key)
+                  extracted.append({"source":src,"url":u})
+
+          share_hosts=(
+              "drive.google.com","docs.google.com","mega.nz","dropbox.com",
+              "mediafire.com","onedrive.live.com","1drv.ms","pan.baidu.com",
+              "cloud.mail.ru","github.com","gofile.io","pixeldrain.com"
+          )
+          sharing=[
+              x for x in extracted
+              if any(h in urlparse(x["url"]).netloc.lower() for h in share_hosts)
+          ]
+
+          targets=[
+              x for x in extracted
+              if re.search(
+                  r'MV_AP82|BP10|BP1048|PCTool|PC_Tool|V2\.2|MVA|firmware|flashboot|'
+                  r'8P100|download|drive\.google|mega\.nz',
+                  x["url"],re.I
+              )
+          ]
+
+          evidence.joinpath("R124_VIDEO_METADATA.json").write_text(
+              json.dumps(metadata,indent=2,ensure_ascii=False)+"\n"
+          )
+          evidence.joinpath("R124_PUBLIC_COMMENTS.json").write_text(
+              json.dumps(comments,indent=2,ensure_ascii=False)+"\n"
+          )
+          evidence.joinpath("R124_ALL_EXTRACTED_URLS.json").write_text(
+              json.dumps(extracted,indent=2,ensure_ascii=False)+"\n"
+          )
+          evidence.joinpath("R124_FILESHARE_URLS.json").write_text(
+              json.dumps(sharing,indent=2,ensure_ascii=False)+"\n"
+          )
+          evidence.joinpath("R124_TARGET_URLS.json").write_text(
+              json.dumps(targets,indent=2,ensure_ascii=False)+"\n"
+          )
+
+          print(json.dumps({
+              "metadata":metadata,
+              "comment_count_captured":len(comments),
+              "url_count":len(extracted),
+              "fileshare_url_count":len(sharing),
+              "target_url_count":len(targets),
+              "fileshare_urls":sharing
+          },indent=2,ensure_ascii=False))
+          PY
+
+      - name: Acquire public Google Drive links as inert files only
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          from urllib.parse import urlparse
+          import json,subprocess,hashlib,os,re,shutil
+
+          ev=Path("/tmp/r124/evidence")
+          out=Path("/tmp/r124/downloads")
+          links=json.loads((ev/"R124_FILESHARE_URLS.json").read_text())
+
+          rows=[]
+          for idx,x in enumerate(links):
+              u=x["url"]
+              host=urlparse(u).netloc.lower()
+              before={str(p) for p in out.rglob("*") if p.is_file()}
+
+              rc=None
+              command=None
+              if "drive.google.com" in host or "docs.google.com" in host:
+                  # First try as a single file, then as a public folder.
+                  command=["gdown","--fuzzy","--continue",u,"-O",str(out/f"gdrive_{idx:02d}")]
+                  cp=subprocess.run(command,capture_output=True,text=True)
+                  rc=cp.returncode
+                  stdout=cp.stdout[-10000:]
+                  stderr=cp.stderr[-10000:]
+
+                  # If direct-file attempt failed, remove empty placeholder and try folder.
+                  p=out/f"gdrive_{idx:02d}"
+                  if p.exists() and p.is_file() and p.stat().st_size==0:
+                      p.unlink()
+                  if rc!=0:
+                      folder=out/f"gdrive_folder_{idx:02d}"
+                      folder.mkdir(exist_ok=True)
+                      cp2=subprocess.run(
+                          ["gdown","--folder","--fuzzy","--continue",u,"-O",str(folder)],
+                          capture_output=True,text=True
+                      )
+                      stdout += "\n---FOLDER TRY---\n"+cp2.stdout[-10000:]
+                      stderr += "\n---FOLDER TRY---\n"+cp2.stderr[-10000:]
+                      if cp2.returncode==0:
+                          rc=0
+              else:
+                  stdout=""
+                  stderr="UNSUPPORTED_FILESHARE_HOST_FOR_AUTOMATIC_DOWNLOAD"
+                  rc=127
+
+              after=[p for p in out.rglob("*") if p.is_file() and str(p) not in before]
+              files=[]
+              for p in after:
+                  try:
+                      files.append({
+                          "path":str(p.relative_to(out)),
+                          "size":p.stat().st_size,
+                          "sha256":hashlib.sha256(p.read_bytes()).hexdigest(),
+                      })
+                  except Exception:
+                      pass
+
+              rows.append({
+                  "source":x.get("source"),
+                  "url":u,
+                  "host":host,
+                  "download_rc":rc,
+                  "stdout_tail":stdout,
+                  "stderr_tail":stderr,
+                  "files":files,
+              })
+
+          ev.joinpath("R124_PUBLIC_LINK_DOWNLOAD_RESULTS.json").write_text(
+              json.dumps(rows,indent=2,ensure_ascii=False)+"\n"
+          )
+          PY
+
+      - name: Static inventory all acquired files and nested archives
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import hashlib,subprocess,json,re,zipfile,shutil,os
+
+          root=Path("/tmp/r124/downloads")
+          ev=Path("/tmp/r124/evidence")
+          unpack=Path("/tmp/r124/unpacked")
+          unpack.mkdir(exist_ok=True)
+
+          rows=[]
+          nested=[]
+          keyword=re.compile(
+              r'MV_AP82|BP10|BP1048|PCTool|PC_Tool|8P100|V2\.2|'
+              r'flashboot|firmware|upgrade|MVA|PCTools_Config|BT_InfoConfig|'
+              r'Upgrade Finished|READSN|HidD_SetFeature|HidD_GetFeature|'
+              r'chiperas|codedata|bootdat|constdat|cnfgdat|btupdat|upinfo',
+              re.I
+          )
+
+          for p in sorted(root.rglob("*")):
+              if not p.is_file():
+                  continue
+              try:
+                  typ=subprocess.check_output(["file","-b",str(p)],text=True).strip()
+              except Exception:
+                  typ=""
+              try:
+                  data=p.read_bytes()
+              except Exception:
+                  continue
+              strings=[
+                  m.group(0).decode("latin1","replace")
+                  for m in re.finditer(rb"[\x20-\x7e]{5,}",data)
+              ]
+              hits=[s[:800] for s in strings if keyword.search(s)][:1000]
+              row={
+                  "path":str(p.relative_to(root)),
+                  "size":len(data),
+                  "sha256":hashlib.sha256(data).hexdigest(),
+                  "file_type":typ,
+                  "keyword_string_hits":hits,
+              }
+
+              archive_entries=[]
+              try:
+                  cp=subprocess.run(
+                      ["7z","l","-slt",str(p)],
+                      capture_output=True,text=True,timeout=40
+                  )
+                  if cp.returncode==0:
+                      names=[]
+                      for line in cp.stdout.splitlines():
+                          if line.startswith("Path = "):
+                              n=line[7:].strip()
+                              if n and n!=str(p):
+                                  names.append(n)
+                      archive_entries=names[:5000]
+              except Exception:
+                  pass
+
+              row["archive_entries"]=archive_entries
+              row["interesting_archive_entries"]=[
+                  n for n in archive_entries if keyword.search(n)
+              ][:1000]
+              rows.append(row)
+
+          ev.joinpath("R124_ACQUIRED_FILE_STATIC_INVENTORY.json").write_text(
+              json.dumps(rows,indent=2,ensure_ascii=False)+"\n"
+          )
+          PY
+
+      - name: Identify candidate PCTools binaries and packages
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import json,re
+
+          ev=Path("/tmp/r124/evidence")
+          inv=json.loads((ev/"R124_ACQUIRED_FILE_STATIC_INVENTORY.json").read_text())
+
+          namepat=re.compile(
+              r'MV_AP82|BP10|BP1048|PCTool|PC_Tool|8P100|V2\.2',
+              re.I
+          )
+          strong_strings=re.compile(
+              r'Upgrade Finished|PCTools_Config|BT_InfoConfig|READSN|'
+              r'flashboot|MV_AP82|BP10|8P100',
+              re.I
+          )
+
+          candidates=[]
+          for x in inv:
+              score=0
+              reasons=[]
+              if namepat.search(x["path"]):
+                  score+=10; reasons.append("filename")
+              for s in x.get("keyword_string_hits",[]):
+                  if strong_strings.search(s):
+                      score+=4; reasons.append("strong_string")
+              for n in x.get("interesting_archive_entries",[]):
+                  if namepat.search(n):
+                      score+=8; reasons.append("archive_entry")
+              if score:
+                  candidates.append({
+                      "path":x["path"],
+                      "size":x["size"],
+                      "sha256":x["sha256"],
+                      "file_type":x["file_type"],
+                      "score":score,
+                      "reasons":sorted(set(reasons)),
+                      "keyword_string_hits":x.get("keyword_string_hits",[])[:300],
+                      "interesting_archive_entries":x.get("interesting_archive_entries",[])[:300],
+                  })
+
+          candidates.sort(key=lambda x:(-x["score"],x["path"]))
+          ev.joinpath("R124_PCTOOLS_CANDIDATES.json").write_text(
+              json.dumps(candidates,indent=2,ensure_ascii=False)+"\n"
+          )
+          PY
+
+      - name: Static PE metadata for candidate executables only
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import json,re,hashlib,pefile
+
+          root=Path("/tmp/r124/downloads")
+          ev=Path("/tmp/r124/evidence")
+          cand=json.loads((ev/"R124_PCTOOLS_CANDIDATES.json").read_text())
+          bypath={x["path"] for x in cand}
+
+          rows=[]
+          for rel in bypath:
+              p=root/rel
+              if not p.exists() or not p.is_file():
+                  continue
+              try:
+                  pe=pefile.PE(str(p),fast_load=False)
+              except Exception:
+                  continue
+
+              imports=[]
+              if hasattr(pe,"DIRECTORY_ENTRY_IMPORT"):
+                  for ent in pe.DIRECTORY_ENTRY_IMPORT:
+                      dll=ent.dll.decode(errors="replace")
+                      names=[]
+                      for imp in ent.imports:
+                          names.append(
+                              imp.name.decode(errors="replace")
+                              if imp.name else f"ord:{imp.ordinal}"
+                          )
+                      imports.append({"dll":dll,"imports":names})
+
+              rows.append({
+                  "path":rel,
+                  "sha256":hashlib.sha256(p.read_bytes()).hexdigest(),
+                  "machine":hex(pe.FILE_HEADER.Machine),
+                  "timestamp":int(pe.FILE_HEADER.TimeDateStamp),
+                  "entrypoint_rva":hex(pe.OPTIONAL_HEADER.AddressOfEntryPoint),
+                  "imagebase":hex(pe.OPTIONAL_HEADER.ImageBase),
+                  "imports":imports,
+              })
+
+          ev.joinpath("R124_CANDIDATE_PE_METADATA.json").write_text(
+              json.dumps(rows,indent=2,ensure_ascii=False)+"\n"
+          )
+          PY
+
+      - name: Build acquisition decision
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import json
+
+          ev=Path("/tmp/r124/evidence")
+
+          def load(name,default):
+              try: return json.loads((ev/name).read_text())
+              except Exception: return default
+
+          meta=load("R124_VIDEO_METADATA.json",{})
+          comments=load("R124_PUBLIC_COMMENTS.json",[])
+          sharing=load("R124_FILESHARE_URLS.json",[])
+          downloads=load("R124_PUBLIC_LINK_DOWNLOAD_RESULTS.json",[])
+          inv=load("R124_ACQUIRED_FILE_STATIC_INVENTORY.json",[])
+          cand=load("R124_PCTOOLS_CANDIDATES.json",[])
+          pe=load("R124_CANDIDATE_PE_METADATA.json",[])
+
+          dl_files=sum(len(x.get("files",[])) for x in downloads)
+          success_links=sum(1 for x in downloads if x.get("download_rc")==0)
+
+          d={
+              "VIDEO_ID":"oSIWbddW7Rc",
+              "VIDEO_METADATA":meta,
+              "PUBLIC_COMMENT_COUNT_CAPTURED":len(comments),
+              "FILESHARE_URL_COUNT":len(sharing),
+              "FILESHARE_URLS":sharing,
+              "SUCCESSFULLY_ACQUIRED_FILESHARE_LINK_COUNT":success_links,
+              "ACQUIRED_FILE_COUNT":dl_files,
+              "STATIC_INVENTORY_FILE_COUNT":len(inv),
+              "PCTOOLS_CANDIDATE_COUNT":len(cand),
+              "PCTOOLS_CANDIDATES":cand[:30],
+              "CANDIDATE_PE_COUNT":len(pe),
+              "CANDIDATE_PE_METADATA":pe[:30],
+
+              "PCTOOLS_BINARY_PUBLICLY_ACQUIRED":len(cand)>0,
+              "VENDOR_BINARY_EXECUTED":False,
+              "USB_DEVICE_ACCESSED":False,
+              "BOARD_CONTACTED":False,
+
+              "PRODUCTION_GOLOPINE_BOOTSTRAP_PROVEN":False,
+              "PRODUCTION_FLASHBOOT_REENUMERATION_PROVEN":False,
+              "PRODUCTION_RECOVERY_USB_IDENTITY_PROVEN":False,
+              "SAFE_READ_ONLY_STOCK_BACKUP_PROVEN":False,
+              "ANY_DISCOVERED_WRITE_AUTHORIZED_FOR_BOARD":False,
+
+              "NEXT":(
+                  "If a PCTools candidate was acquired, pin its exact hash and deep-static reverse HID discovery, MVA parser, flashboot transition, and any read-only identify/SN path without executing it. "
+                  "If no file was acquired, preserve the exact public video/comment/file-share evidence and continue acquisition from the linked source or vendor channel."
+              ),
+              "FLASH_ALLOWED":False
+          }
+
+          ev.joinpath("R124_DECISION.json").write_text(
+              json.dumps(d,indent=2,ensure_ascii=False)+"\n"
+          )
+
+          report=[
+              "# R124 — YouTube-linked BP10xx PCTools public acquisition",
+              "",
+              "Public metadata/comments and linked files only. No vendor executable is launched and no hardware is contacted.",
+              "",
+              "```json",
+              json.dumps(d,indent=2,ensure_ascii=False),
+              "```",
+              "",
+              "FLASH_ALLOWED=NO"
+          ]
+          ev.joinpath("R124_REPORT_TH.md").write_text("\n".join(report)+"\n")
+          print(json.dumps(d,indent=2,ensure_ascii=False))
+          PY
+
+      - name: Package evidence only
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /tmp/r124/evidence
+          zip -9 -r /tmp/R124_YOUTUBE_LINKED_PCTOOLS_ACQUISITION_EVIDENCE.zip .
+          sha256sum /tmp/R124_YOUTUBE_LINKED_PCTOOLS_ACQUISITION_EVIDENCE.zip \
+            > /tmp/R124_YOUTUBE_LINKED_PCTOOLS_ACQUISITION_EVIDENCE.zip.sha256
+
+      - name: Upload evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: R124-YOUTUBE-LINKED-PCTOOLS-ACQUISITION-EVIDENCE
+          path: |
+            /tmp/R124_YOUTUBE_LINKED_PCTOOLS_ACQUISITION_EVIDENCE.zip
+            /tmp/R124_YOUTUBE_LINKED_PCTOOLS_ACQUISITION_EVIDENCE.zip.sha256
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Final fail-closed gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -F 'R124_VENDOR_BINARY_EXECUTED=NO' /tmp/r124/evidence/R124_SAFETY.txt
+          grep -F 'R124_USB_DEVICE_ACCESS=NO' /tmp/r124/evidence/R124_SAFETY.txt
+          grep -F 'R124_AA55_SENT=NO' /tmp/r124/evidence/R124_SAFETY.txt
+          grep -F 'R124_RUNTIME_0X11_SENT=NO' /tmp/r124/evidence/R124_SAFETY.txt
+          grep -F '"FLASH_ALLOWED": false' /tmp/r124/evidence/R124_DECISION.json
+          echo R124_PUBLIC_ACQUISITION_COMPLETE=YES
+          echo FLASH_ALLOWED=NO
