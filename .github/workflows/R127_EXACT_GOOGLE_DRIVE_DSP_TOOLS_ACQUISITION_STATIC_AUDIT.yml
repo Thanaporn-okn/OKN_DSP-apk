@@ -1,0 +1,515 @@
+name: R127 exact Google Drive DSP tools acquisition static audit
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - ".github/workflows/R127_EXACT_GOOGLE_DRIVE_DSP_TOOLS_ACQUISITION_STATIC_AUDIT.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: r127-exact-google-drive-dsp-tools-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  FLASH_ALLOWED: "NO"
+
+jobs:
+  acquire:
+    name: STATIC PUBLIC FILE ACQUISITION ONLY - no execution - no USB - no board
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Immutable safety gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/r127/downloads /tmp/r127/unpacked /tmp/r127/evidence
+          cat > /tmp/r127/evidence/R127_SAFETY.txt <<'EOF'
+          R127_MODE=PUBLIC_FILE_ACQUISITION_AND_STATIC_INSPECTION_ONLY
+          R127_VENDOR_BINARY_EXECUTED=NO
+          R127_INSTALLER_EXECUTED=NO
+          R127_USB_DEVICE_ACCESS=NO
+          R127_BOARD_CONTACT=NO
+          R127_AA55_SENT=NO
+          R127_RUNTIME_0X11_SENT=NO
+          R127_FLASHBOOT_COMMAND_SENT=NO
+          R127_FLASH_READ_EXECUTED=NO
+          R127_FLASH_ERASE_EXECUTED=NO
+          R127_FLASH_WRITE_EXECUTED=NO
+          R127_ANY_DISCOVERED_FRAME_AUTHORIZED_FOR_BOARD=NO
+          FINAL_REQUIRED_TRANSPORT=SAMSUNG_S25_PLUS_USB_C_DIRECT_TO_DSP_USB_C
+          HARDWARE_MODIFICATION=FORBIDDEN
+          FLASH_ALLOWED=NO
+          EOF
+
+      - name: Install static tooling
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+            file unzip p7zip-full binutils jq python3-pip curl >/dev/null
+          python3 -m pip install --disable-pip-version-check --no-input \
+            gdown pefile requests >/dev/null
+          gdown --version > /tmp/r127/evidence/R127_GDOWN_VERSION.txt 2>&1 || true
+          gdown --help > /tmp/r127/evidence/R127_GDOWN_HELP.txt 2>&1 || true
+
+      - name: Record exact recovered Google Drive links from R126
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > /tmp/r127/evidence/R127_PUBLIC_LINKS.json <<'EOF'
+          [
+            {
+              "label": "BT_NAME_TOOL",
+              "file_id": "1uCEvbXY3BftqM1TivYy9NrSMt_Bo4AmH",
+              "url": "https://drive.google.com/file/d/1uCEvbXY3BftqM1TivYy9NrSMt_Bo4AmH/view"
+            },
+            {
+              "label": "DSP_SOFTWARE_PRIMARY",
+              "file_id": "1eJxszZqheaYBkum6AthHMAl35JigTH3A",
+              "url": "https://drive.google.com/file/d/1eJxszZqheaYBkum6AthHMAl35JigTH3A/view?usp=drive_link"
+            },
+            {
+              "label": "DSP_SOFTWARE_ALTERNATE",
+              "file_id": "1hrtYisCGVji3uvY8w3BArx31CBYE7BZq",
+              "url": "https://drive.google.com/file/d/1hrtYisCGVji3uvY8w3BArx31CBYE7BZq/view?usp=share_link"
+            },
+            {
+              "label": "COMMUNITY_SHARED_FILE",
+              "file_id": "1-fvBMX74S69kvDy7EWMBbfg0lpLD05J7",
+              "url": "https://drive.google.com/file/d/1-fvBMX74S69kvDy7EWMBbfg0lpLD05J7/view?usp=drive_link"
+            }
+          ]
+          EOF
+
+      - name: Download exact Drive IDs as inert data only
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import json, subprocess, hashlib
+
+          ev=Path("/tmp/r127/evidence")
+          root=Path("/tmp/r127/downloads")
+          links=json.loads((ev/"R127_PUBLIC_LINKS.json").read_text())
+          results=[]
+
+          for item in links:
+              label=item["label"]
+              fid=item["file_id"]
+              d=root/label
+              d.mkdir(parents=True,exist_ok=True)
+
+              attempts=[]
+              cmds=[
+                  ["gdown", fid],
+                  ["gdown", f"https://drive.google.com/uc?id={fid}"],
+                  ["gdown", item["url"]],
+              ]
+
+              success=False
+              for cmd in cmds:
+                  before={str(p) for p in d.rglob("*") if p.is_file()}
+                  try:
+                      cp=subprocess.run(cmd,cwd=d,capture_output=True,text=True,timeout=240)
+                      after=[p for p in d.rglob("*") if p.is_file() and str(p) not in before]
+                      attempts.append({
+                          "cmd":cmd,
+                          "rc":cp.returncode,
+                          "stdout_tail":cp.stdout[-5000:],
+                          "stderr_tail":cp.stderr[-5000:],
+                          "new_files":[str(p.relative_to(root)) for p in after]
+                      })
+                      if cp.returncode==0 and after:
+                          success=True
+                          break
+                  except Exception as e:
+                      attempts.append({"cmd":cmd,"error":repr(e)})
+
+              files=[]
+              for p in sorted(d.rglob("*")):
+                  if p.is_file():
+                      data=p.read_bytes()
+                      files.append({
+                          "path":str(p.relative_to(root)),
+                          "size":len(data),
+                          "sha256":hashlib.sha256(data).hexdigest()
+                      })
+
+              results.append({**item,"success":success,"attempts":attempts,"files":files})
+
+          ev.joinpath("R127_DOWNLOAD_RESULTS.json").write_text(
+              json.dumps(results,indent=2,ensure_ascii=False)+"\n"
+          )
+          print(json.dumps(results,indent=2,ensure_ascii=False))
+          PY
+
+      - name: Validate downloads are not HTML error pages
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import json,hashlib,subprocess
+
+          root=Path("/tmp/r127/downloads")
+          rows=[]
+          for p in sorted(root.rglob("*")):
+              if not p.is_file():
+                  continue
+              data=p.read_bytes()
+              head=data[:8192].lower()
+              html_like=(
+                  b"<html" in head or b"<!doctype html" in head or
+                  b"<title>google drive" in head
+              )
+              try:
+                  typ=subprocess.check_output(["file","-b",str(p)],text=True).strip()
+              except Exception:
+                  typ=""
+              rows.append({
+                  "path":str(p.relative_to(root)),
+                  "size":len(data),
+                  "sha256":hashlib.sha256(data).hexdigest(),
+                  "file_type":typ,
+                  "html_like":html_like
+              })
+
+          Path("/tmp/r127/evidence/R127_DOWNLOAD_VALIDATION.json").write_text(
+              json.dumps(rows,indent=2,ensure_ascii=False)+"\n"
+          )
+          PY
+
+      - name: Static inventory strings and archive entries
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import json,re,hashlib,subprocess
+
+          root=Path("/tmp/r127/downloads")
+          key=re.compile(
+              r'MV_AP82|BP10|BP1048|PCTool|PC_Tool|PCTools|V2\.2|8P100|MVA|'
+              r'flashboot|firmware|upgrade|bootloader|recovery|READSN|'
+              r'PCTools_Config|BT_InfoConfig|Upgrade Finished|'
+              r'HidD_SetFeature|HidD_GetFeature|HidD_SetOutputReport|'
+              r'chiperas|codedata|bootdat|constdat|cnfgdat|btupdat|upinfo|'
+              r'0633|5322|0288|7966|6324|1719|18B4|06B7',
+              re.I
+          )
+          rows=[]
+          for p in sorted(root.rglob("*")):
+              if not p.is_file():
+                  continue
+              data=p.read_bytes()
+              try:
+                  typ=subprocess.check_output(["file","-b",str(p)],text=True).strip()
+              except Exception:
+                  typ=""
+              strings=[m.group(0).decode("latin1","replace")
+                       for m in re.finditer(rb"[\x20-\x7e]{5,}",data)]
+              hits=[s[:1200] for s in strings if key.search(s)][:2000]
+              entries=[]
+              try:
+                  cp=subprocess.run(["7z","l","-slt",str(p)],capture_output=True,text=True,timeout=60)
+                  if cp.returncode==0:
+                      entries=[line[7:].strip() for line in cp.stdout.splitlines()
+                               if line.startswith("Path = ")][:15000]
+              except Exception:
+                  pass
+              rows.append({
+                  "path":str(p.relative_to(root)),
+                  "size":len(data),
+                  "sha256":hashlib.sha256(data).hexdigest(),
+                  "file_type":typ,
+                  "keyword_string_hits":hits,
+                  "archive_entries":entries,
+                  "interesting_archive_entries":[x for x in entries if key.search(x)][:3000]
+              })
+
+          Path("/tmp/r127/evidence/R127_STATIC_INVENTORY.json").write_text(
+              json.dumps(rows,indent=2,ensure_ascii=False)+"\n"
+          )
+          PY
+
+      - name: Extract archives recursively for static inspection only
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import subprocess,hashlib,json
+
+          src=Path("/tmp/r127/downloads")
+          out=Path("/tmp/r127/unpacked")
+          ev=Path("/tmp/r127/evidence")
+          out.mkdir(parents=True,exist_ok=True)
+
+          queue=[(p,0,p.parent.name) for p in src.rglob("*") if p.is_file()]
+          seen=set()
+          records=[]
+          total=0
+          max_total=2*1024*1024*1024
+
+          while queue:
+              p,depth,label=queue.pop(0)
+              if depth>3 or not p.exists():
+                  continue
+              data=p.read_bytes()
+              h=hashlib.sha256(data).hexdigest()
+              if h in seen:
+                  continue
+              seen.add(h)
+
+              try:
+                  test=subprocess.run(["7z","t",str(p)],capture_output=True,text=True,timeout=60)
+              except Exception:
+                  continue
+              if test.returncode!=0:
+                  continue
+
+              dest=out/f"{label}_d{depth}_{h[:12]}"
+              dest.mkdir(parents=True,exist_ok=True)
+              cp=subprocess.run(["7z","x","-y",f"-o{dest}",str(p)],
+                                capture_output=True,text=True,timeout=180)
+              files=[q for q in dest.rglob("*") if q.is_file()]
+              added=sum(q.stat().st_size for q in files)
+              total+=added
+              records.append({
+                  "source":str(p),
+                  "source_sha256":h,
+                  "depth":depth,
+                  "extract_rc":cp.returncode,
+                  "file_count":len(files),
+                  "added_bytes":added
+              })
+              if total>max_total:
+                  records.append({"stop":"max_total_extracted_bytes","total":total})
+                  break
+              for q in files:
+                  if q.stat().st_size<=512*1024*1024:
+                      queue.append((q,depth+1,label))
+
+          ev.joinpath("R127_ARCHIVE_EXTRACTION.json").write_text(
+              json.dumps(records,indent=2,ensure_ascii=False)+"\n"
+          )
+          PY
+
+      - name: Inventory extracted interesting files and PE metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import re,json,hashlib,subprocess,pefile
+
+          root=Path("/tmp/r127/unpacked")
+          ev=Path("/tmp/r127/evidence")
+          key=re.compile(
+              r'MV_AP82|BP10|BP1048|PCTool|PC_Tool|PCTools|V2\.2|8P100|MVA|'
+              r'flashboot|firmware|upgrade|READSN|PCTools_Config|BT_InfoConfig|'
+              r'Upgrade Finished|HidD_SetFeature|HidD_GetFeature|'
+              r'chiperas|codedata|bootdat|constdat|cnfgdat|btupdat|upinfo',
+              re.I
+          )
+
+          interesting=[]
+          pes=[]
+
+          for p in sorted(root.rglob("*")):
+              if not p.is_file():
+                  continue
+              data=p.read_bytes()
+              try:
+                  typ=subprocess.check_output(["file","-b",str(p)],text=True).strip()
+              except Exception:
+                  typ=""
+              strings=[m.group(0).decode("latin1","replace")
+                       for m in re.finditer(rb"[\x20-\x7e]{5,}",data)]
+              hits=[s[:1200] for s in strings if key.search(s)][:2000]
+              if key.search(p.name) or hits or p.suffix.lower() in (
+                  ".exe",".dll",".mva",".bin",".hex",".elf",".axf",".map",".cfg",".ini"
+              ):
+                  interesting.append({
+                      "path":str(p.relative_to(root)),
+                      "size":len(data),
+                      "sha256":hashlib.sha256(data).hexdigest(),
+                      "file_type":typ,
+                      "keyword_string_hits":hits
+                  })
+              try:
+                  pe=pefile.PE(str(p),fast_load=False)
+              except Exception:
+                  continue
+              imports=[]
+              if hasattr(pe,"DIRECTORY_ENTRY_IMPORT"):
+                  for ent in pe.DIRECTORY_ENTRY_IMPORT:
+                      dll=ent.dll.decode(errors="replace")
+                      names=[]
+                      for imp in ent.imports:
+                          names.append(imp.name.decode(errors="replace")
+                                       if imp.name else f"ord:{imp.ordinal}")
+                      imports.append({"dll":dll,"imports":names})
+              pes.append({
+                  "path":str(p.relative_to(root)),
+                  "size":p.stat().st_size,
+                  "sha256":hashlib.sha256(data).hexdigest(),
+                  "machine":hex(pe.FILE_HEADER.Machine),
+                  "timestamp":int(pe.FILE_HEADER.TimeDateStamp),
+                  "entrypoint_rva":hex(pe.OPTIONAL_HEADER.AddressOfEntryPoint),
+                  "imagebase":hex(pe.OPTIONAL_HEADER.ImageBase),
+                  "imports":imports
+              })
+
+          ev.joinpath("R127_EXTRACTED_INTERESTING_FILES.json").write_text(
+              json.dumps(interesting,indent=2,ensure_ascii=False)+"\n"
+          )
+          ev.joinpath("R127_PE_METADATA.json").write_text(
+              json.dumps(pes,indent=2,ensure_ascii=False)+"\n"
+          )
+          PY
+
+      - name: Build static acquisition decision
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import json,re
+
+          ev=Path("/tmp/r127/evidence")
+          def load(n,d):
+              try: return json.loads((ev/n).read_text())
+              except Exception: return d
+
+          links=load("R127_PUBLIC_LINKS.json",[])
+          dl=load("R127_DOWNLOAD_RESULTS.json",[])
+          val=load("R127_DOWNLOAD_VALIDATION.json",[])
+          inv=load("R127_STATIC_INVENTORY.json",[])
+          ext=load("R127_EXTRACTED_INTERESTING_FILES.json",[])
+          pe=load("R127_PE_METADATA.json",[])
+
+          all_hits=[]
+          for x in inv+ext:
+              blob=(x.get("path","")+" "+" ".join(x.get("keyword_string_hits",[]))).lower()
+              all_hits.append((x,blob))
+
+          pctools=[x for x,blob in all_hits
+                   if re.search(r'mv_ap82|bp10|bp1048|pctool|8p100|pctools_config|flashboot',blob,re.I)]
+          mva=[x for x,blob in all_hits
+               if x.get("path","").lower().endswith(".mva") or re.search(r'\bmva\b',blob,re.I)]
+          updater=[x for x,blob in all_hits
+                   if re.search(r'upgrade finished|firmware|flashboot|bootloader|codedata|chiperas',blob,re.I)]
+          hid=[x for x,blob in all_hits
+               if re.search(r'hidd_setfeature|hidd_getfeature|hidd_setoutputreport',blob,re.I)]
+
+          successful=[x for x in dl if x.get("success") and x.get("files")]
+          non_html=[x for x in val if not x.get("html_like")]
+
+          d={
+              "EXACT_PUBLIC_LINK_COUNT":len(links),
+              "SUCCESSFUL_GOOGLE_DRIVE_DOWNLOAD_COUNT":len(successful),
+              "NON_HTML_ACQUIRED_FILE_COUNT":len(non_html),
+              "PCTOOLS_SIGNAL_FILE_COUNT":len(pctools),
+              "MVA_SIGNAL_FILE_COUNT":len(mva),
+              "UPDATER_SIGNAL_FILE_COUNT":len(updater),
+              "HID_SIGNAL_FILE_COUNT":len(hid),
+              "PE_FILE_COUNT":len(pe),
+
+              "PCTOOLS_SIGNAL_FILES":pctools[:100],
+              "MVA_SIGNAL_FILES":mva[:100],
+              "UPDATER_SIGNAL_FILES":updater[:100],
+              "HID_SIGNAL_FILES":hid[:100],
+              "PE_FILES":pe[:100],
+
+              "R126_DOWNLOAD_FAILURE_ROOT_CAUSE":"R126 passed an obsolete --fuzzy option to gdown; R127 removes it and uses exact Drive IDs.",
+
+              "VENDOR_BINARY_EXECUTED":False,
+              "USB_DEVICE_ACCESSED":False,
+              "BOARD_CONTACTED":False,
+              "PRODUCTION_BOOTSTRAP_BRIDGE_PROVEN":False,
+              "PRODUCTION_FLASHBOOT_REENUMERATION_PROVEN":False,
+              "PRODUCTION_RECOVERY_USB_IDENTITY_PROVEN":False,
+              "SAFE_READ_ONLY_STOCK_BACKUP_PROVEN":False,
+              "ANY_DISCOVERED_WRITE_AUTHORIZED_FOR_BOARD":False,
+
+              "NEXT":(
+                  "If PCTools/updater/MVA signals are recovered, pin exact hashes and deep-static reverse those artifacts only. "
+                  "If these are only tuning/Bluetooth-name utilities, close them and continue searching for MV_AP82xx_BP10xx_PC_Tools V2.2.x or a production firmware/update package."
+              ),
+              "FLASH_ALLOWED":False
+          }
+
+          ev.joinpath("R127_DECISION.json").write_text(
+              json.dumps(d,indent=2,ensure_ascii=False)+"\n"
+          )
+          ev.joinpath("R127_REPORT_TH.md").write_text(
+              "# R127 — exact Google Drive DSP tools acquisition\n\n"
+              "```json\n"+json.dumps(d,indent=2,ensure_ascii=False)+"\n```\n\n"
+              "All acquired files were treated as inert data only. No vendor executable was launched and no hardware was contacted.\n\n"
+              "FLASH_ALLOWED=NO\n"
+          )
+          print(json.dumps(d,indent=2,ensure_ascii=False))
+          PY
+
+      - name: Package acquired public files if any
+        shell: bash
+        run: |
+          set -euo pipefail
+          if find /tmp/r127/downloads -type f -print -quit | grep -q .; then
+            cd /tmp/r127/downloads
+            zip -9 -r /tmp/R127_ACQUIRED_PUBLIC_FILES.zip .
+            sha256sum /tmp/R127_ACQUIRED_PUBLIC_FILES.zip \
+              > /tmp/R127_ACQUIRED_PUBLIC_FILES.zip.sha256
+          else
+            echo "NO_FILES_ACQUIRED" > /tmp/R127_NO_FILES_ACQUIRED.txt
+          fi
+
+      - name: Package evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /tmp/r127/evidence
+          zip -9 -r /tmp/R127_EXACT_GOOGLE_DRIVE_ACQUISITION_EVIDENCE.zip .
+          sha256sum /tmp/R127_EXACT_GOOGLE_DRIVE_ACQUISITION_EVIDENCE.zip \
+            > /tmp/R127_EXACT_GOOGLE_DRIVE_ACQUISITION_EVIDENCE.zip.sha256
+
+      - name: Upload evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: R127-EXACT-GOOGLE-DRIVE-ACQUISITION-EVIDENCE
+          path: |
+            /tmp/R127_EXACT_GOOGLE_DRIVE_ACQUISITION_EVIDENCE.zip
+            /tmp/R127_EXACT_GOOGLE_DRIVE_ACQUISITION_EVIDENCE.zip.sha256
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Upload acquired public files
+        uses: actions/upload-artifact@v4
+        with:
+          name: R127-ACQUIRED-PUBLIC-FILES
+          path: |
+            /tmp/R127_ACQUIRED_PUBLIC_FILES.zip
+            /tmp/R127_ACQUIRED_PUBLIC_FILES.zip.sha256
+            /tmp/R127_NO_FILES_ACQUIRED.txt
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Final fail-closed gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -F 'R127_VENDOR_BINARY_EXECUTED=NO' /tmp/r127/evidence/R127_SAFETY.txt
+          grep -F 'R127_USB_DEVICE_ACCESS=NO' /tmp/r127/evidence/R127_SAFETY.txt
+          grep -F 'R127_AA55_SENT=NO' /tmp/r127/evidence/R127_SAFETY.txt
+          grep -F 'R127_RUNTIME_0X11_SENT=NO' /tmp/r127/evidence/R127_SAFETY.txt
+          grep -F '"FLASH_ALLOWED": false' /tmp/r127/evidence/R127_DECISION.json
+          echo R127_STATIC_ACQUISITION_COMPLETE=YES
+          echo FLASH_ALLOWED=NO
