@@ -1,0 +1,453 @@
+name: R119 BP1048 exact AA55 Feature-report bootstrap correlation static audit
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - ".github/workflows/R119_BP1048_AA55_FEATURE_BOOTSTRAP_CORRELATION_STATIC_AUDIT.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: r119-bp1048-aa55-feature-bootstrap-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  SDK_REPO: "leadercxn/bp1048_sdk_v0.1.12"
+  SDK_COMMIT: "8105bd864b04995d81c9f9ae77cb158259f39015"
+  FLASH_ALLOWED: "NO"
+
+jobs:
+  static-audit:
+    name: STATIC ONLY - correlate exact SDK bridge with existing production evidence
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: Immutable safety gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/r119/sdk /tmp/r119/evidence
+          cat > /tmp/r119/evidence/R119_SAFETY.txt <<'EOF'
+          R119_MODE=STATIC_CORRELATION_ONLY
+          R119_VENDOR_FIRMWARE_EXECUTED=NO
+          R119_USB_DEVICE_ACCESS=NO
+          R119_BOARD_CONTACT=NO
+          R119_AA55_RETEST=NO
+          R119_RUNTIME_0X11_SENT=NO
+          R119_FLASHBOOT_COMMAND_SENT=NO
+          R119_FLASH_READ_EXECUTED=NO
+          R119_FLASH_ERASE_EXECUTED=NO
+          R119_FLASH_WRITE_EXECUTED=NO
+          R119_ANY_DISCOVERED_FRAME_AUTHORIZED_FOR_BOARD=NO
+          FINAL_REQUIRED_TRANSPORT=SAMSUNG_S25_PLUS_USB_C_DIRECT_TO_DSP_USB_C
+          HARDWARE_MODIFICATION=FORBIDDEN
+          FLASH_ALLOWED=NO
+          EOF
+
+      - name: Install static tooling
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+            curl unzip jq >/dev/null
+
+      - name: Acquire exact SDK source
+        shell: bash
+        run: |
+          set -euo pipefail
+          URL="https://codeload.github.com/${SDK_REPO}/zip/${SDK_COMMIT}"
+          curl --fail --location --retry 5 --retry-all-errors \
+            "$URL" -o /tmp/r119/sdk.zip
+          unzip -q /tmp/r119/sdk.zip -d /tmp/r119/sdk
+          ROOT="$(find /tmp/r119/sdk -mindepth 1 -maxdepth 1 -type d -print -quit)"
+          test -n "$ROOT"
+          echo "$ROOT" > /tmp/r119/sdk_root.txt
+          {
+            echo "SDK_REPO=$SDK_REPO"
+            echo "SDK_COMMIT=$SDK_COMMIT"
+            echo "SDK_ZIP_SHA256=$(sha256sum /tmp/r119/sdk.zip | awk '{print $1}')"
+          } > /tmp/r119/evidence/R119_SDK_PIN.txt
+
+      - name: Record existing production live evidence without contacting board
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > /tmp/r119/evidence/R119_PRODUCTION_EXISTING_EVIDENCE.json <<'EOF'
+          {
+            "source": "previously captured live-board evidence supplied by project owner; no hardware access in R119",
+            "runtime_vid_pid": "6324:1719",
+            "android_usb_interface_observations": [
+              "IF0 class=1 sub=1 proto=0 ep=0",
+              "IF1 class=1 sub=2 proto=0 alt/basic ep=0",
+              "IF1 class=1 sub=2 proto=0 streaming ep=0x05 type=iso max=192",
+              "IF2 class=1 sub=2 proto=0 alt/basic ep=0",
+              "IF2 class=1 sub=2 proto=0 streaming ep=0x84 type=iso max=192",
+              "IF3 class=3 sub=0 proto=0 ep=0x81 type=interrupt max=64",
+              "IF4 class=3 sub=0 proto=0 ep=0"
+            ],
+            "if4_feature_before_hex": "00 01 00 03 04 00 08 00",
+            "if4_feature_after_set_aa_then_get_hex": "55 01 00 03 04 00 08 00",
+            "aa_to_55_latch_observed": true,
+            "reenumeration_observed_after_existing_aa55_test": false,
+            "repeat_aa55_test_required": false
+          }
+          EOF
+
+      - name: Extract exact HID data descriptor and AUDIO_MIC interface layout
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import re,json
+
+          root=Path(Path("/tmp/r119/sdk_root.txt").read_text().strip())
+          p=root/"MVsB1_Base_SDK"/"driver"/"driver_api"/"src"/"otg"/"device"/"otg_device_descriptor.h"
+          t=p.read_text(errors="replace")
+
+          def extract_block(start_pat):
+              m=re.search(start_pat,t,re.M)
+              if not m: return ""
+              start=m.start()
+              b=t.find("{",m.start())
+              if b<0: return ""
+              depth=0
+              for i in range(b,len(t)):
+                  if t[i]=="{": depth+=1
+                  elif t[i]=="}":
+                      depth-=1
+                      if depth==0:
+                          semi=t.find(";",i)
+                          return t[start:(semi+1 if semi>=0 else i+1)]
+              return ""
+
+          hid=extract_block(r'const\s+uint8_t\s+HidDataReportDescriptor\[\]\s*=')
+          am=extract_block(r'const\s+uint8_t\s+ConfigDescriptor_Tab\(AUDIO_MIC\)\[\]\s*=')
+
+          iface=re.search(
+              r'const\s+uint8_t\s+InterFaceNum_Tab\(AUDIO_MIC\)\[\]\s*=\s*\{([^}]*)\}',
+              t,re.M
+          )
+
+          Path("/tmp/r119/evidence/R119_HID_DATA_REPORT_DESCRIPTOR.txt").write_text(hid+"\n")
+          Path("/tmp/r119/evidence/R119_AUDIO_MIC_CONFIG_DESCRIPTOR.txt").write_text(am+"\n")
+          Path("/tmp/r119/evidence/R119_AUDIO_MIC_INTERFACE_MAP.txt").write_text(
+              (iface.group(0) if iface else "NOT_FOUND")+"\n"
+          )
+
+          low=hid.lower()
+          facts={
+              "HID_DATA_REPORT_DESCRIPTOR_FOUND":bool(hid),
+              "HID_DATA_USAGE_PAGE_VENDOR_FF00":"0x06, 0x00, 0xff" in low,
+              "HID_DATA_USAGE_AA55":"0x0a, 0xaa, 0x55" in low,
+              "HID_INPUT_REPORT_COUNT_256":"0x96, 0x00, 0x01" in low and "0x81, 0x02" in low,
+              "HID_OUTPUT_REPORT_COUNT_256":"0x96, 0x00, 0x01" in low and "0x91, 0x02" in low,
+              "HID_FEATURE_REPORT_COUNT_8":"0x95, 0x08" in low and "0xb1, 0x02" in low,
+              "AUDIO_MIC_IF_MAP":iface.group(1).strip() if iface else None,
+              "AUDIO_MIC_HAS_HID_CTL_IF3":bool(re.search(r'0x09\s*,\s*0x04\s*,\s*0x03[\s\S]{0,80}0x03',am,re.I)),
+              "AUDIO_MIC_HAS_HID_DATA_IF4_NO_ENDPOINT":bool(
+                  re.search(r'0x09\s*,\s*0x04\s*,\s*0x04\s*,\s*0x00\s*,\s*0x00\s*,\s*0x03',am,re.I)
+              )
+          }
+          Path("/tmp/r119/evidence/R119_DESCRIPTOR_FACTS.json").write_text(
+              json.dumps(facts,indent=2,ensure_ascii=False)+"\n"
+          )
+          print(json.dumps(facts,indent=2))
+          PY
+
+      - name: Extract exact SetReport AA and GetReport 55 bootstrap bridge
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import re,json
+
+          root=Path(Path("/tmp/r119/sdk_root.txt").read_text().strip())
+          p=root/"MVsB1_Base_SDK"/"driver"/"driver_api"/"src"/"otg"/"device"/"otg_device_standard_request.c"
+          t=p.read_text(errors="replace")
+
+          m=re.search(r'void\s+OTG_DeviceClassRequest\s*\(\s*\)\s*\{',t)
+          if not m:
+              raise SystemExit("OTG_DeviceClassRequest not found")
+          b=t.find("{",m.start())
+          depth=0
+          end=None
+          for i in range(b,len(t)):
+              if t[i]=="{": depth+=1
+              elif t[i]=="}":
+                  depth-=1
+                  if depth==0:
+                      end=i+1
+                      break
+          body=t[m.start():end]
+          Path("/tmp/r119/evidence/R119_OTG_DeviceClassRequest.txt").write_text(body+"\n")
+
+          facts={
+              "CLASS_HANDLER_FOUND":True,
+              "HID_DATA_INTERFACE_BRANCH":"HID_DATA_INTERFACE_NUM" in body,
+              "GET_FEATURE_REQUEST_MATCH":bool(re.search(
+                  r'Setup\s*\[\s*3\s*\]\s*==\s*0x03[\s\S]{0,120}Setup\s*\[\s*0\s*\]\s*==\s*0xA1',
+                  body,re.I
+              )),
+              "SET_FEATURE_REQUEST_MATCH":bool(re.search(
+                  r'Setup\s*\[\s*3\s*\]\s*==\s*0x03[\s\S]{0,120}Setup\s*\[\s*0\s*\]\s*==\s*0x21',
+                  body,re.I
+              )),
+              "SET_FEATURE_AA_SETS_PC_UPGRADE":bool(re.search(
+                  r'Request\s*\[\s*0\s*\]\s*==\s*0xAA[\s\S]{0,250}pc_upgrade\s*=\s*1',
+                  body,re.I
+              )),
+              "SET_FEATURE_55_CONDITIONAL_SETS_PC_UPGRADE":bool(re.search(
+                  r'Request\s*\[\s*0\s*\]\s*==\s*0x55[\s\S]{0,500}pc_upgrade\s*=\s*1',
+                  body,re.I
+              )),
+              "GET_FEATURE_WHEN_PC_UPGRADE_RETURNS_55":bool(re.search(
+                  r'if\s*\(\s*pc_upgrade\s*\)[\s\S]{0,300}Setup\s*\[\s*0\s*\]\s*=\s*0x55',
+                  body,re.I
+              )),
+              "GET_FEATURE_THEN_CALLS_USB_BOOTSTRAP":bool(re.search(
+                  r'if\s*\(\s*pc_upgrade\s*\)[\s\S]{0,500}start_up_grate\s*\(\s*AppResourceUsbDevice\s*\)',
+                  body,re.I
+              )),
+              "BOOTSTRAP_CALL_COMPILETIME_GUARDED_BY_FLASH_BOOT_EN":bool(re.search(
+                  r'#if\s+FLASH_BOOT_EN[\s\S]{0,180}start_up_grate\s*\(\s*AppResourceUsbDevice\s*\)',
+                  body,re.I
+              )),
+              "GET_FEATURE_NO_PC_UPGRADE_RETURNS_ZERO":bool(re.search(
+                  r'else[\s\S]{0,180}Setup\s*\[\s*0\s*\]\s*=\s*0\s*;[\s\S]{0,120}OTG_DeviceControlSend',
+                  body,re.I
+              ))
+          }
+          Path("/tmp/r119/evidence/R119_AA55_BRIDGE_FACTS.json").write_text(
+              json.dumps(facts,indent=2,ensure_ascii=False)+"\n"
+          )
+          print(json.dumps(facts,indent=2))
+          PY
+
+      - name: Extract start_up_grate and USB resource registration
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import re,json
+
+          root=Path(Path("/tmp/r119/sdk_root.txt").read_text().strip())
+          up=(root/"BT_Audio_APP"/"bt_audio_app_src"/"device"/"upgrade.c").read_text(errors="replace")
+          ds=(root/"BT_Audio_APP"/"bt_audio_app_src"/"services"/"device_service.c").read_text(errors="replace")
+          ms=(root/"BT_Audio_APP"/"bt_audio_app_src"/"apps"/"mode_switch_api.c").read_text(errors="replace")
+
+          def extract_func(text,name):
+              m=re.search(r'(?m)^[ \t]*[A-Za-z_][\w \t\*]*\b'+re.escape(name)+r'\s*\([^;]*\)\s*\{',text)
+              if not m: return ""
+              b=text.find("{",m.start()); depth=0
+              for i in range(b,len(text)):
+                  if text[i]=="{": depth+=1
+                  elif text[i]=="}":
+                      depth-=1
+                      if depth==0: return text[m.start():i+1]
+              return ""
+
+          start=extract_func(up,"start_up_grate")
+          resource=extract_func(ms,"ResourceValue")
+          Path("/tmp/r119/evidence/R119_start_up_grate.txt").write_text(start+"\n")
+          Path("/tmp/r119/evidence/R119_ResourceValue.txt").write_text(resource+"\n")
+
+          facts={
+              "USB_RESOURCE_REGISTERED_ON_LINK":"ResourceRegister(AppResourceUsbDevice)" in ds,
+              "USB_RESOURCE_DEREGISTERED_ON_UNLINK":"ResourceDeregister(AppResourceUsbDevice)" in ds,
+              "RESOURCEVALUE_USES_READY_BITMASK":"ModeResourceReady & Resources" in resource,
+              "START_UP_GRATE_USB_BRANCH_FOUND":"AppResourceUsbDevice" in start,
+              "START_UP_GRATE_USB_BRANCH_SETS_PC_FLAG":bool(re.search(
+                  r'AppResourceUsbDevice[\s\S]{0,500}\.PC\s*=\s*1',start
+              )),
+              "START_UP_GRATE_USB_BRANCH_SETS_UPDATE_FLAG":bool(re.search(
+                  r'AppResourceUsbDevice[\s\S]{0,700}\.updata\s*=\s*1',start
+              )),
+              "START_UP_GRATE_JUMPS_VECTOR_ZERO":bool(re.search(
+                  r'jump_fun\s*=\s*\(\s*fun\s*\)\s*0[\s\S]{0,1800}jump_fun\s*\(\s*\)',
+                  start
+              ))
+          }
+          Path("/tmp/r119/evidence/R119_RESOURCE_BOOT_FACTS.json").write_text(
+              json.dumps(facts,indent=2,ensure_ascii=False)+"\n"
+          )
+          print(json.dumps(facts,indent=2))
+          PY
+
+      - name: Correct 0x11 classification with exact destructive function text
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import re,json
+
+          root=Path(Path("/tmp/r119/sdk_root.txt").read_text().strip())
+          t=(root/"BT_Audio_APP"/"bt_audio_app_src"/"audio"/"communication.c").read_text(errors="replace")
+
+          start=t.find("uint8_t MV_UserWriteData(void)")
+          if start < 0:
+              raise SystemExit("MV_UserWriteData definition not found")
+          b=t.find("{",start); depth=0; end=None
+          for i in range(b,len(t)):
+              if t[i]=="{": depth+=1
+              elif t[i]=="}":
+                  depth-=1
+                  if depth==0:
+                      end=i+1; break
+          body=t[start:end]
+          Path("/tmp/r119/evidence/R119_MV_UserWriteData.txt").write_text(body+"\n")
+
+          d={
+              "MV_USER_WRITE_DATA_HAS_FLASH_READ":"SpiFlashRead" in body,
+              "MV_USER_WRITE_DATA_HAS_FLASH_ERASE":"SpiFlashErase" in body,
+              "MV_USER_WRITE_DATA_HAS_FLASH_WRITE":"SpiFlashWrite" in body,
+              "CONTROL_0X11_WRITE_IS_DESTRUCTIVE":all(x in body for x in ["SpiFlashRead","SpiFlashErase","SpiFlashWrite"])
+          }
+          Path("/tmp/r119/evidence/R119_0X11_CORRECTION.json").write_text(
+              json.dumps(d,indent=2)+"\n"
+          )
+          PY
+
+      - name: Correlate reference bridge with production evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import json
+
+          ev=Path("/tmp/r119/evidence")
+          prod=json.loads((ev/"R119_PRODUCTION_EXISTING_EVIDENCE.json").read_text())
+          desc=json.loads((ev/"R119_DESCRIPTOR_FACTS.json").read_text())
+          bridge=json.loads((ev/"R119_AA55_BRIDGE_FACTS.json").read_text())
+          boot=json.loads((ev/"R119_RESOURCE_BOOT_FACTS.json").read_text())
+          u11=json.loads((ev/"R119_0X11_CORRECTION.json").read_text())
+
+          descriptor_correlates=all([
+              desc["HID_FEATURE_REPORT_COUNT_8"],
+              desc["AUDIO_MIC_HAS_HID_CTL_IF3"],
+              desc["AUDIO_MIC_HAS_HID_DATA_IF4_NO_ENDPOINT"],
+              desc["HID_DATA_USAGE_AA55"]
+          ])
+
+          aa55_semantics_correlate=all([
+              prod["aa_to_55_latch_observed"],
+              bridge["SET_FEATURE_AA_SETS_PC_UPGRADE"],
+              bridge["GET_FEATURE_WHEN_PC_UPGRADE_RETURNS_55"],
+              bridge["GET_FEATURE_THEN_CALLS_USB_BOOTSTRAP"]
+          ])
+
+          d={
+              "REFERENCE_SDK_DESCRIPTOR_CORRELATES_WITH_PRODUCTION_USB_TOPOLOGY":descriptor_correlates,
+              "REFERENCE_SDK_HID_DATA_FEATURE_LENGTH":8,
+              "REFERENCE_SDK_HID_DATA_LOGICAL_INTERFACE":4,
+              "PRODUCTION_HID_NO_ENDPOINT_LOGICAL_INTERFACE":4,
+
+              "REFERENCE_AA55_BOOTSTRAP_HANDSHAKE_RECOVERED":True,
+              "REFERENCE_SET_FEATURE_AA_MEANING":"set pc_upgrade=1 unconditionally",
+              "REFERENCE_NEXT_GET_FEATURE_MEANING":"return first byte 0x55; when FLASH_BOOT_EN is compiled, call start_up_grate(AppResourceUsbDevice)",
+              "REFERENCE_USB_RESOURCE_IS_REGISTERED_WHILE_DEVICE_LINK_PRESENT":boot["USB_RESOURCE_REGISTERED_ON_LINK"],
+
+              "PRODUCTION_EXISTING_AA_TO_55_MATCHES_REFERENCE_PREBOOT_HANDSHAKE":aa55_semantics_correlate,
+              "PRODUCTION_EXISTING_TEST_REENUMERATED":prod["reenumeration_observed_after_existing_aa55_test"],
+
+              "IMPORTANT_LIMITATION":"Production returned the reference-style 0x55 latch but did not re-enumerate. This does not prove that the production build executes start_up_grate or enters flashboot.",
+              "POSSIBLE_UNPROVEN_EXPLANATIONS":[
+                  "FLASH_BOOT_EN may be disabled or compiled differently in production.",
+                  "Production OTG class-request code may preserve AA->55 acknowledgement but omit/modify the start_up_grate call.",
+                  "Production resource/state gating may differ from the reference build.",
+                  "Production flashboot/re-enumeration behavior may differ."
+              ],
+
+              "R118_FALSE_NEGATIVE_FIXED":u11["CONTROL_0X11_WRITE_IS_DESTRUCTIVE"],
+              "CONTROL_0X11_LIVE_USE_ALLOWED":False,
+              "AA55_REPEAT_REQUIRED":False,
+              "AA55_REPEAT_ALLOWED":False,
+
+              "REFERENCE_BOOTSTRAP_BRIDGE_PROVEN":True,
+              "PRODUCTION_BOOTSTRAP_BRIDGE_PROVEN":False,
+              "PRODUCTION_FLASHBOOT_REENUMERATION_PROVEN":False,
+              "PRODUCTION_RECOVERY_USB_IDENTITY_PROVEN":False,
+              "SAFE_READ_ONLY_STOCK_BACKUP_PROVEN":False,
+
+              "NEXT":"Do not repeat AA55. Offline-reverse production firmware/updater evidence to determine whether the production IF4 Feature handler contains the same pc_upgrade -> 0x55 -> start_up_grate(AppResourceUsbDevice) call and whether FLASH_BOOT_EN/equivalent is enabled. Only after that should recovery identity and read-only backup be pursued.",
+              "FLASH_ALLOWED":False
+          }
+
+          (ev/"R119_DECISION.json").write_text(
+              json.dumps(d,indent=2,ensure_ascii=False)+"\n"
+          )
+
+          report=[
+              "# R119 — exact AA55 Feature-report bootstrap correlation",
+              "",
+              "## What is now proven in the reference BP1048 SDK",
+              "",
+              "- HID data report descriptor has 256-byte Input, 256-byte Output, and 8-byte Feature report.",
+              "- AUDIO_MIC maps HID control to IF3 and HID data/no-endpoint interface to IF4.",
+              "- SetReport(Feature) with first byte AA sets pc_upgrade=1.",
+              "- Next GetReport(Feature) returns first byte 55.",
+              "- Under FLASH_BOOT_EN, that GetReport path calls start_up_grate(AppResourceUsbDevice).",
+              "- start_up_grate sets PC/update boot flags and jumps to address 0.",
+              "",
+              "## Production correlation",
+              "",
+              "- Existing production IF4 topology and 8-byte Feature behavior strongly match the reference layout.",
+              "- Existing production AA -> 55 latch matches the reference pre-bootstrap handshake.",
+              "- But the existing production test did not re-enumerate, so production bootstrap execution is still NOT proven.",
+              "",
+              "No AA55 retest is required or authorized.",
+              "",
+              "FLASH_ALLOWED=NO"
+          ]
+          (ev/"R119_REPORT_TH.md").write_text("\n".join(report)+"\n")
+          print(json.dumps(d,indent=2,ensure_ascii=False))
+          PY
+
+      - name: Fail-closed assertions
+        shell: bash
+        run: |
+          set -euo pipefail
+          D=/tmp/r119/evidence/R119_DECISION.json
+          grep -F '"REFERENCE_AA55_BOOTSTRAP_HANDSHAKE_RECOVERED": true' "$D"
+          grep -F '"PRODUCTION_EXISTING_AA_TO_55_MATCHES_REFERENCE_PREBOOT_HANDSHAKE": true' "$D"
+          grep -F '"PRODUCTION_BOOTSTRAP_BRIDGE_PROVEN": false' "$D"
+          grep -F '"AA55_REPEAT_ALLOWED": false' "$D"
+          grep -F '"FLASH_ALLOWED": false' "$D"
+
+      - name: Package evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /tmp/r119/evidence
+          zip -9 -r /tmp/R119_BP1048_AA55_FEATURE_BOOTSTRAP_CORRELATION_EVIDENCE.zip .
+          sha256sum /tmp/R119_BP1048_AA55_FEATURE_BOOTSTRAP_CORRELATION_EVIDENCE.zip \
+            > /tmp/R119_BP1048_AA55_FEATURE_BOOTSTRAP_CORRELATION_EVIDENCE.zip.sha256
+
+      - name: Upload evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: R119-BP1048-AA55-FEATURE-BOOTSTRAP-CORRELATION-EVIDENCE
+          path: |
+            /tmp/R119_BP1048_AA55_FEATURE_BOOTSTRAP_CORRELATION_EVIDENCE.zip
+            /tmp/R119_BP1048_AA55_FEATURE_BOOTSTRAP_CORRELATION_EVIDENCE.zip.sha256
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Final safety gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -F 'R119_USB_DEVICE_ACCESS=NO' /tmp/r119/evidence/R119_SAFETY.txt
+          grep -F 'R119_AA55_RETEST=NO' /tmp/r119/evidence/R119_SAFETY.txt
+          grep -F 'R119_RUNTIME_0X11_SENT=NO' /tmp/r119/evidence/R119_SAFETY.txt
+          grep -F 'R119_ANY_DISCOVERED_FRAME_AUTHORIZED_FOR_BOARD=NO' /tmp/r119/evidence/R119_SAFETY.txt
+          echo R119_STATIC_CORRELATION_COMPLETE=YES
+          echo FLASH_ALLOWED=NO
