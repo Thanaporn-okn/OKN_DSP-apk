@@ -1,0 +1,310 @@
+name: R136 exact ACPWorkbench recovery backup update static audit
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - ".github/workflows/R136_EXACT_ACPWORKBENCH_RECOVERY_BACKUP_UPDATE_STATIC_AUDIT.yml"
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: r136-acpworkbench-recovery-backup-update-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  FLASH_ALLOWED: "NO"
+  R127_RUN_ID: "35865759674"
+  R127_ACQUIRED_ARTIFACT_NAME: "R127-ACQUIRED-PUBLIC-FILES"
+  R127_INNER_ZIP_SHA256: "d217dff170352179ee3d6a70b8e3a58b98b41ef2d365a4551daff4124ce21be6"
+  DSP_ALT_RAR_SHA256: "8e692b4cf7779f2edb0ad47209fa46204717848568dd4572846cb75294cae2b3"
+  R135_RUN_ID: "35896143080"
+  R135_JOB_ID: "107300426475"
+  R135_EVIDENCE_ARTIFACT_ID: "10767406850"
+  R135_EVIDENCE_ARTIFACT_NAME: "R135-EXACT-PCTOOLS-EXTENDONE-METADISPATCH-PROVENANCE-STATIC-EVIDENCE"
+  R135_EVIDENCE_DIGEST: "sha256:92ffad01dcdf34489bff3a0ba6a8fd46c1c163f4e990c534292f77cb9df4548e"
+  PROD_VID_HEX: "18B4"
+  PROD_PID_HEX: "06B7"
+
+jobs:
+  static_audit:
+    name: STATIC ONLY - ACPWorkbench recovery backup update audit - no execution - no USB - no board
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Immutable safety gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/r136/input /tmp/r136/acquired /tmp/r136/dsp /tmp/r136/r135 /tmp/r136/evidence /tmp/r136/text
+          cat > /tmp/r136/evidence/R136_SAFETY.txt <<'EOF'
+          R136_MODE=OFFLINE_STATIC_ACPWORKBENCH_RECOVERY_BACKUP_UPDATE_AUDIT
+          R136_VENDOR_BINARY_EXECUTED=NO
+          R136_INSTALLER_EXECUTED=NO
+          R136_USB_DEVICE_ACCESS=NO
+          R136_BOARD_CONTACT=NO
+          R136_AA55_SENT=NO
+          R136_RUNTIME_0X11_SENT=NO
+          R136_RUNTIME_0XFE_SENT=NO
+          R136_FLASHBOOT_COMMAND_SENT=NO
+          R136_FLASH_READ_EXECUTED=NO
+          R136_FLASH_ERASE_EXECUTED=NO
+          R136_FLASH_WRITE_EXECUTED=NO
+          R136_ANY_DISCOVERED_FRAME_AUTHORIZED_FOR_BOARD=NO
+          HARDWARE_MODIFICATION=FORBIDDEN
+          REFERENCE_OR_TOOL_EVIDENCE_IS_NOT_PRODUCTION_PROOF=YES
+          FLASH_ALLOWED=NO
+          EOF
+
+      - name: Download pinned R127 acquired files as inert data
+        uses: actions/download-artifact@v4
+        with:
+          name: R127-ACQUIRED-PUBLIC-FILES
+          path: /tmp/r136/input
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          repository: Thanaporn-okn/OKN_DSP-apk
+          run-id: 35865759674
+
+      - name: Download pinned R135 evidence for continuity only
+        uses: actions/download-artifact@v4
+        with:
+          name: R135-EXACT-PCTOOLS-EXTENDONE-METADISPATCH-PROVENANCE-STATIC-EVIDENCE
+          path: /tmp/r136/r135
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          repository: Thanaporn-okn/OKN_DSP-apk
+          run-id: 35896143080
+
+      - name: Install static tooling only
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+            file unzip p7zip-full poppler-utils binutils python3-pip >/dev/null
+          python3 -m pip install --disable-pip-version-check --no-input pefile capstone >/dev/null
+
+      - name: Verify pinned package and extract inert DSP package
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /tmp/r136/input
+          test -f R127_ACQUIRED_PUBLIC_FILES.zip
+          echo "${R127_INNER_ZIP_SHA256}  R127_ACQUIRED_PUBLIC_FILES.zip" | sha256sum -c -
+          unzip -q R127_ACQUIRED_PUBLIC_FILES.zip -d /tmp/r136/acquired
+          DSP_RAR="$(find /tmp/r136/acquired/DSP_SOFTWARE_ALTERNATE -maxdepth 2 -type f -name '*.rar' -print -quit)"
+          test -n "$DSP_RAR"
+          echo "${DSP_ALT_RAR_SHA256}  ${DSP_RAR}" | sha256sum -c -
+          7z x -y -o/tmp/r136/dsp "$DSP_RAR" >/tmp/r136/evidence/R136_7Z_DSP_EXTRACT.txt
+          find /tmp/r136/dsp -type f -printf '%P\t%s\n' | sort > /tmp/r136/evidence/R136_DSP_FILE_LIST.tsv
+          find /tmp/r136/dsp -type f -print0 | sort -z | xargs -0 sha256sum > /tmp/r136/evidence/R136_DSP_FILE_SHA256.txt
+          find /tmp/r136/r135 -maxdepth 1 -type f -printf '%f\n' | sort > /tmp/r136/evidence/R136_R135_ARTIFACT_FILES.txt
+
+      - name: Extract text from manuals configs changelog and XML
+        shell: bash
+        run: |
+          set -euo pipefail
+          while IFS= read -r -d '' f; do
+            rel="${f#/tmp/r136/dsp/}"
+            safe="$(printf '%s' "$rel" | tr '/ ' '__' | tr -cd '[:alnum:]_.-')"
+            case "${f,,}" in
+              *.pdf)
+                pdftotext -layout "$f" "/tmp/r136/text/${safe}.txt" || true
+                ;;
+              *.ini|*.txt|*/changelog|*.xml)
+                cp "$f" "/tmp/r136/text/${safe}.txt" || true
+                ;;
+            esac
+          done < <(find /tmp/r136/dsp -type f -print0)
+          find /tmp/r136/text -type f -printf '%f\t%s\n' | sort > /tmp/r136/evidence/R136_TEXT_FILE_LIST.tsv
+
+      - name: Static scan package semantics production identity and PE imports
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import json,re,hashlib,struct
+          import pefile
+          from capstone import Cs,CS_ARCH_X86,CS_MODE_32
+          from capstone.x86 import X86_OP_IMM
+
+          root=Path('/tmp/r136/dsp')
+          textroot=Path('/tmp/r136/text')
+          ev=Path('/tmp/r136/evidence')
+          PROD_VID=0x18B4; PROD_PID=0x06B7
+          prod_tokens=[r'18b4',r'06b7',r'6324',r'1719',r'vid[_ :=-]*18b4',r'pid[_ :=-]*06b7']
+          backup_terms=re.compile(r'backup|back\s*up|read\s*back|readback|dump|save\s+firmware|read\s+firmware|export.*firmware|flash.*read|read.*flash|rom.*read|recover|recovery|restore',re.I)
+          update_terms=re.compile(r'update|upgrade|firmware|flash|boot|download|program|burn|erase|online\s*update|onlineupdata',re.I)
+          identify_terms=re.compile(r'vid|pid|usb|hid|device|serial|\bsn\b|version|chip|product|vendor',re.I)
+          destructive_terms=re.compile(r'erase|program|burn|write\s*flash|flash\s*write|upgrade|update|download\s*firmware',re.I)
+
+          text_hits=[]
+          for p in sorted(textroot.glob('*')):
+              try: raw=p.read_bytes()
+              except Exception: continue
+              for enc in ('utf-8','utf-16le','latin1'):
+                  try: txt=raw.decode(enc,'ignore')
+                  except Exception: continue
+                  if not txt.strip(): continue
+                  lines=txt.splitlines()
+                  for i,line in enumerate(lines,1):
+                      low=line.lower()
+                      kinds=[]
+                      if backup_terms.search(line): kinds.append('backup_recovery')
+                      if update_terms.search(line): kinds.append('update_firmware')
+                      if identify_terms.search(line): kinds.append('identity_usb')
+                      if any(re.search(t,low,re.I) for t in prod_tokens): kinds.append('production_id_text')
+                      if kinds:
+                          text_hits.append({'file':p.name,'line':i,'encoding':enc,'kinds':kinds,'text':line[:700]})
+                  break
+
+          pe_rows=[]
+          import_interest=re.compile(r'hid|setupapi|cfgmgr|winusb|usb|serial|createfile|readfile|writefile|deviceio|internet|winhttp|wininet',re.I)
+          for p in sorted(root.rglob('*.exe'))+sorted(root.rglob('*.dll')):
+              row={'file':str(p.relative_to(root)),'size':p.stat().st_size,'sha256':hashlib.sha256(p.read_bytes()).hexdigest()}
+              data=p.read_bytes()
+              row['ascii_prod_hits']={t:len(re.findall(t,data.decode('latin1','ignore'),re.I)) for t in prod_tokens}
+              row['raw_u16_vid_count']=sum(1 for i in range(len(data)-1) if data[i:i+2]==struct.pack('<H',PROD_VID))
+              row['raw_u16_pid_count']=sum(1 for i in range(len(data)-1) if data[i:i+2]==struct.pack('<H',PROD_PID))
+              row['imports']=[]; row['interesting_strings']=[]; row['exact_code_immediates']=[]; row['pe_parse_ok']=False
+              try:
+                  pe=pefile.PE(str(p),fast_load=False); row['pe_parse_ok']=True
+                  for e in getattr(pe,'DIRECTORY_ENTRY_IMPORT',[]):
+                      dll=(e.dll or b'').decode('latin1','replace')
+                      for imp in e.imports:
+                          name=imp.name.decode('latin1','replace') if imp.name else f'ord:{imp.ordinal}'
+                          if import_interest.search(dll) or import_interest.search(name):
+                              row['imports'].append({'dll':dll,'name':name,'iat':hex(imp.address)})
+                  ib=pe.OPTIONAL_HEADER.ImageBase
+                  mode=CS_MODE_32 if pe.FILE_HEADER.Machine==0x14c else None
+                  if mode:
+                      md=Cs(CS_ARCH_X86,mode); md.detail=True
+                      for sec in pe.sections:
+                          if sec.Characteristics & 0x20000000:
+                              for ins in md.disasm(sec.get_data(),ib+sec.VirtualAddress):
+                                  for op in ins.operands:
+                                      if op.type==X86_OP_IMM and (op.imm & 0xffffffff) in {PROD_VID,PROD_PID}:
+                                          row['exact_code_immediates'].append({'va':hex(ins.address),'value':hex(op.imm & 0xffffffff),'instruction':f'{ins.mnemonic} {ins.op_str}'})
+              except Exception as e:
+                  row['pe_error']=type(e).__name__+': '+str(e)[:200]
+              # strings from bytes only; never execute file
+              vals=[]
+              for m in re.finditer(rb'[\x20-\x7e]{5,}',data):
+                  s=m.group().decode('latin1','replace')
+                  if backup_terms.search(s) or update_terms.search(s) or identify_terms.search(s): vals.append(s[:500])
+              for m in re.finditer(rb'(?:[\x20-\x7e]\x00){5,}',data):
+                  s=m.group().decode('utf-16le','replace')
+                  if backup_terms.search(s) or update_terms.search(s) or identify_terms.search(s): vals.append(s[:500])
+              row['interesting_strings']=list(dict.fromkeys(vals))[:500]
+              pe_rows.append(row)
+
+          # Separate positive evidence from mere generic/tool evidence.
+          production_text=[h for h in text_hits if 'production_id_text' in h['kinds']]
+          backup_text=[h for h in text_hits if 'backup_recovery' in h['kinds']]
+          pe_prod=[{'file':r['file'],'exact_code_immediates':r['exact_code_immediates'],'ascii_prod_hits':r['ascii_prod_hits']} for r in pe_rows if r['exact_code_immediates'] or any(r['ascii_prod_hits'].values())]
+          pe_usb=[{'file':r['file'],'imports':r['imports']} for r in pe_rows if r['imports']]
+          out={
+              'production_runtime_vid':'0x18B4','production_runtime_pid':'0x06B7',
+              'text_semantic_hits':text_hits,
+              'production_identity_text_hits':production_text,
+              'backup_recovery_text_hits':backup_text,
+              'pe_static_rows':pe_rows,
+              'pe_production_identity_hits':pe_prod,
+              'pe_usb_io_import_hits':pe_usb,
+          }
+          (ev/'R136_ACPWORKBENCH_STATIC_AUDIT.json').write_text(json.dumps(out,indent=2,ensure_ascii=False)+'\n')
+          PY
+
+      - name: Build fail-closed R136 decision and report
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import json,re
+          ev=Path('/tmp/r136/evidence')
+          d=json.loads((ev/'R136_ACPWORKBENCH_STATIC_AUDIT.json').read_text())
+          prodtxt=d['production_identity_text_hits']
+          back=d['backup_recovery_text_hits']
+          perows=d['pe_static_rows']
+          exact=[]
+          for r in perows:
+              for x in r.get('exact_code_immediates',[]): exact.append({'file':r['file'],**x})
+          usb=d['pe_usb_io_import_hits']
+          acp=next((r for r in perows if r['file'].lower().endswith('acpworkbench.exe')),None)
+          decision={
+            'R135_RUN_ID':35896143080,
+            'R135_JOB_ID':107300426475,
+            'R135_EVIDENCE_ARTIFACT_ID':10767406850,
+            'DSP_ALT_RAR_SHA256':'8e692b4cf7779f2edb0ad47209fa46204717848568dd4572846cb75294cae2b3',
+            'PRODUCTION_RUNTIME_VID':'0x18B4','PRODUCTION_RUNTIME_PID':'0x06B7',
+            'PACKAGE_TEXT_PRODUCTION_ID_HIT_COUNT':len(prodtxt),
+            'PACKAGE_BACKUP_RECOVERY_TEXT_HIT_COUNT':len(back),
+            'PE_EXACT_PRODUCTION_ID_CODE_IMMEDIATE_HIT_COUNT':len(exact),
+            'PE_EXACT_PRODUCTION_ID_CODE_IMMEDIATE_HITS':exact[:100],
+            'PE_FILES_WITH_USB_IO_IMPORT_EVIDENCE':[x['file'] for x in usb],
+            'ACPWORKBENCH_PE_PARSE_OK':bool(acp and acp.get('pe_parse_ok')),
+            'ACPWORKBENCH_INTERESTING_IMPORT_COUNT':len(acp.get('imports',[])) if acp else 0,
+            'IMPORTANT_INTERPRETATION':'Offline package/manual/config/PE evidence only. Generic backup/update words, USB imports, or numerical ID hits do not prove compatibility with the production board and do not authorize any transfer.',
+            'ACPWORKBENCH_PRODUCTION_18B4_06B7_LINKAGE_PROVEN':False,
+            'SAFE_READ_ONLY_STOCK_BACKUP_PROVEN':False,
+            'PRODUCTION_BOOTSTRAP_BRIDGE_PROVEN':False,
+            'PRODUCTION_RECOVERY_USB_IDENTITY_PROVEN':False,
+            'ANY_DISCOVERED_FRAME_AUTHORIZED_FOR_BOARD':False,
+            'AA55_LIVE_RETEST_ALLOWED':False,
+            'RUNTIME_0X11_ALLOWED':False,
+            'RUNTIME_0XFE_ALLOWED':False,
+            'VENDOR_BINARY_EXECUTED':False,
+            'USB_DEVICE_ACCESSED':False,
+            'BOARD_CONTACTED':False,
+            'FLASH_ALLOWED':False,
+            'NEXT':'If manuals/configs or exact code immediates reveal a production-specific 0x18B4:0x06B7 read-back/recovery path, isolate its static control flow and file format only. Otherwise close ACPWorkbench as unproven for production recovery and pivot to firmware/update artifact acquisition. No live transmission is authorized.'
+          }
+          (ev/'R136_DECISION.json').write_text(json.dumps(decision,indent=2,ensure_ascii=False)+'\n')
+          report=[
+            '# R136 ACPWorkbench recovery/backup/update static audit','',
+            f'- text production-ID hits: {len(prodtxt)}',
+            f'- backup/recovery semantic hits: {len(back)}',
+            f'- exact production VID/PID code-immediate hits: {len(exact)}',
+            f'- PE files with USB/I/O-related imports: {len(usb)}',
+            f'- ACPWorkbench PE parse OK: {decision["ACPWORKBENCH_PE_PARSE_OK"]}','',
+            '## Safety','- Offline static only.','- No acquired EXE/DLL executed.','- No USB/board access.',
+            '- AA55 / 0x11 / 0xFE / erase / program / flash remain blocked.','- FLASH_ALLOWED=NO']
+          (ev/'R136_REPORT_TH.md').write_text('\n'.join(report)+'\n')
+          print(json.dumps(decision,indent=2,ensure_ascii=False))
+          PY
+
+      - name: Package R136 evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /tmp/r136/evidence
+          zip -9 -r /tmp/R136_EXACT_ACPWORKBENCH_RECOVERY_BACKUP_UPDATE_STATIC_EVIDENCE.zip . >/dev/null
+          sha256sum /tmp/R136_EXACT_ACPWORKBENCH_RECOVERY_BACKUP_UPDATE_STATIC_EVIDENCE.zip > /tmp/R136_EXACT_ACPWORKBENCH_RECOVERY_BACKUP_UPDATE_STATIC_EVIDENCE.zip.sha256
+
+      - name: Upload R136 evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: R136-EXACT-ACPWORKBENCH-RECOVERY-BACKUP-UPDATE-STATIC-EVIDENCE
+          path: |
+            /tmp/R136_EXACT_ACPWORKBENCH_RECOVERY_BACKUP_UPDATE_STATIC_EVIDENCE.zip
+            /tmp/R136_EXACT_ACPWORKBENCH_RECOVERY_BACKUP_UPDATE_STATIC_EVIDENCE.zip.sha256
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Final fail-closed gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -F 'R136_VENDOR_BINARY_EXECUTED=NO' /tmp/r136/evidence/R136_SAFETY.txt
+          grep -F 'R136_USB_DEVICE_ACCESS=NO' /tmp/r136/evidence/R136_SAFETY.txt
+          grep -F 'R136_BOARD_CONTACT=NO' /tmp/r136/evidence/R136_SAFETY.txt
+          grep -F 'R136_AA55_SENT=NO' /tmp/r136/evidence/R136_SAFETY.txt
+          grep -F 'R136_RUNTIME_0X11_SENT=NO' /tmp/r136/evidence/R136_SAFETY.txt
+          grep -F 'R136_RUNTIME_0XFE_SENT=NO' /tmp/r136/evidence/R136_SAFETY.txt
+          grep -F '"FLASH_ALLOWED": false' /tmp/r136/evidence/R136_DECISION.json
+          echo R136_STATIC_AUDIT_COMPLETE=YES
+          echo FLASH_ALLOWED=NO
