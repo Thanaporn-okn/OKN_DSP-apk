@@ -1,0 +1,485 @@
+name: R113 FIX GoloPine Android residual OTA and ID field closure static audit
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - ".github/workflows/R113_GOLOPINE_ANDROID_OTA_IDFIELD_CLOSURE_STATIC_AUDIT_FIXED.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: r113-golopine-android-ota-idfield-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  NEW_ANDROID_URL: "https://golodsp.com/wp-content/uploads/2026/05/golopine_audio_turning_release_2026-04-01.apk_.zip"
+  EXPECTED_NEW_ZIP_SHA256: "974f74fa99420875e64f50a9763f33f3b67a726755f8bfccd4549f944958d319"
+  EXPECTED_NEW_APK_SHA256: "6c2d977f66609b3217f1bd72460aacb299f841bc654bf39f4d209132ca92907c"
+  EXPECTED_LIBAPP_SHA256: "0342b22df07abc0806efee64af3bb7815471d03a2351732fa6146944ddf502e8"
+  FLASH_ALLOWED: "NO"
+
+jobs:
+  static-audit:
+    name: STATIC ONLY - close vendorId productId and OTA residuals - no hardware
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+
+    steps:
+      - name: Immutable safety gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/r113/input /tmp/r113/pkg /tmp/r113/apk /tmp/r113/evidence
+          cat > /tmp/r113/evidence/R113_SAFETY.txt <<'EOF'
+          R113_MODE=STATIC_OFFLINE_ONLY
+          R113_APK_EXECUTED=NO
+          R113_NATIVE_LIB_EXECUTED=NO
+          R113_USB_DEVICE_ACCESS=NO
+          R113_BOARD_CONTACT=NO
+          R113_BLE_CONNECTION=NO
+          R113_AA55_SENT=NO
+          R113_RUNTIME_0X11_SENT=NO
+          R113_FLASH_READ_EXECUTED=NO
+          R113_FLASH_ERASE_EXECUTED=NO
+          R113_FLASH_WRITE_EXECUTED=NO
+          R113_ANY_DISCOVERED_WRITE_AUTHORIZED_FOR_BOARD=NO
+          FINAL_REQUIRED_TRANSPORT=SAMSUNG_S25_PLUS_USB_C_DIRECT_TO_DSP_USB_C
+          HARDWARE_MODIFICATION=FORBIDDEN
+          FLASH_ALLOWED=NO
+          EOF
+
+      - name: Install static tooling
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+            file unzip p7zip-full binutils jq python3-pip >/dev/null
+          python3 -m pip install --disable-pip-version-check --no-input \
+            androguard pyelftools capstone >/dev/null
+
+      - name: Acquire exact latest official APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 5 --retry-all-errors \
+            "$NEW_ANDROID_URL" -o /tmp/r113/input/new.zip
+          test "$(sha256sum /tmp/r113/input/new.zip | awk '{print $1}')" = "$EXPECTED_NEW_ZIP_SHA256"
+          7z x -y /tmp/r113/input/new.zip -o/tmp/r113/pkg >/dev/null
+
+          APK="$(find /tmp/r113/pkg -type f -iname '*.apk' -print -quit)"
+          test -n "$APK"
+          test "$(sha256sum "$APK" | awk '{print $1}')" = "$EXPECTED_NEW_APK_SHA256"
+          cp "$APK" /tmp/r113/input/golopine.apk
+          unzip -q /tmp/r113/input/golopine.apk -d /tmp/r113/apk
+
+          test -f /tmp/r113/apk/lib/arm64-v8a/libapp.so
+          test "$(sha256sum /tmp/r113/apk/lib/arm64-v8a/libapp.so | awk '{print $1}')" = "$EXPECTED_LIBAPP_SHA256"
+
+          {
+            echo "ZIP_SHA256=$EXPECTED_NEW_ZIP_SHA256"
+            echo "APK_SHA256=$EXPECTED_NEW_APK_SHA256"
+            echo "LIBAPP_SHA256=$EXPECTED_LIBAPP_SHA256"
+            echo "PIN_MATCH=YES"
+          } > /tmp/r113/evidence/R113_BINARY_PIN.txt
+
+      - name: Reconfirm manifest and exact Android USB APIs
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          from androguard.core.apk import APK
+          from androguard.core.dex import DEX
+          import zipfile,re,json
+
+          apk="/tmp/r113/input/golopine.apk"
+          a=APK(apk)
+          permissions=sorted(a.get_permissions())
+          features=sorted(str(x) for x in a.get_features())
+
+          targets=[
+              "Landroid/hardware/usb/UsbManager;",
+              "Landroid/hardware/usb/UsbDevice;",
+              "Landroid/hardware/usb/UsbDeviceConnection;",
+              "Landroid/hardware/usb/UsbInterface;",
+              "Landroid/hardware/usb/UsbEndpoint;",
+              "controlTransfer","bulkTransfer","requestWait",
+              "USB_DEVICE_ATTACHED","USB_DEVICE_DETACHED",
+          ]
+          hits={t:[] for t in targets}
+          with zipfile.ZipFile(apk) as z:
+              for dn in sorted(n for n in z.namelist() if re.fullmatch(r"classes\d*\.dex",n)):
+                  d=DEX(z.read(dn))
+                  corpus=[str(s) for s in d.get_strings()]
+                  for c in d.get_classes():
+                      cn=c.get_name()
+                      for m in c.get_methods():
+                          corpus.append(f"{cn}->{m.get_name()}{m.get_descriptor()}")
+                  for t in targets:
+                      vals=[x[:800] for x in corpus if t in x]
+                      if vals: hits[t].extend(vals[:100])
+
+          out={
+              "package":a.get_package(),
+              "version_name":a.get_androidversion_name(),
+              "bluetooth_permissions":[x for x in permissions if "BLUETOOTH" in x],
+              "usb_host_feature":any("usb.host" in x.lower() for x in features),
+              "exact_usb_api_hits":hits,
+              "exact_usb_api_hit_count":sum(len(v) for v in hits.values()),
+          }
+          Path("/tmp/r113/evidence/R113_ANDROID_USB_RECHECK.json").write_text(
+              json.dumps(out,indent=2,ensure_ascii=False)+"\n"
+          )
+          PY
+
+      - name: Exact string neighborhoods for residual strong tokens
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import re,json
+
+          p=Path("/tmp/r113/apk/lib/arm64-v8a/libapp.so")
+          b=p.read_bytes()
+          strings=[(m.start(),m.group(0).decode("latin1","replace"))
+                   for m in re.finditer(rb"[\x20-\x7e]{4,}",b)]
+
+          targets=[
+              "vendorId",
+              "productId",
+              "_Ota@97055485",
+              "0000ab00-0000-1000-8000-00805f9b34fb",
+              "0000ab01-0000-1000-8000-00805f9b34fb",
+              "0000ab02-0000-1000-8000-00805f9b34fb",
+              "0000ab03-0000-1000-8000-00805f9b34fb",
+              "CurDeviceDescriptionLength=",
+              "Read FIFO Sensor sent ID=",
+          ]
+
+          out={}
+          for t in targets:
+              idxs=[i for i,(_,s) in enumerate(strings) if t in s]
+              wins=[]
+              for i in idxs:
+                  lo=max(0,i-60); hi=min(len(strings),i+61)
+                  wins.append({
+                      "target_offset":strings[i][0],
+                      "target_string":strings[i][1],
+                      "neighbors":[{"offset":o,"text":s[:700]} for o,s in strings[lo:hi]]
+                  })
+              out[t]=wins
+
+          Path("/tmp/r113/evidence/R113_TARGET_STRING_NEIGHBORHOODS.json").write_text(
+              json.dumps(out,indent=2,ensure_ascii=False)+"\n"
+          )
+          PY
+
+      - name: Enumerate every OTA update firmware and payload-related string
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import re,json
+
+          p=Path("/tmp/r113/apk/lib/arm64-v8a/libapp.so")
+          b=p.read_bytes()
+          strings=[(m.start(),m.group(0).decode("latin1","replace"))
+                   for m in re.finditer(rb"[\x20-\x7e]{4,}",b)]
+
+          pats={
+              "ota":re.compile(r"ota",re.I),
+              "firmware":re.compile(r"firmware",re.I),
+              "updater":re.compile(r"update|upgrade|updater|download",re.I),
+              "boot_recovery":re.compile(r"bootloader|recovery|dfu",re.I),
+              "flash":re.compile(r"flash|erase|program",re.I),
+              "payload_ext":re.compile(r"\.(bin|hex|mva|fw|img|dfu)\b",re.I),
+              "network":re.compile(r"https?://|\.zip\b|\.apk\b",re.I),
+          }
+
+          out={}
+          for name,pat in pats.items():
+              hits=[]
+              for i,(off,s) in enumerate(strings):
+                  if not pat.search(s): continue
+                  lo=max(0,i-15); hi=min(len(strings),i+16)
+                  hits.append({
+                      "offset":off,
+                      "text":s[:1000],
+                      "neighbors":[{"offset":o,"text":q[:500]} for o,q in strings[lo:hi]]
+                  })
+              out[name]=hits[:1000]
+
+          Path("/tmp/r113/evidence/R113_UPDATE_FAMILY_STRINGS.json").write_text(
+              json.dumps(out,indent=2,ensure_ascii=False)+"\n"
+          )
+          PY
+
+      - name: Inventory possible firmware payload files in APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import hashlib,json,re
+
+          root=Path("/tmp/r113/apk")
+          ext=re.compile(r"\.(bin|hex|mva|fw|img|dfu|dat|zip)$",re.I)
+          keywords=re.compile(r"firmware|boot|recovery|ota|upgrade|update|flash",re.I)
+          rows=[]
+          for p in sorted(root.rglob("*")):
+              if not p.is_file(): continue
+              rel=str(p.relative_to(root))
+              if ext.search(rel) or keywords.search(rel):
+                  b=p.read_bytes()
+                  rows.append({
+                      "path":rel,
+                      "size":len(b),
+                      "sha256":hashlib.sha256(b).hexdigest(),
+                  })
+
+          Path("/tmp/r113/evidence/R113_POSSIBLE_FIRMWARE_PAYLOADS.json").write_text(
+              json.dumps(rows,indent=2,ensure_ascii=False)+"\n"
+          )
+          PY
+
+      - name: ARM64 direct xref attempt to target strings
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import json,re
+          from elftools.elf.elffile import ELFFile
+          from capstone import Cs,CS_ARCH_ARM64,CS_MODE_ARM
+          from capstone.arm64 import ARM64_OP_IMM
+
+          path=Path("/tmp/r113/apk/lib/arm64-v8a/libapp.so")
+          b=path.read_bytes()
+
+          targets=[
+              "vendorId","productId","_Ota@97055485",
+              "0000ab00-0000-1000-8000-00805f9b34fb",
+              "0000ab01-0000-1000-8000-00805f9b34fb",
+              "0000ab02-0000-1000-8000-00805f9b34fb",
+          ]
+
+          with path.open("rb") as f:
+              elf=ELFFile(f)
+              loads=[]
+              exec_ranges=[]
+              for seg in elf.iter_segments():
+                  if seg["p_type"]!="PT_LOAD": continue
+                  loads.append({
+                      "off":int(seg["p_offset"]),
+                      "filesz":int(seg["p_filesz"]),
+                      "vaddr":int(seg["p_vaddr"]),
+                      "flags":int(seg["p_flags"]),
+                  })
+                  if int(seg["p_flags"]) & 1:
+                      exec_ranges.append((int(seg["p_offset"]),int(seg["p_filesz"]),int(seg["p_vaddr"])))
+
+          def off_to_va(off):
+              for s in loads:
+                  if s["off"] <= off < s["off"]+s["filesz"]:
+                      return s["vaddr"] + (off-s["off"])
+              return None
+
+          target_rows=[]
+          for t in targets:
+              start=0
+              while True:
+                  off=b.find(t.encode(),start)
+                  if off<0: break
+                  target_rows.append({"token":t,"file_offset":off,"va":off_to_va(off)})
+                  start=off+1
+
+          # Direct ARM64 reference heuristic:
+          # - ADR with exact target VA
+          # - ADRP target page followed within 8 instructions by ADD immediate matching page offset
+          md=Cs(CS_ARCH_ARM64,CS_MODE_ARM)
+          md.detail=True
+          xrefs=[]
+          target_by_va={r["va"]:r for r in target_rows if r["va"] is not None}
+          target_pages={}
+          for va,r in target_by_va.items():
+              target_pages.setdefault(va & ~0xfff,[]).append((va,r))
+
+          for off,sz,baseva in exec_ranges:
+              code=b[off:off+sz]
+              ins=list(md.disasm(code,baseva))
+              for i,x in enumerate(ins):
+                  if x.mnemonic=="adr" and x.operands and x.operands[-1].type==ARM64_OP_IMM:
+                      dst=x.operands[-1].imm
+                      if dst in target_by_va:
+                          xrefs.append({
+                              "target":target_by_va[dst],
+                              "kind":"ADR",
+                              "instruction_va":x.address,
+                              "instruction":f"{x.mnemonic} {x.op_str}",
+                          })
+                  if x.mnemonic=="adrp" and x.operands and x.operands[-1].type==ARM64_OP_IMM:
+                      page=x.operands[-1].imm & ~0xfff
+                      if page not in target_pages: continue
+                      rd=x.reg_name(x.operands[0].reg) if x.operands else ""
+                      for y in ins[i+1:i+9]:
+                          if y.mnemonic!="add" or len(y.operands)<3: continue
+                          dstreg=y.reg_name(y.operands[0].reg)
+                          srcreg=y.reg_name(y.operands[1].reg)
+                          if dstreg!=rd or srcreg!=rd or y.operands[2].type!=ARM64_OP_IMM:
+                              continue
+                          addr=page + y.operands[2].imm
+                          if addr in target_by_va:
+                              xrefs.append({
+                                  "target":target_by_va[addr],
+                                  "kind":"ADRP_ADD",
+                                  "instruction_va":x.address,
+                                  "instruction":f"{x.mnemonic} {x.op_str} ; {y.mnemonic} {y.op_str}",
+                              })
+
+          Path("/tmp/r113/evidence/R113_ARM64_DIRECT_STRING_XREFS.json").write_text(
+              json.dumps({"targets":target_rows,"xrefs":xrefs},indent=2,ensure_ascii=False)+"\n"
+          )
+          PY
+
+      - name: Classify residual token contexts
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import json,re
+
+          ev=Path("/tmp/r113/evidence")
+          usb=json.loads((ev/"R113_ANDROID_USB_RECHECK.json").read_text())
+          n=json.loads((ev/"R113_TARGET_STRING_NEIGHBORHOODS.json").read_text())
+          u=json.loads((ev/"R113_UPDATE_FAMILY_STRINGS.json").read_text())
+          payload=json.loads((ev/"R113_POSSIBLE_FIRMWARE_PAYLOADS.json").read_text())
+          xr=json.loads((ev/"R113_ARM64_DIRECT_STRING_XREFS.json").read_text())
+
+          usb_terms=re.compile(
+              r"UsbManager|UsbDevice|UsbDeviceConnection|UsbInterface|UsbEndpoint|"
+              r"controlTransfer|bulkTransfer|libusb|hidapi|VID_|PID_|USB_DEVICE_",
+              re.I
+          )
+          update_terms=re.compile(
+              r"firmware|bootloader|recovery|dfu|flash|erase|program|upgrade|"
+              r"\.(bin|hex|mva|fw|img|dfu)\b",
+              re.I
+          )
+          ble_terms=re.compile(
+              r"Bluetooth|remoteId|Characteristic|Descriptor|Service|AB00|AB01|AB02|"
+              r"DeviceDescription|FIFO Sensor|bluetoothConnect|bluetoothScan",
+              re.I
+          )
+
+          def joined(target):
+              wins=n.get(target,[])
+              return "\n".join(
+                  x["text"] for w in wins for x in w["neighbors"]
+              )
+
+          vendor_ctx=joined("vendorId")
+          product_ctx=joined("productId")
+          ota_ctx=joined("_Ota@97055485")
+
+          d={
+              "PINNED_APK_AND_LIBAPP":True,
+              "EXACT_ANDROID_USB_API_HIT_COUNT":usb["exact_usb_api_hit_count"],
+              "USB_HOST_FEATURE_PRESENT":usb["usb_host_feature"],
+              "VENDORID_CONTEXT_HAS_USB_TERMS":bool(usb_terms.search(vendor_ctx)),
+              "PRODUCTID_CONTEXT_HAS_USB_TERMS":bool(usb_terms.search(product_ctx)),
+              "VENDORID_CONTEXT_HAS_BLE_TERMS":bool(ble_terms.search(vendor_ctx)),
+              "PRODUCTID_CONTEXT_HAS_BLE_TERMS":bool(ble_terms.search(product_ctx)),
+              "OTA_CONTEXT_HAS_FIRMWARE_BOOT_FLASH_TERMS":bool(update_terms.search(ota_ctx)),
+              "OTA_TOTAL_STRING_HITS":len(u["ota"]),
+              "FIRMWARE_TOTAL_STRING_HITS":len(u["firmware"]),
+              "BOOT_RECOVERY_TOTAL_STRING_HITS":len(u["boot_recovery"]),
+              "PAYLOAD_EXTENSION_STRING_HITS":len(u["payload_ext"]),
+              "POSSIBLE_FIRMWARE_PAYLOAD_FILE_COUNT":len(payload),
+              "DIRECT_ARM64_XREF_COUNT":len(xr["xrefs"]),
+              "AB00_PRESENT":len(n.get("0000ab00-0000-1000-8000-00805f9b34fb",[]))>0,
+              "AB01_PRESENT":len(n.get("0000ab01-0000-1000-8000-00805f9b34fb",[]))>0,
+              "AB02_PRESENT":len(n.get("0000ab02-0000-1000-8000-00805f9b34fb",[]))>0,
+              "AB03_PRESENT":len(n.get("0000ab03-0000-1000-8000-00805f9b34fb",[]))>0,
+              "DEVICE_DESCRIPTION_MARKER_PRESENT":len(n.get("CurDeviceDescriptionLength=",[]))>0,
+              "FIFO_SENSOR_MARKER_PRESENT":len(n.get("Read FIFO Sensor sent ID=",[]))>0,
+              "OFFICIAL_ANDROID_APP_PROVEN_USB_FIRMWARE_UPDATER":False,
+              "PRODUCTION_USB_BOOT_ENTRY_PROVEN":False,
+              "PRODUCTION_RECOVERY_IDENTITY_PROVEN":False,
+              "SAFE_READ_ONLY_STOCK_BACKUP_PROVEN":False,
+              "ANY_DISCOVERED_WRITE_AUTHORIZED_FOR_BOARD":False,
+              "FLASH_ALLOWED":False,
+          }
+
+          close_ble = (
+              not usb["usb_host_feature"]
+              and usb["exact_usb_api_hit_count"]==0
+              and not d["VENDORID_CONTEXT_HAS_USB_TERMS"]
+              and not d["PRODUCTID_CONTEXT_HAS_USB_TERMS"]
+              and not d["OTA_CONTEXT_HAS_FIRMWARE_BOOT_FLASH_TERMS"]
+              and d["POSSIBLE_FIRMWARE_PAYLOAD_FILE_COUNT"]==0
+              and d["AB00_PRESENT"] and d["AB01_PRESENT"] and d["AB02_PRESENT"]
+          )
+          d["OFFICIAL_ANDROID_CLIENT_CLASSIFICATION"] = (
+              "BLE_RUNTIME_TUNING_CLIENT" if close_ble
+              else "UNRESOLVED_STATIC_RESIDUALS_REMAIN"
+          )
+          d["NEXT"] = (
+              "Close official tuning-client surface and pivot to production-specific factory/updater/image evidence outside tuning clients."
+              if close_ble else
+              "Reverse only the residual OTA/ID contexts reported by this artifact; do not contact the board."
+          )
+
+          (ev/"R113_DECISION.json").write_text(json.dumps(d,indent=2,ensure_ascii=False)+"\n")
+          report=[
+              "# R113 GoloPine Android OTA / ID-field closure",
+              "",
+              "Static/offline only; no APK/native execution and no hardware access.",
+              "",
+              "```json",
+              json.dumps(d,indent=2,ensure_ascii=False),
+              "```",
+              "",
+              "No numeric/string occurrence is accepted as production USB VID/PID or updater evidence without explicit transport context.",
+              "",
+              "FLASH_ALLOWED=NO",
+          ]
+          (ev/"R113_REPORT.md").write_text("\n".join(report)+"\n")
+          print(json.dumps(d,indent=2,ensure_ascii=False))
+          PY
+
+      - name: Package evidence only
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /tmp/r113/evidence
+          zip -9 -r /tmp/R113_GOLOPINE_ANDROID_OTA_IDFIELD_CLOSURE_EVIDENCE.zip .
+          sha256sum /tmp/R113_GOLOPINE_ANDROID_OTA_IDFIELD_CLOSURE_EVIDENCE.zip \
+            > /tmp/R113_GOLOPINE_ANDROID_OTA_IDFIELD_CLOSURE_EVIDENCE.zip.sha256
+
+      - name: Upload evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: R113-GOLOPINE-ANDROID-OTA-IDFIELD-CLOSURE-EVIDENCE
+          path: |
+            /tmp/R113_GOLOPINE_ANDROID_OTA_IDFIELD_CLOSURE_EVIDENCE.zip
+            /tmp/R113_GOLOPINE_ANDROID_OTA_IDFIELD_CLOSURE_EVIDENCE.zip.sha256
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Final fail-closed gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -F 'R113_APK_EXECUTED=NO' /tmp/r113/evidence/R113_SAFETY.txt
+          grep -F 'R113_USB_DEVICE_ACCESS=NO' /tmp/r113/evidence/R113_SAFETY.txt
+          grep -F 'R113_ANY_DISCOVERED_WRITE_AUTHORIZED_FOR_BOARD=NO' /tmp/r113/evidence/R113_SAFETY.txt
+          grep -F '"FLASH_ALLOWED": false' /tmp/r113/evidence/R113_DECISION.json
+          cat /tmp/r113/evidence/R113_DECISION.json
+          echo R113_STATIC_CLOSURE_COMPLETE=YES
+          echo FLASH_ALLOWED=NO
