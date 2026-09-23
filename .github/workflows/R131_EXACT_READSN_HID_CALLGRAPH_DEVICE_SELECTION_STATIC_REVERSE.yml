@@ -1,4 +1,4 @@
-name: R131 exact READSN HID callgraph device-selection static reverse
+name: R131 exact READSN HID callgraph device-selection static reverse FIXED
 
 on:
   workflow_dispatch:
@@ -11,28 +11,28 @@ permissions:
   actions: read
 
 concurrency:
-  group: r131-readsn-hid-callgraph-${{ github.ref }}
+  group: r131-readsn-hid-classification-fixed-${{ github.ref }}
   cancel-in-progress: true
 
 env:
   FLASH_ALLOWED: "NO"
   R127_RUN_ID: "35865759674"
-  R127_ACQUIRED_ARTIFACT_ID: "10751533100"
   R127_ACQUIRED_ARTIFACT_NAME: "R127-ACQUIRED-PUBLIC-FILES"
-  R127_ACQUIRED_ARTIFACT_DIGEST: "sha256:43f60bf724744c488d3c3b0da147666b4091b7d74d3be6ebec6712e4b1b6983a"
   R127_INNER_ZIP_SHA256: "d217dff170352179ee3d6a70b8e3a58b98b41ef2d365a4551daff4124ce21be6"
   BT_NAME_RAR_SHA256: "c6b1fcb4d0e430c86c50e9ddf1007fa110f416c0570888060d693819164eccb8"
   PCTOOLS_SHA256: "0e13801b29070f805869823e6db4ad56d70494b2621fb63c330cea1d69e9ca33"
   UPGRADE_FLASH_SHA256: "bebb887b04fc724e1c459cce15d4395c78df3e098c54f06369ffe78b50aec073"
   R130_RUN_ID: "35881983712"
   R130_JOB_ID: "107252476179"
-  R130_EVIDENCE_ARTIFACT_ID: "10760539531"
   R130_EVIDENCE_ARTIFACT_NAME: "R130-EXACT-PCTOOLS-READONLY-IDENTIFY-RECOVERY-USB-STATIC-EVIDENCE"
+  R130_EVIDENCE_ARTIFACT_ID: "10760539531"
   R130_EVIDENCE_DIGEST: "sha256:58eba111548d6708748769680e9fa58ea5d551cea91fce6e05f75ed2e18c4671"
+  R131_CANCELLED_RUN_ID: "35883252396"
+  R131_CANCELLED_JOB_ID: "107256787901"
 
 jobs:
   static_reverse:
-    name: STATIC ONLY - READSN callgraph and device selection - no execution - no USB - no board
+    name: STATIC ONLY - classify HID reads - no execution - no USB - no board
     runs-on: ubuntu-latest
     timeout-minutes: 45
 
@@ -43,22 +43,17 @@ jobs:
           set -euo pipefail
           mkdir -p /tmp/r131/input /tmp/r131/acquired /tmp/r131/unpacked/bt /tmp/r131/r130 /tmp/r131/evidence
           cat > /tmp/r131/evidence/R131_SAFETY.txt <<'EOF'
-          R131_MODE=OFFLINE_STATIC_REVERSE_ONLY
+          R131_MODE=READSN_HID_CLASSIFICATION_STATIC_ONLY_FIXED_AFTER_TIMEOUT
           R131_VENDOR_BINARY_EXECUTED=NO
-          R131_INSTALLER_EXECUTED=NO
           R131_USB_DEVICE_ACCESS=NO
           R131_BOARD_CONTACT=NO
           R131_AA55_SENT=NO
           R131_RUNTIME_0X11_SENT=NO
           R131_RUNTIME_0XFE_SENT=NO
-          R131_FLASHBOOT_COMMAND_SENT=NO
           R131_FLASH_READ_EXECUTED=NO
           R131_FLASH_ERASE_EXECUTED=NO
           R131_FLASH_WRITE_EXECUTED=NO
           R131_ANY_DISCOVERED_FRAME_AUTHORIZED_FOR_BOARD=NO
-          FINAL_REQUIRED_TRANSPORT=SAMSUNG_S25_PLUS_USB_C_DIRECT_TO_DSP_USB_C
-          HARDWARE_MODIFICATION=FORBIDDEN
-          REFERENCE_OR_TOOL_EVIDENCE_IS_NOT_PRODUCTION_PROOF=YES
           FLASH_ALLOWED=NO
           EOF
 
@@ -71,7 +66,7 @@ jobs:
           repository: Thanaporn-okn/OKN_DSP-apk
           run-id: 35865759674
 
-      - name: Download pinned R130 evidence for continuity
+      - name: Download pinned R130 evidence for continuity only
         uses: actions/download-artifact@v4
         with:
           name: R130-EXACT-PCTOOLS-READONLY-IDENTIFY-RECOVERY-USB-STATIC-EVIDENCE
@@ -80,17 +75,15 @@ jobs:
           repository: Thanaporn-okn/OKN_DSP-apk
           run-id: 35881983712
 
-      - name: Install static analysis tooling only
+      - name: Install static tooling only
         shell: bash
         run: |
           set -euo pipefail
           sudo apt-get update -qq
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
-            file unzip p7zip-full binutils jq python3-pip >/dev/null
-          python3 -m pip install --disable-pip-version-check --no-input \
-            pefile capstone >/dev/null
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq file unzip p7zip-full python3-pip >/dev/null
+          python3 -m pip install --disable-pip-version-check --no-input pefile capstone >/dev/null
 
-      - name: Verify pinned files and extract inert binaries
+      - name: Verify pinned hashes and extract inert files
         shell: bash
         run: |
           set -euo pipefail
@@ -98,12 +91,10 @@ jobs:
           test -f R127_ACQUIRED_PUBLIC_FILES.zip
           echo "${R127_INNER_ZIP_SHA256}  R127_ACQUIRED_PUBLIC_FILES.zip" | sha256sum -c -
           unzip -q R127_ACQUIRED_PUBLIC_FILES.zip -d /tmp/r131/acquired
-
           BT_RAR="$(find /tmp/r131/acquired -type f -name '*.rar' -path '*BT_NAME_TOOL*' -print -quit)"
           test -n "$BT_RAR"
           echo "${BT_NAME_RAR_SHA256}  ${BT_RAR}" | sha256sum -c -
           7z x -y -o/tmp/r131/unpacked/bt "$BT_RAR" >/tmp/r131/evidence/R131_7Z_BT_EXTRACT.txt
-
           PCTOOLS="$(find /tmp/r131/unpacked/bt -type f -name 'MV_AP82xx_BP10xx_PC_Tools_V2.2.8_20210205.exe' -print -quit)"
           UPGRADE="$(find /tmp/r131/unpacked/bt -type f -name 'upgrade_flash.exe' -print -quit)"
           test -n "$PCTOOLS" -a -n "$UPGRADE"
@@ -112,9 +103,7 @@ jobs:
           printf '%s\n' "$PCTOOLS" > /tmp/r131/PCTOOLS_PATH
           printf '%s\n' "$UPGRADE" > /tmp/r131/UPGRADE_PATH
 
-          find /tmp/r131/r130 -maxdepth 1 -type f -printf '%f\n' | sort > /tmp/r131/evidence/R131_R130_ARTIFACT_FILES.txt
-
-      - name: Build exact string xrefs internal callgraph and HID import map
+      - name: Classify every HID read call by nearby write coupling and response checks
         shell: bash
         run: |
           set -euo pipefail
@@ -124,233 +113,93 @@ jobs:
           from capstone import Cs,CS_ARCH_X86,CS_MODE_32
           from capstone.x86 import X86_OP_IMM,X86_OP_MEM
 
-          paths={
-              'pctools':Path(Path('/tmp/r131/PCTOOLS_PATH').read_text().strip()),
-              'upgrade_flash':Path(Path('/tmp/r131/UPGRADE_PATH').read_text().strip()),
+          targets={
+            'pctools':Path(Path('/tmp/r131/PCTOOLS_PATH').read_text().strip()),
+            'upgrade_flash':Path(Path('/tmp/r131/UPGRADE_PATH').read_text().strip()),
           }
-          key_re=re.compile(r'READ\s*SN|READSN|SN\s*Get_Data|codeversion|version|Device Information|Device Info|HID path',re.I)
-          imports_interest={
-              'HidD_GetFeature','HidD_GetInputReport','HidP_GetCaps','HidD_GetPreparsedData',
-              'HidD_SetFeature','HidD_SetOutputReport','ReadFile','WriteFile','CreateFileW','CreateFileA',
-              'SetupDiGetClassDevsW','SetupDiEnumDeviceInfo','SetupDiEnumDeviceInterfaces',
-              'SetupDiGetDeviceInterfaceDetailW','SetupDiGetDeviceRegistryPropertyW','CM_Get_Device_IDW',
-              'HidD_GetHidGuid'
-          }
+          read_names={'HidD_GetFeature','HidD_GetInputReport','HidP_GetCaps'}
+          write_names={'HidD_SetFeature','HidD_SetOutputReport','WriteFile'}
+          danger_re=re.compile(r'chiperas|codedata|bootdat|constdat|cnfgdat|btupdat|upinfo|cxxx|flash|erase|program|mva|upgrade',re.I)
+          ident_re=re.compile(r'readsn|serial|version|identify|device|vid_|pid_|vendor|product|firmware',re.I)
+          all_rows=[]
 
-          allout=[]
-          for label,p in paths.items():
-              data=p.read_bytes(); pe=pefile.PE(str(p),fast_load=False); ib=pe.OPTIONAL_HEADER.ImageBase
-              exec_ranges=[]; ins=[]
-              md=Cs(CS_ARCH_X86,CS_MODE_32); md.detail=True
-              for s in pe.sections:
-                  if s.Characteristics & 0x20000000:
-                      lo=ib+s.VirtualAddress; hi=lo+max(int(s.Misc_VirtualSize),int(s.SizeOfRawData))
-                      exec_ranges.append((lo,hi))
-                      ins.extend(md.disasm(s.get_data(),lo))
-              ins=sorted(ins,key=lambda x:x.address); idx_by_va={x.address:i for i,x in enumerate(ins)}
-              def is_exec(v): return any(a<=v<b for a,b in exec_ranges)
-
-              iat={}
-              for e in getattr(pe,'DIRECTORY_ENTRY_IMPORT',[]):
-                  for imp in e.imports:
-                      if imp.name:
-                          n=imp.name.decode('latin1','replace')
-                          if n in imports_interest: iat[imp.address]=n
-
-              strings=[]
-              pats=[('ascii',rb'[\x20-\x7e]{4,}'),('utf16le',rb'(?:[\x20-\x7e]\x00){4,}')]
-              for enc,pat in pats:
-                  for m in re.finditer(pat,data):
-                      try: s=m.group().decode('latin1' if enc=='ascii' else 'utf-16le','replace')
-                      except Exception: continue
-                      if not key_re.search(s): continue
-                      try: va=ib+pe.get_rva_from_offset(m.start())
-                      except Exception: continue
-                      strings.append({'va':va,'file_offset':m.start(),'encoding':enc,'text':s[:500]})
-              str_by_va={x['va']:x for x in strings}
-
-              direct_targets=set([ib+pe.OPTIONAL_HEADER.AddressOfEntryPoint])
-              calls_by_src=[]
-              refs=[]
-              for i,x in enumerate(ins):
-                  vals=[]
-                  for op in x.operands:
-                      if op.type==X86_OP_IMM: vals.append(op.imm & 0xffffffff)
-                      elif op.type==X86_OP_MEM and op.mem.disp: vals.append(op.mem.disp & 0xffffffff)
-                  if x.mnemonic=='call':
-                      for v in vals:
-                          if is_exec(v): direct_targets.add(v); calls_by_src.append((x.address,v))
-                  for v in vals:
-                      if v in str_by_va: refs.append((i,x.address,v))
-              starts=sorted(direct_targets)
-              def owner_start(va):
-                  prior=[s for s in starts if s<=va]
-                  return prior[-1] if prior else None
-              def owner_end(st):
-                  j=starts.index(st); return starts[j+1] if j+1<len(starts) else max((b for a,b in exec_ranges),default=st)
-
-              funcs={}
-              for st in starts:
-                  en=owner_end(st); direct_imports=[]; children=[]; immed=[]
-                  for x in ins:
-                      if not(st<=x.address<en): continue
-                      vals=[]
-                      for op in x.operands:
-                          if op.type==X86_OP_IMM: vals.append(op.imm & 0xffffffff)
-                          elif op.type==X86_OP_MEM and op.mem.disp: vals.append(op.mem.disp & 0xffffffff)
-                      for v in vals:
-                          if v in iat: direct_imports.append({'va':hex(x.address),'api':iat[v],'instruction':f'{x.mnemonic} {x.op_str}'})
-                      if x.mnemonic=='call':
-                          for v in vals:
-                              if is_exec(v): children.append(v)
-                      if x.mnemonic in {'mov','cmp','push'}:
-                          for op in x.operands:
-                              if op.type==X86_OP_IMM and 0 <= op.imm <= 0xffff:
-                                  immed.append({'va':hex(x.address),'value':int(op.imm),'hex':hex(int(op.imm)),'instruction':f'{x.mnemonic} {x.op_str}'})
-                  funcs[st]={'start':st,'end':en,'direct_imports':direct_imports,'children':sorted(set(children)),'immediates':immed}
-
-              rows=[]
-              for i,iva,sva in refs:
-                  st=owner_start(iva)
-                  if st is None or st not in funcs: continue
-                  f=funcs[st]
-                  visited={st}; frontier=[st]; hops=[]
-                  for depth in range(3):
-                      nxt=[]
-                      for cur in frontier:
-                          cf=funcs.get(cur)
-                          if not cf: continue
-                          for imp in cf['direct_imports']:
-                              hops.append({'depth':depth,'function':hex(cur),**imp})
-                          for ch in cf['children']:
-                              if ch not in visited and ch in funcs:
-                                  visited.add(ch); nxt.append(ch)
-                      frontier=nxt
-                  readapis={'HidD_GetFeature','HidD_GetInputReport','HidP_GetCaps','HidD_GetPreparsedData','ReadFile'}
-                  writeapis={'HidD_SetFeature','HidD_SetOutputReport','WriteFile'}
-                  reached_read=sorted({h['api'] for h in hops if h['api'] in readapis})
-                  reached_write=sorted({h['api'] for h in hops if h['api'] in writeapis})
-                  lo=max(0,i-80); hi=min(len(ins),i+120)
-                  rows.append({
-                      'string':str_by_va[sva],
-                      'xref_instruction_va':hex(iva),
-                      'owner_function_start':hex(st),
-                      'owner_function_end':hex(f['end']),
-                      'reachable_imports_depth_0_to_2':hops,
-                      'reachable_read_apis':reached_read,
-                      'reachable_write_apis':reached_write,
-                      'tool_side_readonly_candidate':bool(reached_read) and not bool(reached_write),
-                      'owner_function_immediates':f['immediates'][:800],
-                      'local_context':[{'va':hex(x.address),'text':f'{x.mnemonic} {x.op_str}'} for x in ins[lo:hi]],
-                  })
-              allout.append({'label':label,'path':str(p),'iat':{hex(k):v for k,v in iat.items()},'string_xref_callgraph':rows})
-
-          Path('/tmp/r131/evidence/R131_READSN_CALLGRAPH.json').write_text(json.dumps(allout,indent=2,ensure_ascii=False)+'\n')
-          PY
-
-      - name: Recover exact HID read report construction contexts
-        shell: bash
-        run: |
-          set -euo pipefail
-          python3 - <<'PY'
-          from pathlib import Path
-          import json,pefile
-          from capstone import Cs,CS_ARCH_X86,CS_MODE_32
-          from capstone.x86 import X86_OP_IMM,X86_OP_MEM
-
-          paths={
-              'pctools':Path(Path('/tmp/r131/PCTOOLS_PATH').read_text().strip()),
-              'upgrade_flash':Path(Path('/tmp/r131/UPGRADE_PATH').read_text().strip()),
-          }
-          wanted={'HidD_GetFeature','HidD_GetInputReport','ReadFile','HidP_GetCaps'}
-          out=[]
-          for label,p in paths.items():
-              pe=pefile.PE(str(p),fast_load=False); ib=pe.OPTIONAL_HEADER.ImageBase
-              iat={}
-              for e in getattr(pe,'DIRECTORY_ENTRY_IMPORT',[]):
-                  for imp in e.imports:
-                      if imp.name:
-                          n=imp.name.decode('latin1','replace')
-                          if n in wanted: iat[imp.address]=n
-              md=Cs(CS_ARCH_X86,CS_MODE_32); md.detail=True
-              ins=[]
-              for s in pe.sections:
-                  if s.Characteristics & 0x20000000: ins.extend(md.disasm(s.get_data(),ib+s.VirtualAddress))
-              ins=sorted(ins,key=lambda x:x.address)
-              calls=[]
-              for i,x in enumerate(ins):
-                  vals=[]
-                  for op in x.operands:
-                      if op.type==X86_OP_IMM: vals.append(op.imm & 0xffffffff)
-                      elif op.type==X86_OP_MEM and op.mem.disp: vals.append(op.mem.disp & 0xffffffff)
-                  names=sorted({iat[v] for v in vals if v in iat})
-                  if not names: continue
-                  lo=max(0,i-100); hi=min(len(ins),i+100)
-                  region=ins[lo:hi]
-                  immed=[]; stack_mem=[]
-                  for y in region:
-                      for op in y.operands:
-                          if op.type==X86_OP_IMM and 0 <= op.imm <= 0xffff:
-                              immed.append({'va':hex(y.address),'value':int(op.imm),'hex':hex(int(op.imm)),'instruction':f'{y.mnemonic} {y.op_str}'})
-                          elif op.type==X86_OP_MEM:
-                              stack_mem.append({'va':hex(y.address),'instruction':f'{y.mnemonic} {y.op_str}'})
-                  calls.append({'call_va':hex(x.address),'apis':names,'nearby_immediates':immed[:500],
-                                'context':[{'va':hex(y.address),'text':f'{y.mnemonic} {y.op_str}'} for y in region]})
-              out.append({'label':label,'read_calls':calls})
-          Path('/tmp/r131/evidence/R131_HID_READ_PACKET_CONTEXTS.json').write_text(json.dumps(out,indent=2)+'\n')
-          PY
-
-      - name: Recover SetupDi and CM device-selection contexts and numeric comparisons
-        shell: bash
-        run: |
-          set -euo pipefail
-          python3 - <<'PY'
-          from pathlib import Path
-          import json,pefile
-          from capstone import Cs,CS_ARCH_X86,CS_MODE_32
-          from capstone.x86 import X86_OP_IMM,X86_OP_MEM
-
-          p=Path(Path('/tmp/r131/PCTOOLS_PATH').read_text().strip())
-          pe=pefile.PE(str(p),fast_load=False); ib=pe.OPTIONAL_HEADER.ImageBase
-          wanted={'SetupDiGetClassDevsW','SetupDiEnumDeviceInfo','SetupDiEnumDeviceInterfaces',
-                  'SetupDiGetDeviceInterfaceDetailW','SetupDiGetDeviceRegistryPropertyW',
-                  'CM_Get_Device_IDW','HidD_GetHidGuid','CreateFileW'}
-          iat={}
-          for e in getattr(pe,'DIRECTORY_ENTRY_IMPORT',[]):
+          for label,p in targets.items():
+            data=p.read_bytes(); pe=pefile.PE(str(p),fast_load=False); ib=pe.OPTIONAL_HEADER.ImageBase
+            iat={}
+            for e in getattr(pe,'DIRECTORY_ENTRY_IMPORT',[]):
               for imp in e.imports:
-                  if imp.name:
-                      n=imp.name.decode('latin1','replace')
-                      if n in wanted: iat[imp.address]=n
-          md=Cs(CS_ARCH_X86,CS_MODE_32); md.detail=True
-          ins=[]
-          for s in pe.sections:
-              if s.Characteristics & 0x20000000: ins.extend(md.disasm(s.get_data(),ib+s.VirtualAddress))
-          ins=sorted(ins,key=lambda x:x.address)
-          contexts=[]
-          for i,x in enumerate(ins):
+                if imp.name:
+                  n=imp.name.decode('latin1','replace')
+                  if n in read_names|write_names:
+                    iat[imp.address]=n
+            strings=[]
+            for m in re.finditer(rb'[\x20-\x7e]{5,}',data):
+              s=m.group().decode('latin1','replace')
+              if danger_re.search(s) or ident_re.search(s):
+                try: va=ib+pe.get_rva_from_offset(m.start())
+                except Exception: continue
+                strings.append((va,s[:300]))
+            for m in re.finditer(rb'(?:[\x20-\x7e]\x00){5,}',data):
+              s=m.group().decode('utf-16le','replace')
+              if danger_re.search(s) or ident_re.search(s):
+                try: va=ib+pe.get_rva_from_offset(m.start())
+                except Exception: continue
+                strings.append((va,s[:300]))
+            strmap=dict(strings)
+            md=Cs(CS_ARCH_X86,CS_MODE_32); md.detail=True
+            ins=[]
+            for sec in pe.sections:
+              if sec.Characteristics & 0x20000000:
+                ins.extend(md.disasm(sec.get_data(),ib+sec.VirtualAddress))
+            ins=sorted(ins,key=lambda x:x.address)
+            calls=[]
+            for idx,x in enumerate(ins):
               vals=[]
               for op in x.operands:
-                  if op.type==X86_OP_IMM: vals.append(op.imm & 0xffffffff)
+                if op.type==X86_OP_IMM: vals.append(op.imm)
+                elif op.type==X86_OP_MEM and op.mem.disp: vals.append(op.mem.disp & 0xffffffff)
+              names=sorted({iat[v] for v in vals if v in iat})
+              if names:
+                calls.append((idx,x,names))
+            for idx,x,names in calls:
+              r=[n for n in names if n in read_names]
+              if not r: continue
+              lo=max(0,idx-160); hi=min(len(ins),idx+161)
+              ctx=ins[lo:hi]
+              nearby_writes=[]; nearby_reads=[]; string_refs=[]; cmps=[]; imm_bytes=[]
+              for j,y in enumerate(ctx):
+                vals=[]
+                for op in y.operands:
+                  if op.type==X86_OP_IMM: vals.append(op.imm)
                   elif op.type==X86_OP_MEM and op.mem.disp: vals.append(op.mem.disp & 0xffffffff)
-              apis=sorted({iat[v] for v in vals if v in iat})
-              if not apis: continue
-              lo=max(0,i-120); hi=min(len(ins),i+220)
-              region=ins[lo:hi]; comps=[]
-              for y in region:
-                  if y.mnemonic in {'cmp','test','mov','push'}:
-                      for op in y.operands:
-                          if op.type==X86_OP_IMM and 0 <= op.imm <= 0xffff:
-                              comps.append({'va':hex(y.address),'value_dec':int(op.imm),'value_hex':hex(int(op.imm)),
-                                            'is_prod_vid':int(op.imm)==0x18b4,'is_prod_pid':int(op.imm)==0x06b7,
-                                            'instruction':f'{y.mnemonic} {y.op_str}'})
-              contexts.append({'call_va':hex(x.address),'apis':apis,'numeric_context':comps[:1000],
-                               'contains_prod_vid':any(c['is_prod_vid'] for c in comps),
-                               'contains_prod_pid':any(c['is_prod_pid'] for c in comps),
-                               'context':[{'va':hex(y.address),'text':f'{y.mnemonic} {y.op_str}'} for y in region]})
-          Path('/tmp/r131/evidence/R131_DEVICE_SELECTION_CONTEXTS.json').write_text(json.dumps({'iat':{hex(k):v for k,v in iat.items()},'contexts':contexts},indent=2)+'\n')
+                ns=sorted({iat[v] for v in vals if v in iat})
+                if any(n in write_names for n in ns):
+                  nearby_writes.append({'va':hex(y.address),'imports':ns,'distance':(lo+j)-idx})
+                if any(n in read_names for n in ns):
+                  nearby_reads.append({'va':hex(y.address),'imports':ns,'distance':(lo+j)-idx})
+                for v in vals:
+                  if v in strmap:
+                    string_refs.append({'va':hex(y.address),'text':strmap[v]})
+                if y.mnemonic in ('cmp','test'):
+                  cmps.append({'va':hex(y.address),'text':f'{y.mnemonic} {y.op_str}'})
+                if y.mnemonic=='mov' and any(op.type==X86_OP_IMM and 0 <= op.imm <= 0xff for op in y.operands):
+                  imm_bytes.append({'va':hex(y.address),'text':f'{y.mnemonic} {y.op_str}'})
+              danger=any(danger_re.search(z['text']) for z in string_refs)
+              ident=any(ident_re.search(z['text']) for z in string_refs)
+              writes_before=[z for z in nearby_writes if -120 <= z['distance'] < 0]
+              writes_after=[z for z in nearby_writes if 0 < z['distance'] <= 120]
+              pure=not writes_before and not writes_after and not danger
+              classification='PURE_READ_CANDIDATE' if pure else ('READ_AFTER_OR_NEAR_WRITE' if (writes_before or writes_after) else 'READ_IN_DANGEROUS_CONTEXT')
+              all_rows.append({
+                'label':label,'call_va':hex(x.address),'read_imports':r,'classification':classification,
+                'nearby_writes':nearby_writes,'nearby_reads':nearby_reads,
+                'identify_string_context':ident,'danger_string_context':danger,
+                'string_refs':string_refs[:80],'response_cmp_context':cmps[:120],'immediate_byte_context':imm_bytes[:120]
+              })
+          Path('/tmp/r131/evidence/R131_HID_READ_CLASSIFICATION.json').write_text(json.dumps(all_rows,indent=2,ensure_ascii=False)+'\n')
           PY
 
-      - name: Build fail-closed R131 decision and report
+      - name: Build fail-closed decision
         shell: bash
         run: |
           set -euo pipefail
@@ -358,75 +207,65 @@ jobs:
           from pathlib import Path
           import json
           ev=Path('/tmp/r131/evidence')
-          cg=json.loads((ev/'R131_READSN_CALLGRAPH.json').read_text())
-          dev=json.loads((ev/'R131_DEVICE_SELECTION_CONTEXTS.json').read_text())
-          hid=json.loads((ev/'R131_HID_READ_PACKET_CONTEXTS.json').read_text())
-
-          rows=[r for b in cg for r in b['string_xref_callgraph']]
-          readsn=[r for r in rows if 'read sn' in r['string']['text'].lower() or 'readsn' in r['string']['text'].lower()]
-          ro=[r for r in rows if r['tool_side_readonly_candidate']]
-          prod_ctx=[r for r in dev['contexts'] if r['contains_prod_vid'] and r['contains_prod_pid']]
-          read_calls=sum(len(x['read_calls']) for x in hid)
-
+          rows=json.loads((ev/'R131_HID_READ_CLASSIFICATION.json').read_text())
+          pure=[r for r in rows if r['classification']=='PURE_READ_CANDIDATE']
+          ident=[r for r in pure if r['identify_string_context']]
+          pct=[r for r in rows if r['label']=='pctools']
+          upg=[r for r in rows if r['label']=='upgrade_flash']
           decision={
-              'R130_RUN_ID':35881983712,
-              'R130_JOB_ID':107252476179,
-              'R130_EVIDENCE_ARTIFACT_ID':10760539531,
-              'PCTOOLS_SHA256':'0e13801b29070f805869823e6db4ad56d70494b2621fb63c330cea1d69e9ca33',
-              'UPGRADE_FLASH_SHA256':'bebb887b04fc724e1c459cce15d4395c78df3e098c54f06369ffe78b50aec073',
-              'IDENTIFY_STRING_XREF_COUNT':len(rows),
-              'EXACT_READSN_STRING_XREF_COUNT':len(readsn),
-              'CALLGRAPH_TOOL_SIDE_READONLY_CANDIDATE_COUNT':len(ro),
-              'CALLGRAPH_TOOL_SIDE_READONLY_CANDIDATES':ro[:30],
-              'DEVICE_SELECTION_CONTEXT_WITH_BOTH_PRODUCTION_18B4_06B7_COUNT':len(prod_ctx),
-              'HID_READ_CALL_CONTEXT_COUNT':read_calls,
-              'IMPORTANT_INTERPRETATION':'Tool-side static callgraph evidence is not production proof. No frame discovered here is authorized for live transmission.',
-              'READ_ONLY_IDENTIFY_PATH_STATICALLY_PROVEN_FOR_PRODUCTION':False,
-              'SAFE_READ_ONLY_STOCK_BACKUP_PROVEN':False,
-              'PRODUCTION_BOOTSTRAP_BRIDGE_PROVEN':False,
-              'PRODUCTION_RECOVERY_USB_IDENTITY_PROVEN':False,
-              'MVA_ACCEPTANCE_FOR_PRODUCTION_PROVEN':False,
-              'ANY_DISCOVERED_FRAME_AUTHORIZED_FOR_BOARD':False,
-              'AA55_LIVE_RETEST_ALLOWED':False,
-              'RUNTIME_0X11_ALLOWED':False,
-              'RUNTIME_0XFE_ALLOWED':False,
-              'VENDOR_BINARY_EXECUTED':False,
-              'USB_DEVICE_ACCESSED':False,
-              'BOARD_CONTACTED':False,
-              'FLASH_ALLOWED':False,
-              'NEXT':'If a tool-side READ SN/read-only candidate is isolated, statically reconstruct its exact report bytes and device-selection prerequisites, then compare only against existing production evidence. Do not send it to the board. If no such candidate exists, close PCTools as a safe production read-only route and continue offline acquisition/reverse of production-specific updater/firmware artifacts.'
+            'R130_RUN_ID':35881983712,
+            'R130_EVIDENCE_ARTIFACT_ID':10760539531,
+            'PCTOOLS_SHA256':'0e13801b29070f805869823e6db4ad56d70494b2621fb63c330cea1d69e9ca33',
+            'UPGRADE_FLASH_SHA256':'bebb887b04fc724e1c459cce15d4395c78df3e098c54f06369ffe78b50aec073',
+            'TOTAL_HID_READ_CALLS_CLASSIFIED':len(rows),
+            'PCTOOLS_HID_READ_CALLS_CLASSIFIED':len(pct),
+            'UPGRADE_FLASH_HID_READ_CALLS_CLASSIFIED':len(upg),
+            'PURE_READ_CANDIDATE_COUNT':len(pure),
+            'PURE_READ_WITH_IDENTIFY_STRING_CONTEXT_COUNT':len(ident),
+            'PURE_READ_WITH_IDENTIFY_STRING_CONTEXT':[{'label':r['label'],'call_va':r['call_va'],'read_imports':r['read_imports']} for r in ident],
+            'IMPORTANT_INTERPRETATION':'Static classification only. Even a pure-read tool call is not authorized for production live use without independent production identity and protocol proof.',
+            'READ_ONLY_IDENTIFY_PATH_STATICALLY_PROVEN_FOR_PRODUCTION':False,
+            'SAFE_READ_ONLY_STOCK_BACKUP_PROVEN':False,
+            'PRODUCTION_BOOTSTRAP_BRIDGE_PROVEN':False,
+            'PRODUCTION_RECOVERY_USB_IDENTITY_PROVEN':False,
+            'ANY_DISCOVERED_FRAME_AUTHORIZED_FOR_BOARD':False,
+            'AA55_LIVE_RETEST_ALLOWED':False,
+            'RUNTIME_0X11_ALLOWED':False,
+            'RUNTIME_0XFE_ALLOWED':False,
+            'VENDOR_BINARY_EXECUTED':False,
+            'USB_DEVICE_ACCESSED':False,
+            'BOARD_CONTACTED':False,
+            'FLASH_ALLOWED':False,
+            'NEXT':'If pure-read identify candidates remain, recover exact packet construction and response validation statically. If none remain, close PCTools read-only identify route and continue searching for production-specific recovery/backup evidence. No live transmission is authorized.'
           }
-          (ev/'R131_DECISION.json').write_text(json.dumps(decision,indent=2,ensure_ascii=False)+'\n')
-          report=[
-              '# R131 READSN HID callgraph / device-selection static reverse','',
-              f'- identify string xrefs: {len(rows)}',
-              f'- exact READ SN / READSN xrefs: {len(readsn)}',
-              f'- tool-side read-only candidates after depth-2 callgraph: {len(ro)}',
-              f'- device-selection contexts containing both 0x18B4 and 0x06B7: {len(prod_ctx)}',
-              f'- HID read call contexts inspected: {read_calls}','',
-              '## Safety','- Offline static only.','- No vendor EXE executed.','- No USB or board accessed.',
-              '- AA55 live retest remains blocked.','- 0x11 / 0xFE / erase / program / flash remain blocked.',
-              '- Tool/reference evidence is not production proof.','- FLASH_ALLOWED=NO']
-          (ev/'R131_REPORT_TH.md').write_text('\n'.join(report)+'\n')
-          print(json.dumps(decision,indent=2,ensure_ascii=False))
+          (ev/'R131_DECISION.json').write_text(json.dumps(decision,indent=2)+'\n')
+          (ev/'R131_REPORT_TH.md').write_text(
+            '# R131 PCTools HID read classification\n\n'
+            f'- HID read calls classified: {len(rows)}\n'
+            f'- pure-read candidates: {len(pure)}\n'
+            f'- pure-read + identify context: {len(ident)}\n'
+            '- static only; no vendor binary executed\n'
+            '- no USB/board access\n'
+            '- AA55, 0x11, 0xFE, erase/program/flash remain blocked\n'
+            '- FLASH_ALLOWED=NO\n')
+          print(json.dumps(decision,indent=2))
           PY
 
-      - name: Package R131 evidence
+      - name: Package evidence
         shell: bash
         run: |
           set -euo pipefail
           cd /tmp/r131/evidence
-          zip -9 -r /tmp/R131_EXACT_READSN_HID_CALLGRAPH_DEVICE_SELECTION_STATIC_EVIDENCE.zip . >/dev/null
-          sha256sum /tmp/R131_EXACT_READSN_HID_CALLGRAPH_DEVICE_SELECTION_STATIC_EVIDENCE.zip \
-            > /tmp/R131_EXACT_READSN_HID_CALLGRAPH_DEVICE_SELECTION_STATIC_EVIDENCE.zip.sha256
+          zip -9 -r /tmp/R131_EXACT_PCTOOLS_HID_READ_CLASSIFICATION_STATIC_EVIDENCE.zip . >/dev/null
+          sha256sum /tmp/R131_EXACT_PCTOOLS_HID_READ_CLASSIFICATION_STATIC_EVIDENCE.zip > /tmp/R131_EXACT_PCTOOLS_HID_READ_CLASSIFICATION_STATIC_EVIDENCE.zip.sha256
 
       - name: Upload R131 evidence
         uses: actions/upload-artifact@v4
         with:
-          name: R131-EXACT-READSN-HID-CALLGRAPH-DEVICE-SELECTION-STATIC-EVIDENCE
+          name: R131-EXACT-PCTOOLS-HID-READ-CLASSIFICATION-STATIC-EVIDENCE
           path: |
-            /tmp/R131_EXACT_READSN_HID_CALLGRAPH_DEVICE_SELECTION_STATIC_EVIDENCE.zip
-            /tmp/R131_EXACT_READSN_HID_CALLGRAPH_DEVICE_SELECTION_STATIC_EVIDENCE.zip.sha256
+            /tmp/R131_EXACT_PCTOOLS_HID_READ_CLASSIFICATION_STATIC_EVIDENCE.zip
+            /tmp/R131_EXACT_PCTOOLS_HID_READ_CLASSIFICATION_STATIC_EVIDENCE.zip.sha256
           if-no-files-found: error
           retention-days: 90
 
@@ -441,5 +280,5 @@ jobs:
           grep -F 'R131_RUNTIME_0X11_SENT=NO' /tmp/r131/evidence/R131_SAFETY.txt
           grep -F 'R131_RUNTIME_0XFE_SENT=NO' /tmp/r131/evidence/R131_SAFETY.txt
           grep -F '"FLASH_ALLOWED": false' /tmp/r131/evidence/R131_DECISION.json
-          echo R131_STATIC_REVERSE_COMPLETE=YES
+          echo R131_STATIC_CLASSIFICATION_COMPLETE=YES
           echo FLASH_ALLOWED=NO
