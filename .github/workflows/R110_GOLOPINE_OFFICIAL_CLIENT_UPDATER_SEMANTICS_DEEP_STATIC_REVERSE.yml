@@ -1,0 +1,427 @@
+name: R110 GoloPine official client updater-semantics deep static reverse
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - ".github/workflows/R110_GOLOPINE_OFFICIAL_CLIENT_UPDATER_SEMANTICS_DEEP_STATIC_REVERSE.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: r110-golopine-official-client-deep-static-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  OLD_URL: "https://golodsp.com/wp-content/uploads/2026/02/4-27Nov2025_Windows-DSTech_AudioDSP_Client.zip"
+  NEW_URL: "https://golodsp.com/wp-content/uploads/2026/05/golopine_audio_turning_release_2026-04-08.exe_.zip"
+  EXPECTED_OLD_ZIP_SHA256: "8f6b6792d072a2b3c7c86276f0bb5bd498a374c4b061adff1eeea7595d3396cf"
+  EXPECTED_NEW_ZIP_SHA256: "f14b0c4baad70a8b0d5dc3b2783819cc2ef6e1a9c6ec2adcf17f1557059edd2a"
+  EXPECTED_OLD_EXE_SHA256: "fde7b0f61ec62ffb6bcda5a921128f531bca84939b6f1f95c8ab2f14c453d1f9"
+  EXPECTED_NEW_EXE_SHA256: "3ca54171c53f7badd963ffe6851b8b3e2faf8aee8ba2afcb7040990e22ae09b2"
+  PRODUCTION_USB_VIDPID: "6324:1719"
+  FLASH_ALLOWED: "NO"
+
+jobs:
+  deep-static:
+    name: STATIC ONLY - no execute - no USB - no board - no flash
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+
+    steps:
+      - name: Immutable safety gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/r110/input /tmp/r110/old /tmp/r110/new /tmp/r110/evidence
+          cat > /tmp/r110/evidence/R110_SAFETY.txt <<'EOF'
+          R110_MODE=STATIC_OFFLINE_ONLY
+          R110_VENDOR_BINARY_EXECUTED=NO
+          R110_INSTALLER_EXECUTED=NO
+          R110_USB_DEVICE_ACCESS=NO
+          R110_BOARD_CONTACT=NO
+          R110_AA55_SENT=NO
+          R110_LINEIN_AA55_SENT=NO
+          R110_RUNTIME_0X11_SENT=NO
+          R110_SEND_CHIPERAS_CODEDATA_BOOTDAT_CONSTDAT_CNFGDAT_BTUPDAT_UPINFO_CXXX=NO
+          R110_FLASH_READ_EXECUTED=NO
+          R110_FLASH_ERASE_EXECUTED=NO
+          R110_FLASH_WRITE_EXECUTED=NO
+          R110_ANY_DISCOVERED_FRAME_AUTHORIZED_FOR_BOARD=NO
+          FINAL_REQUIRED_TRANSPORT=SAMSUNG_S25_PLUS_USB_C_DIRECT_TO_DSP_USB_C
+          HARDWARE_MODIFICATION=FORBIDDEN
+          FLASH_ALLOWED=NO
+          EOF
+
+      - name: Install static parsers
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+            file unzip p7zip-full binutils jq mono-utils python3-pip >/dev/null
+          python3 -m pip install --disable-pip-version-check --no-input pefile dnfile >/dev/null
+
+      - name: Acquire and pin exact official packages
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 4 --retry-all-errors "$OLD_URL" -o /tmp/r110/input/old.zip
+          curl --fail --location --retry 4 --retry-all-errors "$NEW_URL" -o /tmp/r110/input/new.zip
+          test "$(sha256sum /tmp/r110/input/old.zip | awk '{print $1}')" = "$EXPECTED_OLD_ZIP_SHA256"
+          test "$(sha256sum /tmp/r110/input/new.zip | awk '{print $1}')" = "$EXPECTED_NEW_ZIP_SHA256"
+          7z x -y /tmp/r110/input/old.zip -o/tmp/r110/old >/dev/null
+          7z x -y /tmp/r110/input/new.zip -o/tmp/r110/new >/dev/null
+
+          OLD_EXE="$(find /tmp/r110/old -type f -name '*.exe' ! -path '*/__MACOSX/*' -print -quit)"
+          NEW_EXE="$(find /tmp/r110/new -type f -name '*.exe' ! -path '*/__MACOSX/*' -print -quit)"
+          test -n "$OLD_EXE"
+          test -n "$NEW_EXE"
+          test "$(sha256sum "$OLD_EXE" | awk '{print $1}')" = "$EXPECTED_OLD_EXE_SHA256"
+          test "$(sha256sum "$NEW_EXE" | awk '{print $1}')" = "$EXPECTED_NEW_EXE_SHA256"
+
+          cp "$OLD_EXE" /tmp/r110/input/old.exe
+          cp "$NEW_EXE" /tmp/r110/input/new.exe
+          chmod a-x /tmp/r110/input/old.exe /tmp/r110/input/new.exe || true
+
+          {
+            echo "OLD_ZIP_SHA256=$EXPECTED_OLD_ZIP_SHA256"
+            echo "NEW_ZIP_SHA256=$EXPECTED_NEW_ZIP_SHA256"
+            echo "OLD_EXE_SHA256=$EXPECTED_OLD_EXE_SHA256"
+            echo "NEW_EXE_SHA256=$EXPECTED_NEW_EXE_SHA256"
+            echo "PIN_MATCH=YES"
+          } > /tmp/r110/evidence/R110_BINARY_PIN.txt
+
+      - name: Managed PE structure and CLR metadata inventory
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import pefile, json, hashlib
+
+          rows=[]
+          for label in ("old","new"):
+              p=Path(f"/tmp/r110/input/{label}.exe")
+              pe=pefile.PE(str(p),fast_load=False)
+              clr=pe.OPTIONAL_HEADER.DATA_DIRECTORY[14]
+              secs=[]
+              for s in pe.sections:
+                  raw=p.read_bytes()[s.PointerToRawData:s.PointerToRawData+s.SizeOfRawData]
+                  secs.append({
+                      "name":s.Name.rstrip(b"\0").decode(errors="replace"),
+                      "rva":hex(s.VirtualAddress),
+                      "raw_size":s.SizeOfRawData,
+                      "virtual_size":s.Misc_VirtualSize,
+                      "sha256":hashlib.sha256(raw).hexdigest()
+                  })
+              rows.append({
+                  "label":label,
+                  "sha256":hashlib.sha256(p.read_bytes()).hexdigest(),
+                  "machine":hex(pe.FILE_HEADER.Machine),
+                  "entrypoint_rva":hex(pe.OPTIONAL_HEADER.AddressOfEntryPoint),
+                  "imagebase":hex(pe.OPTIONAL_HEADER.ImageBase),
+                  "clr_directory_rva":hex(clr.VirtualAddress),
+                  "clr_directory_size":clr.Size,
+                  "is_managed":bool(clr.VirtualAddress and clr.Size),
+                  "sections":secs
+              })
+          Path("/tmp/r110/evidence/R110_PE_CLR_STRUCTURE.json").write_text(
+              json.dumps(rows,indent=2)+"\n"
+          )
+          PY
+
+      - name: Static monodis metadata and IL extraction
+        shell: bash
+        run: |
+          set -euo pipefail
+          for L in old new; do
+            EXE="/tmp/r110/input/$L.exe"
+            monodis --assembly "$EXE" > "/tmp/r110/evidence/R110_${L}_ASSEMBLY.txt" 2>&1 || true
+            monodis --assemblyref "$EXE" > "/tmp/r110/evidence/R110_${L}_ASSEMBLYREF.txt" 2>&1 || true
+            monodis --typedef "$EXE" > "/tmp/r110/evidence/R110_${L}_TYPEDEF.txt" 2>&1 || true
+            monodis --method "$EXE" > "/tmp/r110/evidence/R110_${L}_METHODS.txt" 2>&1 || true
+            monodis --userstrings "$EXE" > "/tmp/r110/evidence/R110_${L}_USERSTRINGS.txt" 2>&1 || true
+            monodis "$EXE" > "/tmp/r110/evidence/R110_${L}_FULL.il" 2>&1 || true
+          done
+
+          {
+            echo "OLD_IL_BYTES=$(stat -c '%s' /tmp/r110/evidence/R110_old_FULL.il)"
+            echo "NEW_IL_BYTES=$(stat -c '%s' /tmp/r110/evidence/R110_new_FULL.il)"
+            echo "OLD_METHOD_BYTES=$(stat -c '%s' /tmp/r110/evidence/R110_old_METHODS.txt)"
+            echo "NEW_METHOD_BYTES=$(stat -c '%s' /tmp/r110/evidence/R110_new_METHODS.txt)"
+          } > /tmp/r110/evidence/R110_MONODIS_STATUS.txt
+
+      - name: Exact string offsets and semantic classification
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import re,json
+
+          patterns={
+            "production_vidpid":r"6324|1719",
+            "programmer_vidpid":r"0633|5322|0288|7966",
+            "flash_destructive":r"chiperas|codedata|bootdat|constdat|cnfgdat|btupdat|upinfo|erase|flashwrite|flash_write|programflash",
+            "updater_semantics":r"firmware.?update|firmware.?upgrade|bootloader|recovery|download.?firmware|upgrade.?firmware|flash.?firmware",
+            "runtime_ufe":r"UfeStream|DeviceDescription|Actuator|Sensor|CreateFilterUpdateCommand|SigmaDSP",
+            "hid_standard_boot":r"BootKeyboardInputReport|BootKeyboardOutputReport|BootMouseInputReport",
+            "hid_transport":r"USBHID|HidDevice|HidReporterDeviceInfo|setupapi\.dll|hid\.dll|CreateFile|ReadFile|WriteFile|DeviceIoControl",
+            "firmware_revision_only":r"FirmwareRevisionString",
+            "image_format":r"\.mva\b|MVA\b|header|signature|checksum|CRC",
+          }
+
+          out={}
+          for label in ("old","new"):
+              b=Path(f"/tmp/r110/input/{label}.exe").read_bytes()
+              entries=[]
+              for m in re.finditer(rb"[\x20-\x7e]{5,}",b):
+                  entries.append((m.start(),"ascii",m.group(0).decode("latin1","replace")))
+              for m in re.finditer(rb"(?:[\x20-\x7e]\x00){5,}",b):
+                  try: s=m.group(0).decode("utf-16le","replace")
+                  except: continue
+                  entries.append((m.start(),"utf16le",s))
+              entries.sort()
+              cats={k:[] for k in patterns}
+              for off,enc,s in entries:
+                  for cat,pat in patterns.items():
+                      if re.search(pat,s,re.I):
+                          cats[cat].append({"offset":off,"encoding":enc,"text":s[:500]})
+              out[label]=cats
+          Path("/tmp/r110/evidence/R110_STRING_SEMANTICS.json").write_text(
+              json.dumps(out,indent=2,ensure_ascii=False)+"\n"
+          )
+          PY
+
+      - name: Extract updater and HID related IL context
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import re,json
+
+          terms=re.compile(
+              r"FirmwareRevisionString|UfeStream|DeviceDescription|USBHID|HidDevice|HidReporterDeviceInfo|"
+              r"setupapi|hid\.dll|CreateFile|ReadFile|WriteFile|DeviceIoControl|BootKeyboard|BootMouse|"
+              r"firmware|bootloader|recovery|flash|erase|upgrade|MVA|CRC|checksum|6324|1719|0288|7966|0633|5322",
+              re.I
+          )
+          for label in ("old","new"):
+              p=Path(f"/tmp/r110/evidence/R110_{label}_FULL.il")
+              lines=p.read_text(errors="replace").splitlines()
+              out=[]
+              for i,line in enumerate(lines):
+                  if terms.search(line):
+                      a=max(0,i-12); z=min(len(lines),i+13)
+                      out.append({
+                          "line":i+1,
+                          "match":line,
+                          "context":"\n".join(lines[a:z])
+                      })
+              Path(f"/tmp/r110/evidence/R110_{label}_IL_CONTEXT.json").write_text(
+                  json.dumps(out[:500],indent=2,ensure_ascii=False)+"\n"
+              )
+          PY
+
+      - name: PInvoke and method-name audit with dnfile
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import json,re
+          import dnfile
+
+          rows={}
+          for label in ("old","new"):
+              p=Path(f"/tmp/r110/input/{label}.exe")
+              result={"types":[],"methods":[],"errors":[]}
+              try:
+                  pe=dnfile.dnPE(str(p))
+                  if not getattr(pe,"net",None):
+                      result["errors"].append("NO_DOTNET_METADATA")
+                  else:
+                      t=pe.net.mdtables.TypeDef
+                      if t:
+                          for row in t:
+                              try:
+                                  ns=str(row.TypeNamespace or "")
+                                  name=str(row.TypeName or "")
+                                  fq=(ns+"."+name).strip(".")
+                                  result["types"].append(fq)
+                              except Exception as e:
+                                  result["errors"].append("TYPE:"+repr(e))
+                      m=pe.net.mdtables.MethodDef
+                      if m:
+                          for row in m:
+                              try:
+                                  result["methods"].append({
+                                      "name":str(row.Name or ""),
+                                      "rva":int(row.Rva or 0),
+                                      "impl_flags":int(row.ImplFlags.value) if hasattr(row.ImplFlags,"value") else str(row.ImplFlags),
+                                      "flags":int(row.Flags.value) if hasattr(row.Flags,"value") else str(row.Flags),
+                                  })
+                              except Exception as e:
+                                  result["errors"].append("METHOD:"+repr(e))
+              except Exception as e:
+                  result["errors"].append("PE:"+repr(e))
+              rows[label]=result
+
+          interesting=re.compile(
+              r"firmware|upgrade|update|boot|recovery|flash|erase|hid|usb|ufe|device|description|"
+              r"report|read|write|mva|crc|checksum|saveparam",
+              re.I
+          )
+          summarized={}
+          for label,r in rows.items():
+              summarized[label]={
+                  "type_count":len(r["types"]),
+                  "method_count":len(r["methods"]),
+                  "interesting_types":[x for x in r["types"] if interesting.search(x)][:500],
+                  "interesting_methods":[x for x in r["methods"] if interesting.search(x["name"])][:1000],
+                  "errors":r["errors"][:100]
+              }
+          Path("/tmp/r110/evidence/R110_DNFILE_METADATA.json").write_text(
+              json.dumps(summarized,indent=2,ensure_ascii=False)+"\n"
+          )
+          PY
+
+      - name: Compare old and new semantic surfaces
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import json
+
+          strings=json.loads(Path("/tmp/r110/evidence/R110_STRING_SEMANTICS.json").read_text())
+          meta=json.loads(Path("/tmp/r110/evidence/R110_DNFILE_METADATA.json").read_text())
+
+          old_types=set(meta["old"]["interesting_types"])
+          new_types=set(meta["new"]["interesting_types"])
+          old_methods=set(x["name"] for x in meta["old"]["interesting_methods"])
+          new_methods=set(x["name"] for x in meta["new"]["interesting_methods"])
+
+          d={
+              "new_only_interesting_types":sorted(new_types-old_types),
+              "old_only_interesting_types":sorted(old_types-new_types),
+              "new_only_interesting_method_names":sorted(new_methods-old_methods),
+              "old_only_interesting_method_names":sorted(old_methods-new_methods),
+              "string_category_counts":{
+                  label:{cat:len(vals) for cat,vals in cats.items()}
+                  for label,cats in strings.items()
+              }
+          }
+          Path("/tmp/r110/evidence/R110_OLD_NEW_SEMANTIC_DIFF.json").write_text(
+              json.dumps(d,indent=2,ensure_ascii=False)+"\n"
+          )
+          PY
+
+      - name: Build fail-closed updater classification
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import json,re
+
+          ev=Path("/tmp/r110/evidence")
+          ss=json.loads((ev/"R110_STRING_SEMANTICS.json").read_text())
+          md=json.loads((ev/"R110_DNFILE_METADATA.json").read_text())
+          diff=json.loads((ev/"R110_OLD_NEW_SEMANTIC_DIFF.json").read_text())
+
+          def texts(label,cat):
+              return [x["text"] for x in ss[label][cat]]
+
+          def meaningful_updater(label):
+              vals=texts(label,"updater_semantics")+texts(label,"flash_destructive")
+              return vals
+
+          def standard_boot_only(label):
+              boot=texts(label,"hid_standard_boot")
+              # This category specifically contains only standard HID boot-report names.
+              return len(boot)>0
+
+          d={
+              "PINNED_OFFICIAL_27NOV2025_CLIENT":True,
+              "PINNED_OFFICIAL_08APR2026_CLIENT":True,
+              "PRODUCTION_RUNTIME_USB_IDENTITY":"6324:1719",
+              "PRODUCTION_VIDPID_LITERAL_OLD":len(ss["old"]["production_vidpid"])>0,
+              "PRODUCTION_VIDPID_LITERAL_NEW":len(ss["new"]["production_vidpid"])>0,
+              "OLD_DESTRUCTIVE_FLASH_STRING_COUNT":len(ss["old"]["flash_destructive"]),
+              "NEW_DESTRUCTIVE_FLASH_STRING_COUNT":len(ss["new"]["flash_destructive"]),
+              "OLD_MEANINGFUL_UPDATER_STRING_COUNT":len(ss["old"]["updater_semantics"]),
+              "NEW_MEANINGFUL_UPDATER_STRING_COUNT":len(ss["new"]["updater_semantics"]),
+              "OLD_HID_STANDARD_BOOT_REPORT_HITS":texts("old","hid_standard_boot"),
+              "NEW_HID_STANDARD_BOOT_REPORT_HITS":texts("new","hid_standard_boot"),
+              "OLD_FIRMWARE_REVISION_HITS":texts("old","firmware_revision_only"),
+              "NEW_FIRMWARE_REVISION_HITS":texts("new","firmware_revision_only"),
+              "OLD_RUNTIME_UFE_HIT_COUNT":len(ss["old"]["runtime_ufe"]),
+              "NEW_RUNTIME_UFE_HIT_COUNT":len(ss["new"]["runtime_ufe"]),
+              "OLD_HID_TRANSPORT_HIT_COUNT":len(ss["old"]["hid_transport"]),
+              "NEW_HID_TRANSPORT_HIT_COUNT":len(ss["new"]["hid_transport"]),
+              "OLD_INTERESTING_TYPE_COUNT":len(md["old"]["interesting_types"]),
+              "NEW_INTERESTING_TYPE_COUNT":len(md["new"]["interesting_types"]),
+              "SEMANTIC_DIFF":diff,
+              "OFFICIAL_CLIENT_CONTAINS_PROVEN_PRODUCTION_BOOT_ENTRY":False,
+              "OFFICIAL_CLIENT_CONTAINS_PROVEN_PRODUCTION_RECOVERY_IDENTITY":False,
+              "EXACT_PRODUCTION_UPDATER_TRANSPORT_PROVEN":False,
+              "SAFE_READ_ONLY_STOCK_BACKUP_PROVEN":False,
+              "ANY_DISCOVERED_FRAME_AUTHORIZED_FOR_BOARD":False,
+              "NEXT":"If updater/flash semantics remain absent, classify these official EXEs as runtime tuning clients and pivot away from them; otherwise deep-xref only the exact static method(s) found.",
+              "FLASH_ALLOWED":False
+          }
+
+          (ev/"R110_DECISION.json").write_text(json.dumps(d,indent=2,ensure_ascii=False)+"\n")
+          report=[
+              "# R110 GoloPine official Windows client deep static reverse",
+              "",
+              "No vendor binary executed. No USB or board access.",
+              "",
+              "The goal is to distinguish real updater/bootloader semantics from ordinary HID/runtime UI terms such as BootKeyboardInputReport and FirmwareRevisionString.",
+              "",
+              "```json",
+              json.dumps(d,indent=2,ensure_ascii=False),
+              "```",
+              "",
+              "FLASH_ALLOWED=NO"
+          ]
+          (ev/"R110_REPORT.md").write_text("\n".join(report)+"\n")
+          print(json.dumps(d,indent=2,ensure_ascii=False))
+          PY
+
+      - name: Package evidence only
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Full monodis IL may be large; package only focused evidence, not raw vendor EXEs.
+          rm -f /tmp/r110/evidence/R110_old_FULL.il /tmp/r110/evidence/R110_new_FULL.il
+          cd /tmp/r110/evidence
+          zip -9 -r /tmp/R110_GOLOPINE_OFFICIAL_CLIENT_DEEP_STATIC_EVIDENCE.zip .
+          sha256sum /tmp/R110_GOLOPINE_OFFICIAL_CLIENT_DEEP_STATIC_EVIDENCE.zip \
+            > /tmp/R110_GOLOPINE_OFFICIAL_CLIENT_DEEP_STATIC_EVIDENCE.zip.sha256
+
+      - name: Upload evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: R110-GOLOPINE-OFFICIAL-CLIENT-DEEP-STATIC-EVIDENCE
+          path: |
+            /tmp/R110_GOLOPINE_OFFICIAL_CLIENT_DEEP_STATIC_EVIDENCE.zip
+            /tmp/R110_GOLOPINE_OFFICIAL_CLIENT_DEEP_STATIC_EVIDENCE.zip.sha256
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Final fail-closed gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -F 'R110_VENDOR_BINARY_EXECUTED=NO' /tmp/r110/evidence/R110_SAFETY.txt
+          grep -F 'R110_USB_DEVICE_ACCESS=NO' /tmp/r110/evidence/R110_SAFETY.txt
+          grep -F 'R110_ANY_DISCOVERED_FRAME_AUTHORIZED_FOR_BOARD=NO' /tmp/r110/evidence/R110_SAFETY.txt
+          grep -F '"FLASH_ALLOWED": false' /tmp/r110/evidence/R110_DECISION.json
+          cat /tmp/r110/evidence/R110_DECISION.json
+          echo R110_DEEP_STATIC_COMPLETE=YES
+          echo FLASH_ALLOWED=NO
