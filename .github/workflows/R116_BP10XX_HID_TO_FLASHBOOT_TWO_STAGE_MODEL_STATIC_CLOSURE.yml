@@ -1,0 +1,398 @@
+name: R116 BP10xx HID-to-flashboot two-stage model static closure
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - ".github/workflows/R116_BP10XX_HID_TO_FLASHBOOT_TWO_STAGE_MODEL_STATIC_CLOSURE.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: r116-bp10xx-two-stage-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  FLASH_ALLOWED: "NO"
+  R26_EXPECTED_SHA256: "7a0fd1b58f136cb1adb1978039a782dfc8161b3d1b3d362a03c91db164c0f80f"
+
+jobs:
+  static-closure:
+    name: STATIC ONLY - correlate public BPxx protocol with R26 flashboot - no board
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Immutable safety gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/r116/evidence
+          cat > /tmp/r116/evidence/R116_SAFETY.txt <<'EOF'
+          R116_MODE=STATIC_OFFLINE_CORRELATION_ONLY
+          R116_USB_DEVICE_ACCESS=NO
+          R116_BOARD_CONTACT=NO
+          R116_AA55_SENT=NO
+          R116_RUNTIME_0X11_SENT=NO
+          R116_CONTROL_0XFE_SENT=NO
+          R116_CHIPERAS_SENT=NO
+          R116_UPINFO_SENT=NO
+          R116_CXXX_SENT=NO
+          R116_FLASH_READ_EXECUTED=NO
+          R116_FLASH_ERASE_EXECUTED=NO
+          R116_FLASH_WRITE_EXECUTED=NO
+          R116_ANY_DISCOVERED_FRAME_AUTHORIZED_FOR_BOARD=NO
+          FINAL_REQUIRED_TRANSPORT=SAMSUNG_S25_PLUS_USB_C_DIRECT_TO_DSP_USB_C
+          HARDWARE_MODIFICATION=FORBIDDEN
+          FLASH_ALLOWED=NO
+          EOF
+
+      - name: Restore user-uploaded R26 report as evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > /tmp/r116/r26.b64 <<'B64'
+          IyBSMjYg4oCUIFJldmVyc2UgUEMgZmxhc2hib290IHRyYW5zcG9ydCDguYHguJrguJogT0ZGTElO
+          RSDguYDguJfguYjguLLguJnguLHguYnguJkKCuC4p+C4seC4meC4l+C4teC5iDogMjAyNi0wOS0x
+          OQoKIyMg4LiC4Lit4Lia4LmA4LiC4LiVCgpSMjYg4LiX4Liz4LiV4LmI4Lit4LiI4Liy4LiBIFIy
+          NSDguYLguJTguKLguYTguKHguYjguKrguYjguIfguITguLPguKrguLHguYjguIfguYTguJvguJrg
+          uK3guKPguYzguJTguYHguKHguYnguYHguJXguYjguITguLPguKrguLHguYjguIfguYDguJTguLXg
+          uKLguKcg4LmA4Lib4LmJ4Liy4Lir4Lih4Liy4Lii4LiE4Li34Lit4LmB4Lii4LiBIHRyYW5zcG9y
+          dCDguKvguKXguLHguIcgYHN0YXJ0X3VwX2dyYXRlKEFwcFJlc291cmNlVXNiRGV2aWNlKWAgLyBq
+          dW1wLXRvLTAsIOC4q+C4siBmcmFtaW5nL2NvbW1hbmQgdm9jYWJ1bGFyeSwg4LmB4Lii4LiB4Liq
+          4LmI4Lin4LiZ4LiX4Li14LmI4LmA4Liq4Li14LmI4Lii4LiH4LmA4LiC4Li14Lii4LiZIGZsYXNo
+          IOC5geC4peC4sOC4leC4o+C4p+C4iOC4p+C5iOC4suC4oeC4tSBpZGVudGl0eS92ZXJzaW9uL3Jl
+          YWQgY29tbWFuZCDguJfguLXguYjguJ7guLTguKrguLnguIjguJnguYzguKfguYjguLLguYTguKHg
+          uYjguYDguJvguKXguLXguYjguKLguJkgc3RhdGUg4Lir4Lij4Li34Lit4LmE4Lih4LmICgrguILg
+          uYnguK3guKvguYnguLLguKHguKLguLHguIfguYDguJTguLTguKE6IOC5hOC4oeC5iOC4quC5iOC4
+          hyBgLm12YWAsIOC5hOC4oeC5iCBPQkVYIFBVVCwg4LmE4Lih4LmIIGVyYXNlL3Byb2dyYW0vY29t
+          bWl0L2FwcGx5LCDguYTguKHguYjguKXguK3guIcgRmVhdHVyZSBTRVRfUkVQT1JUIGAweDU1LzB4
+          QUFgLCDguYTguKHguYjguJfguLMgQUNQIGAweDAwLzB4MTFgIOC4i+C5ieC4syDguYHguKXguLDg
+          uYTguKHguYjguYDguJTguLIgcHJvZHVjdGlvbiBmbGFzaCBtYXAuCgojIyAxLiBSZWZlcmVuY2Ug
+          Zmxhc2hib290IDY0IEtpQiDguJbguLnguIEgcmVjb25zdHJ1Y3Qg4LmE4LiU4LmJ4LmB4Lia4Lia
+          IGRldGVybWluaXN0aWMKCuC4iOC4suC4gSBgZmxhc2hfYm9vdC5jYCArIG1hY3JvIOC4guC4reC4
+          hyBCUDEwNDhQNCByZWZlcmVuY2UgU0RLIOC4quC4suC4oeC4suC4o+C4liByZWNvbnN0cnVjdCBp
+          bWFnZSA2NSw1MzYgYnl0ZXMg4LmD4LiZ4Lir4LiZ4LmI4Lin4Lii4LiE4Lin4Liy4Lih4LiI4Liz
+          4LmE4LiU4LmJ4LiV4Lij4LiH4LiB4Lix4LiZ4LiX4Li44LiB4LiE4Lij4Lix4LmJ4LiHOgoKLSBT
+          SEEyNTY6IGBjZDBlNGUwM2Y3MDcyYWJkNDhmZWEyYWViNWE1NGQ5MzYwYjY1YWNiMWJkNGQxYjM3
+          NzM0NDM4Y2JlNWY0N2M2YAotIGJ5dGVzIOC4l+C4teC5iCBvZmZzZXQgYDB4MTAwLi4weDEwM2A6
+          IGAwMCAzNiA1NSAwRGAKLSBgMHgzNmAgPSBCT09UX1VBUlRfQ09ORklHIOC4guC4reC4hyByZWZl
+          cmVuY2UgYnVpbGQKLSBgMHg1NWAgPSBKVURHRU1FTlRfU1RBTkRBUkQg4LmB4Lia4LiaIENSQwot
+          IGAweDBEYCA9IFBDVE9PTCArIFVEaXNrICsgU0RfQTE1L0ExNi9BMTcg4LmD4LiZIHJlZmVyZW5j
+          ZSBjb25maWcKCuC4meC4teC5iOC4hOC4t+C4rSAqKnJlZmVyZW5jZSBTREsgaW1hZ2Ug4LmA4LiX
+          4LmI4Liy4LiZ4Lix4LmJ4LiZKiog4LmE4Lih4LmI4LmD4LiK4LmIIHByb2R1Y3Rpb24gZmlybXdh
+          cmUgZHVtcCDguILguK3guIfguJrguK3guKPguYzguJTguJzguLnguYnguYPguIrguYkg4LmB4Lil
+          4Liw4Lir4LmJ4Liy4Lih4LiZ4LizIFNIQS9pbWFnZSDguJnguLXguYnguYTguJvguJbguLfguK3g
+          uKfguYjguLIgZmxhc2gg4LmE4LiU4LmJ4LiB4Lix4Lia4Lia4Lit4Lij4LmM4LiU4LiI4Lij4Li0
+          4LiHLgoKIyMgMi4gVHJhbnNwb3J0IOC4q+C4peC4seC4hyBqdW1wLXRvLTAg4LmA4Lib4LmH4LiZ
+          IFVTQiBNYXNzIFN0b3JhZ2UgQk9UIGZhbWlseSDguK3guKLguYjguLLguIfguKHguLXguKvguKXg
+          uLHguIHguJDguLLguJnguYHguKPguIcKCuC4oOC4suC4ouC5g+C4mSByZWZlcmVuY2UgZmxhc2hi
+          b290IOC4nuC4miBsaXRlcmFsIGBVU0JDYCDguJfguLXguYggYDB4RTAwQ2Ag4LmB4Lil4Liw4Lih
+          4Li14LiV4Liy4Lij4Liy4LiHIHBvaW50ZXIg4LiE4Liz4Liq4Lix4LmI4LiHIDgg4Lij4Liy4Lii
+          4LiB4Liy4Lij4LiX4Li14LmIIGAweEUwNENgLgoK4LmD4LiZIHNvdXJjZSBVU0IgbWFzcy1zdG9y
+          YWdlIOC4guC4reC4hyBTREsg4LmA4LiU4Li14Lii4Lin4LiB4Lix4LiZIOC4meC4tOC4ouC4suC4
+          oSBCdWxrLU9ubHkgVHJhbnNwb3J0IOC5gOC4m+C5h+C4mToKCi0gQ0JXIHNpZ25hdHVyZSBgMHg0
+          MzQyNTM1NWAg4LiL4Li24LmI4LiH4LmD4LiZIGJ5dGUgb3JkZXIg4Lia4LiZ4Liq4Liy4Lii4LiE
+          4Li34LitIGBVU0JDYAotIENCVyAzMSBieXRlczogU2lnbmF0dXJlIDQgKyBUYWcgNCArIERhdGFU
+          cmFuc2Zlckxlbmd0aCA0ICsgRmxhZ3MgMSArIExVTiAxICsgQ0RCTGVuZ3RoIDEgKyBDREJbMTZd
+          Ci0gQ1NXIHNpZ25hdHVyZSBgMHg1MzQyNTM1NWAgKGBVU0JTYCkKLSBDU1cgMTMgYnl0ZXM6IFNp
+          Z25hdHVyZSA0ICsgVGFnIDQgKyBSZXNpZHVlIDQgKyBTdGF0dXMgMQoK4LiB4Liy4Lij4LiX4Li1
+          4LmIIGZsYXNoYm9vdCDguKHguLUgYFVTQkNgIOC4reC4ouC4ueC5iOC4leC4tOC4lOC4geC4seC4
+          muC4leC4suC4o+C4suC4h+C4hOC4s+C4quC4seC5iOC4hyBBU0NJSSDguJfguLPguYPguKvguYng
+          uKrguKPguLjguJvguYTguJTguYnguYPguJnguKPguLDguJTguLHguJogKipzdHJvbmcgc3RhdGlj
+          IGV2aWRlbmNlKiog4Lin4LmI4LiyIFBDIGZsYXNoYm9vdCDguYPguIrguYkgVVNCIE1hc3MgU3Rv
+          cmFnZSBCdWxrLU9ubHkgVHJhbnNwb3J0IC8gQ0JXLWZhbWlseSDguYHguKXguLDguKHguLUgY3Vz
+          dG9tIGNvbW1hbmQgdm9jYWJ1bGFyeSDguYPguJkgY29tbWFuZCBibG9jay9DREIgcGF0aC4KCuC4
+          reC4ouC5iOC4suC4h+C5hOC4o+C4geC5h+C4leC4suC4oSBSMjYg4Lii4Lix4LiH4LmE4Lih4LmI
+          4Lit4LmJ4Liy4LiH4Lin4LmI4Liy4LmA4Lij4Liy4Lij4Li54LmJIGJ5dGUgbGF5b3V0IOC4guC4
+          reC4hyB2ZW5kb3IgQ0RCIOC5geC4leC5iOC4peC4sOC4hOC4s+C4quC4seC5iOC4h+C4hOC4o+C4
+          miAxMDAlIOC5gOC4nuC4o+C4suC4sCBoYW5kbGVyIG1hY2hpbmUgY29kZSDguKLguLHguIfguYTg
+          uKHguYjguYTguJTguYkgZGVjb21waWxlIOC4nuC4o+C5ieC4reC4oSBzeW1ib2wuCgojIyAzLiBD
+          b21tYW5kIHRhYmxlIOC4l+C4teC5iCByZWNvdmVyIOC5hOC4lOC5iQoK4LiV4Liy4Lij4Liy4LiH
+          4LiX4Li14LmIIGAweEUwNENgIOC4iuC4teC5ieC5hOC4m+C4ouC4seC4hyBDLXN0cmluZyDguJXg
+          uYjguK3guYTguJvguJnguLXguYk6Cgp8IGluZGV4IHwgY29tbWFuZCB8IHN0cmluZyBvZmZzZXQg
+          fCDguKrguJbguLLguJnguLAgUjI2IHwKfC0tLTp8LS0tfC0tLTp8LS0tfAp8IDAgfCBgY2hpcGVy
+          YXNgIHwgYDB4Q0JFOGAgfCBCTE9DSyDigJQgZGVzdHJ1Y3RpdmUgZXJhc2UgfAp8IDEgfCBgdXBp
+          bmZvYCB8IGAweENCRjRgIHwgQkxPQ0sg4oCUIHNlbWFudGljcy9zaWRlIGVmZmVjdHMg4Lii4Lix
+          4LiH4LmE4Lih4LmI4Lie4Li04Liq4Li54LiI4LiZ4LmMIHwKfCAyIHwgYGJ0dXBkYXRgIHwgYDB4
+          Q0JGQ2AgfCBCTE9DSyDigJQgdXBkYXRlL3dyaXRlIHwKfCAzIHwgYGNuZmdkYXRgIHwgYDB4Q0Mw
+          NGAgfCBCTE9DSyDigJQgcHJvZ3JhbS9jb25maWcgZGF0YSB8CnwgNCB8IGBjb25zdGRhdGAgfCBg
+          MHhDQzBDYCB8IEJMT0NLIOKAlCBwcm9ncmFtIGNvbnN0IGRhdGEgfAp8IDUgfCBgY29kZWRhdGFg
+          IHwgYDB4Q0MxOGAgfCBCTE9DSyDigJQgcHJvZ3JhbSBjb2RlIHwKfCA2IHwgYGJvb3RkYXRgIHwg
+          YDB4Q0MyNGAgfCBCTE9DSyDigJQgcHJvZ3JhbSBib290IGRhdGEgfAp8IDcgfCBgY3h4eGAgfCBg
+          MHhDQzJDYCB8IEJMT0NLIOKAlCBtZXRhZGF0YS9DUkMvb2Zmc2V0IHZhbGlkYXRpb247IHNpZGUg
+          ZWZmZWN0c+C4ouC4seC4h+C5hOC4oeC5iOC4nuC4tOC4quC4ueC4iOC4meC5jCB8CgrguITguLPg
+          uKfguYjguLIgYGNoaXBlcmFzYCDguKPguKfguKHguIHguLHguJogZGlhZ25vc3RpYyBgcHJlcGFy
+          ZSB0byB1bmxvY2sgJiBjaGlwIGVyYXNlIGFsbGAg4LiX4Liz4LmD4Lir4LmJ4LmA4Liq4LmJ4LiZ
+          4LiX4Liy4LiH4LiZ4Li14LmJ4LmA4Lib4LmH4LiZIGRlc3RydWN0aXZlIOC5guC4lOC4ouC4leC4
+          o+C4h+C5geC4peC4sOC5hOC4oeC5iOC4leC5ieC4reC4h+C4l+C4lOC4peC4reC4h+C4geC4seC4
+          miBoYXJkd2FyZS4KCmBib290ZGF0L2NvZGVkYXRhL2NvbnN0ZGF0L2NuZmdkYXRgIOC4oeC4tSBk
+          aWFnbm9zdGljIOC4hOC4ueC5iOC4geC4seC4miBgcGMgcmVjaXZlIC4uLiBkYXRhIGZhaWxgLCBg
+          cGMgd3JpdGUgLi4uIGRhdGEgZmFpbGAsIOC5geC4peC4sCBgLi4uIGVuZGAg4LiI4Li24LiH4LmA
+          4Lib4LmH4LiZIGRhdGEvcHJvZ3JhbSBzdGFnZXMg4LmE4Lih4LmI4LmD4LiK4LmIIHJlYWQgcHJv
+          YmUuCgpgYnR1cGRhdGAg4Lih4Li1IGRpYWdub3N0aWMgYEJUX0lORk8gdXBkYXRhIG9rIWAg4LiI
+          4Li24LiH4LiI4Lix4LiU4LmA4Lib4LmH4LiZIHdyaXRlL3VwZGF0ZS4KCmBjeHh4YCDguYHguKrg
+          uJTguIcv4LiV4Lij4Lin4LiIIGZpZWxkIOC5gOC4iuC5iOC4mSBgYm9vdF9sZW5gLCBgYm9vdF9j
+          cmNgLCBgY29kZV9sZW5gLCBgY29kZV9jcmNgLCBgY29uc3RfbGVuYCwgYGNvbmZpZ19sZW5gLCBg
+          Y29uc3Rfb2Zmc2V0YCwgYGNvbmZpZ19vZmZzZXRgLCBlbmNyeXB0aW9uIGNvbXBhdGliaWxpdHkg
+          4LmB4Lil4LiwIEFDSy4g4LmB4Lih4LmJ4LiI4Liw4LiU4Li54LmA4Lib4LmH4LiZIHZhbGlkYXRp
+          b24gY29tbWFuZCDguYHguJXguYjguKLguLHguIfguYTguKHguYjguKHguLXguKvguKXguLHguIHg
+          uJDguLLguJnguKfguYjguLLguYTguKHguYjguKHguLUgc3RhdGUgdHJhbnNpdGlvbiDguJTguLHg
+          uIfguJnguLHguYnguJnguKLguLHguIfguKvguYnguLLguKEgcHJvYmUuCgpgdXBpbmZvYCDguYDg
+          uJvguYfguJkgY2FuZGlkYXRlIOC4l+C4teC5iOC4iuC4t+C5iOC4reC4lOC4ueC5gOC4q+C4oeC4
+          t+C4reC4mSBpbmZvL3N0YXR1cyDguYHguJXguYggUjI2IOC4ouC4seC4h+C5hOC4oeC5iOC4oeC4
+          teC4q+C4peC4seC4geC4kOC4suC4mSBoYW5kbGVyIOC5gOC4nuC4teC4ouC4h+C4nuC4reC4l+C4
+          teC5iOC4iOC4sOC4o+C4seC4muC4o+C4reC4h+C4p+C5iOC4siByZWFkLW9ubHkg4LiI4Li24LiH
+          ICoq4Lii4Lix4LiH4Lir4LmJ4Liy4Lih4Liq4LmI4LiHKiouCgojIyA0LiBNVkEvcGFja2FnZSBz
+          dHJ1Y3R1cmUg4LiX4Li14LmI4Lij4Li54LmJ4LmA4Lie4Li04LmI4LihIOC5geC4leC5iOC4ouC4
+          seC4h+C5hOC4oeC5iOC4hOC4o+C4mgoKU3RhdGljIHN0cmluZ3Mg4Lii4Li34LiZ4Lii4Lix4LiZ
+          OgoKLSBoZWFkZXIvbWFnaWMgY2hlY2s6IGBNVkEgSEVBREVSIElTIE5PVCBNVkIxWGAKLSDguKHg
+          uLUgcGFja2FnZSBJRHMgYDAxUEtHYCwgYDAyUEtHYCwgYDAzUEtHYCwgYDA0UEtHYCwgYDA1UEtH
+          YAotIG1ldGFkYXRhIOC4oeC4teC4reC4ouC5iOC4suC4h+C4meC5ieC4reC4oiBib290L2NvZGUg
+          bGVuZ3RoK0NSQywgY29uc3QvY29uZmlnIGxlbmd0aCtvZmZzZXQg4LmB4Lil4LiwIGVuY3J5cHRp
+          b24gY29tcGF0aWJpbGl0eQotIGAwNFBLR2AgZGlhZ25vc3RpY3Mg4LmA4LiK4Li34LmI4Lit4Lih
+          4LiB4Lix4LiaIGNvbnN0IG9mZnNldC9wcm9jZXNzaW5nCi0gYDA1UEtHYCBkaWFnbm9zdGljcyDg
+          uYDguIrguLfguYjguK3guKHguIHguLHguJogY29uZmlnIG9mZnNldC9wcm9jZXNzaW5nCi0gcGFj
+          a2FnZSBtYWtlciBkaWFnbm9zdGljcyDguIHguKXguYjguLLguKfguJbguLbguIcgYGhlYWRlciYw
+          MXBrZ2AsIGAwM3BrZ2AsIGAwMnBrZ2AsIEZsYXNoYm9vdCBDUkMvbGVuIOC5geC4peC4sCBBY3R1
+          YWxDb2RlIENSQy9TSVpFCgrguYHguJXguYggc2VtYW50aWMgbWFwcGluZyDguILguK3guIcgMDEv
+          MDIvMDMg4Lii4Lix4LiH4LmE4Lih4LmI4Lie4Lit4LmD4Lir4LmJ4Liq4Lij4LmJ4Liy4LiHIHBh
+          Y2thZ2Ugc2NoZW1hIOC4l+C4teC5iOC5gOC4iuC4t+C5iOC4reC4luC4t+C4reC5hOC4lOC5iSDg
+          uJTguLHguIfguJnguLHguYnguJkgUjI2ICoq4LmE4Lih4LmI4Liq4Lij4LmJ4Liy4LiHIGAubXZh
+          YCoqIOC5geC4peC4sOC5hOC4oeC5iOC5gOC4lOC4siBmaWVsZCBsYXlvdXQuCgojIyA1LiBSZWZl
+          cmVuY2UgU0RLIGZsYXNoIG1hcCDigJQg4LmD4LiK4LmJ4LmA4Lib4LmH4LiZIGFyY2hpdGVjdHVy
+          ZSBldmlkZW5jZSDguYDguJfguYjguLLguJnguLHguYnguJkKCmBmbGFzaF9jb25maWcuaGAg4LiC
+          4Lit4LiHIHJlZmVyZW5jZSBCUDEwNDhQNCDguKPguLDguJrguLg6CgotIENPREUgYDB4MDAwMDAw
+          YAotIENPTlNUX0RBVEEgYDB4MTk4MDAwYAotIEFVRElPX0VGRkVDVCBgMHgzQzgwMDBgCi0gRkxB
+          U0hGUyBgMHgzRDAwMDBgCi0gVVNFUl9EQVRBIGAweDNGMDAwMGAKLSBCUF9EQVRBIGAweDNGMzAw
+          MGAKLSBCVF9EQVRBIGAweDNGQjAwMGAKLSBVU0VSX0NPTkZJRyBgMHgzRkUwMDBgCi0gQlRfQ09O
+          RklHIGAweDNGRjAwMGAKCuC4hOC5iOC4suC4nuC4p+C4geC4meC4teC5iSAqKuC4ouC4seC4h+C5
+          hOC4oeC5iOC5g+C4iuC5iCBwcm9vZiDguILguK3guIcgcHJvZHVjdGlvbi1ib2FyZCBsYXlvdXQq
+          Ki4g4Lir4LmJ4Liy4Lih4LmD4LiK4LmJ4LmA4Lib4LmH4LiZIGFkZHJlc3Mg4Liq4Liz4Lir4Lij
+          4Lix4LiaIGVyYXNlL3Byb2dyYW0g4Lia4LiZ4Lia4Lit4Lij4LmM4LiU4Lic4Li54LmJ4LmD4LiK
+          4LmJ4LiI4LiZ4LiB4Lin4LmI4Liy4LiI4Liw4Lih4Li1IHByb2R1Y3Rpb24gZHVtcC9vZmZpY2lh
+          bCBwYWNrYWdlL3JlY292ZXJ5IGV2aWRlbmNlIOC4ouC4t+C4meC4ouC4seC4mS4KCiMjIDYuIGIx
+          X2Rvd25sb2FkX3YxLjMuZXhlIOC5gOC4m+C5h+C4meC4hOC4meC4peC4sCB0cmFuc3BvcnQKCuC4
+          leC4o+C4p+C4iCB0b29sIGBiMV9kb3dubG9hZF92MS4zLmV4ZWA6CgotIFNIQTI1NiBgN2I0ZThk
+          ZDc5NDkxNGIzODRmMGE5MTliOTdhMDE2YjZiY2FjMWI5ODlhMzc1ZjY0YWY1NWIzMzcyYTQwMmMx
+          OWAKLSBQRTMyL0N5Z3dpbgotIGltcG9ydCBgc29ja2V0YCwgYGNvbm5lY3RgLCBgcmVhZGAsIGB3
+          cml0ZWAKLSBgc2VuZF9jbWQoY2hhcilgIOC4l+C4teC5iCBWQSBgMHgwMDQwMTJBMGAg4Liq4LmI
+          4LiHIDEgYnl0ZSDguJzguYjguLLguJkgZmlsZSBkZXNjcmlwdG9yL3NvY2tldCDguYHguKXguLDg
+          uK3guYjguLLguJkgQUNLIDIgYnl0ZXM7IHN1Y2Nlc3Mg4LmA4Lih4Li34LmI4LitIGBhY2tbMF09
+          PWNtZCAmJiBhY2tbMV09PTBgCgrguIjguLbguIfguYDguJvguYfguJkgbGVnYWN5IEZsYXNoIEJ1
+          cm5lci9kZWJ1Zy1zZXJ2ZXIgdHJhbnNwb3J0IOC5hOC4oeC5iOC5g+C4iuC5iOC4q+C4peC4seC4
+          geC4kOC4suC4meC4p+C5iOC4siBQQyBmbGFzaGJvb3QgVVNCIEJPVCDguYPguIrguYkgMS1ieXRl
+          IGNvbW1hbmQgZnJhbWluZyDguYHguJrguJrguYDguJTguLXguKLguKfguIHguLHguJkuIFIyNiDg
+          uYHguKLguIHguKrguK3guIcgcHJvdG9jb2wg4LiZ4Li14LmJ4Lit4Lit4LiB4LiI4Liy4LiB4LiB
+          4Lix4LiZIOC5hOC4oeC5iOC5gOC4reC4suC4oeC4suC4m+C4sOC4m+C4mS4KCiMjIDcuIOC4hOC4
+          s+C4leC4reC4muC5gOC4o+C4t+C5iOC4reC4hyBzYWZlIGxpdmUgcmVhZCBjb21tYW5kCgoqKuC4
+          ouC4seC4h+C5hOC4oeC5iOC4nuC4miBjb21tYW5kIOC4l+C4teC5iOC4nuC4tOC4quC4ueC4iOC4
+          meC5jOC5hOC4lOC5ieC4p+C5iOC4suC4m+C4peC4reC4lOC4oOC4seC4ouC4nuC4reC4quC4s+C4
+          q+C4o+C4seC4miBsaXZlIHByb2JlLioqCgrguYDguKvguJXguLjguJzguKXguKHguLXguKrguK3g
+          uIfguIrguLHguYnguJk6CgoxLiDguIHguLLguKPguYDguILguYnguLLguKrguLnguYggUEMgZmxh
+          c2hib290IOC4l+C4teC5iOC5gOC4o+C4suC4o+C4ueC5ieC4iOC4suC4gSByZWZlcmVuY2UgYXBw
+          IOC4leC5ieC4reC4h+C4nOC5iOC4suC4mSBzdGF0ZS1jaGFuZ2luZyBgMHg1NS8weEFBIC0+IEdF
+          VF9SRVBPUlQgLT4gc3RhcnRfdXBfZ3JhdGUgLT4ganVtcCAwYCDguIvguLbguYjguIfguJbguLng
+          uIHguKXguYfguK3guIHguYTguKHguYjguYPguKvguYnguJfguJTguKrguK3guJrguIvguYnguLPg
+          uK3guKLguLnguYjguYHguKXguYnguKcuCjIuIOC5geC4oeC5iSBgdXBpbmZvYCDguK3guLLguIjg
+          uYDguJvguYfguJkgaW5mby9zdGF0dXMgY29tbWFuZCDguYHguJXguYggaGFuZGxlciBzZW1hbnRp
+          Y3Mg4Lii4Lix4LiH4LmE4Lih4LmI4Lie4Li04Liq4Li54LiI4LiZ4LmM4Lin4LmI4Liy4LmE4Lih
+          4LmI4Lih4Li1IHNpZGUgZWZmZWN0cyDguYHguKXguLDguYDguKPguLLguYTguKHguYjguKHguLXg
+          uYDguKvguJXguLjguJzguKXguYPguKvguYnguYDguILguYnguLIgYm9vdGxvYWRlciDguYDguJ7g
+          uLfguYjguK3guJfguJTguKXguK3guIfguKHguLHguJkuCgrguJTguLHguIfguJnguLHguYnguJkg
+          KipSMjYg4LmE4Lih4LmI4Liq4Lij4LmJ4Liy4LiHIEFuZHJvaWQgaGFyZHdhcmUgcHJvYmUg4LmD
+          4Lir4Lih4LmIKiog4LmB4Lil4Liw4LmE4Lih4LmI4LmD4Lir4LmJ4Lic4Li54LmJ4LmD4LiK4LmJ
+          4LiB4LiU4Lit4Liw4LmE4Lij4Lia4LiZ4Lia4Lit4Lij4LmM4LiULgoKIyMgOC4gTmV4dCB0YXJn
+          ZXQg4LiX4Li14LmI4Lib4Lil4Lit4LiU4Lig4Lix4LiiCgrguJfguLMgb2ZmbGluZSDguJXguYjg
+          uK3guYDguJfguYjguLLguJnguLHguYnguJk6CgoxLiBkaXNhc3NlbWJsZS9kZWNvbXBpbGUgaGFu
+          ZGxlciBkaXNwYXRjaCDguILguK3guIfguITguLPguKrguLHguYjguIcgOCDguJXguLHguKfguYPg
+          uJkgNjQgS2lCIHJlZmVyZW5jZSBmbGFzaGJvb3Qg4LmC4LiU4Lii4LmA4LiJ4Lie4Liy4LiwIGB1
+          cGluZm9gIOC5geC4peC4sCBgY3h4eGA7CjIuIHJlY292ZXIgRGF0YVRyYW5zZmVyTGVuZ3RoIC8g
+          ZGlyZWN0aW9uIC8gQ0RCIGJ5dGVzIC8gQUNLL0NTVyBiZWhhdmlvciDguILguK3guIfguYHguJXg
+          uYjguKXguLAgY29tbWFuZDsKMy4g4Lir4LiyIHJlYWQtb25seSBpZGVudGl0eS92ZXJzaW9uIHBh
+          dGgg4LiX4Li14LmI4LmE4Lih4LmI4LiV4LmJ4Lit4LiH4LmA4Lib4Lil4Li14LmI4Lii4LiZIGJv
+          b3Qgc3RhdGUg4LiW4LmJ4Liy4Lih4Li1Owo0LiDguKvguLIgcHJvZHVjdGlvbi1ib2FyZCBsYXlv
+          dXQvcmVjb3ZlcnkgZXZpZGVuY2Ug4LiI4Liy4LiBIG9mZmljaWFsIHVwZGF0ZXIvcGFja2FnZS9k
+          dW1wIOC4geC5iOC4reC4meC5geC4leC4sCBmbGFzaDsKNS4g4LiW4LmJ4Liy4LmE4Lih4LmI4Lih
+          4Li1IG5vbi1kZXN0cnVjdGl2ZSBlbnRyeS9yZWFkIHBhdGgg4LmD4Lir4LmJ4Lib4Lij4Liw4LiB
+          4Liy4Lio4LmA4Liq4LmJ4LiZ4LiX4Liy4LiH4LiZ4Li14LmJ4Lin4LmI4LiyIGhhcmR3YXJlLXBy
+          b2JlIGJsb2NrZWQg4LmB4LiX4LiZ4LiB4Liy4Lij4LmA4LiU4LiyLgoKIyMgRGVjaXNpb24gUjI2
+          CgotIFBDIGZsYXNoYm9vdCB0cmFuc3BvcnQgZmFtaWx5OiAqKmlkZW50aWZpZWQgd2l0aCBzdHJv
+          bmcgc3RhdGljIGV2aWRlbmNlIGFzIFVTQiBNU0MgQk9UICsgY3VzdG9tIGNvbW1hbmQgdGFibGUq
+          Ki4KLSBEZXN0cnVjdGl2ZS93cml0ZSBjb21tYW5kIHZvY2FidWxhcnk6ICoqaWRlbnRpZmllZCBl
+          bm91Z2ggdG8gYmxhY2tsaXN0KiouCi0gQ29tcGxldGUgdmVuZG9yIGNvbW1hbmQgZnJhbWluZzog
+          KipQQVJUSUFMIC8gbm90IHlldCBwcm92ZW4qKi4KLSBTYWZlIGxpdmUgaWRlbnRpdHkvdmVyc2lv
+          biBjb21tYW5kOiAqKk5PVCBQUk9WRU4qKi4KLSBQcm9kdWN0aW9uIGZsYXNoIGxheW91dDogKipO
+          T1QgUFJPVkVOKiouCi0gSGFyZHdhcmUgdGVzdDogKipCTE9DS0VEKiouCg==
+          B64
+          base64 -d /tmp/r116/r26.b64 > /tmp/r116/evidence/R26_SOURCE_REPORT.md
+          echo "$R26_EXPECTED_SHA256  /tmp/r116/evidence/R26_SOURCE_REPORT.md" | sha256sum -c -
+
+      - name: Record public-document facts already verified from source pages
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > /tmp/r116/evidence/R116_PUBLIC_DOC_FACTS.json <<'EOF'
+          {
+            "sources": [
+              {
+                "name": "MV_AP82xx_BP10xx_PCTools upgrade tool manual v0.0.8",
+                "url": "https://www.scribd.com/document/990877502/",
+                "facts": [
+                  "Tool is for PC and communicates with the device through USB.",
+                  "It upgrades MCU code from .MVA files.",
+                  "The manual describes flashboot and states USB resets/reconnects after flashboot jumps.",
+                  "Release note names the base tool MV_AP82xx_BP10xx_PC_Tools_V2.2.",
+                  "V2.2.1 says Flashboot debugging was OK.",
+                  "V2.2.8 adds SN read QR/barcode and ASCII custom-data sending."
+                ]
+              },
+              {
+                "name": "Firmware and user application communication protocol V3.15.1",
+                "url": "https://www.scribd.com/document/1013263124/",
+                "facts": [
+                  "Generic protocol supports UART, IIC and USB; USB uses HID.",
+                  "UART and USB follow the same A5 5A ... 16 framing.",
+                  "Control 0x11 is a PCTools-specific programming-related control.",
+                  "0x11 length 0x00 is documented as a firmware-version query.",
+                  "0x11 also defines a custom programming write carrying Index, Offset, DataLength and Data.",
+                  "Section 5.24 labels 0xFE firmware upgrade but explicitly says it is supported only by DU series."
+                ]
+              }
+            ]
+          }
+          EOF
+
+      - name: Verify R26 flashboot evidence markers
+        shell: bash
+        run: |
+          set -euo pipefail
+          R=/tmp/r116/evidence/R26_SOURCE_REPORT.md
+          grep -F 'USB Mass Storage BOT' "$R"
+          grep -F 'CBW signature `0x43425355`' "$R"
+          grep -F '`chiperas`' "$R"
+          grep -F '`upinfo`' "$R"
+          grep -F '`btupdat`' "$R"
+          grep -F '`cnfgdat`' "$R"
+          grep -F '`constdat`' "$R"
+          grep -F '`codedata`' "$R"
+          grep -F '`bootdat`' "$R"
+          grep -F '`cxxx`' "$R"
+          grep -F '`0x55/0xAA -> GET_REPORT -> start_up_grate -> jump 0`' "$R"
+          grep -F 'Safe live identity/version command: **NOT PROVEN**' "$R"
+
+      - name: Build two-stage transport correlation
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import json,re,hashlib
+
+          ev=Path("/tmp/r116/evidence")
+          r26=(ev/"R26_SOURCE_REPORT.md").read_text(encoding="utf-8")
+          pub=json.loads((ev/"R116_PUBLIC_DOC_FACTS.json").read_text())
+
+          r26_sha=hashlib.sha256((ev/"R26_SOURCE_REPORT.md").read_bytes()).hexdigest()
+
+          d={
+            "R26_SHA256":r26_sha,
+            "PUBLIC_BPXX_RUNTIME_USB_TRANSPORT":"HID",
+            "PUBLIC_BPXX_RUNTIME_FRAME":"A5 5A + control + length + data + 16",
+            "PCTOOLS_CONTROL_0X11_VERSION_QUERY_DOCUMENTED":True,
+            "PCTOOLS_CONTROL_0X11_ALSO_HAS_PROGRAMMING_WRITE":True,
+            "CONTROL_0X11_SAFE_FOR_PRODUCTION_LIVE_TEST":False,
+            "CONTROL_0XFE_FIRMWARE_UPGRADE_DOCUMENTED":True,
+            "CONTROL_0XFE_SCOPE_IN_V3_15_1":"DU_SERIES_ONLY",
+            "CONTROL_0XFE_IS_BP10XX_BOOTSTRAP_CANDIDATE":False,
+            "PCTOOLS_MANUAL_USES_MVA_OVER_USB":True,
+            "PCTOOLS_MANUAL_MENTIONS_FLASHBOOT_USB_RESET":True,
+            "REFERENCE_FLASHBOOT_POST_JUMP_TRANSPORT":"USB_MSC_BOT_CUSTOM_CDB",
+            "REFERENCE_FLASHBOOT_HAS_USBC_CBW_EVIDENCE":True,
+            "REFERENCE_FLASHBOOT_COMMANDS":[
+              "chiperas","upinfo","btupdat","cnfgdat",
+              "constdat","codedata","bootdat","cxxx"
+            ],
+            "REFERENCE_FLASHBOOT_COMMANDS_AUTHORIZED_FOR_PRODUCTION":False,
+            "TWO_STAGE_MODEL":{
+              "stage_1":"runtime/application firmware: USB HID generic/PCTools control protocol",
+              "bridge":"UNKNOWN exact BP10xx production bootstrap/transition command",
+              "stage_2":"flashboot: USB MSC BOT with custom vendor CDB command vocabulary"
+            },
+            "KEY_NEW_CONCLUSION":"0xFE must not be treated as the BP10xx bridge because V3.15.1 explicitly scopes 0xFE firmware upgrade to DU series. The missing BP10xx bridge remains unresolved.",
+            "AA55_RETEST_REQUIRED":False,
+            "PRODUCTION_FIRST_BOOTSTRAP_PROVEN":False,
+            "PRODUCTION_RECOVERY_USB_IDENTITY_PROVEN":False,
+            "SAFE_READ_ONLY_STOCK_BACKUP_PROVEN":False,
+            "PRODUCTION_MVA_ACCEPTANCE_PROVEN":False,
+            "ANY_DISCOVERED_FRAME_AUTHORIZED_FOR_BOARD":False,
+            "NEXT":"Acquire/reverse MV_AP82xx_BP10xx_PC_Tools V2.2.x or matching BP10xx SDK implementation offline to recover the exact runtime-HID to flashboot bridge. Focus on the 0x11 handler and transition code, but do not send 0x11 to the production board.",
+            "FLASH_ALLOWED":False
+          }
+
+          (ev/"R116_TWO_STAGE_MODEL.json").write_text(
+              json.dumps(d,indent=2,ensure_ascii=False)+"\n"
+          )
+
+          md=[
+              "# R116 — BP10xx HID -> flashboot two-stage model",
+              "",
+              "## Result",
+              "",
+              "- Stage 1: runtime/application protocol is USB HID in the public BPxx protocol.",
+              "- Stage 2: R26 reference flashboot is USB MSC BOT/custom CDB after jump-to-0.",
+              "- The exact BP10xx bridge between those two stages is still missing.",
+              "- Public protocol V3.15.1 does NOT make 0xFE a BP10xx upgrade path; section 5.24 scopes 0xFE to DU series only.",
+              "- 0x11 is PCTools-specific and includes both a version query and programming write semantics, so production live probing remains blocked.",
+              "- Do not repeat AA55 and do not transmit flashboot command vocabulary.",
+              "",
+              "## Next offline target",
+              "",
+              "Recover the exact BP10xx PCTools/runtime 0x11 handler and the code path that causes flashboot entry/re-enumeration.",
+              "",
+              "FLASH_ALLOWED=NO"
+          ]
+          (ev/"R116_REPORT_TH.md").write_text("\n".join(md)+"\n")
+          print(json.dumps(d,indent=2,ensure_ascii=False))
+          PY
+
+      - name: Fail-closed consistency checks
+        shell: bash
+        run: |
+          set -euo pipefail
+          D=/tmp/r116/evidence/R116_TWO_STAGE_MODEL.json
+          grep -F '"CONTROL_0XFE_SCOPE_IN_V3_15_1": "DU_SERIES_ONLY"' "$D"
+          grep -F '"CONTROL_0XFE_IS_BP10XX_BOOTSTRAP_CANDIDATE": false' "$D"
+          grep -F '"CONTROL_0X11_SAFE_FOR_PRODUCTION_LIVE_TEST": false' "$D"
+          grep -F '"PRODUCTION_FIRST_BOOTSTRAP_PROVEN": false' "$D"
+          grep -F '"FLASH_ALLOWED": false' "$D"
+
+      - name: Package evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /tmp/r116/evidence
+          zip -9 -r /tmp/R116_BP10XX_TWO_STAGE_MODEL_EVIDENCE.zip .
+          sha256sum /tmp/R116_BP10XX_TWO_STAGE_MODEL_EVIDENCE.zip             > /tmp/R116_BP10XX_TWO_STAGE_MODEL_EVIDENCE.zip.sha256
+
+      - name: Upload evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: R116-BP10XX-TWO-STAGE-MODEL-EVIDENCE
+          path: |
+            /tmp/R116_BP10XX_TWO_STAGE_MODEL_EVIDENCE.zip
+            /tmp/R116_BP10XX_TWO_STAGE_MODEL_EVIDENCE.zip.sha256
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Final gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -F 'R116_USB_DEVICE_ACCESS=NO' /tmp/r116/evidence/R116_SAFETY.txt
+          grep -F 'R116_RUNTIME_0X11_SENT=NO' /tmp/r116/evidence/R116_SAFETY.txt
+          grep -F 'R116_CONTROL_0XFE_SENT=NO' /tmp/r116/evidence/R116_SAFETY.txt
+          grep -F 'R116_ANY_DISCOVERED_FRAME_AUTHORIZED_FOR_BOARD=NO' /tmp/r116/evidence/R116_SAFETY.txt
+          echo R116_STATIC_CLOSURE_COMPLETE=YES
+          echo FLASH_ALLOWED=NO
