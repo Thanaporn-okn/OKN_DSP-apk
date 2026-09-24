@@ -1,0 +1,183 @@
+name: R164 N9 local29 reader lifetime static audit
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - ".github/workflows/R164_N9_LOCAL29_READER_LIFETIME_STATIC_AUDIT.yml"
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: r164-static-${{ github.ref }}
+  cancel-in-progress: true
+env:
+  FLASH_ALLOWED: "NO"
+jobs:
+  static_audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Immutable safety gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$FLASH_ALLOWED" = "NO"
+          mkdir -p /tmp/r164/evidence
+          cat > /tmp/r164/evidence/R164_SAFETY.txt <<'EOF'
+          MODE=OFFLINE_STATIC_IL_TEXT_ONLY
+          FLASH_ALLOWED=NO
+          USB_OR_BOARD_CONTACT=NO
+          VENDOR_EXE_DLL_APK_EXECUTED=NO
+          OFFLINE_DECRYPT_EXECUTED=NO
+          AA55_OR_LINEIN_AA55_SENT=NO
+          RUNTIME_0X11_OR_0XFE_SENT=NO
+          FLASH_READ_ERASE_WRITE_EXECUTED=NO
+          ONE_BYTE_REPAIR_GUESS_ALLOWED=NO
+          DISCOVERED_FRAME_LIVE_AUTHORIZED=NO
+          HARDWARE_MODIFICATION=FORBIDDEN
+          EOF
+      - name: Download pinned R163 result
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          artifact-ids: '10827347973'
+          path: /tmp/r164/r163
+          merge-multiple: true
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          repository: Thanaporn-okn/OKN_DSP-apk
+          run-id: 36044080362
+      - name: Download pinned R157 raw evidence chain
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          artifact-ids: '10820682068'
+          path: /tmp/r164/r157
+          merge-multiple: true
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          repository: Thanaporn-okn/OKN_DSP-apk
+          run-id: 36028455796
+      - name: Verify exact local dispatcher path without execution
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PYCODE'
+          from pathlib import Path
+          import hashlib,json,re
+
+          def audit(raw,full_raw,prior,out):
+              assert prior['revision']=='R163'
+              assert prior['FLASH_ALLOWED'] is False and prior['OFFLINE_DECRYPT_AUTHORIZED'] is False
+              assert prior['UNACCOUNTED_CONDITIONAL_COUNT_AFTER_R163']==3
+              assert hashlib.sha256(raw).hexdigest()==prior['N9_SHA256']
+              assert hashlib.sha256(full_raw).hexdigest()=='aa1d369c8be7ee8d7b358fc5b0f6b0874f46711a9249fee70f413b900d234c66'
+              def parse(text):
+                  return [(m[1],m[2],(m[3] or '').strip()) for line in text.splitlines() if (m:=re.match(r'\s*(IL_[0-9a-f]+):\s+(\S+)(?:\s+(.*))?$',line))]
+              rows=parse(raw.decode()); full=full_raw.decode(); pos={x[0]:i for i,x in enumerate(rows)}
+              targets=rows[pos['IL_0012']][2][1:-1].split(', ')
+              assert {s:targets[s] for s in [96,281,333,508,628]}=={96:'IL_658f',281:'IL_65d1',333:'IL_3285',508:'IL_1b10',628:'IL_0c9b'}
+              def method(owner,name):
+                  end=full.index('} // end of method '+owner+'::'+name)
+                  body=parse(full[full.rfind('.method',0,end):end])
+                  if body[0][1]=='br.s':
+                      assert body[0][2]=='IL_0007'
+                      body=body[next(i for i,x in enumerate(body) if x[0]=='IL_0007'):]
+                  return body
+              owner='q71r2Rj8SiD9GF1BI50'; reader='Y7Uor8e58M9K22QZF7H'
+              wrappers={
+                  'HVJrNANRJZcM7WNOuLw':('System.IO.MemoryStream::ToArray()',['ldarg','callvirt','ret']),
+                  'OqRPwWNg7T0cT923rlN':('System.IO.Stream::Close()',['ldarg','callvirt','ret']),
+                  'xNJi1gNxO5ftieIY2py':('::VjneGFIQYN()',['ldarg','callvirt','ret']),
+                  'qfkv4ZNDynVciIciQy6':('::sXXetjyGMH()',['ldarg','callvirt','ret'])}
+              bodies={}
+              for name,(api,ops) in wrappers.items():
+                  b=method(owner,name);assert [x[1] for x in b]==ops
+                  assert api in b[1][2] and b[0][2]=='0'
+                  bodies[name]=b
+              for name,api in [('VjneGFIQYN','Close()'),('sXXetjyGMH','ReadInt32()')]:
+                  b=method(reader,name);assert [x[1] for x in b]==['ldarg.0','ldfld','callvirt','ret']
+                  assert b[1][2].endswith('::piIeSklUmq') and 'System.IO.BinaryReader::'+api in b[2][2]
+                  bodies[name]=b
+              def region(a,b):return rows[pos[a]:pos[b]+1]
+              suffix=region('IL_65fe','IL_6614')
+              assert [x[1] for x in suffix]==['ldloc.s','ldc.i4.0','ldloc.s','ldlen','conv.i4','call','call','ldc.i4','br']
+              assert suffix[0][2]==suffix[2][2]=='8'
+              assert '::VdpxeBN91DReLWMTEcv' in suffix[5][2]
+              assert '::OqRPwWNg7T0cT923rlN' in suffix[6][2]
+              assert suffix[-2][2]=='333' and suffix[-1][2]=='IL_0012'
+              b333=region('IL_3285','IL_3291')
+              assert [x[1] for x in b333]==['ldloc.s','call','ldc.i4','br']
+              assert b333[0][2]=='65' and '::OqRPwWNg7T0cT923rlN' in b333[1][2]
+              assert b333[2][2]=='508' and b333[3][2]=='IL_0012'
+              b508=region('IL_1b10','IL_1b1c')
+              assert [x[1] for x in b508]==['ldloc.s','call','ldc.i4','br']
+              assert b508[0][2]=='114' and '::xNJi1gNxO5ftieIY2py' in b508[1][2]
+              assert b508[2][2]=='628' and b508[3][2]=='IL_0012'
+              b628=region('IL_0c9b','IL_0ca2')
+              assert [x[1] for x in b628]==['ldloc.s','call','stloc.s']
+              assert b628[0][2]=='114' and '::qfkv4ZNDynVciIciQy6' in b628[1][2]
+              assert b628[2][2]=='71'
+              assert rows[pos['IL_65f7']][1]=='call' and '::HVJrNANRJZcM7WNOuLw' in rows[pos['IL_65f7']][2]
+              assert rows[pos['IL_65fc']]==('IL_65fc','stloc.s','29')
+              assert region('IL_658f','IL_6598')==[('IL_658f','ldloc.s','37'),('IL_6591','stloc.s','29'),('IL_6593','ldc.i4','206'),('IL_6598','br','IL_0012')]
+              stores=[x[0] for x in rows if x[1] in ('stloc','stloc.s') and x[2]=='29']
+              assert stores==['IL_6591','IL_65fc']
+              result={
+                  'revision':'R164','R163_RUN_ID':36044080362,'R163_JOB_ID':107783156852,'R163_ARTIFACT_ID':10827347973,
+                  'N9_SHA256':hashlib.sha256(raw).hexdigest(),
+                  'LOCAL29_ASSIGNMENTS':{'IL_6591':'reference from local37, followed by state206','IL_65fc':'MemoryStream.ToArray return, followed by cleanup and state333'},
+                  'POST_IL65FC_NORMAL_EDGE_CHAIN':[281,333,508,628],
+                  'READER_CLOSE_CALL':'IL_1b12', 'NEXT_SAME_READER_READ_CALL':'IL_0c9d',
+                  'READER_LOCAL':114,'UNDERLYING_READER_FIELD':'piIeSklUmq',
+                  'READER_REBIND_BETWEEN_CLOSE_AND_READ':False,
+                  'CONDITIONAL_EXCEPTION_BARRIER':'Under pinned unmodified method bodies and standard BinaryReader behavior, after Close returns normally, the following ReadInt32 on the same reader cannot return normally. If Close or earlier cleanup throws, this normal edge chain also stops earlier.',
+                  'EXCEPTION_HANDLER_CONTINUATION_AUDITED':False,
+                  'ACTUAL_PRODUCTION_EXCEPTION_OBSERVED':False,
+                  'STATE94_REACHABLE_FROM_IL65FC_PROVEN':False,
+                  'LOCAL29_BYTES_AT_STATE94_PROVEN':False,
+                  'STATIC_PATH_CONTRADICTION_IS_VENDOR_RUNTIME_FAILURE_PROOF':False,
+                  'API_REFERENCE':'https://learn.microsoft.com/en-us/dotnet/api/system.io.binaryreader.readint32',
+                  'UNACCOUNTED_CONDITIONAL_COUNT_AFTER_R164':3,
+                  'remaining_unaccounted_conditionals':prior['remaining_unaccounted_conditionals'],
+                  'INDEPENDENT_FULL_PATH_BRANCH_COVERAGE_PROVEN':False,
+                  'OFFLINE_DECRYPT_AUTHORIZED':False,'H15_PLAINTEXT_RECOVERED':False,
+                  'ANY_DISCOVERED_FRAME_AUTHORIZED_FOR_BOARD':False,'FLASH_ALLOWED':False,
+                  'NEXT':'Audit exception regions and the local37-copy route to state94; do not select the ToArray source as reachable merely from textual order. Keep raw h15 distinct from local29.'}
+              out.mkdir(parents=True,exist_ok=True)
+              (out/'R164_DECISION.json').write_text(json.dumps(result,indent=2)+'\n')
+              (out/'R164_READER_LIFETIME_EVIDENCE.json').write_text(json.dumps({'wrappers':bodies,'suffix':suffix,'state333':b333,'state508':b508,'state628':b628},indent=2)+'\n')
+              print(json.dumps(result,indent=2))
+
+          import io,zipfile
+          base=Path('/tmp/r164')
+          def inner(folder,name,expected):
+              data=(base/folder/name).read_bytes()
+              assert hashlib.sha256(data).hexdigest()==expected, 'pinned inner digest mismatch'
+              assert (base/folder/(name+'.sha256')).read_text().split()[0]==expected
+              return zipfile.ZipFile(io.BytesIO(data))
+          prior=inner('r163','R163_N9_READER_SOURCE_ZERO_CURSOR_EVIDENCE.zip','fc75233a047ab3e8f9fc8e5a3c7d833d84f4f1c645c74f1f53d63ffc41ee4d2c')
+          decision=json.loads(prior.read('R163_DECISION.json'))
+          chain=inner('r157','R157_N9_LOCAL29_LOCAL81_NONNULL_LOCAL93_LOOP_BRANCH_EVIDENCE.zip','f974c64c63eea5f2b940c76101f4ab6e769803f5630a2d87d21d08679c321609')
+          prefix='r156/r155/r154/r153/r152/r151/r150/r149/r148/r147/r146/r145/r144/r143/'
+          n9=chain.read(prefix+'R143_N9_METHOD.il')
+          full=chain.read(prefix+'r142/r141/r140/R140_FIXED_FULL.il')
+          assert hashlib.sha256(n9).hexdigest()=='5a3964c1f4bd8db455e6882a4ce6f90667e1a9abc6e1fafd10440b31006e4a33'
+          audit(n9,full,decision,base/'evidence')
+          (base/'evidence/R163_DECISION.json').write_bytes(prior.read('R163_DECISION.json'))
+          result=json.loads((base/'evidence/R164_DECISION.json').read_text())
+          assert result['FLASH_ALLOWED'] is False and result['OFFLINE_DECRYPT_AUTHORIZED'] is False
+          assert result['UNACCOUNTED_CONDITIONAL_COUNT_AFTER_R164']==3
+          PYCODE
+      - name: Package evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /tmp/r164/evidence
+          zip -9 -r /tmp/R164_N9_LOCAL29_READER_LIFETIME_EVIDENCE.zip . >/dev/null
+          sha256sum /tmp/R164_N9_LOCAL29_READER_LIFETIME_EVIDENCE.zip > /tmp/R164_N9_LOCAL29_READER_LIFETIME_EVIDENCE.zip.sha256
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: R164-N9-LOCAL29-READER-LIFETIME-STATIC-EVIDENCE
+          path: |
+            /tmp/R164_N9_LOCAL29_READER_LIFETIME_EVIDENCE.zip
+            /tmp/R164_N9_LOCAL29_READER_LIFETIME_EVIDENCE.zip.sha256
+          if-no-files-found: error
+          retention-days: 90
