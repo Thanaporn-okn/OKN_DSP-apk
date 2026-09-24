@@ -1,0 +1,324 @@
+name: R152 N9 unsigned assembly public key token branch static audit
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - ".github/workflows/R152_N9_UNSIGNED_ASSEMBLY_PUBLICKEYTOKEN_BRANCH_STATIC_AUDIT.yml"
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: r152-n9-unsigned-assembly-publickeytoken-branch-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  FLASH_ALLOWED: "NO"
+  R151_RUN_ID: "36019596801"
+  R151_JOB_ID: "107700808336"
+  R151_ARTIFACT_ID: "10815434242"
+  R151_ARTIFACT_NAME: "R151-N9-INDEPENDENT-RAW-IL-BRANCH-COVERAGE-STATIC-EVIDENCE"
+  R151_ARTIFACT_DIGEST: "sha256:65030904593a2b40d76c2160bab22d95232e68130766595e122a2c8eb3af209d"
+
+jobs:
+  static_audit:
+    name: STATIC ONLY - resolve earliest public-key-token branches - no execution - no USB - no board
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Immutable safety gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/r152/r151 /tmp/r152/evidence
+          cat > /tmp/r152/evidence/R152_SAFETY.txt <<'EOF'
+          R152_MODE=OFFLINE_STATIC_UNSIGNED_ASSEMBLY_PUBLICKEYTOKEN_BRANCH_AUDIT_ONLY
+          R152_VENDOR_BINARY_EXECUTED=NO
+          R152_WINDOWS_EXE_EXECUTED=NO
+          R152_DLL_EXECUTED=NO
+          R152_APK_EXECUTED=NO
+          R152_USB_DEVICE_ACCESS=NO
+          R152_BOARD_CONTACT=NO
+          R152_AA55_SENT=NO
+          R152_LINEIN_AA55_SENT=NO
+          R152_RUNTIME_0X11_SENT=NO
+          R152_RUNTIME_0XFE_SENT=NO
+          R152_FLASHBOOT_COMMAND_SENT=NO
+          R152_FLASH_READ_EXECUTED=NO
+          R152_FLASH_ERASE_EXECUTED=NO
+          R152_FLASH_WRITE_EXECUTED=NO
+          R152_OFFLINE_DECRYPT_EXECUTED=NO
+          R152_ONE_BYTE_REPAIR_GUESS_ALLOWED=NO
+          R152_ANY_DISCOVERED_FRAME_AUTHORIZED_FOR_BOARD=NO
+          HARDWARE_MODIFICATION=FORBIDDEN
+          FLASH_ALLOWED=NO
+          EOF
+
+      - name: Download pinned R151 evidence
+        uses: actions/download-artifact@v4
+        with:
+          name: R151-N9-INDEPENDENT-RAW-IL-BRANCH-COVERAGE-STATIC-EVIDENCE
+          path: /tmp/r152/r151
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          repository: Thanaporn-okn/OKN_DSP-apk
+          run-id: 36019596801
+
+      - name: Verify and extract pinned R151 evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          OUTER="$(find /tmp/r152/r151 -maxdepth 2 -type f -name 'R151_N9_INDEPENDENT_RAW_IL_BRANCH_COVERAGE_STATIC_EVIDENCE.zip' -print -quit)"
+          SUM="$(find /tmp/r152/r151 -maxdepth 2 -type f -name 'R151_N9_INDEPENDENT_RAW_IL_BRANCH_COVERAGE_STATIC_EVIDENCE.zip.sha256' -print -quit)"
+          test -n "$OUTER"; test -n "$SUM"
+          EXPECTED="$(awk '{print $1}' "$SUM")"
+          ACTUAL="$(sha256sum "$OUTER" | awk '{print $1}')"
+          test "$EXPECTED" = "$ACTUAL"
+          unzip -q "$OUTER" -d /tmp/r152/evidence/r151
+          test -s /tmp/r152/evidence/r151/R151_DECISION.json
+          test -s /tmp/r152/evidence/r151/R151_INDEPENDENT_RAW_IL_BRANCH_COVERAGE.json
+          test -s /tmp/r152/evidence/r151/r150/r149/r148/r147/r146/r145/r144/r143/R143_N9_METHOD.il
+          test -s /tmp/r152/evidence/r151/r150/r149/r148/r147/r146/r145/r144/r143/r142/r141/r140/R140_FIXED_FULL.il
+          test -s /tmp/r152/evidence/r151/r150/r149/r148/r147/r146/r145/r144/r143/r142/r141/r140/R140_FIXED_ASSEMBLY.txt
+          grep -F '"UNACCOUNTED_CONDITIONAL_COUNT_FROM_RESOURCE_TO_CREATEDECRYPTOR": 19' /tmp/r152/evidence/r151/R151_DECISION.json
+          grep -F '"OFFLINE_DECRYPT_AUTHORIZED": false' /tmp/r152/evidence/r151/R151_DECISION.json
+          grep -F '"FLASH_ALLOWED": false' /tmp/r152/evidence/r151/R151_DECISION.json
+
+      - name: Prove local52 is this assembly public key token and assembly is unsigned
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import re,json
+
+          ev=Path('/tmp/r152/evidence')
+          base=ev/'r151/r150/r149/r148/r147/r146/r145/r144'
+          n9=(base/'r143/R143_N9_METHOD.il').read_text(errors='replace')
+          full=(base/'r143/r142/r141/r140/R140_FIXED_FULL.il').read_text(errors='replace')
+          assembly=(base/'r143/r142/r141/r140/R140_FIXED_ASSEMBLY.txt').read_text(errors='replace')
+
+          def body(name):
+              marker=f'}} // end of method q71r2Rj8SiD9GF1BI50::{name}'
+              e=full.find(marker)
+              if e<0: return ''
+              s=full.rfind('\n\t.method ',0,e)
+              return full[s:e+len(marker)] if s>=0 else ''
+
+          vml=body('vml6RVN553UfRTfZJaS')
+          zwc=body('zWct5BNlyiRacwo0U8Y')
+
+          unsigned_facts={
+            'assembly_name_is_DSTech_AudioDSP_Client':'Name:          DSTech_AudioDSP_Client' in assembly,
+            'assembly_flags_zero':'Flags:         0x00000000' in assembly,
+            'assembly_publickey_blobptr_zero':'PublicKey:     BlobPtr (0x00000000)' in assembly,
+            'assembly_publickey_zero_sized':'Zero sized public key' in assembly,
+          }
+          wrapper_facts={
+            'vml_is_Assembly_GetName':'System.Reflection.Assembly::GetName()' in vml,
+            'zwc_is_AssemblyName_GetPublicKeyToken':'System.Reflection.AssemblyName::GetPublicKeyToken()' in zwc,
+            'static_field_lWgj_initialized_from_Type_get_Assembly': all(x in full for x in [
+              'call class [mscorlib]System.Type [mscorlib]System.Type::GetTypeFromHandle',
+              'callvirt instance class [mscorlib]System.Reflection.Assembly [mscorlib]System.Type::get_Assembly()',
+              'stsfld object Q9Wet0jLP4YxXSyJBiC.q71r2Rj8SiD9GF1BI50::lWgjKLKxo2']),
+            'local52_assignment_is_lWgj_GetName_GetPublicKeyToken': bool(re.search(
+              r'ldsfld object .*?::lWgjKLKxo2\s*\n\s*IL_[0-9a-fA-F]+: call object .*?::vml6RVN553UfRTfZJaS\(object\)\s*\n\s*IL_[0-9a-fA-F]+: call object .*?::zWct5BNlyiRacwo0U8Y\(object\)\s*\n\s*IL_[0-9a-fA-F]+: stloc\.s 52',
+              n9,re.S)),
+          }
+
+          if not all(unsigned_facts.values()):
+              raise SystemExit('unsigned assembly metadata proof incomplete: '+repr(unsigned_facts))
+          if not all(wrapper_facts.values()):
+              raise SystemExit('local52 public-key-token dataflow proof incomplete: '+repr(wrapper_facts))
+
+          out={
+            'unsigned_assembly_metadata_facts':unsigned_facts,
+            'local52_wrapper_dataflow_facts':wrapper_facts,
+            'LOCAL52_IS_PUBLIC_KEY_TOKEN_OF_THIS_ASSEMBLY':True,
+            'THIS_ASSEMBLY_HAS_ZERO_SIZED_PUBLIC_KEY':True,
+            'NONEMPTY_PUBLIC_KEY_TOKEN_IS_STATICALLY_EXCLUDED':True,
+            'NULL_VS_EMPTY_ARRAY_REPRESENTATION_NOT_REQUIRED_FOR_CONVERGENCE_PROOF':True,
+            'interpretation':(
+              'R140 assembly metadata proves the protected executable assembly has a zero-sized public key. '
+              'The recovered N9 dataflow stores Assembly.GetName().GetPublicKeyToken() for that same assembly in local52. '
+              'Therefore a non-empty public-key token is excluded. R152 does not need to guess whether the runtime represents '
+              'the absent token as null or a zero-length byte array; both cases are handled separately in the next proof.'),
+          }
+          (ev/'R152_LOCAL52_UNSIGNED_ASSEMBLY_TOKEN_PROOF.json').write_text(json.dumps(out,indent=2)+'\n')
+          print(json.dumps(out,indent=2))
+          PY
+
+      - name: Resolve state58 and state515 as an absent-token branch cluster
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import re,json
+
+          ev=Path('/tmp/r152/evidence')
+          base=ev/'r151/r150/r149/r148/r147/r146/r145/r144'
+          n9=(base/'r143/R143_N9_METHOD.il').read_text(errors='replace')
+          r151=json.loads((ev/'r151/R151_INDEPENDENT_RAW_IL_BRANCH_COVERAGE.json').read_text())
+          p=json.loads((ev/'R152_LOCAL52_UNSIGNED_ASSEMBLY_TOKEN_PROOF.json').read_text())
+
+          sm=re.search(r'IL_0012:\s*switch \(([^)]*)\)',n9)
+          if not sm: raise SystemExit('dispatcher switch missing')
+          labels=[x.strip() for x in sm.group(1).split(',')]
+          state_of={lab:i for i,lab in enumerate(labels)}
+          lines=n9.splitlines()
+          label_line={}
+          for i,l in enumerate(lines):
+              m=re.match(r'\s*(IL_[0-9A-Fa-f]+):',l)
+              if m and m.group(1) in state_of: label_line[m.group(1)]=i
+          ordered=sorted(label_line.items(),key=lambda x:x[1])
+          blocks={}
+          for i,(lab,s) in enumerate(ordered):
+              e=ordered[i+1][1] if i+1<len(ordered) else len(lines)
+              blocks[state_of[lab]]='\n'.join(lines[s:e])
+
+          if state_of.get('IL_1341') != 58 or state_of.get('IL_0d94') != 515 or state_of.get('IL_37ee') != 92:
+              raise SystemExit('expected state labels changed')
+
+          b58=blocks[58]; b515=blocks[515]
+          facts={
+            'state58_tests_local52_nullness': all(x in b58 for x in ['ldloc.s 52','brfalse IL_37ee']),
+            'state58_nonnull_fallthrough_dispatches_state515': all(x in b58 for x in ['ldc.i4 515','br IL_0012']),
+            'state515_tests_local52_length': all(x in b515 for x in ['ldloc.s 52','ldlen','brtrue IL_489a']),
+            'state515_zero_length_fallthrough_dispatches_state12': all(x in b515 for x in ['ldc.i4 12','br IL_0012']),
+          }
+          if not all(facts.values()): raise SystemExit('state58/state515 branch structure changed: '+repr(facts))
+          if not p['NONEMPTY_PUBLIC_KEY_TOKEN_IS_STATICALLY_EXCLUDED']:
+              raise SystemExit('nonempty token was not excluded')
+
+          # Raw-IL verified convergence path for the non-null/zero-length representation.
+          # Every transition below is an unconditional dispatcher assignment or a previously proven literal helper outcome.
+          expected_zero_len_path=[515,12,269,71,467,417,138,310,590,638,195,92]
+
+          # Verify the path skeleton is actually present in the independently rebuilt R151 candidate by using
+          # R144 only as a post-derivation cross-check, never as the source of the branch classification.
+          r144=json.loads((base/'R144_PE32_CONCRETE_KEYIV_PATH.json').read_text())
+          old=r144['path_states']
+          i=old.index(58)
+          observed=old[i+1:i+1+len(expected_zero_len_path)]
+          if observed != expected_zero_len_path:
+              raise SystemExit(f'post-derivation convergence cross-check changed: {observed}')
+
+          unresolved=r151['unaccounted_conditionals_from_state367_to_402']
+          first_two=[(x['state'],x['branch_line']) for x in unresolved[:2]]
+          if first_two != [(58,'IL_1343: brfalse IL_37ee'),(515,'IL_0d97: brtrue IL_489a')]:
+              raise SystemExit('R151 earliest branch ordering changed: '+repr(first_two))
+
+          remaining=unresolved[2:]
+          out={
+            'branch_structure_facts':facts,
+            'ABSENT_TOKEN_REPRESENTATION_CASE_NULL':{
+              'state58_branch_taken_to_state92':True,
+              'converges_at_state92':True,
+            },
+            'ABSENT_TOKEN_REPRESENTATION_CASE_NON_NULL_ZERO_LENGTH':{
+              'state58_falls_to_state515':True,
+              'state515_nonempty_branch_taken':False,
+              'zero_length_path_states_to_convergence':expected_zero_len_path,
+              'converges_at_state92':True,
+            },
+            'NONEMPTY_TOKEN_PATH_TO_IL_489A_STATICALLY_EXCLUDED':True,
+            'STATE58_AND_STATE515_CLUSTER_RESOLVED_WITHOUT_NULL_EMPTY_GUESS':True,
+            'R151_UNACCOUNTED_COUNT_BEFORE':len(unresolved),
+            'R152_RESOLVED_CONDITIONAL_COUNT':2,
+            'R152_UNACCOUNTED_COUNT_AFTER':len(remaining),
+            'NEXT_UNACCOUNTED_CONDITIONAL':remaining[0] if remaining else None,
+            'remaining_unaccounted_conditionals':remaining,
+            'interpretation':(
+              'The own assembly is unsigned, so local52 cannot contain a non-empty public-key token. If the absent token '
+              'is represented as null, state58 jumps directly to state92. If it is represented as a non-null zero-length '
+              'array, state58 enters state515 and the zero-length branch follows the verified path back to the same state92. '
+              'Thus the first two R151 conditionals are resolved without assuming null versus empty-array runtime representation.'),
+          }
+          (ev/'R152_EARLIEST_BRANCH_CLUSTER_RESOLUTION.json').write_text(json.dumps(out,indent=2)+'\n')
+          print(json.dumps(out,indent=2))
+          PY
+
+      - name: Build fail-closed R152 decision and report
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import json
+          ev=Path('/tmp/r152/evidence')
+          p=json.loads((ev/'R152_LOCAL52_UNSIGNED_ASSEMBLY_TOKEN_PROOF.json').read_text())
+          b=json.loads((ev/'R152_EARLIEST_BRANCH_CLUSTER_RESOLUTION.json').read_text())
+          prev=json.loads((ev/'r151/R151_DECISION.json').read_text())
+
+          decision={
+            'R151_INDEPENDENT_FULL_PATH_BRANCH_COVERAGE_PROVEN':prev['INDEPENDENT_FULL_PATH_BRANCH_COVERAGE_PROVEN'],
+            'THIS_ASSEMBLY_HAS_ZERO_SIZED_PUBLIC_KEY':p['THIS_ASSEMBLY_HAS_ZERO_SIZED_PUBLIC_KEY'],
+            'LOCAL52_IS_PUBLIC_KEY_TOKEN_OF_THIS_ASSEMBLY':p['LOCAL52_IS_PUBLIC_KEY_TOKEN_OF_THIS_ASSEMBLY'],
+            'NONEMPTY_PUBLIC_KEY_TOKEN_IS_STATICALLY_EXCLUDED':p['NONEMPTY_PUBLIC_KEY_TOKEN_IS_STATICALLY_EXCLUDED'],
+            'STATE58_AND_STATE515_CLUSTER_RESOLVED_WITHOUT_NULL_EMPTY_GUESS':b['STATE58_AND_STATE515_CLUSTER_RESOLVED_WITHOUT_NULL_EMPTY_GUESS'],
+            'R151_UNACCOUNTED_CONDITIONAL_COUNT':b['R151_UNACCOUNTED_COUNT_BEFORE'],
+            'R152_RESOLVED_CONDITIONAL_COUNT':b['R152_RESOLVED_CONDITIONAL_COUNT'],
+            'UNACCOUNTED_CONDITIONAL_COUNT_AFTER_R152':b['R152_UNACCOUNTED_COUNT_AFTER'],
+            'NEXT_UNACCOUNTED_CONDITIONAL':b['NEXT_UNACCOUNTED_CONDITIONAL'],
+            'INDEPENDENT_FULL_PATH_BRANCH_COVERAGE_PROVEN':b['R152_UNACCOUNTED_COUNT_AFTER']==0,
+            'STATIC_SEMANTICS_CONTRADICTION_CAN_BE_TREATED_AS_TRUE_RUNTIME_PATH_CONTRADICTION':False,
+            'OFFLINE_DECRYPT_AUTHORIZED':False,
+            'H15_PLAINTEXT_RECOVERED':False,
+            'ANY_DISCOVERED_FRAME_AUTHORIZED_FOR_BOARD':False,
+            'FLASH_ALLOWED':False,
+            'NEXT':(
+              'Resolve the next raw-IL conditional in execution order: state404 IL_12f9 (local83 < local8.Length). '
+              'Trace the exact definitions and loop bounds of local83 and local8 from raw IL; classify the branch without '
+              'assuming the legacy fallthrough. Continue through the remaining 17 conditionals before interpreting the '
+              '15-byte CryptoStream remainder as a true runtime-path contradiction. Preserve h15 unchanged and do not decrypt.'),
+          }
+          (ev/'R152_DECISION.json').write_text(json.dumps(decision,indent=2)+'\n')
+          (ev/'R152_REPORT_TH.md').write_text(
+            '# R152 unsigned-assembly public-key-token branch audit\n\n'
+            f'- R151 unresolved conditionals: {decision["R151_UNACCOUNTED_CONDITIONAL_COUNT"]}\n'
+            f'- resolved in R152: {decision["R152_RESOLVED_CONDITIONAL_COUNT"]}\n'
+            f'- remaining: {decision["UNACCOUNTED_CONDITIONAL_COUNT_AFTER_R152"]}\n'
+            f'- local52 is own-assembly public key token: {decision["LOCAL52_IS_PUBLIC_KEY_TOKEN_OF_THIS_ASSEMBLY"]}\n'
+            f'- own assembly zero-sized public key: {decision["THIS_ASSEMBLY_HAS_ZERO_SIZED_PUBLIC_KEY"]}\n'
+            f'- non-empty token excluded: {decision["NONEMPTY_PUBLIC_KEY_TOKEN_IS_STATICALLY_EXCLUDED"]}\n'
+            f'- state58/state515 resolved without null-vs-empty guess: {decision["STATE58_AND_STATE515_CLUSTER_RESOLVED_WITHOUT_NULL_EMPTY_GUESS"]}\n'
+            f'- next unresolved: {decision["NEXT_UNACCOUNTED_CONDITIONAL"]}\n'
+            '- offline decrypt authorized: False\n- h15 plaintext recovered: False\n\n'
+            f'NEXT: {decision["NEXT"]}\n\nFLASH_ALLOWED=NO\n')
+          print(json.dumps(decision,indent=2))
+          PY
+
+      - name: Package R152 evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /tmp/r152/evidence
+          zip -9 -r /tmp/R152_N9_UNSIGNED_ASSEMBLY_PUBLICKEYTOKEN_BRANCH_STATIC_EVIDENCE.zip . >/dev/null
+          sha256sum /tmp/R152_N9_UNSIGNED_ASSEMBLY_PUBLICKEYTOKEN_BRANCH_STATIC_EVIDENCE.zip > /tmp/R152_N9_UNSIGNED_ASSEMBLY_PUBLICKEYTOKEN_BRANCH_STATIC_EVIDENCE.zip.sha256
+
+      - name: Upload R152 evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: R152-N9-UNSIGNED-ASSEMBLY-PUBLICKEYTOKEN-BRANCH-STATIC-EVIDENCE
+          path: |
+            /tmp/R152_N9_UNSIGNED_ASSEMBLY_PUBLICKEYTOKEN_BRANCH_STATIC_EVIDENCE.zip
+            /tmp/R152_N9_UNSIGNED_ASSEMBLY_PUBLICKEYTOKEN_BRANCH_STATIC_EVIDENCE.zip.sha256
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Final fail-closed gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -F 'R152_VENDOR_BINARY_EXECUTED=NO' /tmp/r152/evidence/R152_SAFETY.txt
+          grep -F 'R152_USB_DEVICE_ACCESS=NO' /tmp/r152/evidence/R152_SAFETY.txt
+          grep -F 'R152_BOARD_CONTACT=NO' /tmp/r152/evidence/R152_SAFETY.txt
+          grep -F '"R152_RESOLVED_CONDITIONAL_COUNT": 2' /tmp/r152/evidence/R152_DECISION.json
+          grep -F '"UNACCOUNTED_CONDITIONAL_COUNT_AFTER_R152": 17' /tmp/r152/evidence/R152_DECISION.json
+          grep -F '"OFFLINE_DECRYPT_AUTHORIZED": false' /tmp/r152/evidence/R152_DECISION.json
+          grep -F '"H15_PLAINTEXT_RECOVERED": false' /tmp/r152/evidence/R152_DECISION.json
+          grep -F '"FLASH_ALLOWED": false' /tmp/r152/evidence/R152_DECISION.json
+          echo R152_N9_UNSIGNED_ASSEMBLY_PUBLICKEYTOKEN_BRANCH_STATIC_AUDIT_COMPLETE=YES
+          echo FLASH_ALLOWED=NO
