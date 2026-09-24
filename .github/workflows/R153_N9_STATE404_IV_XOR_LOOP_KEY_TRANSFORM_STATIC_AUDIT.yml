@@ -1,0 +1,281 @@
+name: R153 N9 state404 IV XOR loop key transform static audit
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - ".github/workflows/R153_N9_STATE404_IV_XOR_LOOP_KEY_TRANSFORM_STATIC_AUDIT.yml"
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: r153-n9-state404-iv-xor-loop-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  FLASH_ALLOWED: "NO"
+  R152_RUN_ID: "36020744233"
+  R152_JOB_ID: "107704684435"
+  R152_ARTIFACT_ID: "10817100145"
+  R152_ARTIFACT_NAME: "R152-N9-UNSIGNED-ASSEMBLY-PUBLICKEYTOKEN-BRANCH-STATIC-EVIDENCE"
+  R152_ARTIFACT_DIGEST: "sha256:1004c772adedda808d624e0bcf1b37d5e61990ae95adb683fea4cf172f5eca70"
+
+jobs:
+  static_audit:
+    name: STATIC ONLY - state404 IV XOR loop and key transform - no execution - no USB - no board
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Immutable safety gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/r153/r152 /tmp/r153/evidence
+          cat > /tmp/r153/evidence/R153_SAFETY.txt <<'EOF'
+          R153_MODE=OFFLINE_STATIC_STATE404_IV_XOR_LOOP_KEY_TRANSFORM_ONLY
+          R153_VENDOR_BINARY_EXECUTED=NO
+          R153_WINDOWS_EXE_EXECUTED=NO
+          R153_DLL_EXECUTED=NO
+          R153_APK_EXECUTED=NO
+          R153_USB_DEVICE_ACCESS=NO
+          R153_BOARD_CONTACT=NO
+          R153_AA55_SENT=NO
+          R153_LINEIN_AA55_SENT=NO
+          R153_RUNTIME_0X11_SENT=NO
+          R153_RUNTIME_0XFE_SENT=NO
+          R153_FLASHBOOT_COMMAND_SENT=NO
+          R153_FLASH_READ_EXECUTED=NO
+          R153_FLASH_ERASE_EXECUTED=NO
+          R153_FLASH_WRITE_EXECUTED=NO
+          R153_OFFLINE_DECRYPT_EXECUTED=NO
+          R153_ONE_BYTE_REPAIR_GUESS_ALLOWED=NO
+          R153_ANY_DISCOVERED_FRAME_AUTHORIZED_FOR_BOARD=NO
+          HARDWARE_MODIFICATION=FORBIDDEN
+          FLASH_ALLOWED=NO
+          EOF
+
+      - name: Download pinned R152 evidence
+        uses: actions/download-artifact@v4
+        with:
+          name: R152-N9-UNSIGNED-ASSEMBLY-PUBLICKEYTOKEN-BRANCH-STATIC-EVIDENCE
+          path: /tmp/r153/r152
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          repository: Thanaporn-okn/OKN_DSP-apk
+          run-id: 36020744233
+
+      - name: Verify and extract pinned R152 evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          OUTER="$(find /tmp/r153/r152 -maxdepth 2 -type f -name 'R152_N9_UNSIGNED_ASSEMBLY_PUBLICKEYTOKEN_BRANCH_STATIC_EVIDENCE.zip' -print -quit)"
+          SUM="$(find /tmp/r153/r152 -maxdepth 2 -type f -name 'R152_N9_UNSIGNED_ASSEMBLY_PUBLICKEYTOKEN_BRANCH_STATIC_EVIDENCE.zip.sha256' -print -quit)"
+          test -n "$OUTER"; test -n "$SUM"
+          EXPECTED="$(awk '{print $1}' "$SUM")"
+          ACTUAL="$(sha256sum "$OUTER" | awk '{print $1}')"
+          test "$EXPECTED" = "$ACTUAL"
+          unzip -q "$OUTER" -d /tmp/r153/evidence/r152
+          test -s /tmp/r153/evidence/r152/R152_DECISION.json
+          test -s /tmp/r153/evidence/r152/R152_EARLIEST_BRANCH_CLUSTER_RESOLUTION.json
+          test -s /tmp/r153/evidence/r152/r151/r150/r149/r148/r147/r146/r145/R145_DECISION.json
+          test -s /tmp/r153/evidence/r152/r151/r150/r149/r148/r147/r146/r145/r144/R144_PE32_CONCRETE_KEYIV_PATH.json
+          test -s /tmp/r153/evidence/r152/r151/r150/r149/r148/r147/r146/r145/r144/r143/R143_N9_METHOD.il
+          grep -F '"UNACCOUNTED_CONDITIONAL_COUNT_AFTER_R152": 17' /tmp/r153/evidence/r152/R152_DECISION.json
+          grep -F '"OFFLINE_DECRYPT_AUTHORIZED": false' /tmp/r153/evidence/r152/R152_DECISION.json
+          grep -F '"FLASH_ALLOWED": false' /tmp/r153/evidence/r152/R152_DECISION.json
+
+      - name: Prove direct branch corrections and exact state404 XOR loop
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import re,json,hashlib
+
+          ev=Path('/tmp/r153/evidence')
+          base=ev/'r152/r151/r150/r149/r148/r147/r146/r145/r144'
+          n9=(base/'r143/R143_N9_METHOD.il').read_text(errors='replace')
+          r144=json.loads((base/'R144_PE32_CONCRETE_KEYIV_PATH.json').read_text())
+          r145=json.loads((base.parent/'R145_DECISION.json').read_text())
+          r152=json.loads((ev/'r152/R152_EARLIEST_BRANCH_CLUSTER_RESOLUTION.json').read_text())
+
+          sm=re.search(r'IL_0012:\s*switch \(([^)]*)\)',n9)
+          if not sm: raise SystemExit('dispatcher switch missing')
+          labels=[x.strip() for x in sm.group(1).split(',')]
+          state_of={lab:i for i,lab in enumerate(labels)}
+          lines=n9.splitlines()
+          label_line={}
+          for i,l in enumerate(lines):
+              m=re.match(r'\s*(IL_[0-9A-Fa-f]+):',l)
+              if m and m.group(1) in state_of: label_line[m.group(1)]=i
+          ordered=sorted(label_line.items(),key=lambda x:x[1])
+          blocks={}
+          for i,(lab,s) in enumerate(ordered):
+              e=ordered[i+1][1] if i+1<len(ordered) else len(lines)
+              blocks[state_of[lab]]='\n'.join(lines[s:e])
+
+          expected_map={12:'IL_3db0',92:'IL_37ee',265:'IL_64c5',404:'IL_12f3',309:'IL_33d9',625:'IL_1bb9',604:'IL_0fa8'}
+          for st,lab in expected_map.items():
+              if state_of.get(lab)!=st: raise SystemExit(f'state mapping changed {st} {lab} -> {state_of.get(lab)}')
+
+          b12,b92,b265,b404,b309,b625,b604=[blocks[x] for x in [12,92,265,404,309,625,604]]
+          facts={
+            'state12_direct_branches_to_state92_before_dead_dispatch_code': b12.lstrip().startswith('IL_3db0: br IL_37ee'),
+            'state92_initializes_local83_zero': all(x in b92 for x in ['ldc.i4.0','stloc.s 83','ldc.i4 265','br IL_0012']),
+            'state265_direct_branches_to_state404': b265.lstrip().startswith('IL_64c5: br IL_12f3'),
+            'state404_tests_local83_lt_local8_length': all(x in b404 for x in ['ldloc.s 83','ldloc.s 8','ldlen','conv.i4','blt IL_33d9']),
+            'state309_xors_local47_index_with_local8_index': all(x in b309 for x in [
+              'ldloc.s 47','ldloc.s 83','ldelem.u1','ldloc.s 8','xor','conv.u1','stelem.i1','ldc.i4 625']),
+            'state625_increments_local83_and_returns_state404': all(x in b625 for x in ['ldloc.s 83','ldc.i4.1','add','stloc.s 83','ldc.i4 404','br IL_0012']),
+            'state604_aliases_local12_to_local27_after_loop': all(x in b604 for x in ['ldloc.s 12','stloc.s 27']),
+            'r144_key_alias_local17_to_local47': r144.get('key_alias_local17_to_local47') is True,
+            'r144_iv_alias_local100_to_local8': r144.get('iv_alias_local100_to_local8') is True,
+            'r144_key_length_32': r144.get('key_length')==32,
+            'r144_iv_length_16': r144.get('iv_length')==16,
+            'r144_zfos_predicate_proven_true': r144.get('proven_opaque_predicates',{}).get('zfos5ENLukrcbiO4qNQ') is True,
+            'r145_used_same_preloop_key_candidate': r145.get('PE32_KEY_HEX')==r144.get('key_hex'),
+            'r145_used_same_iv_candidate': r145.get('PE32_IV_HEX')==r144.get('iv_hex'),
+            'r152_absent_token_cluster_resolved': r152.get('STATE58_AND_STATE515_CLUSTER_RESOLVED_WITHOUT_NULL_EMPTY_GUESS') is True,
+          }
+          if not all(facts.values()):
+              raise SystemExit('state404 loop proof incomplete: '+repr({k:v for k,v in facts.items() if not v}))
+
+          pre=bytes.fromhex(r144['key_hex'])
+          iv=bytes.fromhex(r144['iv_hex'])
+          if len(pre)!=32 or len(iv)!=16: raise SystemExit('unexpected candidate key/iv size')
+
+          # Exact loop semantics: local83 starts at 0, state404 enters state309 while i<16,
+          # state309 performs key[i] ^= iv[i], state625 increments i, then state404 repeats.
+          work=bytearray(pre)
+          trace=[]
+          i=0
+          while i < len(iv):
+              before=work[i]
+              work[i] ^= iv[i]
+              trace.append({'iteration':i,'local83':i,'key_before':before,'iv_byte':iv[i],'key_after':work[i]})
+              i += 1
+          post=bytes(work)
+          if i != 16: raise SystemExit('loop iteration count not 16')
+
+          expected_post=bytes(a^b for a,b in zip(pre[:16],iv))+pre[16:]
+          if post!=expected_post: raise SystemExit('post-loop key computation mismatch')
+
+          out={
+            'raw_il_facts':facts,
+            'R152_ZERO_LENGTH_PATH_RAW_IL_CORRECTION':'state12 branches directly to state92; legacy states after the unconditional branch are dead on that path',
+            'STATE404_LOOP_INITIAL_LOCAL83':0,
+            'STATE404_LOOP_BOUND_LOCAL8_LENGTH':len(iv),
+            'STATE404_TRUE_BRANCH_ITERATIONS':16,
+            'STATE404_EXIT_LOCAL83':16,
+            'STATE404_LOOP_MUTATES_LOCAL47_FIRST_16_BYTES_BY_XOR_LOCAL8':True,
+            'PRE_LOOP_KEY_CANDIDATE_HEX_FROM_R144_R145':pre.hex(),
+            'IV_CANDIDATE_HEX_FROM_R144_R145':iv.hex(),
+            'POST_LOOP_LOCAL47_KEY_CANDIDATE_HEX':post.hex(),
+            'POST_LOOP_LOCAL47_KEY_CANDIDATE_SHA256':hashlib.sha256(post).hexdigest(),
+            'loop_trace':trace,
+            'R145_KEY_VALUE_CAN_NO_LONGER_BE_TREATED_AS_FINAL_CREATEDECRYPTOR_KEY_WITHOUT_STATE404_TRANSFORM':True,
+            'STATE404_CONDITIONAL_STATICALLY_RESOLVED':True,
+            'interpretation':(
+              'Raw IL proves a 16-iteration loop starting at local83=0. On each iteration local47[i] is replaced by '
+              'local47[i] XOR local8[i], then local83 increments and the loop repeats while local83 < local8.Length. '
+              'The R144/R145 candidate IV length is 16. Therefore the previously reported key bytes are a pre-loop '
+              'candidate for this cluster, not a final CreateDecryptor key unless this transform is incorporated. '
+              'This does not authorize decryption because later path conditionals remain unresolved.'),
+          }
+          (ev/'R153_STATE404_IV_XOR_LOOP_KEY_TRANSFORM.json').write_text(json.dumps(out,indent=2)+'\n')
+          print(json.dumps(out,indent=2))
+          PY
+
+      - name: Rebase unresolved conditionals and build fail-closed R153 decision
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import json
+          ev=Path('/tmp/r153/evidence')
+          prev=json.loads((ev/'r152/R152_EARLIEST_BRANCH_CLUSTER_RESOLUTION.json').read_text())
+          loop=json.loads((ev/'R153_STATE404_IV_XOR_LOOP_KEY_TRANSFORM.json').read_text())
+          old=prev['remaining_unaccounted_conditionals']
+          if len(old)!=17: raise SystemExit(f'expected 17 unresolved from R152, got {len(old)}')
+          first=old[0]
+          if (first.get('state'),first.get('branch_line')) != (404,'IL_12f9: blt IL_33d9'):
+              raise SystemExit('next R152 conditional changed: '+repr(first))
+          if not loop['STATE404_CONDITIONAL_STATICALLY_RESOLVED']:
+              raise SystemExit('state404 not resolved')
+          remaining=old[1:]
+
+          decision={
+            'R152_UNACCOUNTED_CONDITIONAL_COUNT':len(old),
+            'R153_RESOLVED_CONDITIONAL_COUNT':1,
+            'UNACCOUNTED_CONDITIONAL_COUNT_AFTER_R153':len(remaining),
+            'NEXT_UNACCOUNTED_CONDITIONAL':remaining[0] if remaining else None,
+            'STATE404_LOOP_ITERATION_COUNT':loop['STATE404_TRUE_BRANCH_ITERATIONS'],
+            'STATE404_LOOP_EXIT_LOCAL83':loop['STATE404_EXIT_LOCAL83'],
+            'PRE_LOOP_KEY_CANDIDATE_HEX':loop['PRE_LOOP_KEY_CANDIDATE_HEX_FROM_R144_R145'],
+            'IV_CANDIDATE_HEX':loop['IV_CANDIDATE_HEX_FROM_R144_R145'],
+            'POST_LOOP_LOCAL47_KEY_CANDIDATE_HEX':loop['POST_LOOP_LOCAL47_KEY_CANDIDATE_HEX'],
+            'R145_KEY_VALUE_CAN_NO_LONGER_BE_TREATED_AS_FINAL_CREATEDECRYPTOR_KEY_WITHOUT_STATE404_TRANSFORM':True,
+            'INDEPENDENT_FULL_PATH_BRANCH_COVERAGE_PROVEN':len(remaining)==0,
+            'OFFLINE_DECRYPT_AUTHORIZED':False,
+            'H15_PLAINTEXT_RECOVERED':False,
+            'ANY_DISCOVERED_FRAME_AUTHORIZED_FOR_BOARD':False,
+            'FLASH_ALLOWED':False,
+            'remaining_unaccounted_conditionals':remaining,
+            'NEXT':(
+              'Resolve the next raw-IL conditional in execution order: state436 IL_1c46 (local80 <= 0). '
+              'Trace the exact initialization/update/bounds of local80 and any coupled local38/local98 loops from raw IL. '
+              'Also carry forward the state404-corrected post-loop local47 key candidate; do not use the old R145 key '
+              'as a final CreateDecryptor key and do not decrypt until all path/framing contradictions are resolved.'),
+          }
+          (ev/'R153_DECISION.json').write_text(json.dumps(decision,indent=2)+'\n')
+          (ev/'R153_REPORT_TH.md').write_text(
+            '# R153 state404 IV-XOR loop / key-transform static audit\n\n'
+            f'- R152 unresolved conditionals: {decision["R152_UNACCOUNTED_CONDITIONAL_COUNT"]}\n'
+            f'- resolved in R153: {decision["R153_RESOLVED_CONDITIONAL_COUNT"]}\n'
+            f'- remaining: {decision["UNACCOUNTED_CONDITIONAL_COUNT_AFTER_R153"]}\n'
+            f'- state404 loop iterations: {decision["STATE404_LOOP_ITERATION_COUNT"]}\n'
+            f'- pre-loop key candidate: {decision["PRE_LOOP_KEY_CANDIDATE_HEX"]}\n'
+            f'- IV candidate: {decision["IV_CANDIDATE_HEX"]}\n'
+            f'- post-loop local47 key candidate: {decision["POST_LOOP_LOCAL47_KEY_CANDIDATE_HEX"]}\n'
+            '- old R145 key may not be treated as final CreateDecryptor key: True\n'
+            '- offline decrypt authorized: False\n- h15 plaintext recovered: False\n\n'
+            f'NEXT: {decision["NEXT"]}\n\nFLASH_ALLOWED=NO\n')
+          print(json.dumps(decision,indent=2))
+          PY
+
+      - name: Package R153 evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /tmp/r153/evidence
+          zip -9 -r /tmp/R153_N9_STATE404_IV_XOR_LOOP_KEY_TRANSFORM_STATIC_EVIDENCE.zip . >/dev/null
+          sha256sum /tmp/R153_N9_STATE404_IV_XOR_LOOP_KEY_TRANSFORM_STATIC_EVIDENCE.zip > /tmp/R153_N9_STATE404_IV_XOR_LOOP_KEY_TRANSFORM_STATIC_EVIDENCE.zip.sha256
+
+      - name: Upload R153 evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: R153-N9-STATE404-IV-XOR-LOOP-KEY-TRANSFORM-STATIC-EVIDENCE
+          path: |
+            /tmp/R153_N9_STATE404_IV_XOR_LOOP_KEY_TRANSFORM_STATIC_EVIDENCE.zip
+            /tmp/R153_N9_STATE404_IV_XOR_LOOP_KEY_TRANSFORM_STATIC_EVIDENCE.zip.sha256
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Final fail-closed gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -F 'R153_VENDOR_BINARY_EXECUTED=NO' /tmp/r153/evidence/R153_SAFETY.txt
+          grep -F 'R153_USB_DEVICE_ACCESS=NO' /tmp/r153/evidence/R153_SAFETY.txt
+          grep -F 'R153_BOARD_CONTACT=NO' /tmp/r153/evidence/R153_SAFETY.txt
+          grep -F '"R153_RESOLVED_CONDITIONAL_COUNT": 1' /tmp/r153/evidence/R153_DECISION.json
+          grep -F '"UNACCOUNTED_CONDITIONAL_COUNT_AFTER_R153": 16' /tmp/r153/evidence/R153_DECISION.json
+          grep -F '"R145_KEY_VALUE_CAN_NO_LONGER_BE_TREATED_AS_FINAL_CREATEDECRYPTOR_KEY_WITHOUT_STATE404_TRANSFORM": true' /tmp/r153/evidence/R153_DECISION.json
+          grep -F '"POST_LOOP_LOCAL47_KEY_CANDIDATE_HEX": "8e491ed108e5b47c8f39d70fd5c8342d8a42a068d0554a0ee526b8f7d6c844b3"' /tmp/r153/evidence/R153_DECISION.json
+          grep -F '"OFFLINE_DECRYPT_AUTHORIZED": false' /tmp/r153/evidence/R153_DECISION.json
+          grep -F '"H15_PLAINTEXT_RECOVERED": false' /tmp/r153/evidence/R153_DECISION.json
+          grep -F '"FLASH_ALLOWED": false' /tmp/r153/evidence/R153_DECISION.json
+          echo R153_N9_STATE404_IV_XOR_LOOP_KEY_TRANSFORM_STATIC_AUDIT_COMPLETE=YES
+          echo FLASH_ALLOWED=NO
