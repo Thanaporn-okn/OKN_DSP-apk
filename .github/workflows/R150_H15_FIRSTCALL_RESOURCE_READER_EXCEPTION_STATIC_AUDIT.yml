@@ -1,0 +1,467 @@
+name: R150 h15 first-call resource reader exception static audit
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - ".github/workflows/R150_H15_FIRSTCALL_RESOURCE_READER_EXCEPTION_STATIC_AUDIT.yml"
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: r150-h15-firstcall-resource-reader-exception-static-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  FLASH_ALLOWED: "NO"
+  R149_RUN_ID: "36017449696"
+  R149_JOB_ID: "107693512692"
+  R149_ARTIFACT_ID: "10814594441"
+  R149_ARTIFACT_NAME: "R149-N9-PREDECRYPT-RUNTIME-PATCH-DESTINATION-STATIC-EVIDENCE"
+  R149_ARTIFACT_DIGEST: "sha256:47610e942e0b0836c70558d5131fa32471767f12a63c72847ca1302f67de90ca"
+  REFSOURCE_COMMIT: "ec9fa9ae770d522a5b5f0607898044b7478574a3"
+  H15_RESOURCE_NAME: "h15IL2i6yy2BZV8RqM.YuRwd1JALC4oy32W66"
+
+jobs:
+  static_audit:
+    name: STATIC ONLY - first-call resource reader and exception audit - no execution - no USB - no board
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: Immutable safety gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/r150/r149 /tmp/r150/evidence/reference_source
+          cat > /tmp/r150/evidence/R150_SAFETY.txt <<'EOF'
+          R150_MODE=OFFLINE_STATIC_FIRSTCALL_RESOURCE_READER_EXCEPTION_AUDIT_ONLY
+          R150_VENDOR_BINARY_EXECUTED=NO
+          R150_WINDOWS_EXE_EXECUTED=NO
+          R150_DLL_EXECUTED=NO
+          R150_APK_EXECUTED=NO
+          R150_USB_DEVICE_ACCESS=NO
+          R150_BOARD_CONTACT=NO
+          R150_AA55_SENT=NO
+          R150_LINEIN_AA55_SENT=NO
+          R150_RUNTIME_0X11_SENT=NO
+          R150_RUNTIME_0XFE_SENT=NO
+          R150_FLASHBOOT_COMMAND_SENT=NO
+          R150_FLASH_READ_EXECUTED=NO
+          R150_FLASH_ERASE_EXECUTED=NO
+          R150_FLASH_WRITE_EXECUTED=NO
+          R150_OFFLINE_DECRYPT_EXECUTED=NO
+          R150_ONE_BYTE_REPAIR_GUESS_ALLOWED=NO
+          R150_ANY_DISCOVERED_FRAME_AUTHORIZED_FOR_BOARD=NO
+          HARDWARE_MODIFICATION=FORBIDDEN
+          FLASH_ALLOWED=NO
+          EOF
+
+      - name: Download pinned R149 evidence
+        uses: actions/download-artifact@v4
+        with:
+          name: R149-N9-PREDECRYPT-RUNTIME-PATCH-DESTINATION-STATIC-EVIDENCE
+          path: /tmp/r150/r149
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          repository: Thanaporn-okn/OKN_DSP-apk
+          run-id: 36017449696
+
+      - name: Verify and extract pinned R149 evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          OUTER="$(find /tmp/r150/r149 -maxdepth 2 -type f -name 'R149_N9_PREDECRYPT_RUNTIME_PATCH_DESTINATION_STATIC_EVIDENCE.zip' -print -quit)"
+          SUM="$(find /tmp/r150/r149 -maxdepth 2 -type f -name 'R149_N9_PREDECRYPT_RUNTIME_PATCH_DESTINATION_STATIC_EVIDENCE.zip.sha256' -print -quit)"
+          test -n "$OUTER"
+          test -n "$SUM"
+          EXPECTED="$(awk '{print $1}' "$SUM")"
+          ACTUAL="$(sha256sum "$OUTER" | awk '{print $1}')"
+          test "$EXPECTED" = "$ACTUAL"
+          cp "$OUTER" /tmp/r150/evidence/R149_INNER.zip
+          cp "$SUM" /tmp/r150/evidence/R149_INNER.zip.sha256.source
+          printf '%s  %s\n' "$ACTUAL" R149_INNER.zip > /tmp/r150/evidence/R150_R149_INNER_ZIP.sha256
+          unzip -q "$OUTER" -d /tmp/r150/evidence/r149
+
+          test -s /tmp/r150/evidence/r149/R149_DECISION.json
+          test -s /tmp/r150/evidence/r149/r148/R148_DECISION.json
+          test -s /tmp/r150/evidence/r149/r148/r147/r146/R146_FIXED_N9_DATA_AWARE_STREAM_TRACE.json
+          test -s /tmp/r150/evidence/r149/r148/r147/r146/r145/r144/R144_PE32_CONCRETE_KEYIV_PATH.json
+          test -s /tmp/r150/evidence/r149/r148/r147/r146/r145/r144/r143/R143_N9_METHOD.il
+          test -s /tmp/r150/evidence/r149/r148/r147/r146/r145/r144/r143/r142/r141/r140/R140_FIXED_FULL.il
+          test -s /tmp/r150/evidence/r149/r148/r147/r146/r145/r144/r143/r142/R142_EXTRACTED_MANAGED_RESOURCES/02_h15IL2i6yy2BZV8RqM.YuRwd1JALC4oy32W66.bin
+
+          grep -F '"NO_KNOWN_PATCH_PRIMITIVE_ON_PROVEN_FIRST_CREATEDECRYPTOR_PATH": true' /tmp/r150/evidence/r149/R149_DECISION.json
+          grep -F '"RUNTIME_PATCH_DESTINATION_HYPOTHESIS_RESOLVES_15_BYTE_REMAINDER": false' /tmp/r150/evidence/r149/R149_DECISION.json
+          grep -F '"OFFLINE_DECRYPT_AUTHORIZED": false' /tmp/r150/evidence/r149/R149_DECISION.json
+          grep -F '"H15_PLAINTEXT_RECOVERED": false' /tmp/r150/evidence/r149/R149_DECISION.json
+          grep -F '"FLASH_ALLOWED": false' /tmp/r150/evidence/r149/R149_DECISION.json
+
+      - name: Checkout pinned Microsoft .NET Framework Reference Source
+        uses: actions/checkout@v4
+        with:
+          repository: microsoft/referencesource
+          ref: ec9fa9ae770d522a5b5f0607898044b7478574a3
+          path: reference-source
+          fetch-depth: 1
+
+      - name: Pin exact manifest-resource stream source semantics
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git -C reference-source rev-parse HEAD)" = "$REFSOURCE_COMMIT"
+          SRC=/tmp/r150/evidence/reference_source
+          FILE=mscorlib/system/reflection/assembly.cs
+          test -s "reference-source/$FILE"
+          cp "reference-source/$FILE" "$SRC/assembly.cs"
+          {
+            echo "REFSOURCE_COMMIT=$REFSOURCE_COMMIT"
+            printf '%s  %s\n' "$(git -C reference-source rev-parse "HEAD:$FILE")" "$FILE"
+          } > /tmp/r150/evidence/R150_REFERENCE_SOURCE_GIT_BLOBS.txt
+          sha256sum "$SRC/assembly.cs" > /tmp/r150/evidence/R150_REFERENCE_SOURCE_SNAPSHOT_SHA256.txt
+
+      - name: Prove CLR resource stream and custom reader semantics
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import json,re
+
+          ev=Path('/tmp/r150/evidence')
+          root=ev/'r149/r148/r147/r146/r145/r144/r143/r142/r141/r140'
+          full=(root/'R140_FIXED_FULL.il').read_text(errors='replace')
+          assembly=(ev/'reference_source/assembly.cs').read_text(errors='replace')
+
+          def body_by_end(name, nested=None):
+              if nested:
+                  marker=f'}} // end of method {nested}::{name}'
+              else:
+                  marker=f'}} // end of method q71r2Rj8SiD9GF1BI50::{name}'
+              end=full.find(marker)
+              if end < 0:
+                  return ''
+              starts=[full.rfind('\n\t.method ',0,end),full.rfind('\n\t\t.method ',0,end)]
+              start=max(starts)
+              return full[start:end+len(marker)] if start >= 0 else ''
+
+          wrappers={
+            'resource':body_by_end('gH6uphNOsYQyRXDZmHu'),
+            'base_stream':body_by_end('oNNQE6NTi9uesXTTGZJ'),
+            'set_position':body_by_end('uKbcISNmDSreine16Qp'),
+            'get_length':body_by_end('B5fr4WNvBYuVpLZQQQQ'),
+            'read_bytes':body_by_end('sWg0PuN2fLSfxi2LB0D'),
+            'read_int32':body_by_end('qfkv4ZNDynVciIciQy6'),
+            'reader_ctor':body_by_end('.ctor','Y7Uor8e58M9K22QZF7H'),
+            'reader_base':body_by_end('mpep2xkqqr','Y7Uor8e58M9K22QZF7H'),
+            'reader_readbytes':body_by_end('FtHelxtJIP','Y7Uor8e58M9K22QZF7H'),
+            'reader_readint':body_by_end('sXXetjyGMH','Y7Uor8e58M9K22QZF7H'),
+          }
+          if not all(wrappers.values()):
+              missing=[k for k,v in wrappers.items() if not v]
+              raise SystemExit(f'wrapper bodies missing: {missing}')
+
+          facts={
+            'resource_wrapper_calls_GetManifestResourceStream':
+              'System.Reflection.Assembly::GetManifestResourceStream(string)' in wrappers['resource'],
+            'reader_ctor_wraps_stream_in_BinaryReader':
+              'System.IO.BinaryReader::.ctor(class [mscorlib]System.IO.Stream)' in wrappers['reader_ctor'],
+            'reader_base_returns_BinaryReader_BaseStream':
+              'System.IO.BinaryReader::get_BaseStream()' in wrappers['reader_base'] and '::mpep2xkqqr()' in wrappers['base_stream'],
+            'position_wrapper_calls_Stream_set_Position':
+              'System.IO.Stream::set_Position(int64)' in wrappers['set_position'],
+            'length_wrapper_calls_Stream_get_Length':
+              'System.IO.Stream::get_Length()' in wrappers['get_length'],
+            'readbytes_wrapper_reaches_BinaryReader_ReadBytes':
+              '::FtHelxtJIP(int32)' in wrappers['read_bytes'] and 'System.IO.BinaryReader::ReadBytes(int32)' in wrappers['reader_readbytes'],
+            'readint_wrapper_reaches_BinaryReader_ReadInt32':
+              '::sXXetjyGMH()' in wrappers['read_int32'] and 'System.IO.BinaryReader::ReadInt32()' in wrappers['reader_readint'],
+            'reference_source_GetResource_returns_length':
+              bool(re.search(r'GetResource\(GetNativeHandle\(\),\s*name,\s*out length',assembly)),
+            'reference_source_stream_constructed_with_exact_length':
+              'new UnmanagedMemoryStream(pbInMemoryResource, (long)length, (long)length, FileAccess.Read, true)' in assembly,
+          }
+          if not all(facts.values()):
+              raise SystemExit('resource/reader semantics proof incomplete: '+repr({k:v for k,v in facts.items() if not v}))
+
+          out={
+            'reference_source_commit':__import__('os').environ['REFSOURCE_COMMIT'],
+            'facts':facts,
+            'RESOURCE_STREAM_LENGTH_IS_RUNTIME_RESOURCE_LENGTH':True,
+            'CUSTOM_READER_IS_BINARYREADER_OVER_RESOURCE_STREAM':True,
+            'READBYTES_SEMANTICS_ARE_STANDARD_BINARYREADER':True,
+            'important_interpretation':(
+              'The protected wrapper chain does not add framing bytes. GetManifestResourceStream returns an '
+              'UnmanagedMemoryStream whose Length is the runtime resource length, and the custom reader is a thin '
+              'BinaryReader wrapper with standard BaseStream/Position/Length/ReadBytes/ReadInt32 semantics.')
+          }
+          (ev/'R150_RESOURCE_READER_SEMANTICS.json').write_text(json.dumps(out,indent=2)+'\n')
+          PY
+
+      - name: Audit exact first-call path and every local12 operation
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import json,re,hashlib
+
+          ev=Path('/tmp/r150/evidence')
+          base=ev/'r149/r148/r147/r146/r145/r144'
+          n9=(base/'r143/R143_N9_METHOD.il').read_text(errors='replace')
+          r144=json.loads((base/'R144_PE32_CONCRETE_KEYIV_PATH.json').read_text())
+          r146=json.loads((ev/'r149/r148/r147/r146/R146_FIXED_N9_DATA_AWARE_STREAM_TRACE.json').read_text())
+          r148path=json.loads((ev/'r149/r148/R148_N9_CONCRETE_CRYPTO_PATH_PROOF.json').read_text())
+          h15=(base/'r143/r142/R142_EXTRACTED_MANAGED_RESOURCES/02_h15IL2i6yy2BZV8RqM.YuRwd1JALC4oy32W66.bin').read_bytes()
+
+          labels=r144.get('path_labels') or []
+          states=r144.get('path_states') or []
+          if len(labels)!=473 or len(states)!=473 or states[-1]!=402:
+              raise SystemExit('R144 path shape changed')
+
+          ins=[]
+          for m in re.finditer(r'(?m)^\s*(IL_[0-9a-fA-F]{4}):\s*(.*)$',n9):
+              ins.append((m.group(1),m.group(2).strip()))
+          index={lab:i for i,(lab,_) in enumerate(ins)}
+
+          def state_slice(entry):
+              i=index[entry]; out=[]
+              for j in range(i,min(i+180,len(ins))):
+                  lab,op=ins[j]; out.append((lab,op))
+                  if re.fullmatch(r'br(?:\.s)?\s+IL_00(?:0e|12)',op):
+                      break
+              return out
+          def txt(step):
+              return '\n'.join(f'{a}: {b}' for a,b in state_slice(labels[step]))
+
+          s21,s22,s23=txt(21),txt(22),txt(23)
+          first_call_sequence={
+            'step21_state367_resource_reader_create': all([
+              states[21]==367,
+              f'ldstr "{__import__("os").environ["H15_RESOURCE_NAME"]}"' in s21,
+              '::gH6uphNOsYQyRXDZmHu(object, object)' in s21,
+              'Y7Uor8e58M9K22QZF7H::.ctor(class [mscorlib]System.IO.Stream)' in s21,
+              'stloc.s 114' in s21]),
+            'step22_state111_seeks_BaseStream_to_zero': all([
+              states[22]==111,'ldloc.s 114' in s22,'ldc.i4.0' in s22,
+              '::oNNQE6NTi9uesXTTGZJ(object)' in s22,
+              '::uKbcISNmDSreine16Qp(object, int64)' in s22]),
+            'step23_state211_reads_BaseStream_Length_bytes_to_local12': all([
+              states[23]==211,'ldloc.s 114' in s23,
+              '::oNNQE6NTi9uesXTTGZJ(object)' in s23,
+              '::B5fr4WNvBYuVpLZQQQQ(object)' in s23,
+              '::sWg0PuN2fLSfxi2LB0D(object, int32)' in s23,
+              'stloc.s 12' in s23]),
+            'no_ReadInt32_on_steps21_to23': all('::qfkv4ZNDynVciIciQy6(object)' not in x for x in [s21,s22,s23]),
+          }
+          if not all(first_call_sequence.values()):
+              raise SystemExit('first-call sequence not proven: '+repr(first_call_sequence))
+
+          local12_stores=[(lab,op) for lab,op in ins if re.fullmatch(r'stloc\.s 12',op)]
+          local12_load_idx=[i for i,(lab,op) in enumerate(ins) if re.fullmatch(r'ldloc\.s 12',op)]
+          local12_contexts=[]
+          for i in local12_load_idx:
+              local12_contexts.append(ins[i:i+8])
+
+          direct_alias=any(
+              len(c)>=2 and c[0][1]=='ldloc.s 12' and c[1][1]=='stloc.s 27'
+              for c in local12_contexts)
+          write_source=any(
+              c[0][1]=='ldloc.s 12' and any('RMHoOvNN1BGBrZfKGy1' in op for _,op in c)
+              for c in local12_contexts)
+          length_use=any(
+              c[0][1]=='ldloc.s 12' and any(op=='ldlen' for _,op in c[:3])
+              for c in local12_contexts)
+
+          # local27 aliases local12, but each local27 use is read-only: Length or ldelem.u1.
+          local27_idx=[i for i,(lab,op) in enumerate(ins) if re.fullmatch(r'ldloc\.s 27',op)]
+          local27_kinds=[]
+          for i in local27_idx:
+              nxt=[op for _,op in ins[i+1:i+10]]
+              if 'ldlen' in nxt[:3]: kind='length'
+              elif 'ldelem.u1' in nxt[:8]: kind='byte_read'
+              else: kind='other'
+              local27_kinds.append({'label':ins[i][0],'kind':kind,'next_ops':nxt[:8]})
+          local27_read_only=bool(local27_kinds) and all(x['kind'] in ('length','byte_read') for x in local27_kinds)
+
+          state281_label=r148path['state281_label']
+          s281='\n'.join(f'{a}: {b}' for a,b in state_slice(state281_label))
+          state281_write_exact=all([
+              'CryptoStream::.ctor' in s281,
+              'ldloc.s 12' in s281,
+              'ldc.i4.0' in s281,
+              'ldlen' in s281,
+              '::RMHoOvNN1BGBrZfKGy1(object, object, int32, int32)' in s281,
+              '::it3eekNKjtbEQVI5up2(object)' in s281,
+          ])
+
+          # Pair ILSpy .try ranges and prove IL_65d1 is not inside any .try region.
+          lines=n9.splitlines()
+          try_stack=[]; try_ranges=[]
+          for i,line in enumerate(lines,1):
+              if line.strip()=='.try':
+                  try_stack.append(i)
+              elif '} // end .try' in line:
+                  if not try_stack:
+                      raise SystemExit('unbalanced try end')
+                  try_ranges.append((try_stack.pop(),i))
+          if try_stack:
+              raise SystemExit('unbalanced try start')
+          target_line=next(i for i,line in enumerate(lines,1) if 'IL_65d1:' in line)
+          covering=[r for r in try_ranges if r[0] <= target_line <= r[1]]
+          state281_inside_try=bool(covering)
+
+          out={
+            'h15_length':len(h15),
+            'h15_sha256':hashlib.sha256(h15).hexdigest(),
+            'first_call_sequence':first_call_sequence,
+            'FIRST_CALL_RESOURCE_READER_SEQUENCE_PROVEN':all(first_call_sequence.values()),
+            'first_reader_position_before_ReadBytes':0,
+            'first_reader_ReadBytes_requested_count':len(h15),
+            'first_reader_expected_standard_output_length':len(h15),
+            'R146_FIRST_READER_FACTS_RECONFIRMED': all([
+              r146['h15_reader_create_proven'],r146['h15_reader_seek_zero_proven'],
+              r146['h15_ReadBytes_count_is_resource_stream_length'],
+              r146['h15_exact_bytes_consumed_by_first_reader']==len(h15)]),
+            'local12_store_count':len(local12_stores),
+            'local12_load_count':len(local12_load_idx),
+            'local12_store_labels':[x[0] for x in local12_stores],
+            'local12_direct_alias_to_local27_proven':direct_alias,
+            'local12_used_as_CryptoStream_Write_source_proven':write_source,
+            'local12_used_for_its_Length_proven':length_use,
+            'LOCAL12_SINGLE_ASSIGNMENT':len(local12_stores)==1,
+            'LOCAL12_ONLY_EXPECTED_THREE_LOADS':len(local12_load_idx)==3,
+            'local27_use_classification':local27_kinds,
+            'LOCAL27_ALIAS_IS_READ_ONLY_BEFORE_DERIVED_LOCAL37':local27_read_only,
+            'state281_label':state281_label,
+            'STATE281_EXACT_WRITE_AND_FLUSH_BLOCK_PROVEN':state281_write_exact,
+            'state281_line':target_line,
+            'try_ranges':try_ranges,
+            'STATE281_INSIDE_TRY_REGION':state281_inside_try,
+            'OUTER_TRY_CATCH_DOES_NOT_EXPLAIN_FINALBLOCK_EXCEPTION':not state281_inside_try,
+            'RESOURCE_READER_OR_LOCAL12_MUTATION_HYPOTHESIS_RESOLVES_15_BYTE_REMAINDER':False,
+            'OFFLINE_DECRYPT_AUTHORIZED':False,
+            'H15_PLAINTEXT_RECOVERED':False,
+          }
+          required=[
+            out['FIRST_CALL_RESOURCE_READER_SEQUENCE_PROVEN'],
+            out['R146_FIRST_READER_FACTS_RECONFIRMED'],
+            out['LOCAL12_SINGLE_ASSIGNMENT'],out['LOCAL12_ONLY_EXPECTED_THREE_LOADS'],
+            direct_alias,write_source,length_use,local27_read_only,state281_write_exact,
+            not state281_inside_try,
+          ]
+          if not all(required):
+              raise SystemExit('R150 first-call/local12/exception proof incomplete')
+          (ev/'R150_FIRSTCALL_LOCAL12_EXCEPTION_AUDIT.json').write_text(json.dumps(out,indent=2)+'\n')
+          PY
+
+      - name: Build fail-closed R150 decision and report
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import json
+          ev=Path('/tmp/r150/evidence')
+          r=json.loads((ev/'R150_RESOURCE_READER_SEMANTICS.json').read_text())
+          a=json.loads((ev/'R150_FIRSTCALL_LOCAL12_EXCEPTION_AUDIT.json').read_text())
+          prev=json.loads((ev/'r149/R149_DECISION.json').read_text())
+
+          contradiction_still_unresolved=all([
+            prev['RUNTIME_PATCH_DESTINATION_HYPOTHESIS_RESOLVES_15_BYTE_REMAINDER'] is False,
+            a['RESOURCE_READER_OR_LOCAL12_MUTATION_HYPOTHESIS_RESOLVES_15_BYTE_REMAINDER'] is False,
+            a['OUTER_TRY_CATCH_DOES_NOT_EXPLAIN_FINALBLOCK_EXCEPTION'],
+          ])
+          decision={
+            'R149_RUN_ID':36017449696,
+            'R149_JOB_ID':107693512692,
+            'R149_ARTIFACT_ID':10814594441,
+            'R149_ARTIFACT_DIGEST':'sha256:47610e942e0b0836c70558d5131fa32471767f12a63c72847ca1302f67de90ca',
+            'H15_LENGTH':a['h15_length'],
+            'H15_SHA256':a['h15_sha256'],
+            'CLR_RESOURCE_STREAM_LENGTH_SEMANTICS_PROVEN':r['RESOURCE_STREAM_LENGTH_IS_RUNTIME_RESOURCE_LENGTH'],
+            'CUSTOM_READER_STANDARD_BINARYREADER_SEMANTICS_PROVEN':r['CUSTOM_READER_IS_BINARYREADER_OVER_RESOURCE_STREAM'],
+            'FIRST_CALL_RESOURCE_READER_SEQUENCE_PROVEN':a['FIRST_CALL_RESOURCE_READER_SEQUENCE_PROVEN'],
+            'FIRST_READER_POSITION_BEFORE_READBYTES':a['first_reader_position_before_ReadBytes'],
+            'FIRST_READER_READBYTES_REQUESTED_COUNT':a['first_reader_ReadBytes_requested_count'],
+            'LOCAL12_SINGLE_ASSIGNMENT':a['LOCAL12_SINGLE_ASSIGNMENT'],
+            'LOCAL12_LOAD_COUNT':a['local12_load_count'],
+            'LOCAL27_ALIAS_READ_ONLY':a['LOCAL27_ALIAS_IS_READ_ONLY_BEFORE_DERIVED_LOCAL37'],
+            'STATE281_EXACT_WRITE_AND_FLUSH_BLOCK_PROVEN':a['STATE281_EXACT_WRITE_AND_FLUSH_BLOCK_PROVEN'],
+            'STATE281_INSIDE_TRY_REGION':a['STATE281_INSIDE_TRY_REGION'],
+            'OUTER_TRY_CATCH_DOES_NOT_EXPLAIN_FINALBLOCK_EXCEPTION':a['OUTER_TRY_CATCH_DOES_NOT_EXPLAIN_FINALBLOCK_EXCEPTION'],
+            'RESOURCE_READER_OR_LOCAL12_MUTATION_HYPOTHESIS_RESOLVES_15_BYTE_REMAINDER':False,
+            'RUNTIME_PATCH_DESTINATION_HYPOTHESIS_RESOLVES_15_BYTE_REMAINDER':False,
+            'STATIC_SEMANTICS_CONTRADICTION_REMAINS_UNRESOLVED':contradiction_still_unresolved,
+            'ONE_BYTE_REPAIR_GUESS_ALLOWED':False,
+            'OFFLINE_DECRYPT_AUTHORIZED':False,
+            'H15_PLAINTEXT_RECOVERED':False,
+            'ANY_DISCOVERED_FRAME_AUTHORIZED_FOR_BOARD':False,
+            'AA55_LIVE_RETEST_ALLOWED':False,
+            'RUNTIME_0X11_ALLOWED':False,
+            'RUNTIME_0XFE_ALLOWED':False,
+            'FLASH_ALLOWED':False,
+            'NEXT':(
+              'The exact first-call resource/BinaryReader/local12 flow and exception scope do not explain the 15-byte remainder. '
+              'Next independently rebuild the relevant N9 control flow from raw IL without reusing the R144 path list: resolve every '
+              'branch/opaque predicate from h15 resource creation through seek/read-all, CreateDecryptor, state 40, and state 281. '
+              'Cross-check the independently derived states against 367 -> 111 -> 211 and 402 -> 40 -> 281. Preserve h15 unchanged; '
+              'do not decrypt or authorize any live frame unless the contradiction is statically resolved.'),
+          }
+          (ev/'R150_DECISION.json').write_text(json.dumps(decision,indent=2)+'\n')
+          (ev/'R150_REPORT_TH.md').write_text(
+            '# R150 h15 first-call resource/reader/exception static audit\n\n'
+            f'- h15 length: {decision["H15_LENGTH"]}\n'
+            f'- CLR resource stream length semantics proven: {decision["CLR_RESOURCE_STREAM_LENGTH_SEMANTICS_PROVEN"]}\n'
+            f'- custom reader is standard BinaryReader wrapper: {decision["CUSTOM_READER_STANDARD_BINARYREADER_SEMANTICS_PROVEN"]}\n'
+            f'- first-call reader sequence proven: {decision["FIRST_CALL_RESOURCE_READER_SEQUENCE_PROVEN"]}\n'
+            f'- position before ReadBytes: {decision["FIRST_READER_POSITION_BEFORE_READBYTES"]}\n'
+            f'- requested ReadBytes count: {decision["FIRST_READER_READBYTES_REQUESTED_COUNT"]}\n'
+            f'- local12 single assignment / loads: {decision["LOCAL12_SINGLE_ASSIGNMENT"]} / {decision["LOCAL12_LOAD_COUNT"]}\n'
+            f'- local27 alias read-only: {decision["LOCAL27_ALIAS_READ_ONLY"]}\n'
+            f'- state281 inside try region: {decision["STATE281_INSIDE_TRY_REGION"]}\n'
+            f'- static semantics contradiction remains unresolved: {decision["STATIC_SEMANTICS_CONTRADICTION_REMAINS_UNRESOLVED"]}\n'
+            '- offline decrypt authorized: False\n'
+            '- h15 plaintext recovered: False\n\n'
+            f'NEXT: {decision["NEXT"]}\n\n'
+            'FLASH_ALLOWED=NO\n')
+          print(json.dumps(decision,indent=2))
+          PY
+
+      - name: Package R150 evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /tmp/r150/evidence
+          zip -9 -r /tmp/R150_H15_FIRSTCALL_RESOURCE_READER_EXCEPTION_STATIC_EVIDENCE.zip . >/dev/null
+          sha256sum /tmp/R150_H15_FIRSTCALL_RESOURCE_READER_EXCEPTION_STATIC_EVIDENCE.zip \
+            > /tmp/R150_H15_FIRSTCALL_RESOURCE_READER_EXCEPTION_STATIC_EVIDENCE.zip.sha256
+
+      - name: Upload R150 evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: R150-H15-FIRSTCALL-RESOURCE-READER-EXCEPTION-STATIC-EVIDENCE
+          path: |
+            /tmp/R150_H15_FIRSTCALL_RESOURCE_READER_EXCEPTION_STATIC_EVIDENCE.zip
+            /tmp/R150_H15_FIRSTCALL_RESOURCE_READER_EXCEPTION_STATIC_EVIDENCE.zip.sha256
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Final fail-closed gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -F 'R150_VENDOR_BINARY_EXECUTED=NO' /tmp/r150/evidence/R150_SAFETY.txt
+          grep -F 'R150_USB_DEVICE_ACCESS=NO' /tmp/r150/evidence/R150_SAFETY.txt
+          grep -F 'R150_BOARD_CONTACT=NO' /tmp/r150/evidence/R150_SAFETY.txt
+          grep -F 'R150_AA55_SENT=NO' /tmp/r150/evidence/R150_SAFETY.txt
+          grep -F 'R150_RUNTIME_0X11_SENT=NO' /tmp/r150/evidence/R150_SAFETY.txt
+          grep -F 'R150_RUNTIME_0XFE_SENT=NO' /tmp/r150/evidence/R150_SAFETY.txt
+          grep -F 'R150_OFFLINE_DECRYPT_EXECUTED=NO' /tmp/r150/evidence/R150_SAFETY.txt
+          grep -F '"STATIC_SEMANTICS_CONTRADICTION_REMAINS_UNRESOLVED": true' /tmp/r150/evidence/R150_DECISION.json
+          grep -F '"OFFLINE_DECRYPT_AUTHORIZED": false' /tmp/r150/evidence/R150_DECISION.json
+          grep -F '"H15_PLAINTEXT_RECOVERED": false' /tmp/r150/evidence/R150_DECISION.json
+          grep -F '"FLASH_ALLOWED": false' /tmp/r150/evidence/R150_DECISION.json
+          echo R150_H15_FIRSTCALL_RESOURCE_READER_EXCEPTION_STATIC_AUDIT_COMPLETE=YES
+          echo FLASH_ALLOWED=NO
