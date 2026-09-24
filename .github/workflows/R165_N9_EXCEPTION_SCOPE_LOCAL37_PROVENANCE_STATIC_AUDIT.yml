@@ -1,0 +1,179 @@
+name: R165 N9 exception scope local37 provenance static audit
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - ".github/workflows/R165_N9_EXCEPTION_SCOPE_LOCAL37_PROVENANCE_STATIC_AUDIT.yml"
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: r165-static-${{ github.ref }}
+  cancel-in-progress: true
+env:
+  FLASH_ALLOWED: "NO"
+jobs:
+  static_audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Immutable safety gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$FLASH_ALLOWED" = "NO"
+          mkdir -p /tmp/r165/evidence
+          cat > /tmp/r165/evidence/R165_SAFETY.txt <<'EOF'
+          MODE=OFFLINE_STATIC_IL_TEXT_ONLY
+          FLASH_ALLOWED=NO
+          USB_OR_BOARD_CONTACT=NO
+          VENDOR_EXE_DLL_APK_EXECUTED=NO
+          OFFLINE_DECRYPT_EXECUTED=NO
+          AA55_OR_LINEIN_AA55_SENT=NO
+          RUNTIME_0X11_OR_0XFE_SENT=NO
+          FLASH_READ_ERASE_WRITE_EXECUTED=NO
+          ONE_BYTE_REPAIR_GUESS_ALLOWED=NO
+          DISCOVERED_FRAME_LIVE_AUTHORIZED=NO
+          HARDWARE_MODIFICATION=FORBIDDEN
+          EOF
+      - name: Download pinned R164 result
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          artifact-ids: '10827962995'
+          path: /tmp/r165/r164
+          merge-multiple: true
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          repository: Thanaporn-okn/OKN_DSP-apk
+          run-id: 36044695567
+      - name: Download pinned R157 raw evidence chain
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          artifact-ids: '10820682068'
+          path: /tmp/r165/r157
+          merge-multiple: true
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          repository: Thanaporn-okn/OKN_DSP-apk
+          run-id: 36028455796
+      - name: Verify exact local dispatcher path without execution
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PYCODE'
+          from pathlib import Path
+          import hashlib,json,re,collections
+
+          def audit(raw,full_raw,prior,out):
+              assert prior['revision']=='R164'
+              assert prior['FLASH_ALLOWED'] is False and prior['OFFLINE_DECRYPT_AUTHORIZED'] is False
+              assert prior['UNACCOUNTED_CONDITIONAL_COUNT_AFTER_R164']==3
+              assert hashlib.sha256(raw).hexdigest()==prior['N9_SHA256']
+              assert hashlib.sha256(full_raw).hexdigest()=='aa1d369c8be7ee8d7b358fc5b0f6b0874f46711a9249fee70f413b900d234c66'
+              s=raw.decode();full=full_raw.decode();assert s in full
+              assert s.strip().endswith('} // end of method q71r2Rj8SiD9GF1BI50::N9jju8llVi')
+              stack=[];pending=None;regions=[];membership={};rows=[]
+              for line in s.splitlines():
+                  t=line.strip()
+                  if t=='.try' or t.startswith('catch ') or t in ('finally','fault','filter'):
+                      assert pending is None;pending=t
+                  elif t=='{':
+                      regions.append({'kind':pending or 'method','labels':[]})
+                      stack.append(len(regions)-1);pending=None
+                  elif t.startswith('}'):
+                      assert stack;stack.pop()
+                  m=re.match(r'\s*(IL_[0-9a-f]+):\s+(\S+)(?:\s+(.*))?$',line)
+                  if m:
+                      label,op,arg=m[1],m[2],(m[3] or '').split(' //',1)[0].strip()
+                      assert label not in membership
+                      rows.append((label,op,arg));membership[label]=[regions[i]['kind'] for i in stack]
+                      for i in stack:regions[i]['labels'].append(label)
+              assert not stack and pending is None
+              counts=dict(collections.Counter(x['kind'] for x in regions))
+              assert counts=={'method':1,'.try':9,'finally':4,'catch [mscorlib]System.Object':5},counts
+              targets=['IL_0c9d','IL_1b12','IL_65fc']
+              assert all(membership[label]==['method'] for label in targets)
+              pos={x[0]:i for i,x in enumerate(rows)}
+              def region(a,b):return rows[pos[a]:pos[b]+1]
+              alloc=region('IL_4031','IL_403a')
+              assert alloc==[('IL_4031','ldloc.s','27'),('IL_4033','ldlen',''),('IL_4034','conv.i4',''),('IL_4035','newarr','[mscorlib]System.Byte'),('IL_403a','stloc.s','37')]
+              assert [x[0] for x in rows if x[1] in ('stloc','stloc.s') and x[2]=='37']==['IL_403a']
+              assert not any(x[1] in ('ldloca','ldloca.s') and x[2]=='37' for x in rows)
+              uses=[x[0] for x in rows if x[1] in ('ldloc','ldloc.s') and x[2]=='37']
+              assert uses==['IL_10da','IL_1e4b','IL_478f','IL_55ff','IL_5900','IL_658f'],uses
+              writes={}
+              for begin,end in [('IL_10da','IL_10eb'),('IL_1e4b','IL_1e5d'),('IL_478f','IL_479c'),('IL_55ff','IL_5611'),('IL_5900','IL_5913')]:
+                  r=region(begin,end)
+                  assert r[0][1:] == ('ldloc.s','37') and r[-1][1]=='stelem.i1'
+                  assert not any(x[1].startswith(('call','br')) for x in r)
+                  writes[begin]=r
+              # Validate all four byte stores of local24, without computing the unknown word.
+              for begin,offset,mask,shift in [('IL_478f',0,255,0),('IL_10da',1,65280,8),('IL_1e4b',2,16711680,16),('IL_55ff',3,-16777216,24)]:
+                  expected=[('ldloc.s','37'),('ldloc.s','67')]
+                  if offset:expected += [('ldc.i4.'+str(offset),''),('add','')]
+                  expected += [('ldloc.s','24'),('ldc.i4',str(mask)),('and','')]
+                  if shift: expected += [('ldc.i4.8','') if shift==8 else ('ldc.i4.s',str(shift)),('shr.un','')]
+                  expected += [('conv.u1',''),('stelem.i1','')]
+                  assert [x[1:] for x in writes[begin]]==expected
+              alias=region('IL_658f','IL_6598')
+              assert alias==[('IL_658f','ldloc.s','37'),('IL_6591','stloc.s','29'),('IL_6593','ldc.i4','206'),('IL_6598','br','IL_0012')]
+              result={
+                  'revision':'R165','R164_RUN_ID':36044695567,'R164_JOB_ID':107785217832,'R164_ARTIFACT_ID':10827962995,
+                  'N9_SHA256':hashlib.sha256(raw).hexdigest(),
+                  'EH_SCOPE_SOURCE':'Complete pinned IL method, byte-identical substring of full pinned IL; textual scope audit, not independent PE exception-table decoding.',
+                  'SCOPE_COUNTS':counts,'TARGET_SCOPE_MEMBERSHIP':{x:membership[x] for x in targets},
+                  'IN_METHOD_HANDLER_COVERS_CLOSED_READER_READ':False,
+                  'CALLER_EXCEPTION_HANDLING_AUDITED':False,
+                  'PRODUCTION_EXCEPTION_OBSERVED':False,
+                  'LOCAL37_SOURCE':'new byte[local27.Length] at IL_4035, assigned IL_403a',
+                  'LOCAL37_DIRECT_BYTE_STORE_SITE_COUNT':5,
+                  'LOCAL37_FOUR_WORD_BYTES':'local24 low-to-high bytes stored at local67+[0,1,2,3], subject to path and bounds',
+                  'LOCAL37_REMAINDER_STORE':'IL_5913; value depends on locals22,60,0 and destination locals67,79',
+                  'LOCAL29_COPY_ASSIGNMENT':'IL_6591 aliases local37; it does not create another array',
+                  'LOCAL37_EQUALS_RAW_H15_PROVEN':False,
+                  'LOCAL29_BYTES_AT_STATE94_PROVEN':False,
+                  'UNACCOUNTED_CONDITIONAL_COUNT_AFTER_R165':3,
+                  'remaining_unaccounted_conditionals':prior['remaining_unaccounted_conditionals'],
+                  'INDEPENDENT_FULL_PATH_BRANCH_COVERAGE_PROVEN':False,
+                  'OFFLINE_DECRYPT_AUTHORIZED':False,'H15_PLAINTEXT_RECOVERED':False,
+                  'ANY_DISCOVERED_FRAME_AUTHORIZED_FOR_BOARD':False,'FLASH_ALLOWED':False,
+                  'NEXT':'Trace local37 word/remainder producers and the route from state96 to state94, including pointer writes. Never substitute raw h15 bytes at offset20 without proving buffer identity.'}
+              out.mkdir(parents=True,exist_ok=True)
+              (out/'R165_DECISION.json').write_text(json.dumps(result,indent=2)+'\n')
+              (out/'R165_EH_REGIONS_AND_LOCAL37_WRITES.json').write_text(json.dumps({'regions':regions,'allocation':alloc,'writes':writes,'alias':alias},indent=2)+'\n')
+              print(json.dumps(result,indent=2))
+
+          import io,zipfile
+          base=Path('/tmp/r165')
+          def inner(folder,name,expected):
+              data=(base/folder/name).read_bytes()
+              assert hashlib.sha256(data).hexdigest()==expected, 'pinned inner digest mismatch'
+              assert (base/folder/(name+'.sha256')).read_text().split()[0]==expected
+              return zipfile.ZipFile(io.BytesIO(data))
+          prior=inner('r164','R164_N9_LOCAL29_READER_LIFETIME_EVIDENCE.zip','c72e7669dd49c1feb81e8e1592ec8e832891f6c2b35bb65986328944e747c040')
+          decision=json.loads(prior.read('R164_DECISION.json'))
+          chain=inner('r157','R157_N9_LOCAL29_LOCAL81_NONNULL_LOCAL93_LOOP_BRANCH_EVIDENCE.zip','f974c64c63eea5f2b940c76101f4ab6e769803f5630a2d87d21d08679c321609')
+          prefix='r156/r155/r154/r153/r152/r151/r150/r149/r148/r147/r146/r145/r144/r143/'
+          n9=chain.read(prefix+'R143_N9_METHOD.il')
+          full=chain.read(prefix+'r142/r141/r140/R140_FIXED_FULL.il')
+          assert hashlib.sha256(n9).hexdigest()=='5a3964c1f4bd8db455e6882a4ce6f90667e1a9abc6e1fafd10440b31006e4a33'
+          audit(n9,full,decision,base/'evidence')
+          (base/'evidence/R164_DECISION.json').write_bytes(prior.read('R164_DECISION.json'))
+          result=json.loads((base/'evidence/R165_DECISION.json').read_text())
+          assert result['FLASH_ALLOWED'] is False and result['OFFLINE_DECRYPT_AUTHORIZED'] is False
+          assert result['UNACCOUNTED_CONDITIONAL_COUNT_AFTER_R165']==3
+          PYCODE
+      - name: Package evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /tmp/r165/evidence
+          zip -9 -r /tmp/R165_N9_EXCEPTION_SCOPE_LOCAL37_PROVENANCE_EVIDENCE.zip . >/dev/null
+          sha256sum /tmp/R165_N9_EXCEPTION_SCOPE_LOCAL37_PROVENANCE_EVIDENCE.zip > /tmp/R165_N9_EXCEPTION_SCOPE_LOCAL37_PROVENANCE_EVIDENCE.zip.sha256
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: R165-N9-EXCEPTION-SCOPE-LOCAL37-PROVENANCE-STATIC-EVIDENCE
+          path: |
+            /tmp/R165_N9_EXCEPTION_SCOPE_LOCAL37_PROVENANCE_EVIDENCE.zip
+            /tmp/R165_N9_EXCEPTION_SCOPE_LOCAL37_PROVENANCE_EVIDENCE.zip.sha256
+          if-no-files-found: error
+          retention-days: 90
