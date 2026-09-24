@@ -1,0 +1,201 @@
+name: R162 N9 location alternatives convergence static audit
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - ".github/workflows/R162_N9_LOCATION_ALTERNATIVES_CONVERGENCE_STATIC_AUDIT.yml"
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: r162-static-${{ github.ref }}
+  cancel-in-progress: true
+env:
+  FLASH_ALLOWED: "NO"
+jobs:
+  static_audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Immutable safety gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$FLASH_ALLOWED" = "NO"
+          mkdir -p /tmp/r162/evidence
+          cat > /tmp/r162/evidence/R162_SAFETY.txt <<'EOF'
+          MODE=OFFLINE_STATIC_IL_TEXT_ONLY
+          FLASH_ALLOWED=NO
+          USB_OR_BOARD_CONTACT=NO
+          VENDOR_EXE_DLL_APK_EXECUTED=NO
+          OFFLINE_DECRYPT_EXECUTED=NO
+          AA55_OR_LINEIN_AA55_SENT=NO
+          RUNTIME_0X11_OR_0XFE_SENT=NO
+          FLASH_READ_ERASE_WRITE_EXECUTED=NO
+          ONE_BYTE_REPAIR_GUESS_ALLOWED=NO
+          DISCOVERED_FRAME_LIVE_AUTHORIZED=NO
+          HARDWARE_MODIFICATION=FORBIDDEN
+          EOF
+      - name: Download pinned R161 result
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          artifact-ids: '10827156481'
+          path: /tmp/r162/r161
+          merge-multiple: true
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          repository: Thanaporn-okn/OKN_DSP-apk
+          run-id: 36042861593
+      - name: Download pinned R157 raw evidence chain
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          artifact-ids: '10820682068'
+          path: /tmp/r162/r157
+          merge-multiple: true
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          repository: Thanaporn-okn/OKN_DSP-apk
+          run-id: 36028455796
+      - name: Verify exact local dispatcher path without execution
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PYCODE'
+          from pathlib import Path
+          import hashlib,json,re
+
+          def audit(raw,full_raw,prior,out):
+              assert prior['revision']=='R161' and prior['FLASH_ALLOWED'] is False
+              assert prior['OFFLINE_DECRYPT_AUTHORIZED'] is False
+              assert prior['UNACCOUNTED_CONDITIONAL_COUNT_AFTER_R161']==3
+              assert hashlib.sha256(raw).hexdigest()==prior['N9_SHA256']
+              assert hashlib.sha256(full_raw).hexdigest()=='aa1d369c8be7ee8d7b358fc5b0f6b0874f46711a9249fee70f413b900d234c66'
+              def parse(text):
+                  return [(m[1],m[2],(m[3] or '').strip()) for line in text.splitlines() if (m:=re.match(r'\s*(IL_[0-9a-f]+):\s+(\S+)(?:\s+(.*))?$',line))]
+              rows=parse(raw.decode());full=full_raw.decode();pos={x[0]:i for i,x in enumerate(rows)}
+              def helper(name):
+                  end=full.index('} // end of method q71r2Rj8SiD9GF1BI50::'+name)
+                  start=full.rfind('.method',0,end)
+                  return [(op,arg) for _,op,arg in parse(full[start:end])]
+              assert helper('zfos5ENLukrcbiO4qNQ')==[('ldnull',''),('ldnull',''),('ceq',''),('ret','')]
+              assert helper('omTjeHNp0inHSoSsOBH')==[('ldnull',''),('ret','')]
+              assert rows[pos['IL_000e']]==('IL_000e','ldloc','95')
+              assert pos['IL_0012']==pos['IL_000e']+1
+              switch=rows[pos['IL_0012']];assert switch[1]=='switch'
+              targets=switch[2][1:-1].split(', ')
+              assert targets[605]=='IL_1fbf' and targets[292]=='IL_59b1'
+              # Check conditional entry. We do not decide the value of Assembly.Location.Length.
+              entry=rows[pos['IL_1fbf']:pos['IL_1fbf']+4]
+              assert [x[0] for x in entry]==['IL_1fbf','IL_1fc4','IL_1fc9','IL_1fce']
+              assert entry[0][1]=='ldsfld' and entry[0][2].endswith('::lWgjKLKxo2')
+              assert entry[1][1]=='call' and '::KIoEb3NS3a1HTR21GpN(object)' in entry[1][2]
+              assert entry[2][1]=='call' and '::SMPFNLNr5St51O5T1Ai(object)' in entry[2][2]
+              assert entry[3]==('IL_1fce','brtrue','IL_5d2c')
+              def run(scenario):
+                  pc=pos['IL_3e0d']; stack=[]; locals_={}; reads=[]; trace=[]; states=[]
+                  # Narrow abstract walk: symbolic read values, no binary execution, no bytes decoded.
+                  for _ in range(250):
+                      label,op,arg=rows[pc]
+                      if label=='IL_59b1': break
+                      trace.append('%s: %s %s'%(label,op,arg))
+                      if label in targets: states.append(targets.index(label))
+                      jump=None
+                      if op in ('ldloc','ldloc.s'):
+                          stack.append(('reader',114) if arg=='114' else locals_[int(arg)])
+                      elif op in ('stloc','stloc.s'):
+                          value=stack.pop();locals_[int(arg)]=value
+                          if isinstance(value,tuple) and value[0]=='read':reads[value[1]]['destination']='local'+arg
+                      elif op=='ldc.i4': stack.append(int(arg))
+                      elif op=='ldc.i4.0': stack.append(0)
+                      elif op=='ldsfld' and arg.endswith('::lWgjKLKxo2'): stack.append(('assembly',))
+                      elif op=='call' and '::KIoEb3NS3a1HTR21GpN(object)' in arg:
+                          assert stack.pop()==('assembly',)
+                          stack.append(None if scenario=='null' else ('location',scenario))
+                      elif op=='call' and '::SMPFNLNr5St51O5T1Ai(object)' in arg:
+                          value=stack.pop();assert value==('location',scenario)
+                          stack.append(0 if scenario=='empty' else 1)
+                      elif op=='call' and '::qfkv4ZNDynVciIciQy6(object)' in arg:
+                          assert stack.pop()==('reader',114)
+                          index=len(reads);reads.append({'call':label,'ordinal':index+1,'destination':'unassigned'})
+                          stack.append(('read',index))
+                      elif op=='call' and '::zfos5ENLukrcbiO4qNQ()' in arg:stack.append(1)
+                      elif op=='call' and '::omTjeHNp0inHSoSsOBH()' in arg:stack.append(None)
+                      elif op=='pop':
+                          value=stack.pop()
+                          if isinstance(value,tuple) and value[0]=='read':reads[value[1]]['destination']='discard'
+                      elif op=='br':jump=arg
+                      elif op in ('brtrue','brfalse'):
+                          value=stack.pop();assert value is None or isinstance(value,int) or value==('location',scenario)
+                          if bool(value)==(op=='brtrue'):jump=arg
+                      elif op=='switch':
+                          state=stack.pop();assert isinstance(state,int) and 0<=state<len(targets)
+                          jump=targets[state]
+                      else:raise AssertionError(('unsupported instruction',label,op,arg))
+                      pc=pos[jump] if jump else pc+1
+                  else:raise AssertionError('bounded walk did not reach compare')
+                  prefix={'null':[260,246,516,610],'empty':[260,246,605,610],'nonempty':[260,246,605]}[scenario]
+                  assert states==prefix+[556,650,614,573,535,289],states
+                  assert locals_[99]==(0 if scenario=='nonempty' else 7680)
+                  assert len(reads)==6 and [x['destination'] for x in reads]==['discard']*4+['local71','local28']
+                  assert locals_[28]==('read',5) and not stack
+                  assert rows[pc:pc+3]==[('IL_59b1','ldloc.s','28'),('IL_59b3','ldc.i4.4',''),('IL_59b4','bne.un','IL_5d8f')]
+                  return {'states':states+[292],'local99':locals_[99],'reads':reads,'trace':trace}
+              scenarios={key:run(key) for key in ['null','empty','nonempty']}
+              assert all(len(x['reads'])==6 for x in scenarios.values())
+              result={
+                  'revision':'R162','R161_RUN_ID':36042861593,'R161_JOB_ID':107779062574,'R161_ARTIFACT_ID':10827156481,
+                  'N9_SHA256':hashlib.sha256(raw).hexdigest(),
+                  'LOCATION_SCENARIOS':{k:{a:b for a,b in v.items() if a!='trace'} for k,v in scenarios.items()},
+                  'NORMAL_FLOW_CONVERGENCE_STATE':556,
+                  'LOCAL28_SOURCE_IN_ALL_THREE_SCENARIOS':'sixth reader wrapper return after convergence at state556',
+                  'LOCAL99_NONEMPTY':0,'LOCAL99_EMPTY_OR_NULL':7680,
+                  'QUALIFICATION':'Conditional paths from state260; calls return normally, pinned helper semantics and consistent Location value across calls. Null is a conservative hypothetical path, not a claim about the production .NET API.',
+                  'LOCATION_BRANCHES_HAVE_NO_EFFECT_GLOBALLY':False,
+                  'LOCATION_PATH_DIFFERENCE':'local99 differs and may affect later address calculations; no branch may be erased from the full model.',
+                  'PRODUCTION_LOCATION_VALUE_PROVEN':False,
+                  'READER_INPUT_BYTES_AND_ENTRY_CURSOR_PROVEN':False,
+                  'UNACCOUNTED_CONDITIONAL_COUNT_AFTER_R162':3,
+                  'remaining_unaccounted_conditionals':prior['remaining_unaccounted_conditionals'],
+                  'INDEPENDENT_FULL_PATH_BRANCH_COVERAGE_PROVEN':False,
+                  'OFFLINE_DECRYPT_AUTHORIZED':False,'H15_PLAINTEXT_RECOVERED':False,
+                  'ANY_DISCOVERED_FRAME_AUTHORIZED_FOR_BOARD':False,'FLASH_ALLOWED':False,
+                  'NEXT':'Prove reader provenance and cursor at state260 entry. Preserve local99 path differences; do not guess the sixth read value.'}
+              out.mkdir(parents=True,exist_ok=True)
+              (out/'R162_DECISION.json').write_text(json.dumps(result,indent=2)+'\n')
+              (out/'R162_LOCATION_ALTERNATIVE_TRACES.json').write_text(json.dumps(scenarios,indent=2)+'\n')
+              print(json.dumps(result,indent=2))
+
+          import io,zipfile
+          base=Path('/tmp/r162')
+          def inner(folder,name,expected):
+              data=(base/folder/name).read_bytes()
+              assert hashlib.sha256(data).hexdigest()==expected, 'pinned inner digest mismatch'
+              assert (base/folder/(name+'.sha256')).read_text().split()[0]==expected
+              return zipfile.ZipFile(io.BytesIO(data))
+          prior=inner('r161','R161_N9_CONDITIONAL_SIX_READ_CHAIN_EVIDENCE.zip','449300a0ea0acc800312603c27e3b050b2e319de9492ebd9ab0b899e573ef21b')
+          decision=json.loads(prior.read('R161_DECISION.json'))
+          chain=inner('r157','R157_N9_LOCAL29_LOCAL81_NONNULL_LOCAL93_LOOP_BRANCH_EVIDENCE.zip','f974c64c63eea5f2b940c76101f4ab6e769803f5630a2d87d21d08679c321609')
+          prefix='r156/r155/r154/r153/r152/r151/r150/r149/r148/r147/r146/r145/r144/r143/'
+          n9=chain.read(prefix+'R143_N9_METHOD.il')
+          full=chain.read(prefix+'r142/r141/r140/R140_FIXED_FULL.il')
+          assert hashlib.sha256(n9).hexdigest()=='5a3964c1f4bd8db455e6882a4ce6f90667e1a9abc6e1fafd10440b31006e4a33'
+          audit(n9,full,decision,base/'evidence')
+          (base/'evidence/R161_DECISION.json').write_bytes(prior.read('R161_DECISION.json'))
+          result=json.loads((base/'evidence/R162_DECISION.json').read_text())
+          assert result['FLASH_ALLOWED'] is False and result['OFFLINE_DECRYPT_AUTHORIZED'] is False
+          assert result['UNACCOUNTED_CONDITIONAL_COUNT_AFTER_R162']==3
+          PYCODE
+      - name: Package evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /tmp/r162/evidence
+          zip -9 -r /tmp/R162_N9_LOCATION_ALTERNATIVES_CONVERGENCE_EVIDENCE.zip . >/dev/null
+          sha256sum /tmp/R162_N9_LOCATION_ALTERNATIVES_CONVERGENCE_EVIDENCE.zip > /tmp/R162_N9_LOCATION_ALTERNATIVES_CONVERGENCE_EVIDENCE.zip.sha256
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: R162-N9-LOCATION-ALTERNATIVES-CONVERGENCE-STATIC-EVIDENCE
+          path: |
+            /tmp/R162_N9_LOCATION_ALTERNATIVES_CONVERGENCE_EVIDENCE.zip
+            /tmp/R162_N9_LOCATION_ALTERNATIVES_CONVERGENCE_EVIDENCE.zip.sha256
+          if-no-files-found: error
+          retention-days: 90
