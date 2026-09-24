@@ -1,0 +1,384 @@
+name: R147 N9 exact CryptoStream input slice static proof
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - ".github/workflows/R147_N9_EXACT_CRYPTOSTREAM_INPUT_SLICE_STATIC_PROOF.yml"
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: r147-n9-exact-cryptostream-input-static-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  FLASH_ALLOWED: "NO"
+  R146_FIXED_RUN_ID: "36010330937"
+  R146_FIXED_JOB_ID: "107669065678"
+  R146_FIXED_ARTIFACT_ID: "10812281399"
+  R146_FIXED_ARTIFACT_NAME: "R146-FIXED-N9-DATA-AWARE-STATIC-STREAM-POSITION-CIPHERTEXT-SLICE-EVIDENCE"
+  R146_FIXED_ARTIFACT_DIGEST: "sha256:d4c8864f30f85529e30bd60011da96b1f3b6c929d3b38b25f62d7aca76328eea"
+  H15_RESOURCE_NAME: "h15IL2i6yy2BZV8RqM.YuRwd1JALC4oy32W66"
+
+jobs:
+  static_proof:
+    name: STATIC ONLY - exact CryptoStream input slice proof - no execution - no USB - no board
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: Immutable safety gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/r147/r146 /tmp/r147/evidence
+          cat > /tmp/r147/evidence/R147_SAFETY.txt <<'EOF'
+          R147_MODE=OFFLINE_STATIC_EXACT_CRYPTOSTREAM_INPUT_SLICE_PROOF_ONLY
+          R147_VENDOR_BINARY_EXECUTED=NO
+          R147_WINDOWS_EXE_EXECUTED=NO
+          R147_DLL_EXECUTED=NO
+          R147_APK_EXECUTED=NO
+          R147_USB_DEVICE_ACCESS=NO
+          R147_BOARD_CONTACT=NO
+          R147_AA55_SENT=NO
+          R147_LINEIN_AA55_SENT=NO
+          R147_RUNTIME_0X11_SENT=NO
+          R147_RUNTIME_0XFE_SENT=NO
+          R147_FLASHBOOT_COMMAND_SENT=NO
+          R147_FLASH_READ_EXECUTED=NO
+          R147_FLASH_ERASE_EXECUTED=NO
+          R147_FLASH_WRITE_EXECUTED=NO
+          R147_ANY_DISCOVERED_FRAME_AUTHORIZED_FOR_BOARD=NO
+          R147_REFERENCE_EVIDENCE_IS_NOT_PRODUCTION_PROOF=YES
+          HARDWARE_MODIFICATION=FORBIDDEN
+          FLASH_ALLOWED=NO
+          EOF
+
+      - name: Download pinned R146 FIXED evidence
+        uses: actions/download-artifact@v4
+        with:
+          name: R146-FIXED-N9-DATA-AWARE-STATIC-STREAM-POSITION-CIPHERTEXT-SLICE-EVIDENCE
+          path: /tmp/r147/r146
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          repository: Thanaporn-okn/OKN_DSP-apk
+          run-id: 36010330937
+
+      - name: Verify and extract pinned R146 FIXED evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          OUTER="$(find /tmp/r147/r146 -maxdepth 2 -type f -name 'R146_FIXED_N9_DATA_AWARE_STATIC_STREAM_POSITION_CIPHERTEXT_SLICE_EVIDENCE.zip' -print -quit)"
+          SUM="$(find /tmp/r147/r146 -maxdepth 2 -type f -name 'R146_FIXED_N9_DATA_AWARE_STATIC_STREAM_POSITION_CIPHERTEXT_SLICE_EVIDENCE.zip.sha256' -print -quit)"
+          test -n "$OUTER"
+          test -n "$SUM"
+          cp "$OUTER" /tmp/r147/evidence/R146_FIXED_INNER.zip
+          cp "$SUM" /tmp/r147/evidence/R146_FIXED_INNER.zip.sha256.source
+          EXPECTED="$(awk '{print $1}' "$SUM")"
+          ACTUAL="$(sha256sum "$OUTER" | awk '{print $1}')"
+          test "$EXPECTED" = "$ACTUAL"
+          printf '%s  %s\n' "$ACTUAL" R146_FIXED_INNER.zip > /tmp/r147/evidence/R147_R146_FIXED_INNER_ZIP.sha256
+          unzip -q "$OUTER" -d /tmp/r147/evidence/r146
+          test -s /tmp/r147/evidence/r146/R146_FIXED_DECISION.json
+          test -s /tmp/r147/evidence/r146/R146_FIXED_N9_DATA_AWARE_STREAM_TRACE.json
+          test -s /tmp/r147/evidence/r146/r145/r144/R144_PE32_CONCRETE_KEYIV_PATH.json
+          test -s /tmp/r147/evidence/r146/r145/r144/r143/R143_N9_METHOD.il
+          test -s /tmp/r147/evidence/r146/r145/r144/r143/r142/r141/r140/R140_FIXED_FULL.il
+          test -s /tmp/r147/evidence/r146/r145/r144/r143/r142/R142_EXTRACTED_MANAGED_RESOURCES/02_h15IL2i6yy2BZV8RqM.YuRwd1JALC4oy32W66.bin
+          grep -F '"H15_EXACT_FIRST_READER_BYTES_CONSUMED": 607967' /tmp/r147/evidence/r146/R146_FIXED_DECISION.json
+          grep -F '"CREATEDECRYPTOR_USES_KEY_LOCAL47_IV_LOCAL8": true' /tmp/r147/evidence/r146/R146_FIXED_DECISION.json
+          grep -F '"H15_PLAINTEXT_RECOVERED": false' /tmp/r147/evidence/r146/R146_FIXED_DECISION.json
+          grep -F '"FLASH_ALLOWED": false' /tmp/r147/evidence/r146/R146_FIXED_DECISION.json
+
+      - name: Prove exact crypto wrappers and algorithm factory statically
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import json
+
+          ev=Path('/tmp/r147/evidence')
+          full=(ev/'r146/r145/r144/r143/r142/r141/r140/R140_FIXED_FULL.il').read_text(errors='replace')
+
+          def body(name):
+              marker=f'}} // end of method q71r2Rj8SiD9GF1BI50::{name}'
+              end=full.find(marker)
+              if end < 0:
+                  return ''
+              start=max(full.rfind('\n\t.method ',0,end), full.rfind('\n\t\t.method ',0,end))
+              return full[start:end+len(marker)] if start >= 0 else ''
+
+          b_factory=body('t2QjAoPE2q')
+          b_make=body('trEuKPNkgB3p5fLuROn')
+          b_mode=body('Q2CVcdNXO7dpP5ufbGy')
+          b_dec=body('VnHlfpNorSGR6U9GUOp')
+          b_write=body('RMHoOvNN1BGBrZfKGy1')
+          b_flush=body('it3eekNKjtbEQVI5up2')
+          b_array=body('HVJrNANRJZcM7WNOuLw')
+
+          facts={
+            'factory_mentions_AesCryptoServiceProvider':'AesCryptoServiceProvider::.ctor()' in b_factory,
+            'factory_mentions_RijndaelManaged':'RijndaelManaged::.ctor()' in b_factory,
+            'algorithm_wrapper_calls_factory':'::t2QjAoPE2q()' in b_make,
+            'mode_wrapper_is_SymmetricAlgorithm_set_Mode':'SymmetricAlgorithm::set_Mode' in b_mode,
+            'decryptor_wrapper_is_CreateDecryptor_key_iv':'SymmetricAlgorithm::CreateDecryptor(uint8[], uint8[])' in b_dec,
+            'write_wrapper_is_Stream_Write':'System.IO.Stream::Write(uint8[], int32, int32)' in b_write,
+            'finalize_wrapper_is_FlushFinalBlock':'CryptoStream::FlushFinalBlock()' in b_flush,
+            'output_wrapper_is_MemoryStream_ToArray':'MemoryStream::ToArray()' in b_array,
+          }
+          out={'facts':facts,'all_required':all(facts.values())}
+          (ev/'R147_CRYPTO_WRAPPER_PROOF.json').write_text(json.dumps(out,indent=2)+'\n')
+          if not out['all_required']:
+              raise SystemExit('required crypto wrapper/factory proof failed')
+          PY
+
+      - name: Prove exact h15 to CreateDecryptor to CryptoStream Write dataflow
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import json,re,hashlib
+
+          ev=Path('/tmp/r147/evidence')
+          n9=(ev/'r146/r145/r144/r143/R143_N9_METHOD.il').read_text(errors='replace')
+          r146=json.loads((ev/'r146/R146_FIXED_N9_DATA_AWARE_STREAM_TRACE.json').read_text())
+          r144=json.loads((ev/'r146/r145/r144/R144_PE32_CONCRETE_KEYIV_PATH.json').read_text())
+          h15=(ev/'r146/r145/r144/r143/r142/R142_EXTRACTED_MANAGED_RESOURCES/02_h15IL2i6yy2BZV8RqM.YuRwd1JALC4oy32W66.bin').read_bytes()
+
+          def ordered(snippets):
+              pos=-1
+              where=[]
+              for s in snippets:
+                  p=n9.find(s,pos+1)
+                  if p < 0:
+                      return False,[]
+                  where.append(p)
+                  pos=p
+              return True,where
+
+          # local12 is produced once by the exact first h15 reader proven in R146 FIXED.
+          local12_store_count=len(re.findall(r'(?m)^\s*IL_[0-9a-fA-F]{4}:\s*stloc\.s 12\s*$',n9))
+          local27_store_count=len(re.findall(r'(?m)^\s*IL_[0-9a-fA-F]{4}:\s*stloc\.s 27\s*$',n9))
+          local37_store_count=len(re.findall(r'(?m)^\s*IL_[0-9a-fA-F]{4}:\s*stloc\.s 37\s*$',n9))
+          local29_store_labels=re.findall(r'(?m)^\s*(IL_[0-9a-fA-F]{4}):\s*stloc\.s 29\s*$',n9)
+          local78_store_count=len(re.findall(r'(?m)^\s*IL_[0-9a-fA-F]{4}:\s*stloc\.s 78\s*$',n9))
+
+          alias12to27,_=ordered([
+            'IL_0fa8: ldloc.s 12',
+            'IL_0faa: stloc.s 27',
+          ])
+          alloc37,_=ordered([
+            'IL_4031: ldloc.s 27',
+            'IL_4033: ldlen',
+            'IL_4034: conv.i4',
+            'IL_4035: newarr [mscorlib]System.Byte',
+            'IL_403a: stloc.s 37',
+          ])
+          alias37to29,_=ordered([
+            'IL_658f: ldloc.s 37',
+            'IL_6591: stloc.s 29',
+          ])
+
+          decryptor_block,_=ordered([
+            'IL_23ed: call object Q9Wet0jLP4YxXSyJBiC.q71r2Rj8SiD9GF1BI50::trEuKPNkgB3p5fLuROn()',
+            'IL_23f2: dup',
+            'IL_23f3: ldc.i4.1',
+            'IL_23f4: call void Q9Wet0jLP4YxXSyJBiC.q71r2Rj8SiD9GF1BI50::Q2CVcdNXO7dpP5ufbGy(object, valuetype [mscorlib]System.Security.Cryptography.CipherMode)',
+            'IL_23f9: ldloc.s 47',
+            'IL_23fb: ldloc.s 8',
+            'IL_23fd: call object Q9Wet0jLP4YxXSyJBiC.q71r2Rj8SiD9GF1BI50::VnHlfpNorSGR6U9GUOp(object, object, object)',
+            'IL_2402: stloc.s 78',
+          ])
+
+          crypto_block,_=ordered([
+            'IL_65d1: newobj instance void [mscorlib]System.IO.MemoryStream::.ctor()',
+            'IL_65d6: dup',
+            'IL_65d7: ldloc.s 78',
+            'IL_65d9: ldc.i4.1',
+            'IL_65da: newobj instance void [mscorlib]System.Security.Cryptography.CryptoStream::.ctor(class [mscorlib]System.IO.Stream, class [mscorlib]System.Security.Cryptography.ICryptoTransform, valuetype [mscorlib]System.Security.Cryptography.CryptoStreamMode)',
+            'IL_65df: stloc.s 65',
+            'IL_65e1: ldloc.s 65',
+            'IL_65e3: ldloc.s 12',
+            'IL_65e5: ldc.i4.0',
+            'IL_65e6: ldloc.s 12',
+            'IL_65e8: ldlen',
+            'IL_65e9: conv.i4',
+            'IL_65ea: call void Q9Wet0jLP4YxXSyJBiC.q71r2Rj8SiD9GF1BI50::RMHoOvNN1BGBrZfKGy1(object, object, int32, int32)',
+            'IL_65ef: ldloc.s 65',
+            'IL_65f1: call void Q9Wet0jLP4YxXSyJBiC.q71r2Rj8SiD9GF1BI50::it3eekNKjtbEQVI5up2(object)',
+            'IL_65f6: dup',
+            'IL_65f7: call object Q9Wet0jLP4YxXSyJBiC.q71r2Rj8SiD9GF1BI50::HVJrNANRJZcM7WNOuLw(object)',
+            'IL_65fc: stloc.s 29',
+          ])
+
+          source_proven=all([
+            r146.get('h15_exact_bytes_consumed_by_first_reader')==len(h15),
+            r146.get('h15_first_reader_output_local')==12,
+            local12_store_count==1,
+            alias12to27,
+          ])
+          transform_proven=all([
+            decryptor_block,
+            local78_store_count==1,
+            r146.get('CreateDecryptor_uses_key_local47_iv_local8') is True,
+          ])
+          write_proven=all([source_proven,transform_proven,crypto_block])
+
+          exact_slice=None
+          if write_proven:
+              exact_slice={
+                'source':'embedded h15 resource bytes via local12',
+                'offset':0,
+                'length':len(h15),
+                'end_exclusive':len(h15),
+                'sha256':hashlib.sha256(h15).hexdigest(),
+              }
+
+          # Diagnostic only. Do not infer unproven padding or block-size configuration.
+          mod16=len(h15)%16
+
+          out={
+            'R146_FIXED_RUN_ID':36010330937,
+            'h15_length':len(h15),
+            'h15_sha256':hashlib.sha256(h15).hexdigest(),
+            'local12_store_count':local12_store_count,
+            'local27_store_count':local27_store_count,
+            'local37_store_count':local37_store_count,
+            'local29_store_labels':local29_store_labels,
+            'local78_store_count':local78_store_count,
+            'local12_to_local27_direct_alias_proven':alias12to27,
+            'local37_allocated_exact_length_of_local27_proven':alloc37,
+            'local37_to_local29_precrypto_alias_proven':alias37to29,
+            'local29_has_distinct_precrypto_and_postcrypto_assignments':local29_store_labels==['IL_6591','IL_65fc'],
+            'algorithm_mode_setter_literal_at_decryptor_creation':1 if decryptor_block else None,
+            'CreateDecryptor_key_local':47,
+            'CreateDecryptor_iv_local':8,
+            'CreateDecryptor_output_transform_local':78,
+            'CryptoStream_transform_local':78,
+            'CryptoStream_mode_literal':1 if crypto_block else None,
+            'CryptoStream_Write_source_local':12 if crypto_block else None,
+            'CryptoStream_Write_offset':0 if crypto_block else None,
+            'CryptoStream_Write_length_expression':'local12.Length' if crypto_block else None,
+            'CryptoStream_FlushFinalBlock_proven':crypto_block,
+            'CryptoStream_output_ToArray_stored_local29_proven':crypto_block,
+            'PROVEN_EXACT_CIPHERTEXT_SLICE':exact_slice,
+            'PROVEN_EXACT_CIPHERTEXT_SLICE_BOOL':exact_slice is not None,
+            'H15_MOD_16_DIAGNOSTIC_ONLY':mod16,
+            'BLOCK_SIZE_OR_PADDING_CONFIGURATION_FULLY_PROVEN':False,
+            'OFFLINE_DECRYPT_AUTHORIZED_BY_R147':False,
+            'H15_PLAINTEXT_RECOVERED':False,
+            'important_interpretation':(
+              'R147 statically proves that the CreateDecryptor transform in local78 is used by the CryptoStream '
+              'and that Stream.Write receives local12 with offset 0 and count local12.Length. R146 FIXED already '
+              'proved local12 is the complete embedded h15 resource. Therefore the exact input slice is h15[0:607967]. '
+              'No offline decryption is performed because the full padding/block-size/final framing semantics are not yet proven, '
+              'and the observed length has mod16=15. The pre-crypto local29 alias from local37 is distinct from the post-crypto '
+              'local29 assignment from MemoryStream.ToArray().'),
+          }
+          (ev/'R147_EXACT_CRYPTOSTREAM_INPUT_SLICE_PROOF.json').write_text(json.dumps(out,indent=2)+'\n')
+
+          required=[
+            source_proven, transform_proven, crypto_block, alloc37, alias37to29,
+            out['local29_has_distinct_precrypto_and_postcrypto_assignments'],
+            out['PROVEN_EXACT_CIPHERTEXT_SLICE_BOOL'],
+          ]
+          if not all(required):
+              raise SystemExit('exact CryptoStream input dataflow proof incomplete')
+          PY
+
+      - name: Build fail-closed R147 decision and report
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import json
+          ev=Path('/tmp/r147/evidence')
+          p=json.loads((ev/'R147_EXACT_CRYPTOSTREAM_INPUT_SLICE_PROOF.json').read_text())
+          decision={
+            'R146_FIXED_RUN_ID':36010330937,
+            'R146_FIXED_JOB_ID':107669065678,
+            'R146_FIXED_ARTIFACT_ID':10812281399,
+            'R146_FIXED_ARTIFACT_DIGEST':'sha256:d4c8864f30f85529e30bd60011da96b1f3b6c929d3b38b25f62d7aca76328eea',
+            'H15_SOURCE_LOCAL12_PROVEN':True,
+            'CREATEDECRYPTOR_TRANSFORM_LOCAL78_PROVEN':True,
+            'CRYPTOSTREAM_USES_LOCAL78_PROVEN':True,
+            'CRYPTOSTREAM_WRITE_SOURCE_LOCAL12_PROVEN':True,
+            'CRYPTOSTREAM_WRITE_OFFSET':0,
+            'CRYPTOSTREAM_WRITE_LENGTH':p['h15_length'],
+            'PROVEN_EXACT_CIPHERTEXT_SLICE':p['PROVEN_EXACT_CIPHERTEXT_SLICE'],
+            'PROVEN_EXACT_CIPHERTEXT_SLICE_BOOL':p['PROVEN_EXACT_CIPHERTEXT_SLICE_BOOL'],
+            'H15_MOD_16_DIAGNOSTIC_ONLY':p['H15_MOD_16_DIAGNOSTIC_ONLY'],
+            'LOCAL29_PRECRYPTO_FROM_LOCAL37_AND_POSTCRYPTO_FROM_TOARRAY_DISTINCT':p['local29_has_distinct_precrypto_and_postcrypto_assignments'],
+            'BLOCK_SIZE_OR_PADDING_CONFIGURATION_FULLY_PROVEN':False,
+            'OFFLINE_DECRYPT_AUTHORIZED':False,
+            'H15_PLAINTEXT_RECOVERED':False,
+            'ANY_DISCOVERED_FRAME_AUTHORIZED_FOR_BOARD':False,
+            'AA55_LIVE_RETEST_ALLOWED':False,
+            'RUNTIME_0X11_ALLOWED':False,
+            'RUNTIME_0XFE_ALLOWED':False,
+            'FLASH_ALLOWED':False,
+            'NEXT':(
+              'Resolve the remaining static crypto-semantics contradiction before decrypting: prove the exact algorithm/block-size/padding '
+              'configuration and any exception/final-block path affecting the full 607967-byte CryptoStream.Write input. Do not trim, prepend, '
+              'pad, or decrypt bytes by guess. If and only if the static semantics explain a valid input length, perform offline decryption and '
+              'validate the resulting local29 structure without executing vendor code.'),
+          }
+          (ev/'R147_DECISION.json').write_text(json.dumps(decision,indent=2)+'\n')
+          s=decision['PROVEN_EXACT_CIPHERTEXT_SLICE']
+          (ev/'R147_REPORT_TH.md').write_text(
+            '# R147 exact CryptoStream input slice static proof\n\n'
+            f'- exact input slice proven: {decision["PROVEN_EXACT_CIPHERTEXT_SLICE_BOOL"]}\n'
+            f'- source: {s["source"]}\n'
+            f'- offset: {s["offset"]}\n'
+            f'- length: {s["length"]}\n'
+            f'- SHA256: {s["sha256"]}\n'
+            f'- h15 mod16 diagnostic: {decision["H15_MOD_16_DIAGNOSTIC_ONLY"]}\n'
+            f'- local29 pre/post crypto assignment distinction proven: {decision["LOCAL29_PRECRYPTO_FROM_LOCAL37_AND_POSTCRYPTO_FROM_TOARRAY_DISTINCT"]}\n'
+            '- offline decrypt authorized: False\n'
+            '- H15 plaintext recovered: False\n'
+            '- live/board authorization: False\n\n'
+            f'NEXT: {decision["NEXT"]}\n\n'
+            'FLASH_ALLOWED=NO\n')
+          print(json.dumps(decision,indent=2))
+          PY
+
+      - name: Package R147 evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /tmp/r147/evidence
+          zip -9 -r /tmp/R147_N9_EXACT_CRYPTOSTREAM_INPUT_SLICE_STATIC_EVIDENCE.zip . >/dev/null
+          sha256sum /tmp/R147_N9_EXACT_CRYPTOSTREAM_INPUT_SLICE_STATIC_EVIDENCE.zip \
+            > /tmp/R147_N9_EXACT_CRYPTOSTREAM_INPUT_SLICE_STATIC_EVIDENCE.zip.sha256
+
+      - name: Upload R147 evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: R147-N9-EXACT-CRYPTOSTREAM-INPUT-SLICE-STATIC-EVIDENCE
+          path: |
+            /tmp/R147_N9_EXACT_CRYPTOSTREAM_INPUT_SLICE_STATIC_EVIDENCE.zip
+            /tmp/R147_N9_EXACT_CRYPTOSTREAM_INPUT_SLICE_STATIC_EVIDENCE.zip.sha256
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Final fail-closed gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -F 'R147_VENDOR_BINARY_EXECUTED=NO' /tmp/r147/evidence/R147_SAFETY.txt
+          grep -F 'R147_USB_DEVICE_ACCESS=NO' /tmp/r147/evidence/R147_SAFETY.txt
+          grep -F 'R147_BOARD_CONTACT=NO' /tmp/r147/evidence/R147_SAFETY.txt
+          grep -F 'R147_AA55_SENT=NO' /tmp/r147/evidence/R147_SAFETY.txt
+          grep -F 'R147_RUNTIME_0X11_SENT=NO' /tmp/r147/evidence/R147_SAFETY.txt
+          grep -F 'R147_RUNTIME_0XFE_SENT=NO' /tmp/r147/evidence/R147_SAFETY.txt
+          grep -F '"PROVEN_EXACT_CIPHERTEXT_SLICE_BOOL": true' /tmp/r147/evidence/R147_DECISION.json
+          grep -F '"OFFLINE_DECRYPT_AUTHORIZED": false' /tmp/r147/evidence/R147_DECISION.json
+          grep -F '"H15_PLAINTEXT_RECOVERED": false' /tmp/r147/evidence/R147_DECISION.json
+          grep -F '"FLASH_ALLOWED": false' /tmp/r147/evidence/R147_DECISION.json
+          echo R147_EXACT_CRYPTOSTREAM_INPUT_SLICE_STATIC_PROOF_COMPLETE=YES
+          echo FLASH_ALLOWED=NO
