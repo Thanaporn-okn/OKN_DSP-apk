@@ -1,0 +1,409 @@
+name: R140 FIXED exact official Windows .NET USBHID IL static reverse
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - ".github/workflows/R140_FIXED_EXACT_OFFICIAL_WINDOWS_DOTNET_USBHID_IL_STATIC_REVERSE.yml"
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: r140-fixed-official-windows-dotnet-usbhid-il-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  FLASH_ALLOWED: "NO"
+  R140_FAILED_RUN_ID: "35943371749"
+  R140_FAILED_JOB_ID: "107455934226"
+  R139_RUN_ID: "35942006697"
+  R139_JOB_ID: "107451721855"
+  R139_EVIDENCE_ARTIFACT_ID: "10785341483"
+  R139_EVIDENCE_ARTIFACT_NAME: "R139-EXACT-OFFICIAL-GOLOPINE-7CH-2026-CLIENTS-STATIC-EVIDENCE"
+  R139_EVIDENCE_DIGEST: "sha256:e7013afd9e81d0a0a40d4acac6e95aea63cf3a9944cc26bf5f9949a585af65e0"
+  R139_ACQUIRED_ARTIFACT_ID: "10785516143"
+  R139_ACQUIRED_ARTIFACT_NAME: "R139-ACQUIRED-OFFICIAL-GOLOPINE-7CH-CLIENTS"
+  R139_ACQUIRED_ARTIFACT_DIGEST: "sha256:94cf50b5d821e02f4303236fe42c5748434a70a1f914c91a6794d5c2d71097ab"
+  R139_ACQUIRED_INNER_ZIP_SHA256: "47847664d699fc0fdd85a3861c438916524715803655dc25a23f1d34ee3bf375"
+  WINDOWS_ZIP_SHA256: "f14b0c4baad70a8b0d5dc3b2783819cc2ef6e1a9c6ec2adcf17f1557059edd2a"
+  WINDOWS_EXE_SHA256: "3ca54171c53f7badd963ffe6851b8b3e2faf8aee8ba2afcb7040990e22ae09b2"
+  ANDROID_ZIP_SHA256: "974f74fa99420875e64f50a9763f33f3b67a726755f8bfccd4549f944958d319"
+  ANDROID_APK_SHA256: "6c2d977f66609b3217f1bd72460aacb299f841bc654bf39f4d209132ca92907c"
+  PROD_VID_DEC: "6324"
+  PROD_PID_DEC: "1719"
+  PROD_VID_HEX: "18B4"
+  PROD_PID_HEX: "06B7"
+
+jobs:
+  static_reverse:
+    name: STATIC ONLY - FIXED managed IL USBHID - no execution - no USB - no board
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+
+    steps:
+      - name: Immutable safety gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/r140f/r139 /tmp/r140f/r139-evidence /tmp/r140f/acquired /tmp/r140f/windows /tmp/r140f/android /tmp/r140f/evidence /tmp/r140f/tools
+          cat > /tmp/r140f/evidence/R140_FIXED_SAFETY.txt <<'EOF'
+          R140_FIXED_MODE=OFFLINE_STATIC_MANAGED_IL_USBHID_REVERSE_ONLY
+          R140_FIXED_VENDOR_BINARY_EXECUTED=NO
+          R140_FIXED_WINDOWS_EXE_EXECUTED=NO
+          R140_FIXED_ANDROID_APK_EXECUTED=NO
+          R140_FIXED_ANALYSIS_TOOLS_READ_VENDOR_EXE_AS_INERT_DATA_ONLY=YES
+          R140_FIXED_USB_DEVICE_ACCESS=NO
+          R140_FIXED_BOARD_CONTACT=NO
+          R140_FIXED_AA55_SENT=NO
+          R140_FIXED_RUNTIME_0X11_SENT=NO
+          R140_FIXED_RUNTIME_0XFE_SENT=NO
+          R140_FIXED_FLASHBOOT_COMMAND_SENT=NO
+          R140_FIXED_FLASH_READ_EXECUTED=NO
+          R140_FIXED_FLASH_ERASE_EXECUTED=NO
+          R140_FIXED_FLASH_WRITE_EXECUTED=NO
+          R140_FIXED_ANY_DISCOVERED_FRAME_AUTHORIZED_FOR_BOARD=NO
+          HARDWARE_MODIFICATION=FORBIDDEN
+          REFERENCE_OR_TOOL_EVIDENCE_IS_NOT_PRODUCTION_SAFETY_PROOF=YES
+          FLASH_ALLOWED=NO
+          EOF
+
+      - name: Download pinned R139 acquired official clients as inert data
+        uses: actions/download-artifact@v4
+        with:
+          name: R139-ACQUIRED-OFFICIAL-GOLOPINE-7CH-CLIENTS
+          path: /tmp/r140f/r139
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          repository: Thanaporn-okn/OKN_DSP-apk
+          run-id: 35942006697
+
+      - name: Download pinned R139 evidence for continuity only
+        uses: actions/download-artifact@v4
+        with:
+          name: R139-EXACT-OFFICIAL-GOLOPINE-7CH-2026-CLIENTS-STATIC-EVIDENCE
+          path: /tmp/r140f/r139-evidence
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          repository: Thanaporn-okn/OKN_DSP-apk
+          run-id: 35942006697
+
+      - name: Install static disassembly tooling only
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+            file unzip mono-utils mono-devel binutils python3 >/dev/null
+          dotnet --info > /tmp/r140f/evidence/R140_FIXED_DOTNET_INFO.txt 2>&1 || true
+          monodis --version > /tmp/r140f/evidence/R140_FIXED_MONODIS_VERSION.txt 2>&1 || true
+          command -v ikdasm > /tmp/r140f/evidence/R140_FIXED_IKDASM_PATH.txt 2>&1 || true
+          set +e
+          dotnet tool install ilspycmd --tool-path /tmp/r140f/tools > /tmp/r140f/evidence/R140_FIXED_ILSPY_INSTALL.txt 2>&1
+          echo $? > /tmp/r140f/evidence/R140_FIXED_ILSPY_INSTALL_RC.txt
+          set -e
+
+      - name: Verify pinned hashes and extract official clients
+        shell: bash
+        run: |
+          set -euo pipefail
+          ACQ="$(find /tmp/r140f/r139 -maxdepth 2 -type f -name 'R139_ACQUIRED_OFFICIAL_GOLOPINE_7CH_CLIENTS.zip' -print -quit)"
+          test -n "$ACQ"
+          echo "${R139_ACQUIRED_INNER_ZIP_SHA256}  ${ACQ}" | sha256sum -c -
+          unzip -q "$ACQ" -d /tmp/r140f/acquired
+
+          WINZIP=/tmp/r140f/acquired/windows_2026-04-08.zip
+          ANDZIP=/tmp/r140f/acquired/android_2026-04-01.zip
+          test -f "$WINZIP"; test -f "$ANDZIP"
+          echo "${WINDOWS_ZIP_SHA256}  ${WINZIP}" | sha256sum -c -
+          echo "${ANDROID_ZIP_SHA256}  ${ANDZIP}" | sha256sum -c -
+          unzip -q "$WINZIP" -d /tmp/r140f/windows
+          unzip -q "$ANDZIP" -d /tmp/r140f/android
+
+          WINEXE="$(find /tmp/r140f/windows -type f -name 'golopine_audio_turning_release_2026-04-08.exe' ! -path '*/__MACOSX/*' -print -quit)"
+          APK="$(find /tmp/r140f/android -type f -name 'golopine_audio_turning_release_2026-04-01.apk' ! -path '*/__MACOSX/*' -print -quit)"
+          test -n "$WINEXE"; test -n "$APK"
+          echo "${WINDOWS_EXE_SHA256}  ${WINEXE}" | sha256sum -c -
+          echo "${ANDROID_APK_SHA256}  ${APK}" | sha256sum -c -
+          printf '%s\n' "$WINEXE" > /tmp/r140f/WINEXE_PATH
+          printf '%s\n' "$APK" > /tmp/r140f/APK_PATH
+          file "$WINEXE" > /tmp/r140f/evidence/R140_FIXED_WINDOWS_FILE_TYPE.txt
+
+      - name: Produce managed IL with multiple static-only disassemblers
+        shell: bash
+        run: |
+          set -euo pipefail
+          WINEXE="$(cat /tmp/r140f/WINEXE_PATH)"
+
+          monodis --assembly "$WINEXE" > /tmp/r140f/evidence/R140_FIXED_ASSEMBLY.txt 2>&1 || true
+          monodis --typedef "$WINEXE" > /tmp/r140f/evidence/R140_FIXED_TYPEDEF.txt 2>&1 || true
+          monodis --method "$WINEXE" > /tmp/r140f/evidence/R140_FIXED_METHOD_TABLE.txt 2>&1 || true
+          monodis --fields "$WINEXE" > /tmp/r140f/evidence/R140_FIXED_FIELDS.txt 2>&1 || true
+          monodis --userstrings "$WINEXE" > /tmp/r140f/evidence/R140_FIXED_USERSTRINGS.txt 2>&1 || true
+
+          : > /tmp/r140f/evidence/R140_FIXED_DISASSEMBLER_STATUS.txt
+
+          if [ -x /tmp/r140f/tools/ilspycmd ]; then
+            set +e
+            /tmp/r140f/tools/ilspycmd --ilcode "$WINEXE" > /tmp/r140f/R140_FIXED_ILSPY.il 2>/tmp/r140f/evidence/R140_FIXED_ILSPY_STDERR.txt
+            rc=$?
+            set -e
+            echo "ILSPYCMD_RC=$rc" >> /tmp/r140f/evidence/R140_FIXED_DISASSEMBLER_STATUS.txt
+          else
+            echo "ILSPYCMD_RC=NOT_INSTALLED" >> /tmp/r140f/evidence/R140_FIXED_DISASSEMBLER_STATUS.txt
+          fi
+
+          if command -v ikdasm >/dev/null 2>&1; then
+            set +e
+            ikdasm "$WINEXE" > /tmp/r140f/R140_FIXED_IKDASM.il 2>/tmp/r140f/evidence/R140_FIXED_IKDASM_STDERR.txt
+            rc=$?
+            set -e
+            echo "IKDASM_RC=$rc" >> /tmp/r140f/evidence/R140_FIXED_DISASSEMBLER_STATUS.txt
+          else
+            echo "IKDASM_RC=NOT_INSTALLED" >> /tmp/r140f/evidence/R140_FIXED_DISASSEMBLER_STATUS.txt
+          fi
+
+          set +e
+          monodis "$WINEXE" > /tmp/r140f/R140_FIXED_MONODIS.il 2>/tmp/r140f/evidence/R140_FIXED_MONODIS_STDERR.txt
+          rc=$?
+          set -e
+          echo "MONODIS_FULL_RC=$rc" >> /tmp/r140f/evidence/R140_FIXED_DISASSEMBLER_STATUS.txt
+
+          SOURCE=""
+          for f in /tmp/r140f/R140_FIXED_ILSPY.il /tmp/r140f/R140_FIXED_IKDASM.il /tmp/r140f/R140_FIXED_MONODIS.il; do
+            if [ -s "$f" ] && [ "$(wc -c < "$f")" -gt 10000 ]; then SOURCE="$f"; break; fi
+          done
+          test -n "$SOURCE"
+          cp "$SOURCE" /tmp/r140f/R140_FIXED_FULL.il
+          printf '%s\n' "$SOURCE" > /tmp/r140f/evidence/R140_FIXED_SELECTED_IL_SOURCE.txt
+          sha256sum /tmp/r140f/R140_FIXED_FULL.il > /tmp/r140f/evidence/R140_FIXED_FULL_IL.sha256
+
+      - name: Analyze exact production IDs USBHID methods and report construction
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import json,re,hashlib
+
+          ilp=Path('/tmp/r140f/R140_FIXED_FULL.il')
+          text=ilp.read_text(errors='replace')
+          lines=text.splitlines()
+          ev=Path('/tmp/r140f/evidence')
+          VID=6324; PID=1719
+
+          read_re=re.compile(r'HidD_GetInputReport|HidRead|ReadFile|GetHidDeviceList|HidD_GetAttributes|HidD_GetSerialNumberString|HidP_GetCaps|get_InputReportLength',re.I)
+          write_re=re.compile(r'HidD_SetOutputReport|HidD_SetFeature|WriteFile|HidWrite|SetOutputReport|SetFeature',re.I)
+          usb_re=re.compile(r'USBHID|UsbHidReporterDeviceInfo|HIDInterface|HidDevice|GetHidDeviceList|VendorID|ProductID|reportID|reportBuff|HIDD_ATTRIBUTES|HIDP_CAPS',re.I)
+          protocol_re=re.compile(r'DSTechAcutatorCommand|CreateSigmaDSPsingleVariableUpdateCommand|reportID|reportBuff|HID_RETURN|USB_DEVICE_PATHDATA|AudioPort|packet|command',re.I)
+          dangerous_re=re.compile(r'upgrade|update|firmware|flash|erase|program|bootloader|burn',re.I)
+
+          def const_hits(block_lines, value, hexfmt):
+              hits=[]
+              pats=[rf'\b{value}\b',rf'\b0x0*{hexfmt}\b']
+              for j,l in block_lines:
+                  ll=l.lower()
+                  if any(re.search(p,ll) for p in pats):
+                      hits.append({'line':j,'text':l[:900]})
+                  m=re.search(r'\bldc\.i4(?:\.s)?\s+(-?0x[0-9a-f]+|-?\d+)',l,re.I)
+                  if m:
+                      try:v=int(m.group(1),0)
+                      except:continue
+                      if v==value and not any(x['line']==j for x in hits): hits.append({'line':j,'text':l[:900]})
+              return hits
+
+          starts=[i for i,l in enumerate(lines) if re.match(r'^\s*\.method\b',l)]
+          methods=[]
+          for k,s in enumerate(starts):
+              e=starts[k+1] if k+1<len(starts) else len(lines)
+              indexed=list(enumerate(lines[s:e],s+1))
+              block='\n'.join(l for _,l in indexed)
+              vh=const_hits(indexed,VID,'18b4')
+              ph=const_hits(indexed,PID,'6b7')
+              su=bool(usb_re.search(block)); sr=bool(read_re.search(block)); sw=bool(write_re.search(block)); sp=bool(protocol_re.search(block)); sd=bool(dangerous_re.search(block))
+              packet=[]
+              local=lines[s:e]
+              for q,l in enumerate(local):
+                  if re.search(r'stelem\.i1|set_Item|reportBuff|ReportBuffer|SetOutputReport|SetFeature|GetInputReport',l,re.I):
+                      near=[]
+                      for z in local[max(0,q-10):min(len(local),q+11)]:
+                          m=re.search(r'\bldc\.i4(?:\.s)?\s+(-?0x[0-9a-f]+|-?\d+)',z,re.I)
+                          if m:
+                              try:v=int(m.group(1),0)
+                              except:continue
+                              if 0<=v<=255: near.append(v)
+                      if near: packet.append({'line':s+q+1,'instruction':l[:700],'nearby_byte_constants':near[-24:]})
+              if vh or ph or su or sr or sw or sp or sd:
+                  methods.append({
+                      'start_line':s+1,'end_line':e,
+                      'header':' '.join(lines[s:min(e,s+5)])[:1600],
+                      'vid_hits':vh[:50],'pid_hits':ph[:50],
+                      'contains_both_production_ids':bool(vh and ph),
+                      'usb_semantics':su,'read_semantics':sr,'write_semantics':sw,
+                      'protocol_semantics':sp,'dangerous_update_semantics':sd,
+                      'packet_byte_clues':packet[:160],
+                      'evidence_excerpt':'\n'.join(lines[s:min(e,s+320)])[:50000]
+                  })
+
+          gvid=const_hits(list(enumerate(lines,1)),VID,'18b4')
+          gpid=const_hits(list(enumerate(lines,1)),PID,'6b7')
+          both=[m for m in methods if m['contains_both_production_ids']]
+          both_usb=[m for m in both if m['usb_semantics']]
+          ro=[m for m in both_usb if m['read_semantics'] and not m['write_semantics'] and not m['dangerous_update_semantics']]
+          wr=[m for m in both_usb if m['write_semantics'] or m['dangerous_update_semantics']]
+
+          out={
+              'windows_exe_sha256':'3ca54171c53f7badd963ffe6851b8b3e2faf8aee8ba2afcb7040990e22ae09b2',
+              'managed_il_sha256':hashlib.sha256(ilp.read_bytes()).hexdigest(),
+              'selected_il_source':Path('/tmp/r140f/evidence/R140_FIXED_SELECTED_IL_SOURCE.txt').read_text().strip(),
+              'global_exact_vid_il_hits':gvid[:1000],
+              'global_exact_pid_il_hits':gpid[:1000],
+              'interesting_method_count':len(methods),
+              'usb_semantic_method_count':sum(1 for m in methods if m['usb_semantics']),
+              'hid_read_method_count':sum(1 for m in methods if m['read_semantics']),
+              'hid_write_method_count':sum(1 for m in methods if m['write_semantics']),
+              'method_with_both_production_ids_count':len(both),
+              'usb_method_with_both_production_ids_count':len(both_usb),
+              'production_linked_read_only_candidate_count':len(ro),
+              'production_linked_write_or_danger_candidate_count':len(wr),
+              'production_linked_methods':both_usb,
+              'production_linked_read_only_candidates':ro,
+              'production_linked_write_or_danger_candidates':wr,
+              'methods':methods,
+          }
+          (ev/'R140_FIXED_MANAGED_IL_USBHID_ANALYSIS.json').write_text(json.dumps(out,indent=2,ensure_ascii=False)+'\n')
+          PY
+
+      - name: Correct R139 Android broad-hit interpretation with exact token scan
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import zipfile,json,struct,hashlib
+          ev=Path('/tmp/r140f/evidence')
+          apk=Path(Path('/tmp/r140f/APK_PATH').read_text().strip())
+          rows=[]
+          with zipfile.ZipFile(apk) as z:
+              for n in z.namelist():
+                  if n.endswith('/'): continue
+                  b=z.read(n)
+                  counts={
+                      'ascii_18B4':b.count(b'18B4')+b.count(b'18b4'),
+                      'ascii_06B7':b.count(b'06B7')+b.count(b'06b7'),
+                      'ascii_6324':b.count(b'6324'),
+                      'ascii_1719':b.count(b'1719'),
+                      'le16_0x18B4':b.count(struct.pack('<H',0x18B4)),
+                      'le16_0x06B7':b.count(struct.pack('<H',0x06B7)),
+                      'le32_6324':b.count(struct.pack('<I',6324)),
+                      'le32_1719':b.count(struct.pack('<I',1719)),
+                  }
+                  sem=[]
+                  for pat in [b'vendorId',b'productId',b'UsbManager',b'UsbDevice',b'USB_DEVICE_ATTACHED',b'hidUsage',b'GoloPineDSPAudioTurning']:
+                      if pat in b: sem.append(pat.decode('latin1'))
+                  if any(counts.values()) or sem:
+                      rows.append({'entry':n,'size':len(b),'sha256':hashlib.sha256(b).hexdigest(),'counts':counts,'semantic_strings':sem})
+          out={
+              'apk_sha256':'6c2d977f66609b3217f1bd72460aacb299f841bc654bf39f4d209132ca92907c',
+              'entry_evidence':rows,
+              'exact_ascii_18B4_total':sum(x['counts']['ascii_18B4'] for x in rows),
+              'exact_ascii_06B7_total':sum(x['counts']['ascii_06B7'] for x in rows),
+              'raw_le16_18B4_total':sum(x['counts']['le16_0x18B4'] for x in rows),
+              'raw_le16_06B7_total':sum(x['counts']['le16_0x06B7'] for x in rows),
+              'important_correction':'R139 broad numeric regex produced many substring hits. Exact token/resource evidence must be used before claiming Android VID/PID linkage.'
+          }
+          (ev/'R140_FIXED_ANDROID_HIT_CORRECTION.json').write_text(json.dumps(out,indent=2,ensure_ascii=False)+'\n')
+          PY
+
+      - name: Build fail-closed R140 FIXED decision and report
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import json
+          ev=Path('/tmp/r140f/evidence')
+          d=json.loads((ev/'R140_FIXED_MANAGED_IL_USBHID_ANALYSIS.json').read_text())
+          a=json.loads((ev/'R140_FIXED_ANDROID_HIT_CORRECTION.json').read_text())
+          both=d['usb_method_with_both_production_ids_count']; ro=d['production_linked_read_only_candidate_count']; wr=d['production_linked_write_or_danger_candidate_count']
+          decision={
+            'R140_FAILED_RUN_ID':35943371749,
+            'R140_FAILED_JOB_ID':107455934226,
+            'R140_FAILURE_ROOT_CAUSE':'mono monodis full-disassembly aborted with SIGABRT/exit 134; fixed workflow uses ilspycmd and ikdasm fallbacks and treats monodis full dump as non-fatal.',
+            'R139_RUN_ID':35942006697,
+            'R139_JOB_ID':107451721855,
+            'WINDOWS_EXE_SHA256':'3ca54171c53f7badd963ffe6851b8b3e2faf8aee8ba2afcb7040990e22ae09b2',
+            'ANDROID_APK_SHA256':'6c2d977f66609b3217f1bd72460aacb299f841bc654bf39f4d209132ca92907c',
+            'SELECTED_IL_SOURCE':d['selected_il_source'],
+            'GLOBAL_EXACT_VID_IL_HIT_COUNT':len(d['global_exact_vid_il_hits']),
+            'GLOBAL_EXACT_PID_IL_HIT_COUNT':len(d['global_exact_pid_il_hits']),
+            'USB_SEMANTIC_METHOD_COUNT':d['usb_semantic_method_count'],
+            'HID_READ_METHOD_COUNT':d['hid_read_method_count'],
+            'HID_WRITE_METHOD_COUNT':d['hid_write_method_count'],
+            'USB_METHOD_WITH_BOTH_PRODUCTION_6324_1719_COUNT':both,
+            'PRODUCTION_LINKED_READ_ONLY_CANDIDATE_COUNT':ro,
+            'PRODUCTION_LINKED_WRITE_OR_DANGER_CANDIDATE_COUNT':wr,
+            'ANDROID_EXACT_ASCII_18B4_TOTAL':a['exact_ascii_18B4_total'],
+            'ANDROID_EXACT_ASCII_06B7_TOTAL':a['exact_ascii_06B7_total'],
+            'R139_BROAD_ANDROID_PRODUCTION_HIT_COUNT_ACCEPTED_AS_PROOF':False,
+            'OFFICIAL_WINDOWS_PRODUCTION_USBHID_LINKAGE_STATICALLY_PROVEN':bool(both),
+            'READ_ONLY_IDENTIFY_PATH_STATICALLY_PROVEN_FOR_PRODUCTION':False,
+            'SAFE_READ_ONLY_STOCK_BACKUP_PROVEN':False,
+            'PRODUCTION_BOOTSTRAP_BRIDGE_PROVEN':False,
+            'PRODUCTION_RECOVERY_USB_IDENTITY_PROVEN':False,
+            'ANY_DISCOVERED_FRAME_AUTHORIZED_FOR_BOARD':False,
+            'AA55_LIVE_RETEST_ALLOWED':False,
+            'RUNTIME_0X11_ALLOWED':False,
+            'RUNTIME_0XFE_ALLOWED':False,
+            'VENDOR_BINARY_EXECUTED':False,
+            'USB_DEVICE_ACCESSED':False,
+            'BOARD_CONTACTED':False,
+            'FLASH_ALLOWED':False,
+            'NEXT':('Deep-static trace exact production-linked USBHID methods, callers, reportID/reportBuff construction and read-vs-write branches. No live transfer.' if both else 'Trace VendorID/ProductID assignments and GetHidDeviceList filtering in managed IL. No live transfer.')
+          }
+          (ev/'R140_FIXED_DECISION.json').write_text(json.dumps(decision,indent=2,ensure_ascii=False)+'\n')
+          (ev/'R140_FIXED_REPORT_TH.md').write_text(
+            '# R140 FIXED official Windows .NET USBHID static reverse\n\n'
+            f'- selected IL source: {decision["SELECTED_IL_SOURCE"]}\n'
+            f'- exact VID/PID IL hits: {decision["GLOBAL_EXACT_VID_IL_HIT_COUNT"]} / {decision["GLOBAL_EXACT_PID_IL_HIT_COUNT"]}\n'
+            f'- USB semantic methods: {decision["USB_SEMANTIC_METHOD_COUNT"]}\n'
+            f'- USB methods containing both 6324/1719: {both}\n'
+            f'- production-linked read-only candidates: {ro}\n'
+            f'- production-linked write/danger candidates: {wr}\n\n'
+            'FLASH_ALLOWED=NO\n')
+          print(json.dumps(decision,indent=2,ensure_ascii=False))
+          PY
+
+      - name: Package R140 FIXED evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp /tmp/r140f/R140_FIXED_FULL.il /tmp/r140f/evidence/R140_FIXED_FULL.il
+          cd /tmp/r140f/evidence
+          zip -9 -r /tmp/R140_FIXED_EXACT_OFFICIAL_WINDOWS_DOTNET_USBHID_IL_STATIC_EVIDENCE.zip . >/dev/null
+          sha256sum /tmp/R140_FIXED_EXACT_OFFICIAL_WINDOWS_DOTNET_USBHID_IL_STATIC_EVIDENCE.zip > /tmp/R140_FIXED_EXACT_OFFICIAL_WINDOWS_DOTNET_USBHID_IL_STATIC_EVIDENCE.zip.sha256
+
+      - name: Upload R140 FIXED evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: R140-FIXED-EXACT-OFFICIAL-WINDOWS-DOTNET-USBHID-IL-STATIC-EVIDENCE
+          path: |
+            /tmp/R140_FIXED_EXACT_OFFICIAL_WINDOWS_DOTNET_USBHID_IL_STATIC_EVIDENCE.zip
+            /tmp/R140_FIXED_EXACT_OFFICIAL_WINDOWS_DOTNET_USBHID_IL_STATIC_EVIDENCE.zip.sha256
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Final fail-closed gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -F 'R140_FIXED_VENDOR_BINARY_EXECUTED=NO' /tmp/r140f/evidence/R140_FIXED_SAFETY.txt
+          grep -F 'R140_FIXED_WINDOWS_EXE_EXECUTED=NO' /tmp/r140f/evidence/R140_FIXED_SAFETY.txt
+          grep -F 'R140_FIXED_ANDROID_APK_EXECUTED=NO' /tmp/r140f/evidence/R140_FIXED_SAFETY.txt
+          grep -F 'R140_FIXED_USB_DEVICE_ACCESS=NO' /tmp/r140f/evidence/R140_FIXED_SAFETY.txt
+          grep -F 'R140_FIXED_BOARD_CONTACT=NO' /tmp/r140f/evidence/R140_FIXED_SAFETY.txt
+          grep -F 'R140_FIXED_AA55_SENT=NO' /tmp/r140f/evidence/R140_FIXED_SAFETY.txt
+          grep -F 'R140_FIXED_RUNTIME_0X11_SENT=NO' /tmp/r140f/evidence/R140_FIXED_SAFETY.txt
+          grep -F 'R140_FIXED_RUNTIME_0XFE_SENT=NO' /tmp/r140f/evidence/R140_FIXED_SAFETY.txt
+          grep -F '"FLASH_ALLOWED": false' /tmp/r140f/evidence/R140_FIXED_DECISION.json
+          echo R140_FIXED_MANAGED_IL_STATIC_REVERSE_COMPLETE=YES
+          echo FLASH_ALLOWED=NO
