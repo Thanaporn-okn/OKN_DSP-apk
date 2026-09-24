@@ -1,0 +1,360 @@
+name: R151 N9 independent raw IL branch coverage static audit
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - ".github/workflows/R151_N9_INDEPENDENT_RAW_IL_BRANCH_COVERAGE_STATIC_AUDIT.yml"
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: r151-n9-independent-raw-il-branch-coverage-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  FLASH_ALLOWED: "NO"
+  R150_RUN_ID: "36018543872"
+  R150_JOB_ID: "107697229184"
+  R150_ARTIFACT_ID: "10816070713"
+  R150_ARTIFACT_NAME: "R150-H15-FIRSTCALL-RESOURCE-READER-EXCEPTION-STATIC-EVIDENCE"
+  R150_ARTIFACT_DIGEST: "sha256:498ec59e03bb007c15e7c682f3170db90813be3faacb35c11ee16d3e69ef80f6"
+  PE32_INTPTR_SIZE: "4"
+
+jobs:
+  static_audit:
+    name: STATIC ONLY - independent raw IL branch coverage - no execution - no USB - no board
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Immutable safety gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/r151/r150 /tmp/r151/evidence
+          cat > /tmp/r151/evidence/R151_SAFETY.txt <<'EOF'
+          R151_MODE=OFFLINE_STATIC_INDEPENDENT_RAW_IL_BRANCH_COVERAGE_ONLY
+          R151_VENDOR_BINARY_EXECUTED=NO
+          R151_WINDOWS_EXE_EXECUTED=NO
+          R151_DLL_EXECUTED=NO
+          R151_APK_EXECUTED=NO
+          R151_USB_DEVICE_ACCESS=NO
+          R151_BOARD_CONTACT=NO
+          R151_AA55_SENT=NO
+          R151_LINEIN_AA55_SENT=NO
+          R151_RUNTIME_0X11_SENT=NO
+          R151_RUNTIME_0XFE_SENT=NO
+          R151_FLASHBOOT_COMMAND_SENT=NO
+          R151_FLASH_READ_EXECUTED=NO
+          R151_FLASH_ERASE_EXECUTED=NO
+          R151_FLASH_WRITE_EXECUTED=NO
+          R151_OFFLINE_DECRYPT_EXECUTED=NO
+          R151_ONE_BYTE_REPAIR_GUESS_ALLOWED=NO
+          R151_ANY_DISCOVERED_FRAME_AUTHORIZED_FOR_BOARD=NO
+          HARDWARE_MODIFICATION=FORBIDDEN
+          FLASH_ALLOWED=NO
+          EOF
+
+      - name: Download pinned R150 evidence
+        uses: actions/download-artifact@v4
+        with:
+          name: R150-H15-FIRSTCALL-RESOURCE-READER-EXCEPTION-STATIC-EVIDENCE
+          path: /tmp/r151/r150
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          repository: Thanaporn-okn/OKN_DSP-apk
+          run-id: 36018543872
+
+      - name: Verify and extract pinned R150 evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          OUTER="$(find /tmp/r151/r150 -maxdepth 2 -type f -name 'R150_H15_FIRSTCALL_RESOURCE_READER_EXCEPTION_STATIC_EVIDENCE.zip' -print -quit)"
+          SUM="$(find /tmp/r151/r150 -maxdepth 2 -type f -name 'R150_H15_FIRSTCALL_RESOURCE_READER_EXCEPTION_STATIC_EVIDENCE.zip.sha256' -print -quit)"
+          test -n "$OUTER"; test -n "$SUM"
+          EXPECTED="$(awk '{print $1}' "$SUM")"
+          ACTUAL="$(sha256sum "$OUTER" | awk '{print $1}')"
+          test "$EXPECTED" = "$ACTUAL"
+          unzip -q "$OUTER" -d /tmp/r151/evidence/r150
+          test -s /tmp/r151/evidence/r150/R150_DECISION.json
+          test -s /tmp/r151/evidence/r150/r149/r148/r147/r146/r145/r144/R144_PE32_CONCRETE_KEYIV_PATH.json
+          test -s /tmp/r151/evidence/r150/r149/r148/r147/r146/r145/r144/r143/R143_N9_METHOD.il
+          test -s /tmp/r151/evidence/r150/r149/r148/r147/r146/r145/r144/r143/r142/r141/r140/R140_FIXED_FULL.il
+          grep -F '"STATIC_SEMANTICS_CONTRADICTION_REMAINS_UNRESOLVED": true' /tmp/r151/evidence/r150/R150_DECISION.json
+          grep -F '"FLASH_ALLOWED": false' /tmp/r151/evidence/r150/R150_DECISION.json
+
+      - name: Independently rebuild candidate state path from raw IL and audit branch coverage
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import re,json,hashlib,os
+
+          ev=Path('/tmp/r151/evidence')
+          base=ev/'r150/r149/r148/r147/r146/r145/r144'
+          n9=(base/'r143/R143_N9_METHOD.il').read_text(errors='replace')
+          full=(base/'r143/r142/r141/r140/R140_FIXED_FULL.il').read_text(errors='replace')
+
+          # Raw dispatcher only. R144 path list is deliberately not read here.
+          sm=re.search(r'IL_0012:\s*switch \(([^)]*)\)',n9)
+          if not sm: raise SystemExit('N9 dispatcher switch missing')
+          labels=[x.strip() for x in sm.group(1).split(',')]
+          state_of={lab:i for i,lab in enumerate(labels)}
+          label_line={}
+          lines=n9.splitlines()
+          for i,l in enumerate(lines):
+              m=re.match(r'\s*(IL_[0-9A-Fa-f]+):',l)
+              if m and m.group(1) in state_of: label_line[m.group(1)]=i
+          ordered=sorted(label_line.items(),key=lambda x:x[1])
+          blocks={}
+          for i,(lab,s) in enumerate(ordered):
+              e=ordered[i+1][1] if i+1<len(ordered) else len(lines)
+              blocks[state_of[lab]]=lines[s:e]
+          if len(blocks)!=len(labels): raise SystemExit('dispatcher block count mismatch')
+
+          def method_body(name):
+              marker=f'}} // end of method q71r2Rj8SiD9GF1BI50::{name}'
+              e=full.find(marker)
+              if e<0:return ''
+              s=full.rfind('\n\t.method ',0,e)
+              return full[s:e+len(marker)] if s>=0 else ''
+
+          z=method_body('zfos5ENLukrcbiO4qNQ')
+          o=method_body('omTjeHNp0inHSoSsOBH')
+          t=method_body('tFjbT6Nj4GDWeki27kh')
+          helper_facts={
+            'zfos_literal_true': all(x in z for x in ['ldnull','ceq','ret']),
+            'omT_literal_null': bool(re.search(r'IL_0000:\s*ldnull\s*\n\s*IL_0001:\s*ret',o)),
+            'tFjb_is_IntPtr_Size':'System.IntPtr::get_Size()' in t,
+            'pe32_intptr_size':int(os.environ['PE32_INTPTR_SIZE']),
+          }
+          if not all([helper_facts['zfos_literal_true'],helper_facts['omT_literal_null'],helper_facts['tFjb_is_IntPtr_Size'],helper_facts['pe32_intptr_size']==4]):
+              raise SystemExit('helper facts incomplete')
+
+          def simple_expr(xs):
+              st=[]
+              for x in xs:
+                  m=re.search(r'ldc\.i4(?:\.s)?\s+(-?\d+)',x)
+                  m2=re.search(r'ldc\.i4\.(\d)',x)
+                  if m: st.append(int(m.group(1)) & 0xffffffff)
+                  elif m2: st.append(int(m2.group(1)) & 0xffffffff)
+                  elif re.search(r':\s+add$',x):
+                      if len(st)<2:return None
+                      b=st.pop();a=st.pop();st.append((a+b)&0xffffffff)
+                  elif re.search(r':\s+sub$',x):
+                      if len(st)<2:return None
+                      b=st.pop();a=st.pop();st.append((a-b)&0xffffffff)
+                  elif re.search(r':\s+xor$',x):
+                      if len(st)<2:return None
+                      b=st.pop();a=st.pop();st.append((a^b)&0xffffffff)
+                  elif 'conv.u1' in x:
+                      if not st:return None
+                      st[-1]&=0xff
+                  elif re.search(r'ldloc|ldarg|call|ldfld|ldsfld',x): return None
+              return st[-1] if len(st)==1 else None
+
+          def const_before(bl,j,maxback=10):
+              best=None
+              for back in range(1,maxback+1):
+                  if j-back<0:break
+                  v=simple_expr(bl[j-back:j])
+                  if v is not None:best=v
+              return best
+
+          cond_pat=re.compile(r'\b(brtrue|brfalse|beq|bne\.un|bgt(?:\.un)?|blt(?:\.un)?|bge(?:\.un)?|ble(?:\.un)?)\s+(IL_[0-9A-Fa-f]+)')
+
+          def unaccounted_conditionals(st):
+              bl=blocks[st]; out=[]
+              for j,x in enumerate(bl):
+                  m=cond_pat.search(x)
+                  if not m: continue
+                  prev='\n'.join(bl[max(0,j-5):j])
+                  known=any(k in prev for k in ['zfos5ENLukrcbiO4qNQ','omTjeHNp0inHSoSsOBH','tFjbT6Nj4GDWeki27kh','NaheA732Kj'])
+                  if not known:
+                      out.append({'state':st,'label':labels[st],'branch_line':x.strip(),'context':prev})
+              return out
+
+          def legacy_candidate_next(st,nahe):
+              bl=blocks[st]
+              for j,x in enumerate(bl):
+                  if 'stsfld bool' in x and 'NaheA732Kj' in x:
+                      v=const_before(bl,j,4)
+                      if v is not None: nahe=bool(v)
+              for j,x in enumerate(bl):
+                  if 'ldsfld bool' in x and 'NaheA732Kj' in x and j+1<len(bl):
+                      m=re.search(r'br(true|false)\s+(IL_[0-9A-Fa-f]+)',bl[j+1])
+                      if m:
+                          take=nahe if m.group(1)=='true' else not nahe
+                          if take and m.group(2) in state_of:return state_of[m.group(2)],nahe,'Nahe'
+                          break
+              for j,x in enumerate(bl):
+                  known=None
+                  if '::zfos5ENLukrcbiO4qNQ()' in x:known=True
+                  elif '::omTjeHNp0inHSoSsOBH()' in x:known=False
+                  if known is None or j+1>=len(bl):continue
+                  m=re.search(r'br(true|false)\s+(IL_[0-9A-Fa-f]+)',bl[j+1])
+                  if not m:continue
+                  take=known if m.group(1)=='true' else not known
+                  if take:
+                      target=m.group(2)
+                      if target=='IL_0012':
+                          v=const_before(bl,j,8)
+                          if v is not None:return int(v),nahe,'opaque-take'
+                      if target in state_of:return state_of[target],nahe,'opaque-direct'
+                  else:
+                      for k in range(j+2,min(len(bl),j+10)):
+                          if 'br IL_0012' in bl[k]:
+                              v=const_before(bl,k,6)
+                              if v is not None:return int(v),nahe,'opaque-fall'
+              for j,x in enumerate(bl):
+                  if '::tFjbT6Nj4GDWeki27kh()' in x:
+                      for k in range(j+1,min(len(bl),j+6)):
+                          m=re.search(r'(bne\.un|beq)\s+(IL_[0-9A-Fa-f]+)',bl[k])
+                          if m:
+                              c=const_before(bl,k,5)
+                              if c is not None:
+                                  take=(4!=c) if m.group(1)=='bne.un' else (4==c)
+                                  if take and m.group(2) in state_of:return state_of[m.group(2)],nahe,'PE32-IntPtr'
+                              break
+              for j,x in enumerate(bl):
+                  if re.search(r'stloc(?:\.s)?\s+95\b',x):
+                      v=const_before(bl,j,10)
+                      if v is not None and any('br IL_000e' in y for y in bl[j:j+6]):
+                          if 0<=int(v)<len(labels):return int(v),nahe,'local95'
+              for j,x in enumerate(bl):
+                  if 'br IL_0012' in x:
+                      v=const_before(bl,j,8)
+                      if v is not None and 0<=int(v)<len(labels):return int(v),nahe,'switch'
+              raise RuntimeError(f'candidate transition unresolved state {st} {labels[st]}')
+
+          candidate=[]; unresolved=[]; nahe=False; st=392
+          for step in range(2000):
+              candidate.append(st)
+              unresolved.extend(unaccounted_conditionals(st))
+              if st==402:break
+              st,nahe,_=legacy_candidate_next(st,nahe)
+          else: raise SystemExit('candidate path did not reach state402')
+          if candidate[-1]!=402: raise SystemExit('state402 not reached')
+
+          # Direct raw-IL landmark transitions; no R144 list involved.
+          landmark={}
+          for s in [367,111,211,402,40,281]:
+              landmark[s]='\n'.join(blocks[s])
+          facts={
+            '367_resource_to_111': all(x in landmark[367] for x in ['h15IL2i6yy2BZV8RqM.YuRwd1JALC4oy32W66','ldc.i4 111','br IL_0012']),
+            '111_seek_to_211': all(x in landmark[111] for x in ['uKbcISNmDSreine16Qp','ldc.i4 211','br IL_0012']),
+            '211_readall_present': all(x in landmark[211] for x in ['B5fr4WNvBYuVpLZQQQQ','sWg0PuN2fLSfxi2LB0D','stloc.s 12']),
+            '402_create_decryptor_to_40': all(x in landmark[402] for x in ['VnHlfpNorSGR6U9GUOp','stloc.s 78','ldc.i4 40','br IL_0012']),
+            '40_zfos_true_candidate_281': all(x in landmark[40] for x in ['ldc.i4 281','zfos5ENLukrcbiO4qNQ','brtrue IL_0012']),
+            '281_write_flush_local12': all(x in landmark[281] for x in ['CryptoStream::.ctor','ldloc.s 12','RMHoOvNN1BGBrZfKGy1','it3eekNKjtbEQVI5up2']),
+          }
+          if not all(facts.values()): raise SystemExit('landmark proof incomplete')
+
+          idx367=candidate.index(367) if 367 in candidate else None
+          post_resource=[u for u in unresolved if idx367 is not None and candidate.index(u['state'])>=idx367]
+          unique=[]; seen=set()
+          for u in post_resource:
+              key=(u['state'],u['branch_line'])
+              if key not in seen:seen.add(key);unique.append(u)
+
+          out={
+            'dispatcher_state_count':len(labels),
+            'candidate_path_start_state':392,
+            'candidate_path_reaches_state367':367 in candidate,
+            'candidate_path_reaches_state402':candidate[-1]==402,
+            'candidate_path_state_count_to_402':len(candidate),
+            'candidate_path_sha256':hashlib.sha256(','.join(map(str,candidate)).encode()).hexdigest(),
+            'raw_il_landmark_facts':facts,
+            'helper_facts':helper_facts,
+            'unaccounted_conditional_count_all_candidate_path':len(unresolved),
+            'unaccounted_conditional_count_from_state367_to_402':len(unique),
+            'unaccounted_conditionals_from_state367_to_402':unique,
+            'earliest_unaccounted_after_resource': unique[0] if unique else None,
+            'INDEPENDENT_FULL_PATH_BRANCH_COVERAGE_PROVEN':len(unique)==0,
+            'interpretation':(
+              'The candidate path is rebuilt from raw N9 IL without reading the R144 path list. '
+              'However, any conditional branch not explicitly resolved by the helper/Nahe/PE32 rules is recorded rather than silently ignored. '
+              'If this list is non-empty, the full runtime path to CreateDecryptor is not independently proven.'),
+          }
+          (ev/'R151_INDEPENDENT_RAW_IL_BRANCH_COVERAGE.json').write_text(json.dumps(out,indent=2)+'\n')
+          PY
+
+      - name: Cross-check only after independent derivation and build fail-closed decision
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import json
+          ev=Path('/tmp/r151/evidence')
+          a=json.loads((ev/'R151_INDEPENDENT_RAW_IL_BRANCH_COVERAGE.json').read_text())
+          r144=json.loads((ev/'r150/r149/r148/r147/r146/r145/r144/R144_PE32_CONCRETE_KEYIV_PATH.json').read_text())
+          r150=json.loads((ev/'r150/R150_DECISION.json').read_text())
+
+          # This is a post-derivation comparison only; it is not used to construct R151's candidate path.
+          r144_states=r144['path_states']
+          r144_sha=__import__('hashlib').sha256(','.join(map(str,r144_states)).encode()).hexdigest()
+          candidate_matches_r144=(a['candidate_path_state_count_to_402']==len(r144_states) and a['candidate_path_sha256']==r144_sha)
+          unresolved=a['unaccounted_conditionals_from_state367_to_402']
+          decision={
+            'R150_STATIC_SEMANTICS_CONTRADICTION_REMAINS_UNRESOLVED':r150['STATIC_SEMANTICS_CONTRADICTION_REMAINS_UNRESOLVED'],
+            'RAW_IL_CANDIDATE_PATH_REBUILT_WITHOUT_R144_PATH_INPUT':True,
+            'RAW_IL_CANDIDATE_PATH_MATCHES_R144_POST_DERIVATION':candidate_matches_r144,
+            'RAW_IL_LANDMARKS_367_111_211_AND_402_40_281_PROVEN':all(a['raw_il_landmark_facts'].values()),
+            'UNACCOUNTED_CONDITIONAL_COUNT_FROM_RESOURCE_TO_CREATEDECRYPTOR':len(unresolved),
+            'EARLIEST_UNACCOUNTED_CONDITIONAL_AFTER_RESOURCE':a['earliest_unaccounted_after_resource'],
+            'INDEPENDENT_FULL_PATH_BRANCH_COVERAGE_PROVEN':a['INDEPENDENT_FULL_PATH_BRANCH_COVERAGE_PROVEN'],
+            'R144_STYLE_PATH_IS_NOT_FULL_RUNTIME_PROOF_IF_UNACCOUNTED_BRANCHES_EXIST':len(unresolved)>0,
+            'OFFLINE_DECRYPT_AUTHORIZED':False,
+            'H15_PLAINTEXT_RECOVERED':False,
+            'ANY_DISCOVERED_FRAME_AUTHORIZED_FOR_BOARD':False,
+            'FLASH_ALLOWED':False,
+            'NEXT':(
+              'Resolve the unaccounted conditional branches after state367 in execution order, starting with the earliest one. '
+              'Do not assume the legacy/fallthrough path. Track the controlling locals/return values from raw IL and classify each branch as '
+              'statically fixed or runtime-environment-dependent. Only after every branch to state402 is resolved may the 15-byte CryptoStream contradiction be interpreted as a true runtime path contradiction.'),
+          }
+          (ev/'R151_DECISION.json').write_text(json.dumps(decision,indent=2)+'\n')
+          (ev/'R151_REPORT_TH.md').write_text(
+            '# R151 independent raw-IL branch coverage audit\n\n'
+            f'- candidate path rebuilt without R144 path input: True\n'
+            f'- post-derivation match with R144: {candidate_matches_r144}\n'
+            f'- raw IL landmarks proven: {decision["RAW_IL_LANDMARKS_367_111_211_AND_402_40_281_PROVEN"]}\n'
+            f'- unresolved conditionals after h15 resource state367: {len(unresolved)}\n'
+            f'- independent full path branch coverage proven: {decision["INDEPENDENT_FULL_PATH_BRANCH_COVERAGE_PROVEN"]}\n'
+            '- offline decrypt authorized: False\n- h15 plaintext recovered: False\n\n'
+            f'NEXT: {decision["NEXT"]}\n\nFLASH_ALLOWED=NO\n')
+          print(json.dumps(decision,indent=2))
+          PY
+
+      - name: Package R151 evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /tmp/r151/evidence
+          zip -9 -r /tmp/R151_N9_INDEPENDENT_RAW_IL_BRANCH_COVERAGE_STATIC_EVIDENCE.zip . >/dev/null
+          sha256sum /tmp/R151_N9_INDEPENDENT_RAW_IL_BRANCH_COVERAGE_STATIC_EVIDENCE.zip > /tmp/R151_N9_INDEPENDENT_RAW_IL_BRANCH_COVERAGE_STATIC_EVIDENCE.zip.sha256
+
+      - name: Upload R151 evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: R151-N9-INDEPENDENT-RAW-IL-BRANCH-COVERAGE-STATIC-EVIDENCE
+          path: |
+            /tmp/R151_N9_INDEPENDENT_RAW_IL_BRANCH_COVERAGE_STATIC_EVIDENCE.zip
+            /tmp/R151_N9_INDEPENDENT_RAW_IL_BRANCH_COVERAGE_STATIC_EVIDENCE.zip.sha256
+          if-no-files-found: error
+
+      - name: Final fail-closed gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -F 'R151_VENDOR_BINARY_EXECUTED=NO' /tmp/r151/evidence/R151_SAFETY.txt
+          grep -F 'R151_USB_DEVICE_ACCESS=NO' /tmp/r151/evidence/R151_SAFETY.txt
+          grep -F 'R151_BOARD_CONTACT=NO' /tmp/r151/evidence/R151_SAFETY.txt
+          grep -F '"OFFLINE_DECRYPT_AUTHORIZED": false' /tmp/r151/evidence/R151_DECISION.json
+          grep -F '"H15_PLAINTEXT_RECOVERED": false' /tmp/r151/evidence/R151_DECISION.json
+          grep -F '"FLASH_ALLOWED": false' /tmp/r151/evidence/R151_DECISION.json
+          echo R151_INDEPENDENT_RAW_IL_BRANCH_COVERAGE_STATIC_AUDIT_COMPLETE=YES
+          echo FLASH_ALLOWED=NO
