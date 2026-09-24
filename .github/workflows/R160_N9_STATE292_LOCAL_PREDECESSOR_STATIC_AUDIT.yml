@@ -1,0 +1,163 @@
+name: R160 N9 state292 local predecessor static audit
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - ".github/workflows/R160_N9_STATE292_LOCAL_PREDECESSOR_STATIC_AUDIT.yml"
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: r160-static-${{ github.ref }}
+  cancel-in-progress: true
+env:
+  FLASH_ALLOWED: "NO"
+jobs:
+  static_audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Immutable safety gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$FLASH_ALLOWED" = "NO"
+          mkdir -p /tmp/r160/evidence
+          cat > /tmp/r160/evidence/R160_SAFETY.txt <<'EOF'
+          MODE=OFFLINE_STATIC_IL_TEXT_ONLY
+          FLASH_ALLOWED=NO
+          USB_OR_BOARD_CONTACT=NO
+          VENDOR_EXE_DLL_APK_EXECUTED=NO
+          OFFLINE_DECRYPT_EXECUTED=NO
+          AA55_OR_LINEIN_AA55_SENT=NO
+          RUNTIME_0X11_OR_0XFE_SENT=NO
+          FLASH_READ_ERASE_WRITE_EXECUTED=NO
+          ONE_BYTE_REPAIR_GUESS_ALLOWED=NO
+          DISCOVERED_FRAME_LIVE_AUTHORIZED=NO
+          HARDWARE_MODIFICATION=FORBIDDEN
+          EOF
+      - name: Download pinned R159 result
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          artifact-ids: '10825809534'
+          path: /tmp/r160/r159
+          merge-multiple: true
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          repository: Thanaporn-okn/OKN_DSP-apk
+          run-id: 36041520180
+      - name: Download pinned R157 raw evidence chain
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          artifact-ids: '10820682068'
+          path: /tmp/r160/r157
+          merge-multiple: true
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          repository: Thanaporn-okn/OKN_DSP-apk
+          run-id: 36028455796
+      - name: Verify exact local dispatcher path without execution
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PYCODE'
+          from pathlib import Path
+          import hashlib, json, re
+
+          def audit(n9_bytes, prior, out):
+              assert prior['revision'] == 'R159'
+              assert prior['FLASH_ALLOWED'] is False and prior['OFFLINE_DECRYPT_AUTHORIZED'] is False
+              assert prior['UNACCOUNTED_CONDITIONAL_COUNT_AFTER_R159'] == 3
+              assert hashlib.sha256(n9_bytes).hexdigest() == prior['N9_SHA256']
+              s=n9_bytes.decode('utf-8','strict')
+              rows=[]
+              for line in s.splitlines():
+                  m=re.match(r'\s*(IL_[0-9a-f]+):\s+(\S+)(?:\s+(.*))?$',line)
+                  if m: rows.append((m[1],m[2],m[3] or ''))
+              pos={x[0]:i for i,x in enumerate(rows)}
+              assert len(pos)==len(rows)
+              dispatcher=rows[pos['IL_0012']]
+              assert dispatcher[1]=='switch'
+              targets=dispatcher[2][1:-1].split(', ')
+              mapping={535:'IL_4c9d',289:'IL_1969',292:'IL_59b1',1:'IL_6679'}
+              assert all(targets[k]==v for k,v in mapping.items())
+              assert rows[pos['IL_000e']]==('IL_000e','ldloc','95')
+              assert pos['IL_0012']==pos['IL_000e']+1
+              def check(start, expected):
+                  actual=rows[pos[start]:pos[start]+len(expected)]
+                  assert actual==expected,(start,actual)
+                  return ['%s: %s %s'%x for x in actual]
+              call='int32 Q9Wet0jLP4YxXSyJBiC.q71r2Rj8SiD9GF1BI50::qfkv4ZNDynVciIciQy6(object)'
+              sequences={}
+              sequences['535_to_289']=check('IL_4c9d',[
+                  ('IL_4c9d','ldloc.s','114'),('IL_4c9f','call',call),
+                  ('IL_4ca4','stloc.s','71'),('IL_4ca6','ldc.i4','289'),('IL_4cab','br','IL_0012')])
+              sequences['289_to_292']=check('IL_1969',[
+                  ('IL_1969','ldloc.s','114'),('IL_196b','call',call),
+                  ('IL_1970','stloc.s','28'),('IL_1972','ldc.i4','292'),
+                  ('IL_1977','stloc','95'),('IL_197b','br','IL_000e')])
+              sequences['292_comparison']=check('IL_59b1',[
+                  ('IL_59b1','ldloc.s','28'),('IL_59b3','ldc.i4.4',''),
+                  ('IL_59b4','bne.un','IL_5d8f'),('IL_59b9','ldc.i4','402'),('IL_59be','br','IL_0012')])
+              # Conditional statements only: never infer entry reachability or reader cursor.
+              result={
+                  'revision':'R160', 'R159_RUN_ID':36041520180,
+                  'R159_JOB_ID':107774581419, 'R159_ARTIFACT_ID':10825809534,
+                  'N9_SHA256':hashlib.sha256(n9_bytes).hexdigest(),
+                  'DISPATCHER_MAPPING':mapping,
+                  'LOCAL_NORMAL_FLOW_EDGES_PROVEN':[[535,289],[289,292]],
+                  'QUALIFICATION':'Only if these blocks are entered and calls return normally; not proof of entry reachability, exception flow, or complete execution path.',
+                  'LOCAL28_AT_COMPARE_VIA_STATE289':'The result stored at IL_1970; this overwrites any earlier local28 value, including IL_6680.',
+                  'STATE535_THEN289_CALL_ORDER':['reader local114 -> local71','reader local114 -> local28'],
+                  'INTERVENING_READER_REBIND_OR_SEEK_IN_THIS_EXACT_LOCAL_SEQUENCE':False,
+                  'STATE292_BRANCH_MODEL':{'local28_equals_4':'fall through and dispatch state402','local28_not_equals_4':'branch IL_5d8f'},
+                  'STATE535_ENTRY_REACHABILITY_PROVEN':False,
+                  'ALL_PREDECESSORS_TO_STATE292_PROVEN':False,
+                  'READER_INPUT_BYTES_AND_CURSOR_PROVEN':False,
+                  'UNACCOUNTED_CONDITIONAL_COUNT_AFTER_R160':3,
+                  'remaining_unaccounted_conditionals':prior['remaining_unaccounted_conditionals'],
+                  'INDEPENDENT_FULL_PATH_BRANCH_COVERAGE_PROVEN':False,
+                  'OFFLINE_DECRYPT_AUTHORIZED':False,'H15_PLAINTEXT_RECOVERED':False,
+                  'ANY_DISCOVERED_FRAME_AUTHORIZED_FOR_BOARD':False,'FLASH_ALLOWED':False,
+                  'NEXT':'Trace predecessors of state535 and state289 to the active reader construction and intervening cursor operations. Keep branch values unknown until this is proven.'
+              }
+              out.mkdir(parents=True,exist_ok=True)
+              (out/'R160_DECISION.json').write_text(json.dumps(result,indent=2)+'\n')
+              (out/'R160_EXACT_LOCAL_SEQUENCES.json').write_text(json.dumps(sequences,indent=2)+'\n')
+              (out/'R160_REPORT_TH.md').write_text('พิสูจน์เส้นทางย่อย 535 -> 289 -> 292 เมื่อเข้าบล็อกและ call คืนค่าปกติ\nlocal28 ที่เทียบในเส้นทางนี้มาจาก IL_1970 ซึ่งทับค่าก่อนหน้า\nยังไม่พิสูจน์เส้นทางเข้า reader input/cursor หรือค่า branch จริง\nFLASH_ALLOWED=NO\n')
+              print(json.dumps(result,indent=2))
+
+
+          import io,zipfile
+          base=Path('/tmp/r160')
+          def inner(folder,name,expected):
+              b=(base/folder/name).read_bytes()
+              assert hashlib.sha256(b).hexdigest()==expected, 'pinned inner digest mismatch'
+              assert (base/folder/(name+'.sha256')).read_text().split()[0]==expected
+              return zipfile.ZipFile(io.BytesIO(b))
+          prior=inner('r159','R159_N9_READER_DEFINITION_USE_EVIDENCE.zip','3194f72dea92fbb0cc37d2e36012cd89b0f5bc392d1cb21c3b7e642b9cd1677a')
+          decision=json.loads(prior.read('R159_DECISION.json'))
+          chain=inner('r157','R157_N9_LOCAL29_LOCAL81_NONNULL_LOCAL93_LOOP_BRANCH_EVIDENCE.zip','f974c64c63eea5f2b940c76101f4ab6e769803f5630a2d87d21d08679c321609')
+          prefix='r156/r155/r154/r153/r152/r151/r150/r149/r148/r147/r146/r145/r144/r143/'
+          n9=chain.read(prefix+'R143_N9_METHOD.il')
+          assert hashlib.sha256(n9).hexdigest()=='5a3964c1f4bd8db455e6882a4ce6f90667e1a9abc6e1fafd10440b31006e4a33'
+          audit(n9,decision,base/'evidence')
+          (base/'evidence/R159_DECISION.json').write_bytes(prior.read('R159_DECISION.json'))
+          result=json.loads((base/'evidence/R160_DECISION.json').read_text())
+          assert result['FLASH_ALLOWED'] is False and result['OFFLINE_DECRYPT_AUTHORIZED'] is False
+          assert result['UNACCOUNTED_CONDITIONAL_COUNT_AFTER_R160']==3
+          PYCODE
+      - name: Package evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /tmp/r160/evidence
+          zip -9 -r /tmp/R160_N9_STATE292_LOCAL_PREDECESSOR_EVIDENCE.zip . >/dev/null
+          sha256sum /tmp/R160_N9_STATE292_LOCAL_PREDECESSOR_EVIDENCE.zip > /tmp/R160_N9_STATE292_LOCAL_PREDECESSOR_EVIDENCE.zip.sha256
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: R160-N9-STATE292-LOCAL-PREDECESSOR-STATIC-EVIDENCE
+          path: |
+            /tmp/R160_N9_STATE292_LOCAL_PREDECESSOR_EVIDENCE.zip
+            /tmp/R160_N9_STATE292_LOCAL_PREDECESSOR_EVIDENCE.zip.sha256
+          if-no-files-found: error
+          retention-days: 90
