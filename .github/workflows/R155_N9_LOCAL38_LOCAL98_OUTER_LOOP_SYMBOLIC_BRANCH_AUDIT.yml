@@ -1,0 +1,308 @@
+name: R155 N9 local38 local98 outer loop symbolic branch audit
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - ".github/workflows/R155_N9_LOCAL38_LOCAL98_OUTER_LOOP_SYMBOLIC_BRANCH_AUDIT.yml"
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: r155-n9-local38-local98-loop-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  FLASH_ALLOWED: "NO"
+  R154_RUN_ID: "36023306793"
+  R154_JOB_ID: "107713362280"
+  R154_ARTIFACT_ID: "10817109003"
+  R154_ARTIFACT_NAME: "R154-N9-LOCAL80-H15-MOD4-BRANCH-CLUSTER-STATIC-EVIDENCE"
+  R154_ARTIFACT_DIGEST: "sha256:4c9f8610baf265ff5b88adfa4c4163f682ba69efeaec10789f6b6d393607e212"
+
+jobs:
+  static_audit:
+    name: STATIC ONLY - local38 local98 outer-loop branch model - no execution - no USB - no board
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Immutable safety gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/r155/r154 /tmp/r155/evidence
+          cat > /tmp/r155/evidence/R155_SAFETY.txt <<'EOF'
+          R155_MODE=OFFLINE_STATIC_LOCAL38_LOCAL98_OUTER_LOOP_SYMBOLIC_BRANCH_AUDIT_ONLY
+          R155_VENDOR_BINARY_EXECUTED=NO
+          R155_WINDOWS_EXE_EXECUTED=NO
+          R155_DLL_EXECUTED=NO
+          R155_APK_EXECUTED=NO
+          R155_USB_DEVICE_ACCESS=NO
+          R155_BOARD_CONTACT=NO
+          R155_AA55_SENT=NO
+          R155_LINEIN_AA55_SENT=NO
+          R155_RUNTIME_0X11_SENT=NO
+          R155_RUNTIME_0XFE_SENT=NO
+          R155_FLASHBOOT_COMMAND_SENT=NO
+          R155_FLASH_READ_EXECUTED=NO
+          R155_FLASH_ERASE_EXECUTED=NO
+          R155_FLASH_WRITE_EXECUTED=NO
+          R155_OFFLINE_DECRYPT_EXECUTED=NO
+          R155_ONE_BYTE_REPAIR_GUESS_ALLOWED=NO
+          R155_ANY_DISCOVERED_FRAME_AUTHORIZED_FOR_BOARD=NO
+          R155_LOOP_BRANCHES_MAY_BE_SYMBOLIC_NOT_CONSTANT=YES
+          HARDWARE_MODIFICATION=FORBIDDEN
+          FLASH_ALLOWED=NO
+          EOF
+
+      - name: Download pinned R154 evidence
+        uses: actions/download-artifact@v4
+        with:
+          name: R154-N9-LOCAL80-H15-MOD4-BRANCH-CLUSTER-STATIC-EVIDENCE
+          path: /tmp/r155/r154
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          repository: Thanaporn-okn/OKN_DSP-apk
+          run-id: 36023306793
+
+      - name: Verify and extract pinned R154 evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          OUTER="$(find /tmp/r155/r154 -maxdepth 2 -type f -name 'R154_N9_LOCAL80_H15_MOD4_BRANCH_CLUSTER_STATIC_EVIDENCE.zip' -print -quit)"
+          SUM="$(find /tmp/r155/r154 -maxdepth 2 -type f -name 'R154_N9_LOCAL80_H15_MOD4_BRANCH_CLUSTER_STATIC_EVIDENCE.zip.sha256' -print -quit)"
+          test -n "$OUTER"; test -n "$SUM"
+          EXPECTED="$(awk '{print $1}' "$SUM")"
+          ACTUAL="$(sha256sum "$OUTER" | awk '{print $1}')"
+          test "$EXPECTED" = "$ACTUAL"
+          unzip -q "$OUTER" -d /tmp/r155/evidence/r154
+          test -s /tmp/r155/evidence/r154/R154_DECISION.json
+          test -s /tmp/r155/evidence/r154/R154_LOCAL80_H15_MOD4_BRANCH_CLUSTER.json
+          test -s /tmp/r155/evidence/r154/r153/r152/r151/r150/R150_DECISION.json
+          test -s /tmp/r155/evidence/r154/r153/r152/r151/r150/r149/r148/r147/r146/r145/r144/r143/R143_N9_METHOD.il
+          grep -F '"UNACCOUNTED_CONDITIONAL_COUNT_AFTER_R154": 13' /tmp/r155/evidence/r154/R154_DECISION.json
+          grep -F '"LOCAL80_VALUE": 3' /tmp/r155/evidence/r154/R154_DECISION.json
+          grep -F '"OFFLINE_DECRYPT_AUTHORIZED": false' /tmp/r155/evidence/r154/R154_DECISION.json
+          grep -F '"FLASH_ALLOWED": false' /tmp/r155/evidence/r154/R154_DECISION.json
+
+      - name: Prove local38 local98 loop-variable structure and classify three branch predicates
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import re,json
+
+          ev=Path('/tmp/r155/evidence')
+          root=ev/'r154'
+          n9=(root/'r153/r152/r151/r150/r149/r148/r147/r146/r145/r144/r143/R143_N9_METHOD.il').read_text(errors='replace')
+          r150=json.loads((root/'r153/r152/r151/r150/R150_DECISION.json').read_text())
+          r154=json.loads((root/'R154_DECISION.json').read_text())
+
+          if r150['H15_LENGTH'] != 607967:
+              raise SystemExit('h15 length changed')
+          if r154['LOCAL80_VALUE'] != 3 or not r154['LOCAL80_IS_POSITIVE']:
+              raise SystemExit('R154 local80 proof missing')
+
+          # local38 is the word-loop index. It is initialized once to zero and otherwise only incremented by one.
+          local38_stores=re.findall(r'(?m)^\s*(IL_[0-9A-Fa-f]+):\s*stloc\.s 38\s*$',n9)
+          local98_stores=re.findall(r'(?m)^\s*(IL_[0-9A-Fa-f]+):\s*stloc\.s 98\s*$',n9)
+          if local38_stores != ['IL_0e86','IL_50ef']:
+              raise SystemExit('local38 store set changed: '+repr(local38_stores))
+          if local98_stores != ['IL_0c51','IL_1c27']:
+              raise SystemExit('local98 store set changed: '+repr(local98_stores))
+
+          facts={
+            'local98_initial_floor_h15_len_div4': bool(re.search(
+              r'IL_0c4b:\s*ldloc\.s 27\s*\n\s*IL_0c4d:\s*ldlen\s*\n\s*IL_0c4e:\s*conv\.i4\s*\n\s*IL_0c4f:\s*ldc\.i4\.4\s*\n\s*IL_0c50:\s*div\s*\n\s*IL_0c51:\s*stloc\.s 98',n9)),
+            'local98_only_other_store_is_plus_one': bool(re.search(
+              r'IL_1c23:\s*ldloc\.s 98\s*\n\s*IL_1c25:\s*ldc\.i4\.1\s*\n\s*IL_1c26:\s*add\s*\n\s*IL_1c27:\s*stloc\.s 98',n9)),
+            'local38_initializes_zero': bool(re.search(
+              r'IL_0e85:\s*ldc\.i4\.0\s*\n\s*IL_0e86:\s*stloc\.s 38',n9)),
+            'local38_only_other_store_is_plus_one_then_state458': bool(re.search(
+              r'IL_50eb:\s*ldloc\.s 38\s*\n\s*IL_50ed:\s*ldc\.i4\.1\s*\n\s*IL_50ee:\s*add\s*\n\s*IL_50ef:\s*stloc\.s 38\s*\n\s*IL_50f1:\s*ldc\.i4 458\s*\n\s*IL_50f6:\s*br IL_0012',n9)),
+            'state458_is_outer_loop_guard_local38_lt_local98': bool(re.search(
+              r'IL_4121:\s*ldloc\.s 38\s*\n\s*IL_4123:\s*ldloc\.s 98\s*\n\s*IL_4125:\s*blt IL_652b\s*\n\s*IL_412a:\s*ldc\.i4 96\s*\n\s*IL_412f:\s*br IL_0012',n9)),
+            'state215_is_not_last_word_predicate': bool(re.search(
+              r'IL_3547:\s*ldloc\.s 38\s*\n\s*IL_3549:\s*ldloc\.s 98\s*\n\s*IL_354b:\s*ldc\.i4\.1\s*\n\s*IL_354c:\s*sub\s*\n\s*IL_354d:\s*bne\.un IL_5442',n9)),
+            'state33_is_not_last_word_predicate': bool(re.search(
+              r'IL_2110:\s*ldloc\.s 38\s*\n\s*IL_2112:\s*ldloc\.s 98\s*\n\s*IL_2114:\s*ldc\.i4\.1\s*\n\s*IL_2115:\s*sub\s*\n\s*IL_2116:\s*bne\.un IL_1172',n9)),
+          }
+          if not all(facts.values()):
+              raise SystemExit('local38/local98 loop structure proof incomplete: '+repr({k:v for k,v in facts.items() if not v}))
+
+          floor_words=r150['H15_LENGTH']//4
+          remainder=r150['H15_LENGTH']%4
+          if floor_words != 151991 or remainder != 3:
+              raise SystemExit('unexpected h15 floor/remainder')
+
+          old=r154['remaining_unaccounted_conditionals']
+          by_state={x['state']:x for x in old}
+          expected={
+            215:'IL_354d: bne.un IL_5442',
+            33:'IL_2116: bne.un IL_1172',
+            458:'IL_4125: blt IL_652b',
+          }
+          for st,line in expected.items():
+              if st not in by_state or by_state[st].get('branch_line') != line:
+                  raise SystemExit(f'expected unresolved loop branch changed: state {st}: {by_state.get(st)}')
+
+          # Important: these are not constant branches. We account for them symbolically instead of
+          # pretending that one legacy/fallthrough outcome is always taken.
+          symbolic={
+            'state458':{
+              'predicate':'local38 < local98',
+              'meaning':'outer-loop continue guard',
+              'constant_branch_value':None,
+            },
+            'state215':{
+              'predicate':'local38 != local98 - 1',
+              'meaning':'not-final-word test',
+              'constant_branch_value':None,
+            },
+            'state33':{
+              'predicate':'local38 != local98 - 1',
+              'meaning':'not-final-word test',
+              'constant_branch_value':None,
+            },
+          }
+
+          out={
+            'H15_LENGTH':r150['H15_LENGTH'],
+            'H15_FLOOR_WORDS_4B':floor_words,
+            'H15_REMAINDER_BYTES_MOD4':remainder,
+            'LOCAL38_STORE_LABELS':local38_stores,
+            'LOCAL98_STORE_LABELS':local98_stores,
+            'LOCAL38_INITIAL_VALUE':0,
+            'LOCAL38_UPDATE':'local38 = local38 + 1',
+            'LOCAL98_INITIAL_VALUE_FLOOR_H15_DIV4':floor_words,
+            'LOCAL98_ONLY_OTHER_UPDATE':'local98 = local98 + 1',
+            'LOCAL38_LOCAL98_RAW_IL_FACTS':facts,
+            'SYMBOLIC_BRANCH_MODELS':symbolic,
+            'BRANCH_VALUES_ARE_INDEX_DEPENDENT_NOT_CONSTANT':True,
+            'LEGACY_SINGLE_OUTCOME_ASSUMPTION_FOR_STATES_215_33_458_REJECTED':True,
+            'SYMBOLICALLY_ACCOUNTED_CONDITIONAL_STATES':[215,33,458],
+            'SYMBOLICALLY_ACCOUNTED_CONDITIONAL_COUNT':3,
+            'OUTER_LOOP_TOTAL_ITERATION_COUNT_NOT_YET_CLAIMED':True,
+            'STATE477_VISIT_COUNT_NOT_YET_PROVEN':True,
+            'POST_LOOP_LOCAL47_KEY_CANDIDATE_HEX':r154['POST_LOOP_LOCAL47_KEY_CANDIDATE_HEX'],
+            'OFFLINE_DECRYPT_AUTHORIZED':False,
+            'H15_PLAINTEXT_RECOVERED':False,
+            'ANY_DISCOVERED_FRAME_AUTHORIZED_FOR_BOARD':False,
+            'FLASH_ALLOWED':False,
+            'interpretation':(
+              'Raw IL proves local38 is a monotonic word-loop index initialized to zero and otherwise only incremented by one. '
+              'local98 is initialized from floor(h15.Length/4) and has only one additional +1 store site. State458 is exactly '
+              'the local38<local98 loop guard; states215 and33 are exactly local38!=local98-1 final-word tests. Their outcomes '
+              'are therefore index-dependent, not fixed constants. R155 accounts for these branches symbolically and explicitly '
+              'does not claim a total iteration count or a state477 visit count yet. No decryption is authorized.'),
+          }
+          (ev/'R155_LOCAL38_LOCAL98_OUTER_LOOP_SYMBOLIC_BRANCH_MODEL.json').write_text(json.dumps(out,indent=2)+'\n')
+          print(json.dumps(out,indent=2))
+          PY
+
+      - name: Rebase unresolved conditionals and build fail-closed R155 decision
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import json
+          ev=Path('/tmp/r155/evidence')
+          prev=json.loads((ev/'r154/R154_DECISION.json').read_text())
+          proof=json.loads((ev/'R155_LOCAL38_LOCAL98_OUTER_LOOP_SYMBOLIC_BRANCH_MODEL.json').read_text())
+          old=prev['remaining_unaccounted_conditionals']
+          if len(old)!=13:
+              raise SystemExit(f'expected 13 unresolved from R154, got {len(old)}')
+          if (old[0].get('state'),old[0].get('branch_line')) != (215,'IL_354d: bne.un IL_5442'):
+              raise SystemExit('next R154 conditional changed: '+repr(old[0]))
+
+          accounted=set(proof['SYMBOLICALLY_ACCOUNTED_CONDITIONAL_STATES'])
+          present={x['state'] for x in old if x['state'] in accounted}
+          if present != accounted:
+              raise SystemExit(f'not all loop-cluster states present: {present} vs {accounted}')
+          remaining=[x for x in old if x['state'] not in accounted]
+          if len(remaining)!=10:
+              raise SystemExit(f'expected 10 remaining after symbolic loop cluster, got {len(remaining)}')
+
+          decision={
+            'R154_UNACCOUNTED_CONDITIONAL_COUNT':len(old),
+            'R155_SYMBOLICALLY_ACCOUNTED_CONDITIONAL_COUNT':len(accounted),
+            'R155_SYMBOLICALLY_ACCOUNTED_CONDITIONAL_STATES':sorted(accounted),
+            'UNACCOUNTED_CONDITIONAL_COUNT_AFTER_R155':len(remaining),
+            'NEXT_UNACCOUNTED_CONDITIONAL':remaining[0] if remaining else None,
+            'H15_LENGTH':proof['H15_LENGTH'],
+            'H15_FLOOR_WORDS_4B':proof['H15_FLOOR_WORDS_4B'],
+            'H15_REMAINDER_BYTES_MOD4':proof['H15_REMAINDER_BYTES_MOD4'],
+            'BRANCH_VALUES_ARE_INDEX_DEPENDENT_NOT_CONSTANT':proof['BRANCH_VALUES_ARE_INDEX_DEPENDENT_NOT_CONSTANT'],
+            'OUTER_LOOP_TOTAL_ITERATION_COUNT_NOT_YET_CLAIMED':True,
+            'STATE477_VISIT_COUNT_NOT_YET_PROVEN':True,
+            'POST_LOOP_LOCAL47_KEY_CANDIDATE_HEX':proof['POST_LOOP_LOCAL47_KEY_CANDIDATE_HEX'],
+            'INDEPENDENT_FULL_PATH_BRANCH_COVERAGE_PROVEN':len(remaining)==0,
+            'OFFLINE_DECRYPT_AUTHORIZED':False,
+            'H15_PLAINTEXT_RECOVERED':False,
+            'ANY_DISCOVERED_FRAME_AUTHORIZED_FOR_BOARD':False,
+            'AA55_LIVE_RETEST_ALLOWED':False,
+            'RUNTIME_0X11_ALLOWED':False,
+            'RUNTIME_0XFE_ALLOWED':False,
+            'FLASH_ALLOWED':False,
+            'remaining_unaccounted_conditionals':remaining,
+            'NEXT':(
+              'Resolve the next raw-IL conditional cluster beginning with state403 IL_0f3a (local77 <= 0) and '
+              'state583 IL_1d40 (local77 < local80). Trace local77 initialization/update and prove the exact nested-loop '
+              'schedule against the already-proven local80=3. Keep state215/state33/state458 modeled symbolically rather '
+              'than forcing one constant branch outcome. Preserve h15 unchanged and do not decrypt or authorize any live frame.'),
+          }
+          (ev/'R155_DECISION.json').write_text(json.dumps(decision,indent=2)+'\n')
+          (ev/'R155_REPORT_TH.md').write_text(
+            '# R155 local38/local98 outer-loop symbolic branch audit\n\n'
+            f'- R154 unaccounted conditionals: {decision["R154_UNACCOUNTED_CONDITIONAL_COUNT"]}\n'
+            f'- symbolically accounted in R155: {decision["R155_SYMBOLICALLY_ACCOUNTED_CONDITIONAL_COUNT"]} states {decision["R155_SYMBOLICALLY_ACCOUNTED_CONDITIONAL_STATES"]}\n'
+            f'- remaining: {decision["UNACCOUNTED_CONDITIONAL_COUNT_AFTER_R155"]}\n'
+            f'- h15 floor words / remainder: {decision["H15_FLOOR_WORDS_4B"]} / {decision["H15_REMAINDER_BYTES_MOD4"]}\n'
+            '- state458 = local38 < local98 outer-loop guard\n'
+            '- state215/state33 = local38 != local98-1 final-word tests\n'
+            '- these branch values are index-dependent, not constants\n'
+            '- total outer-loop iteration count not yet claimed\n'
+            '- offline decrypt authorized: False\n- h15 plaintext recovered: False\n\n'
+            f'NEXT: {decision["NEXT"]}\n\nFLASH_ALLOWED=NO\n')
+          print(json.dumps(decision,indent=2))
+          PY
+
+      - name: Package R155 evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /tmp/r155/evidence
+          zip -9 -r /tmp/R155_N9_LOCAL38_LOCAL98_OUTER_LOOP_SYMBOLIC_BRANCH_EVIDENCE.zip . >/dev/null
+          sha256sum /tmp/R155_N9_LOCAL38_LOCAL98_OUTER_LOOP_SYMBOLIC_BRANCH_EVIDENCE.zip > /tmp/R155_N9_LOCAL38_LOCAL98_OUTER_LOOP_SYMBOLIC_BRANCH_EVIDENCE.zip.sha256
+
+      - name: Upload R155 evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: R155-N9-LOCAL38-LOCAL98-OUTER-LOOP-SYMBOLIC-BRANCH-EVIDENCE
+          path: |
+            /tmp/R155_N9_LOCAL38_LOCAL98_OUTER_LOOP_SYMBOLIC_BRANCH_EVIDENCE.zip
+            /tmp/R155_N9_LOCAL38_LOCAL98_OUTER_LOOP_SYMBOLIC_BRANCH_EVIDENCE.zip.sha256
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Final fail-closed gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -F 'R155_VENDOR_BINARY_EXECUTED=NO' /tmp/r155/evidence/R155_SAFETY.txt
+          grep -F 'R155_USB_DEVICE_ACCESS=NO' /tmp/r155/evidence/R155_SAFETY.txt
+          grep -F 'R155_BOARD_CONTACT=NO' /tmp/r155/evidence/R155_SAFETY.txt
+          grep -F 'R155_OFFLINE_DECRYPT_EXECUTED=NO' /tmp/r155/evidence/R155_SAFETY.txt
+          grep -F '"R155_SYMBOLICALLY_ACCOUNTED_CONDITIONAL_COUNT": 3' /tmp/r155/evidence/R155_DECISION.json
+          grep -F '"UNACCOUNTED_CONDITIONAL_COUNT_AFTER_R155": 10' /tmp/r155/evidence/R155_DECISION.json
+          grep -F '"BRANCH_VALUES_ARE_INDEX_DEPENDENT_NOT_CONSTANT": true' /tmp/r155/evidence/R155_DECISION.json
+          grep -F '"OUTER_LOOP_TOTAL_ITERATION_COUNT_NOT_YET_CLAIMED": true' /tmp/r155/evidence/R155_DECISION.json
+          grep -F '"POST_LOOP_LOCAL47_KEY_CANDIDATE_HEX": "8e491ed108e5b47c8f39d70fd5c8342d8a42a068d0554a0ee526b8f7d6c844b3"' /tmp/r155/evidence/R155_DECISION.json
+          grep -F '"OFFLINE_DECRYPT_AUTHORIZED": false' /tmp/r155/evidence/R155_DECISION.json
+          grep -F '"H15_PLAINTEXT_RECOVERED": false' /tmp/r155/evidence/R155_DECISION.json
+          grep -F '"FLASH_ALLOWED": false' /tmp/r155/evidence/R155_DECISION.json
+          echo R155_N9_LOCAL38_LOCAL98_OUTER_LOOP_SYMBOLIC_BRANCH_AUDIT_COMPLETE=YES
+          echo FLASH_ALLOWED=NO
