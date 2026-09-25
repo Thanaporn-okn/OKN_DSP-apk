@@ -1,0 +1,336 @@
+name: R174 N9 unreachable CryptoStream path static retirement proof
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - ".github/workflows/R174_N9_UNREACHABLE_CRYPTOSTREAM_PATH_STATIC_RETIREMENT_PROOF.yml"
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: r174-static-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  FLASH_ALLOWED: "NO"
+
+jobs:
+  static_audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: Immutable safety gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$FLASH_ALLOWED" = "NO"
+          mkdir -p /tmp/r174/evidence
+          cat > /tmp/r174/evidence/R174_SAFETY.txt <<'EOF'
+          MODE=OFFLINE_STATIC_CONTROL_FLOW_ONLY
+          FLASH_ALLOWED=NO
+          USB_OR_BOARD_CONTACT=NO
+          VENDOR_EXE_DLL_APK_EXECUTED=NO
+          AES_OR_CRYPTOSTREAM_DECRYPT_EXECUTED=NO
+          AA55_OR_LINEIN_AA55_SENT=NO
+          RUNTIME_0X11_OR_0XFE_SENT=NO
+          FLASH_READ_ERASE_WRITE_EXECUTED=NO
+          DISCOVERED_FRAME_LIVE_AUTHORIZED=NO
+          HARDWARE_MODIFICATION=FORBIDDEN
+          EOF
+
+      - name: Download pinned R173 evidence
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          artifact-ids: "10858700069"
+          path: /tmp/r174/r173
+          merge-multiple: true
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          repository: Thanaporn-okn/OKN_DSP-apk
+          run-id: 36120987803
+
+      - name: Download pinned R157 historical evidence chain
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          artifact-ids: "10820682068"
+          path: /tmp/r174/r157
+          merge-multiple: true
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          repository: Thanaporn-okn/OKN_DSP-apk
+          run-id: 36028455796
+
+      - name: Retire unreachable state402 crypto path
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PYCODE'
+          from pathlib import Path
+          import hashlib, io, json, re, zipfile
+
+          base = Path("/tmp/r174")
+          out = base / "evidence"
+          out.mkdir(parents=True, exist_ok=True)
+
+          def inner(folder, name, expected_sha):
+              p = base / folder / name
+              data = p.read_bytes()
+              got = hashlib.sha256(data).hexdigest()
+              assert got == expected_sha, (name, got, expected_sha)
+              shp = p.with_name(p.name + ".sha256")
+              assert shp.exists(), f"missing {shp.name}"
+              assert shp.read_text().split()[0] == expected_sha
+              return zipfile.ZipFile(io.BytesIO(data))
+
+          r173 = inner(
+              "r173",
+              "R173_N9_ASSEMBLY_LOCATION_PRODUCTION_LOAD_CONTEXT_EVIDENCE.zip",
+              "e47a69090594ca3f6424d8f82fa12eb4b3b5bc745ebb725baee8160ec9985098",
+          )
+          d173 = json.loads(r173.read("R173_DECISION.json"))
+          d172 = json.loads(r173.read("R172_DECISION.json"))
+
+          assert d173["revision"] == "R173"
+          assert d173["UNACCOUNTED_CONDITIONAL_COUNT_AFTER_R173_PRODUCTION_DISTRIBUTION_MODEL"] == 0
+          assert d173["INDEPENDENT_FULL_PATH_BRANCH_COVERAGE_PROVEN"] is True
+          assert d173["STATE246_CONDITIONAL_RESOLVED_FOR_PRODUCTION_DISTRIBUTION"] is True
+          assert d173["STATE605_CONDITIONAL_RESOLVED_FOR_PRODUCTION_DISTRIBUTION"] is True
+          assert d173["R147_R150_15_BYTE_FINALBLOCK_CONTRADICTION_RESOLVED"] is False
+          assert d173["OFFLINE_DECRYPT_AUTHORIZED"] is False
+          assert d173["FLASH_ALLOWED"] is False
+
+          assert d172["STATE292_CONDITIONAL_RESOLVED"] is True
+          assert d172["STATE292_LOCAL28_BYTES_HEX"] == "a8ca2e67"
+          assert d172["STATE292_LOCAL28_INT32"] == 1731119784
+          assert d172["STATE292_LOCAL28_EQUALS_4"] is False
+          assert d172["STATE292_BRANCH_TO_IL_5D8F_PROVEN"] is True
+          assert d172["STATE292_FALLTHROUGH_TO_STATE402_EXCLUDED_ON_STATE94_PATH"] is True
+          assert d172["STATE278_LOCAL28_EQUALS_1"] is False
+          assert d172["STATE278_BNE_TO_IL_45A9_PROVEN"] is True
+
+          r157 = inner(
+              "r157",
+              "R157_N9_LOCAL29_LOCAL81_NONNULL_LOCAL93_LOOP_BRANCH_EVIDENCE.zip",
+              "f974c64c63eea5f2b940c76101f4ab6e769803f5630a2d87d21d08679c321609",
+          )
+
+          prefix = "r156/r155/r154/r153/r152/r151/r150/r149/r148/r147/r146/r145/r144/r143/"
+          raw = r157.read(prefix + "R143_N9_METHOD.il")
+          assert hashlib.sha256(raw).hexdigest() == "5a3964c1f4bd8db455e6882a4ce6f90667e1a9abc6e1fafd10440b31006e4a33"
+          text = raw.decode()
+
+          d144 = json.loads(r157.read(
+              "r156/r155/r154/r153/r152/r151/r150/r149/r148/r147/r146/r145/r144/R144_PE32_CONCRETE_KEYIV_PATH.json"
+          ))
+          d147 = json.loads(r157.read(
+              "r156/r155/r154/r153/r152/r151/r150/r149/r148/r147/R147_DECISION.json"
+          ))
+          d148 = json.loads(r157.read(
+              "r156/r155/r154/r153/r152/r151/r150/r149/r148/R148_DECISION.json"
+          ))
+          d150 = json.loads(r157.read(
+              "r156/r155/r154/r153/r152/r151/r150/R150_DECISION.json"
+          ))
+
+          assert d144["path_reaches_crypto_state_402"] is True
+          assert d144["path_states"][-2:] == [292, 402]
+          assert d144["proven_opaque_predicates"]["zfos5ENLukrcbiO4qNQ"] is True
+
+          assert d147["CRYPTOSTREAM_WRITE_LENGTH"] == 607967
+          assert d147["H15_MOD_16_DIAGNOSTIC_ONLY"] == 15
+          assert d147["OFFLINE_DECRYPT_AUTHORIZED"] is False
+
+          assert d148["STATIC_SEMANTICS_CONTRADICTION_CONFIRMED"] is True
+          assert d148["CRYPTOSTREAM_FINAL_REMAINDER_BYTES"] == 15
+          assert d150["STATIC_SEMANTICS_CONTRADICTION_REMAINS_UNRESOLVED"] is True
+
+          rows = []
+          for line in text.splitlines():
+              m = re.match(r"\s*(IL_[0-9a-f]+):\s+(\S+)(?:\s+(.*))?$", line)
+              if m:
+                  rows.append((m.group(1), m.group(2), (m.group(3) or "").split(" //",1)[0].strip()))
+          pos = {lab:i for i,(lab,_,_) in enumerate(rows)}
+
+          sm = re.search(r"IL_0012:\s+switch \((.*?)\)\n", text, re.S)
+          assert sm
+          targets = [x.strip() for x in sm.group(1).split(",")]
+          assert len(targets) == 689
+          assert targets[292] == "IL_59b1"
+          assert targets[278] == "IL_5d8f"
+          assert targets[402] == "IL_23ed"
+          assert targets[558] == "IL_3851"
+
+          tpos = sorted((pos[lab], st, lab) for st,lab in enumerate(targets))
+          blocks = {}
+          for i,(p0,st,lab) in enumerate(tpos):
+              p1 = tpos[i+1][0] if i+1 < len(tpos) else len(rows)
+              blocks[st] = rows[p0:p1]
+
+          def ops(st):
+              return [(op,arg) for _,op,arg in blocks[st]]
+
+          assert ops(292) == [
+              ("ldloc.s","28"),
+              ("ldc.i4.4",""),
+              ("bne.un","IL_5d8f"),
+              ("ldc.i4","402"),
+              ("br","IL_0012"),
+          ]
+
+          assert ops(278) == [
+              ("ldloc.s","28"),
+              ("ldc.i4.1",""),
+              ("bne.un","IL_45a9"),
+              ("ldc.i4","634"),
+              ("call","bool Q9Wet0jLP4YxXSyJBiC.q71r2Rj8SiD9GF1BI50::zfos5ENLukrcbiO4qNQ()"),
+              ("brtrue","IL_0012"),
+              ("pop",""),
+              ("ldc.i4","262"),
+              ("br","IL_0012"),
+          ]
+
+          # State402 has exactly one dispatcher producer in the method:
+          # state292's ldc.i4 402 / br IL_0012 pair.
+          literal_402 = [(st,lab) for st,b in blocks.items() for lab,op,arg in b
+                         if op == "ldc.i4" and arg == "402"]
+          direct_branches_to_402_label = [(st,lab,op) for st,b in blocks.items()
+                                          for lab,op,arg in b
+                                          if op.startswith("br") and arg == "IL_23ed"]
+
+          assert literal_402 == [(292, "IL_59b9")]
+          assert direct_branches_to_402_label == []
+          assert text.count("IL_23ed") == 2  # switch target + block label
+          assert text.count("ldc.i4 402") == 1
+
+          # The earlier R144 concrete path selected the fallthrough from state292.
+          # R172 later proved that exact branch condition false on the proven
+          # production state94/local29 path, invalidating 292 -> 402.
+          r144_last_edge = d144["path_states"][-2:]
+          assert r144_last_edge == [292,402]
+          assert d172["STATE292_LOCAL28_EQUALS_4"] is False
+
+          # Prove actual successor after state278 under the already-pinned zfos=true.
+          # The direct branch target enters IL_45a9 (inside the physical state108 region),
+          # sets local35=0, and dispatches literal state558.
+          il45a9 = pos["IL_45a9"]
+          seq = rows[il45a9:il45a9+7]
+          assert [(op,arg) for _,op,arg in seq] == [
+              ("ldc.i4.0",""),
+              ("stloc.s","35"),
+              ("ldc.i4","558"),
+              ("call","bool Q9Wet0jLP4YxXSyJBiC.q71r2Rj8SiD9GF1BI50::zfos5ENLukrcbiO4qNQ()"),
+              ("brtrue","IL_0012"),
+              ("pop",""),
+              ("ldc.i4","221"),
+          ]
+          assert d144["proven_opaque_predicates"]["zfos5ENLukrcbiO4qNQ"] is True
+
+          # Preserve the crypto block itself exactly, but reclassify reachability.
+          assert ops(402)[:7] == [
+              ("call","object Q9Wet0jLP4YxXSyJBiC.q71r2Rj8SiD9GF1BI50::trEuKPNkgB3p5fLuROn()"),
+              ("dup",""),
+              ("ldc.i4.1",""),
+              ("call","void Q9Wet0jLP4YxXSyJBiC.q71r2Rj8SiD9GF1BI50::Q2CVcdNXO7dpP5ufbGy(object, valuetype [mscorlib]System.Security.Cryptography.CipherMode)"),
+              ("ldloc.s","47"),
+              ("ldloc.s","8"),
+              ("call","object Q9Wet0jLP4YxXSyJBiC.q71r2Rj8SiD9GF1BI50::VnHlfpNorSGR6U9GUOp(object, object, object)"),
+          ]
+
+          result = {
+              "revision": "R174",
+              "R173_RUN_ID": 36120987803,
+              "R173_JOB_ID": 108026173377,
+              "R173_ARTIFACT_ID": 10858700069,
+              "R173_ARTIFACT_DIGEST": "sha256:075fe0fb741dc1d1c60db64f7285ccbd34e9d0d44c69436b44522affeb6099b2",
+              "R173_INNER_SHA256": "e47a69090594ca3f6424d8f82fa12eb4b3b5bc745ebb725baee8160ec9985098",
+              "N9_SHA256": hashlib.sha256(raw).hexdigest(),
+
+              "STATE402_LABEL": "IL_23ed",
+              "STATE402_LITERAL_DISPATCH_PRODUCER_COUNT": len(literal_402),
+              "STATE402_DIRECT_BRANCH_PREDECESSOR_COUNT": len(direct_branches_to_402_label),
+              "STATE402_ONLY_DISPATCH_PRODUCER_PROVEN": True,
+              "STATE402_ONLY_DISPATCH_PRODUCER_STATE": 292,
+
+              "STATE292_CONCRETE_LOCAL28": d172["STATE292_LOCAL28_INT32"],
+              "STATE292_LOCAL28_EQUALS_4": False,
+              "STATE292_TO_STATE402_EDGE_EXCLUDED": True,
+              "STATE402_REACHABLE_ON_PROVEN_PRODUCTION_DIRECT_EXE_PATH": False,
+
+              "R144_PATH_FINAL_EDGE": r144_last_edge,
+              "R144_292_TO_402_FALLTHROUGH_INVALIDATED_BY_R172": True,
+              "R148_CRYPTO_PATH_REACHABILITY_PREMISE_INVALIDATED_FOR_PRODUCTION_PATH": True,
+
+              "STATE278_LOCAL28_EQUALS_1": False,
+              "STATE278_DIRECT_BRANCH_TO_IL_45A9_PROVEN": True,
+              "IL_45A9_DISPATCHES_STATE558_UNDER_PROVEN_ZFOS_TRUE": True,
+              "ACTUAL_PRODUCTION_SUCCESSOR_AFTER_STATE278": 558,
+
+              "R147_H15_607967_BYTE_SLICE_FACT_RETAINED": True,
+              "R147_R150_CRYPTOSTREAM_SEMANTICS_FACTS_RETAINED_AS_BLOCK_LOCAL_FACTS": True,
+              "R147_R150_15_BYTE_FINALBLOCK_CONTRADICTION_RESOLVED_AS_UNREACHABLE_PATH": True,
+              "R147_R150_CONTRADICTION_RESOLUTION_KIND": "control-flow reachability, not padding/framing repair",
+              "ONE_BYTE_REPAIR_GUESS_ALLOWED": False,
+              "RAW_H15_DIRECT_AES_DECRYPTION_JUSTIFIED": False,
+
+              "UNACCOUNTED_CONDITIONAL_COUNT_AFTER_R174_PRODUCTION_DISTRIBUTION_MODEL": 0,
+              "INDEPENDENT_FULL_PATH_BRANCH_COVERAGE_PROVEN": True,
+
+              "AES_OR_CRYPTOSTREAM_DECRYPT_EXECUTED": False,
+              "OFFLINE_DECRYPT_AUTHORIZED": False,
+              "H15_PLAINTEXT_RECOVERED": False,
+              "ANY_DISCOVERED_FRAME_AUTHORIZED_FOR_BOARD": False,
+              "FLASH_ALLOWED": False,
+
+              "NEXT": "R175: follow the proven live production path from state278 -> IL_45a9 -> state558 and reconstruct its exact successors to the N9 return/initialization effects. Treat state402/40/281 CryptoStream as unreachable on this production path; do not decrypt raw h15, execute vendor code, contact USB, or flash."
+          }
+
+          (out / "R174_DECISION.json").write_text(json.dumps(result, indent=2) + "\n")
+          (out / "R174_STATE402_PREDECESSOR_PROOF.json").write_text(json.dumps({
+              "literal_402_producers": literal_402,
+              "direct_branches_to_IL_23ed": direct_branches_to_402_label,
+              "state292_ops": ops(292),
+              "state278_ops": ops(278),
+              "IL_45a9_sequence": seq,
+              "state402_ops": blocks[402],
+          }, indent=2) + "\n")
+          (out / "R173_DECISION.json").write_text(json.dumps(d173, indent=2) + "\n")
+          (out / "R172_DECISION.json").write_text(json.dumps(d172, indent=2) + "\n")
+          print(json.dumps(result, indent=2))
+          PYCODE
+
+      - name: Package R174 evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /tmp/r174/evidence
+          zip -9 -r /tmp/R174_N9_UNREACHABLE_CRYPTOSTREAM_PATH_EVIDENCE.zip . >/dev/null
+          sha256sum /tmp/R174_N9_UNREACHABLE_CRYPTOSTREAM_PATH_EVIDENCE.zip \
+            > /tmp/R174_N9_UNREACHABLE_CRYPTOSTREAM_PATH_EVIDENCE.zip.sha256
+
+      - name: Upload R174 evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: R174-N9-UNREACHABLE-CRYPTOSTREAM-PATH-STATIC-EVIDENCE
+          path: |
+            /tmp/R174_N9_UNREACHABLE_CRYPTOSTREAM_PATH_EVIDENCE.zip
+            /tmp/R174_N9_UNREACHABLE_CRYPTOSTREAM_PATH_EVIDENCE.zip.sha256
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Final fail-closed gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$FLASH_ALLOWED" = "NO"
+          grep -F '"STATE402_ONLY_DISPATCH_PRODUCER_PROVEN": true' /tmp/r174/evidence/R174_DECISION.json
+          grep -F '"STATE292_TO_STATE402_EDGE_EXCLUDED": true' /tmp/r174/evidence/R174_DECISION.json
+          grep -F '"STATE402_REACHABLE_ON_PROVEN_PRODUCTION_DIRECT_EXE_PATH": false' /tmp/r174/evidence/R174_DECISION.json
+          grep -F '"R147_R150_15_BYTE_FINALBLOCK_CONTRADICTION_RESOLVED_AS_UNREACHABLE_PATH": true' /tmp/r174/evidence/R174_DECISION.json
+          grep -F '"ACTUAL_PRODUCTION_SUCCESSOR_AFTER_STATE278": 558' /tmp/r174/evidence/R174_DECISION.json
+          grep -F '"RAW_H15_DIRECT_AES_DECRYPTION_JUSTIFIED": false' /tmp/r174/evidence/R174_DECISION.json
+          grep -F '"OFFLINE_DECRYPT_AUTHORIZED": false' /tmp/r174/evidence/R174_DECISION.json
+          grep -F '"FLASH_ALLOWED": false' /tmp/r174/evidence/R174_DECISION.json
+          echo R174_UNREACHABLE_CRYPTOSTREAM_PATH_STATIC_RETIREMENT_COMPLETE=YES
+          echo FLASH_ALLOWED=NO
