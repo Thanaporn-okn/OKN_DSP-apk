@@ -1,0 +1,445 @@
+name: R177 N9 post-XOR local47 corrected reconstruction static audit
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - ".github/workflows/R177_N9_POST_XOR_LOCAL47_CORRECTED_RECONSTRUCTION_STATIC_AUDIT.yml"
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: r177-static-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  FLASH_ALLOWED: "NO"
+
+jobs:
+  static_audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Immutable safety gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$FLASH_ALLOWED" = "NO"
+          mkdir -p /tmp/r177/evidence
+          cat > /tmp/r177/evidence/R177_SAFETY.txt <<'EOF'
+          MODE=OFFLINE_STATIC_RECONSTRUCTION_ONLY
+          FLASH_ALLOWED=NO
+          USB_OR_BOARD_CONTACT=NO
+          VENDOR_EXE_DLL_APK_EXECUTED=NO
+          AES_OR_CRYPTOSTREAM_DECRYPT_EXECUTED=NO
+          AA55_OR_LINEIN_AA55_SENT=NO
+          RUNTIME_0X11_OR_0XFE_SENT=NO
+          FLASH_READ_ERASE_WRITE_EXECUTED=NO
+          DISCOVERED_FRAME_LIVE_AUTHORIZED=NO
+          HARDWARE_MODIFICATION=FORBIDDEN
+          EOF
+
+      - name: Download pinned R176 fixed evidence
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          artifact-ids: "10861324699"
+          path: /tmp/r177/r176
+          merge-multiple: true
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          repository: Thanaporn-okn/OKN_DSP-apk
+          run-id: 36131572981
+
+      - name: Download pinned R171 old reconstruction evidence
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          artifact-ids: "10856075889"
+          path: /tmp/r177/r171
+          merge-multiple: true
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          repository: Thanaporn-okn/OKN_DSP-apk
+          run-id: 36118258307
+
+      - name: Download pinned R157 raw evidence chain
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          artifact-ids: "10820682068"
+          path: /tmp/r177/r157
+          merge-multiple: true
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          repository: Thanaporn-okn/OKN_DSP-apk
+          run-id: 36028455796
+
+      - name: Prove post-XOR local47 and reconstruct corrected state94 bytes
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PYCODE'
+          from pathlib import Path
+          import hashlib, io, json, re, struct, zipfile
+
+          MASK = 0xFFFFFFFF
+          def u32(x): return x & MASK
+
+          base = Path("/tmp/r177")
+          out = base / "evidence"
+          out.mkdir(parents=True, exist_ok=True)
+
+          def inner(folder, name, expected_sha):
+              p = base / folder / name
+              data = p.read_bytes()
+              got = hashlib.sha256(data).hexdigest()
+              assert got == expected_sha, (name, got, expected_sha)
+              shp = p.with_name(p.name + ".sha256")
+              assert shp.exists(), f"missing {shp.name}"
+              assert shp.read_text().split()[0] == expected_sha
+              return zipfile.ZipFile(io.BytesIO(data))
+
+          r176 = inner(
+              "r176",
+              "R176_N9_LOCAL71_LOCAL114_PROVENANCE_CLOSURE_EVIDENCE.zip",
+              "643769719120dbd83b4d2631810d45d37f5f6a99c5186785fb0a180ddf1dd379",
+          )
+          d176 = json.loads(r176.read("R176_DECISION.json"))
+          assert d176["revision"] == "R176"
+          assert d176["R175_MODEL_CONSISTENCY_CONTRADICTION_REMAINS"] is True
+          assert d176["R171_LOCAL29_BYTES_RETAINED_AS_PROVEN_AFTER_R176"] is False
+          assert d176["OFFLINE_DECRYPT_AUTHORIZED"] is False
+          assert d176["FLASH_ALLOWED"] is False
+
+          r171 = inner(
+              "r171",
+              "R171_N9_CONCRETE_LOCAL37_STATE94_BYTES_EVIDENCE.zip",
+              "88161a5a174546e41d4c6803c51be16e387d9a67e7a1ef1080292c27ee68b1b8",
+          )
+          old171 = json.loads(r171.read("R171_DECISION.json"))
+          assert old171["revision"] == "R171"
+          assert old171["KEY_HEX"] == "ef3259221c86959fd2122f8afb00fb208a42a068d0554a0ee526b8f7d6c844b3"
+          assert old171["LOCAL29_STATE94_SHA256"] == "6f9ef64dd69335e3e8b522afccc6b32a7d97973a9ce680035bee9e926a0a0ac1"
+
+          r157 = inner(
+              "r157",
+              "R157_N9_LOCAL29_LOCAL81_NONNULL_LOCAL93_LOOP_BRANCH_EVIDENCE.zip",
+              "f974c64c63eea5f2b940c76101f4ab6e769803f5630a2d87d21d08679c321609",
+          )
+
+          prefix = "r156/r155/r154/r153/r152/r151/r150/r149/r148/r147/r146/r145/r144/r143/"
+          raw = r157.read(prefix + "R143_N9_METHOD.il")
+          assert hashlib.sha256(raw).hexdigest() == "5a3964c1f4bd8db455e6882a4ce6f90667e1a9abc6e1fafd10440b31006e4a33"
+          text = raw.decode()
+
+          r144 = json.loads(r157.read(
+              "r156/r155/r154/r153/r152/r151/r150/r149/r148/r147/r146/r145/r144/R144_PE32_CONCRETE_KEYIV_PATH.json"
+          ))
+          d157 = json.loads(r157.read("R157_DECISION.json"))
+
+          key_pre = bytes.fromhex(r144["key_hex"])
+          iv = bytes.fromhex(r144["iv_hex"])
+          assert len(key_pre) == 32
+          assert len(iv) == 16
+          assert r144["key_alias_local17_to_local47"] is True
+          assert r144["iv_alias_local100_to_local8"] is True
+
+          h15 = r157.read(
+              "r156/r155/r154/r153/r152/r151/r150/r149/r148/r147/r146/r145/r144/r143/r142/"
+              "R142_EXTRACTED_MANAGED_RESOURCES/02_h15IL2i6yy2BZV8RqM.YuRwd1JALC4oy32W66.bin"
+          )
+          assert len(h15) == 607967
+          assert hashlib.sha256(h15).hexdigest() == "a46885bb2f09a600f6f16e6206f49d304ca829d441c5077b360b25ac8e6a33aa"
+
+          rows = []
+          for line in text.splitlines():
+              m = re.match(r"\s*(IL_[0-9a-f]+):\s+(\S+)(?:\s+(.*))?$", line)
+              if m:
+                  rows.append((m.group(1), m.group(2), (m.group(3) or "").split(" //",1)[0].strip()))
+          pos = {lab:i for i,(lab,_,_) in enumerate(rows)}
+
+          sm = re.search(r"IL_0012:\s+switch \((.*?)\)\n", text, re.S)
+          assert sm
+          targets = [x.strip() for x in sm.group(1).split(",")]
+          assert len(targets) == 689
+
+          tpos = sorted((pos[lab], st, lab) for st,lab in enumerate(targets))
+          blocks = {}
+          for i,(p0,st,lab) in enumerate(tpos):
+              p1 = tpos[i+1][0] if i+1 < len(tpos) else len(rows)
+              blocks[st] = rows[p0:p1]
+
+          def ops(st):
+              return [(op,arg) for _,op,arg in blocks[st]]
+
+          # Pin the pre-reconstruction local47 mutation path.
+          assert ops(626)[:3] == [
+              ("ldloc","17"),
+              ("stloc.s","47"),
+              ("ldc.i4","662"),
+          ]
+          assert ops(631)[:3] == [
+              ("ldloc","100"),
+              ("stloc.s","8"),
+              ("ldc.i4","101"),
+          ]
+          assert ops(92)[:3] == [
+              ("ldc.i4.0",""),
+              ("stloc.s","83"),
+              ("ldc.i4","265"),
+          ]
+          assert ops(265)[0] == ("br","IL_12f3")
+          assert ops(404)[:5] == [
+              ("ldloc.s","83"),
+              ("ldloc.s","8"),
+              ("ldlen",""),
+              ("conv.i4",""),
+              ("blt","IL_33d9"),
+          ]
+          assert ops(309)[:12] == [
+              ("ldloc.s","47"),
+              ("ldloc.s","83"),
+              ("ldloc.s","47"),
+              ("ldloc.s","83"),
+              ("ldelem.u1",""),
+              ("ldloc.s","8"),
+              ("ldloc.s","83"),
+              ("ldelem.u1",""),
+              ("xor",""),
+              ("conv.u1",""),
+              ("stelem.i1",""),
+              ("ldc.i4","625"),
+          ]
+          assert ops(625)[:5] == [
+              ("ldloc.s","83"),
+              ("ldc.i4.1",""),
+              ("add",""),
+              ("stloc.s","83"),
+              ("ldc.i4","404"),
+          ]
+          assert ops(604)[:3] == [
+              ("ldloc.s","12"),
+              ("stloc.s","27"),
+              ("ldc.i4","149"),
+          ]
+
+          # The loop is exactly i=0..15 because local8 is the proven 16-byte IV.
+          key_post = bytearray(key_pre)
+          for i,b in enumerate(iv):
+              key_post[i] ^= b
+          key_post = bytes(key_post)
+
+          expected_post = "8e491ed108e5b47c8f39d70fd5c8342d8a42a068d0554a0ee526b8f7d6c844b3"
+          assert key_post.hex() == expected_post
+          assert d157["POST_LOOP_LOCAL47_KEY_CANDIDATE_HEX"] == expected_post
+
+          # R171 used the pre-XOR value in the word schedule. That premise is false.
+          assert old171["KEY_HEX"] == key_pre.hex()
+          assert old171["KEY_HEX"] != key_post.hex()
+
+          # Parse and interpret the exact state46 transform from raw IL.
+          b46 = blocks[46]
+          canon46 = json.dumps([(lab,op,arg) for lab,op,arg in b46], separators=(",",":")).encode()
+          assert hashlib.sha256(canon46).hexdigest() == "75f84c2e24085e392d83239813fd59f0cd54311e440f8c9118edddb332c6fcd9"
+
+          def state46(x):
+              loc = {105:u32(x)}
+              stack = []
+              for _,op,arg in b46:
+                  if op in ("ldloc","ldloc.s"):
+                      stack.append(loc.get(int(arg),0))
+                  elif op in ("stloc","stloc.s"):
+                      loc[int(arg)] = u32(int(stack.pop()))
+                  elif op in ("ldc.i4","ldc.i4.s"):
+                      stack.append(u32(int(arg)))
+                  elif op.startswith("ldc.i4."):
+                      tail = op[len("ldc.i4."):]
+                      stack.append(u32(-1 if tail == "m1" else int(tail)))
+                  elif op == "add":
+                      b=stack.pop(); a=stack.pop(); stack.append(u32(int(a)+int(b)))
+                  elif op == "sub":
+                      b=stack.pop(); a=stack.pop(); stack.append(u32(int(a)-int(b)))
+                  elif op == "xor":
+                      b=stack.pop(); a=stack.pop(); stack.append(u32(int(a)^int(b)))
+                  elif op == "and":
+                      b=stack.pop(); a=stack.pop(); stack.append(u32(int(a)&int(b)))
+                  elif op == "or":
+                      b=stack.pop(); a=stack.pop(); stack.append(u32(int(a)|int(b)))
+                  elif op == "shl":
+                      b=int(stack.pop()) & 31; a=int(stack.pop()); stack.append(u32(a << b))
+                  elif op == "shr.un":
+                      b=int(stack.pop()) & 31; a=int(stack.pop()); stack.append((a & MASK) >> b)
+                  elif op == "conv.r.un":
+                      stack.append(float(int(stack.pop()) & MASK))
+                  elif op == "conv.r8":
+                      stack.append(float(stack.pop()))
+                  elif op == "conv.u4":
+                      stack.append(u32(int(stack.pop())))
+                  elif op == "br":
+                      break
+                  else:
+                      raise AssertionError(("unsupported state46 opcode",op,arg))
+              return loc[105]
+
+          # Reconstruct local37 using the post-XOR local47 value.
+          key_words = [struct.unpack_from("<I", key_post, i*4)[0] for i in range(8)]
+          local37 = bytearray(len(h15))
+          s = 0
+          full = len(h15)//4
+
+          for i in range(full):
+              s = state46(u32(s + key_words[i % 8]))
+              src = struct.unpack_from("<I", h15, i*4)[0]
+              struct.pack_into("<I", local37, i*4, u32(s ^ src))
+
+          # Final 3-byte remainder path.
+          i = full
+          s = state46(u32(s + key_words[i % 8]))
+          local82 = int.from_bytes(h15[-3:], "little")
+          local22 = u32(s ^ local82)
+          local37[-3:] = (local22 & 0xFFFFFF).to_bytes(3, "little")
+          local37 = bytes(local37)
+
+          # State96 aliases local37 -> local29, then state179 XORs each complete 8-byte lane.
+          local29 = bytearray(local37)
+          mask = 0x3800CD0D
+          iterations = len(local29)//8
+          assert iterations == 75995
+          for j in range(iterations):
+              off = j*8
+              v = int.from_bytes(local29[off:off+8], "little") ^ mask
+              local29[off:off+8] = v.to_bytes(8, "little")
+          local29 = bytes(local29)
+
+          local37_sha = hashlib.sha256(local37).hexdigest()
+          local29_sha = hashlib.sha256(local29).hexdigest()
+
+          assert local37_sha == "fec7f1e15f9c5e57a8c03fb42b51d9986eec5d0b6fcd4a39552c243d15e7b423"
+          assert local29_sha == "9f8c10e6443399bebcc35d670d6185f99698d5bce51eb2af1325c9e8602acbe1"
+          assert local29[:24].hex() == "3e8b658404d65f16cee5569267e6111f9e4340da742baf0e"
+
+          first6 = [struct.unpack_from("<i",local29,off)[0] for off in [0,4,8,12,16,20]]
+          local71 = first6[4]
+          local28 = first6[5]
+
+          assert local71 == -633322594
+          assert local28 == 246360948
+          assert local28 != 4
+          assert local28 != 1
+
+          # Therefore the R172/R174 branch direction remains the same:
+          # state292 -> state278 -> IL_45a9 -> state558.
+          # But the state183 patch-loop guard is signed blt local35,local71.
+          assert ops(183)[:4] == [
+              ("ldloc.s","35"),
+              ("ldloc.s","71"),
+              ("blt","IL_3e63"),
+              ("ldc.i4","565"),
+          ]
+          local35 = 0
+          patch_loop_taken = local35 < local71
+          assert patch_loop_taken is False
+
+          # Corrected data therefore exits the patch loop immediately to state565.
+          assert targets[565] == "IL_5b26"
+
+          (out / "R177_CORRECTED_LOCAL37.bin").write_bytes(local37)
+          (out / "R177_CORRECTED_LOCAL29_STATE94.bin").write_bytes(local29)
+
+          result = {
+              "revision":"R177",
+              "R176_FIXED_RUN_ID":36131572981,
+              "R176_FIXED_JOB_ID":108059802475,
+              "R176_FIXED_ARTIFACT_ID":10861324699,
+              "R176_FIXED_ARTIFACT_DIGEST":"sha256:e0e68d7edadb25045581f81ed7303956cadfdee184d8e32d82c871a97c2ef10e",
+              "R176_FIXED_INNER_SHA256":"643769719120dbd83b4d2631810d45d37f5f6a99c5186785fb0a180ddf1dd379",
+              "N9_SHA256":hashlib.sha256(raw).hexdigest(),
+
+              "R171_ROOT_CAUSE_IDENTIFIED":True,
+              "R171_ROOT_CAUSE":"R171 used the pre-state309 local47 value as the word-schedule key. Raw IL proves state309 XOR-mutates local47[0..15] with local8 (the 16-byte IV) before state604/local27 and before state668 reconstruction.",
+              "PRE_XOR_LOCAL47_HEX":key_pre.hex(),
+              "LOCAL8_IV_HEX":iv.hex(),
+              "POST_XOR_LOCAL47_HEX":key_post.hex(),
+              "POST_XOR_LOCAL47_MATCHES_R157_CANDIDATE":True,
+              "STATE309_XOR_LOOP_ITERATIONS":16,
+
+              "R171_OLD_LOCAL29_SHA256":old171["LOCAL29_STATE94_SHA256"],
+              "R171_OLD_RECONSTRUCTION_INVALIDATED":True,
+
+              "CORRECTED_LOCAL37_LENGTH":len(local37),
+              "CORRECTED_LOCAL37_SHA256":local37_sha,
+              "CORRECTED_LOCAL29_STATE94_LENGTH":len(local29),
+              "CORRECTED_LOCAL29_STATE94_SHA256":local29_sha,
+              "CORRECTED_LOCAL29_FIRST24_HEX":local29[:24].hex(),
+              "CORRECTED_FIRST_SIX_INT32":first6,
+
+              "CORRECTED_LOCAL71_INT32":local71,
+              "CORRECTED_LOCAL28_INT32":local28,
+              "STATE292_LOCAL28_NOT_4":True,
+              "STATE278_LOCAL28_NOT_1":True,
+              "R172_R174_BRANCH_DIRECTION_REMAINS_VALID":True,
+
+              "STATE183_SIGNED_PATCH_LOOP_GUARD":"local35 < local71",
+              "LOCAL35_AT_STATE558_ENTRY":0,
+              "PATCH_LOOP_TAKEN_WITH_CORRECTED_LOCAL71":False,
+              "STATE565_NORMAL_EXIT_REACHABLE":True,
+
+              "R175_READ_BUDGET_CONTRADICTION_RESOLVED":True,
+              "R175_CONTRADICTION_CAUSE":"incorrect R171 pre-XOR local47 reconstruction, not reader rebinding and not a real 2,037,921,120-iteration production patch loop",
+              "PRODUCTION_PATH_MODEL_SELF_CONSISTENT_THROUGH_STATE565":True,
+
+              "AES_OR_CRYPTOSTREAM_DECRYPT_EXECUTED":False,
+              "OFFLINE_DECRYPT_AUTHORIZED":False,
+              "H15_PLAINTEXT_RECOVERED":False,
+              "ANY_DISCOVERED_FRAME_AUTHORIZED_FOR_BOARD":False,
+              "FLASH_ALLOWED":False,
+
+              "NEXT":"R178: continue statically from state565 using the corrected R177 state94 bytes and prove the exact successor chain to N9 return/initialization effects. Retire the old R171 local29 hash and all R172/R175 concrete values derived from it, while retaining only branch conclusions re-proven by R177. Do not decrypt, execute vendor binaries, contact USB, or flash."
+          }
+
+          (out / "R177_DECISION.json").write_text(json.dumps(result,indent=2)+"\n")
+          (out / "R177_CORRECTED_RECONSTRUCTION_MANIFEST.json").write_text(json.dumps({
+              "pre_xor_local47":key_pre.hex(),
+              "iv":iv.hex(),
+              "post_xor_local47":key_post.hex(),
+              "local37_sha256":local37_sha,
+              "local29_state94_sha256":local29_sha,
+              "first6_i32":first6,
+              "patch_loop_taken":patch_loop_taken,
+          },indent=2)+"\n")
+          print(json.dumps(result,indent=2))
+          PYCODE
+
+      - name: Package R177 evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /tmp/r177/evidence
+          zip -9 -r /tmp/R177_N9_POST_XOR_LOCAL47_CORRECTED_RECONSTRUCTION_EVIDENCE.zip . >/dev/null
+          sha256sum /tmp/R177_N9_POST_XOR_LOCAL47_CORRECTED_RECONSTRUCTION_EVIDENCE.zip \
+            > /tmp/R177_N9_POST_XOR_LOCAL47_CORRECTED_RECONSTRUCTION_EVIDENCE.zip.sha256
+
+      - name: Upload R177 evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: R177-N9-POST-XOR-LOCAL47-CORRECTED-RECONSTRUCTION-STATIC-EVIDENCE
+          path: |
+            /tmp/R177_N9_POST_XOR_LOCAL47_CORRECTED_RECONSTRUCTION_EVIDENCE.zip
+            /tmp/R177_N9_POST_XOR_LOCAL47_CORRECTED_RECONSTRUCTION_EVIDENCE.zip.sha256
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Final fail-closed gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$FLASH_ALLOWED" = "NO"
+          grep -F '"R171_ROOT_CAUSE_IDENTIFIED": true' /tmp/r177/evidence/R177_DECISION.json
+          grep -F '"POST_XOR_LOCAL47_MATCHES_R157_CANDIDATE": true' /tmp/r177/evidence/R177_DECISION.json
+          grep -F '"R171_OLD_RECONSTRUCTION_INVALIDATED": true' /tmp/r177/evidence/R177_DECISION.json
+          grep -F '"CORRECTED_LOCAL71_INT32": -633322594' /tmp/r177/evidence/R177_DECISION.json
+          grep -F '"CORRECTED_LOCAL28_INT32": 246360948' /tmp/r177/evidence/R177_DECISION.json
+          grep -F '"PATCH_LOOP_TAKEN_WITH_CORRECTED_LOCAL71": false' /tmp/r177/evidence/R177_DECISION.json
+          grep -F '"R175_READ_BUDGET_CONTRADICTION_RESOLVED": true' /tmp/r177/evidence/R177_DECISION.json
+          grep -F '"OFFLINE_DECRYPT_AUTHORIZED": false' /tmp/r177/evidence/R177_DECISION.json
+          grep -F '"FLASH_ALLOWED": false' /tmp/r177/evidence/R177_DECISION.json
+          echo R177_POST_XOR_LOCAL47_CORRECTED_RECONSTRUCTION_COMPLETE=YES
+          echo FLASH_ALLOWED=NO
