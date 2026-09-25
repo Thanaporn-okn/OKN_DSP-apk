@@ -1,0 +1,401 @@
+name: R170 N9 exact per-visit producer reaching definitions static audit
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - ".github/workflows/R170_N9_EXACT_PER_VISIT_PRODUCER_REACHING_DEFINITIONS_STATIC_AUDIT.yml"
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: r170-static-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  FLASH_ALLOWED: "NO"
+
+jobs:
+  static_audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Immutable safety gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$FLASH_ALLOWED" = "NO"
+          mkdir -p /tmp/r170/evidence
+          cat > /tmp/r170/evidence/R170_SAFETY.txt <<'EOF'
+          MODE=OFFLINE_STATIC_IL_TEXT_ONLY
+          FLASH_ALLOWED=NO
+          USB_OR_BOARD_CONTACT=NO
+          VENDOR_EXE_DLL_APK_EXECUTED=NO
+          OFFLINE_DECRYPT_EXECUTED=NO
+          AA55_OR_LINEIN_AA55_SENT=NO
+          RUNTIME_0X11_OR_0XFE_SENT=NO
+          FLASH_READ_ERASE_WRITE_EXECUTED=NO
+          DISCOVERED_FRAME_LIVE_AUTHORIZED=NO
+          HARDWARE_MODIFICATION=FORBIDDEN
+          EOF
+
+      - name: Download pinned R169 evidence
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          artifact-ids: "10855376629"
+          path: /tmp/r170/r169
+          merge-multiple: true
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          repository: Thanaporn-okn/OKN_DSP-apk
+          run-id: 36116106256
+
+      - name: Download pinned R157 raw evidence chain
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          artifact-ids: "10820682068"
+          path: /tmp/r170/r157
+          merge-multiple: true
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          repository: Thanaporn-okn/OKN_DSP-apk
+          run-id: 36028455796
+
+      - name: Prove exact per-visit reaching definitions
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PYCODE'
+          from pathlib import Path
+          import hashlib, io, json, re, zipfile
+
+          base = Path("/tmp/r170")
+          out = base / "evidence"
+          out.mkdir(parents=True, exist_ok=True)
+
+          def open_inner(folder, name, expected_sha):
+              p = base / folder / name
+              data = p.read_bytes()
+              got = hashlib.sha256(data).hexdigest()
+              assert got == expected_sha, (name, got, expected_sha)
+              sha_file = p.with_name(p.name + ".sha256")
+              assert sha_file.exists(), f"missing {sha_file.name}"
+              assert sha_file.read_text().split()[0] == expected_sha
+              return zipfile.ZipFile(io.BytesIO(data))
+
+          r169 = open_inner(
+              "r169",
+              "R169_N9_PRODUCER_REACHING_STORE_CANDIDATE_EVIDENCE.zip",
+              "78f576ac661da2c96121b1f4b6934a5bb022ae2ff6fe3c935a4b50ac98948675",
+          )
+          prior = json.loads(r169.read("R169_DECISION.json"))
+          assert prior["revision"] == "R169"
+          assert prior["CONSERVATIVE_DISPATCH_GRAPH_BUILT"] is True
+          assert prior["EXACT_PER_VISIT_REACHING_STORE_SELECTION_PROVEN"] is False
+          assert prior["OFFLINE_DECRYPT_AUTHORIZED"] is False
+          assert prior["FLASH_ALLOWED"] is False
+
+          r157 = open_inner(
+              "r157",
+              "R157_N9_LOCAL29_LOCAL81_NONNULL_LOCAL93_LOOP_BRANCH_EVIDENCE.zip",
+              "f974c64c63eea5f2b940c76101f4ab6e769803f5630a2d87d21d08679c321609",
+          )
+
+          prefix = "r156/r155/r154/r153/r152/r151/r150/r149/r148/r147/r146/r145/r144/r143/"
+          raw = r157.read(prefix + "R143_N9_METHOD.il")
+          assert hashlib.sha256(raw).hexdigest() == "5a3964c1f4bd8db455e6882a4ce6f90667e1a9abc6e1fafd10440b31006e4a33"
+          text = raw.decode()
+
+          r155 = json.loads(r157.read("r156/r155/R155_LOCAL38_LOCAL98_OUTER_LOOP_SYMBOLIC_BRANCH_MODEL.json"))
+          r156 = json.loads(r157.read("r156/R156_LOCAL77_LOCAL79_REMAINDER_LOOP_SYMBOLIC_BRANCH_MODEL.json"))
+          r154 = json.loads(r157.read("r156/r155/r154/R154_LOCAL80_H15_MOD4_BRANCH_CLUSTER.json"))
+
+          assert r155["H15_LENGTH"] == 607967
+          assert r155["H15_FLOOR_WORDS_4B"] == 151991
+          assert r155["H15_REMAINDER_BYTES_MOD4"] == 3
+          assert r155["LOCAL38_INITIAL_VALUE"] == 0
+          assert r155["LOCAL38_UPDATE"] == "local38 = local38 + 1"
+          assert r155["LOCAL98_INITIAL_VALUE_FLOOR_H15_DIV4"] == 151991
+          assert r155["LOCAL98_ONLY_OTHER_UPDATE"] == "local98 = local98 + 1"
+
+          assert r154["LOCAL80_VALUE"] == 3
+          assert r154["LOCAL80_IS_POSITIVE"] is True
+          assert r156["LOCAL77_MONOTONIC_ZERO_TO_GUARD_EXIT_3"] is True
+          assert r156["LOCAL79_MONOTONIC_ZERO_TO_GUARD_EXIT_3"] is True
+
+          rows = []
+          for line in text.splitlines():
+              m = re.match(r"\s*(IL_[0-9a-f]+):\s+(\S+)(?:\s+(.*))?$", line)
+              if m:
+                  rows.append((m.group(1), m.group(2), (m.group(3) or "").split(" //", 1)[0].strip()))
+          pos = {lab: i for i, (lab, _, _) in enumerate(rows)}
+
+          sm = re.search(r"IL_0012:\s+switch \((.*?)\)\n", text, re.S)
+          assert sm
+          targets = [x.strip() for x in sm.group(1).split(",")]
+          assert len(targets) == 689
+
+          target_positions = sorted((pos[lab], st, lab) for st, lab in enumerate(targets))
+          blocks = {}
+          for i, (p0, st, lab) in enumerate(target_positions):
+              p1 = target_positions[i + 1][0] if i + 1 < len(target_positions) else len(rows)
+              blocks[st] = rows[p0:p1]
+
+          def ops(st):
+              return [(op, arg) for _, op, arg in blocks[st]]
+
+          # Exact outer-loop setup: positive remainder increments ceil-word count.
+          assert ops(436) == [
+              ("ldloc.s", "80"), ("ldc.i4.0", ""), ("ble", "IL_55e2"),
+              ("ldc.i4", "477"), ("br", "IL_0012")
+          ]
+          assert ops(477) == [
+              ("ldloc.s", "98"), ("ldc.i4.1", ""), ("add", ""), ("stloc.s", "98"),
+              ("ldc.i4", "370"), ("call", "bool Q9Wet0jLP4YxXSyJBiC.q71r2Rj8SiD9GF1BI50::zfos5ENLukrcbiO4qNQ()"),
+              ("brtrue", "IL_0012"), ("pop", ""), ("ldc.i4", "342"), ("br", "IL_0012")
+          ]
+          assert ops(370) == [
+              ("ldc.i4.0", ""), ("stloc.s", "76"),
+              ("ldc.i4", "60"), ("call", "bool Q9Wet0jLP4YxXSyJBiC.q71r2Rj8SiD9GF1BI50::zfos5ENLukrcbiO4qNQ()"),
+              ("brtrue", "IL_0012"), ("pop", ""), ("ldc.i4", "5"), ("br", "IL_0012")
+          ]
+          assert ops(60) == [
+              ("ldc.i4.0", ""), ("stloc.s", "38"), ("ldc.i4", "32"), ("br", "IL_0012")
+          ]
+          assert ops(458) == [
+              ("ldloc.s", "38"), ("ldloc.s", "98"), ("blt", "IL_652b"),
+              ("ldc.i4", "96"), ("br", "IL_0012")
+          ]
+
+          h15_len = 607967
+          full_words = h15_len // 4
+          rem = h15_len % 4
+          ceil_words = full_words + 1
+          assert (full_words, rem, ceil_words) == (151991, 3, 151992)
+
+          # Main full-word path for local38 = 0..151990.
+          assert ops(215) == [
+              ("ldloc.s", "38"), ("ldloc.s", "98"), ("ldc.i4.1", ""), ("sub", ""),
+              ("bne.un", "IL_5442"), ("ldc.i4", "338"), ("br", "IL_0012")
+          ]
+          assert ops(15) == [
+              ("ldloc.s", "67"), ("stloc.s", "76"), ("ldc.i4", "299"), ("br", "IL_0012")
+          ]
+          assert ops(299) == [
+              ("ldloc.s", "105"), ("ldloc.s", "53"), ("add", ""), ("stloc.s", "105"),
+              ("ldc.i4", "342"), ("stloc", "95"), ("br", "IL_000e")
+          ]
+
+          expected342 = [
+              ("ldloc.s", "27"), ("ldloc.s", "76"), ("ldc.i4.3", ""), ("add", ""), ("ldelem.u1", ""),
+              ("ldc.i4.s", "24"), ("shl", ""),
+              ("ldloc.s", "27"), ("ldloc.s", "76"), ("ldc.i4.2", ""), ("add", ""), ("ldelem.u1", ""),
+              ("ldc.i4.s", "16"), ("shl", ""), ("or", ""),
+              ("ldloc.s", "27"), ("ldloc.s", "76"), ("ldc.i4.1", ""), ("add", ""), ("ldelem.u1", ""),
+              ("ldc.i4.8", ""), ("shl", ""), ("or", ""),
+              ("ldloc.s", "27"), ("ldloc.s", "76"), ("ldelem.u1", ""), ("or", ""),
+              ("stloc.s", "82"), ("ldc.i4", "664"), ("stloc", "95"), ("br", "IL_000e")
+          ]
+          assert ops(342) == expected342
+          assert ops(664) == [
+              ("ldloc.s", "105"), ("stloc.s", "105"), ("ldc.i4", "46"), ("br", "IL_0012")
+          ]
+          assert ops(46)[-3:] == [
+              ("stloc.s", "105"), ("ldc.i4", "33"), ("br", "IL_0012")
+          ]
+          assert ops(33) == [
+              ("ldloc.s", "38"), ("ldloc.s", "98"), ("ldc.i4.1", ""), ("sub", ""),
+              ("bne.un", "IL_1172"),
+              ("ldc.i4", "387"), ("call", "bool Q9Wet0jLP4YxXSyJBiC.q71r2Rj8SiD9GF1BI50::zfos5ENLukrcbiO4qNQ()"),
+              ("brtrue", "IL_0012"), ("pop", ""), ("ldc.i4", "98"), ("br", "IL_0012")
+          ]
+          assert ops(57)[:4] == [
+              ("ldloc.s", "105"), ("ldloc.s", "82"), ("xor", ""), ("stloc.s", "24")
+          ]
+
+          # Final partial-word path local38 = 151991.
+          assert ops(338) == [
+              ("ldloc.s", "80"), ("ldc.i4.0", ""), ("ble", "IL_5442"),
+              ("ldc.i4", "368"), ("stloc", "95"), ("br", "IL_000e")
+          ]
+          assert ops(368)[:4] == [
+              ("ldloc.s", "105"), ("ldloc.s", "53"), ("add", ""), ("stloc.s", "105")
+          ]
+          assert ops(523)[:2] == [
+              ("ldc.i4.0", ""), ("stloc.s", "82")
+          ]
+          assert ops(490)[:2] == [
+              ("ldc.i4.0", ""), ("stloc.s", "77")
+          ]
+          assert ops(401)[0] == ("br", "IL_1d3c")
+          assert ops(583)[:3] == [
+              ("ldloc.s", "77"), ("ldloc.s", "80"), ("blt", "IL_0f37")
+          ]
+          assert ops(403)[:3] == [
+              ("ldloc.s", "77"), ("ldc.i4.0", ""), ("ble", "IL_37b4")
+          ]
+          assert ops(669) == [
+              ("ldloc.s", "82"), ("ldc.i4.8", ""), ("shl", ""), ("stloc.s", "82"),
+              ("ldc.i4", "596"), ("br", "IL_0012")
+          ]
+          assert ops(596)[:10] == [
+              ("ldloc.s", "82"), ("ldloc.s", "27"), ("ldloc.s", "27"),
+              ("ldlen", ""), ("conv.i4", ""), ("ldc.i4.1", ""),
+              ("ldloc.s", "77"), ("add", ""), ("sub", ""), ("ldelem.u1", "")
+          ]
+          assert ops(596)[10:13] == [
+              ("or", ""), ("stloc.s", "82"), ("ldc.i4", "687")
+          ]
+          assert ops(687)[:4] == [
+              ("ldloc.s", "77"), ("ldc.i4.1", ""), ("add", ""), ("stloc.s", "77")
+          ]
+          assert ops(323)[0] == ("br", "IL_488c")
+          assert ops(387) == [
+              ("ldloc.s", "80"), ("ldc.i4.0", ""), ("ble", "IL_1172"),
+              ("ldc.i4", "239"), ("stloc", "95"), ("br", "IL_000e")
+          ]
+          assert ops(239)[:4] == [
+              ("ldloc.s", "105"), ("ldloc.s", "82"), ("xor", ""), ("stloc.s", "22")
+          ]
+
+          # Remainder output writes exactly 3 little-endian bytes of local22.
+          assert ops(78)[:2] == [("ldc.i4.0", ""), ("stloc.s", "79")]
+          assert ops(327)[:3] == [
+              ("ldloc.s", "79"), ("ldloc.s", "80"), ("blt", "IL_22a6")
+          ]
+          assert ops(308)[:3] == [
+              ("ldloc.s", "79"), ("ldc.i4.0", ""), ("ble", "IL_5900")
+          ]
+          assert ops(141)[:2] == [("ldc.i4", "255"), ("stloc.s", "60")]
+          assert ops(502)[:2] == [("ldc.i4.0", ""), ("stloc.s", "0")]
+          assert ops(326)[:4] == [
+              ("ldloc.s", "60"), ("ldc.i4.8", ""), ("shl", ""), ("stloc.s", "60")
+          ]
+          assert ops(22)[:4] == [
+              ("ldloc.s", "0"), ("ldc.i4.8", ""), ("add", ""), ("stloc.s", "0")
+          ]
+          assert ops(534)[:14] == [
+              ("ldloc.s", "37"), ("ldloc.s", "67"), ("ldloc.s", "79"), ("add", ""),
+              ("ldloc.s", "22"), ("ldloc.s", "60"), ("and", ""),
+              ("ldloc.s", "0"), ("ldc.i4.s", "31"), ("and", ""), ("shr.un", ""),
+              ("conv.u1", ""), ("stelem.i1", ""), ("ldc.i4", "244")
+          ]
+
+          result = {
+              "revision": "R170",
+              "R169_RUN_ID": 36116106256,
+              "R169_JOB_ID": 108010475487,
+              "R169_ARTIFACT_ID": 10855376629,
+              "R169_ARTIFACT_DIGEST": "sha256:61a81095960f8c2893d28515df6197ae8bffdff13f34b46331e306f2fa798078",
+              "R169_INNER_SHA256": "78f576ac661da2c96121b1f4b6934a5bb022ae2ff6fe3c935a4b50ac98948675",
+              "N9_SHA256": hashlib.sha256(raw).hexdigest(),
+
+              "H15_LENGTH": h15_len,
+              "H15_FULL_WORD_COUNT": full_words,
+              "H15_REMAINDER_BYTES": rem,
+              "H15_CEIL_WORD_COUNT": ceil_words,
+              "LOCAL98_INCREMENT_FOR_POSITIVE_REMAINDER_PROVEN": True,
+              "OUTER_LOOP_EXACT_ITERATION_COUNT_PROVEN": True,
+              "OUTER_LOOP_ITERATION_COUNT": ceil_words,
+              "FULL_WORD_ITERATION_COUNT": full_words,
+              "FULL_WORD_INDEX_RANGE": [0, full_words - 1],
+              "FINAL_PARTIAL_WORD_INDEX": full_words,
+
+              "FULL_WORD_LOCAL76_REACHING_STORE_PROVEN": True,
+              "FULL_WORD_LOCAL76_REACHING_STORE": {"state": 15, "label": "IL_5444", "meaning": "local76 = local67"},
+              "FULL_WORD_LOCAL82_REACHING_STORE_PROVEN": True,
+              "FULL_WORD_LOCAL82_REACHING_STORE": {"state": 342, "label": "IL_61d4", "meaning": "local82 = LE32(h15[local67:local67+4])"},
+              "FULL_WORD_LOCAL105_REACHING_STORE_PROVEN": True,
+              "FULL_WORD_LOCAL105_REACHING_STORE": {"state": 46, "label": "IL_5d20"},
+              "FULL_WORD_LOCAL24_PRODUCER_STATE": 57,
+              "FULL_WORD_LOCAL24_EQUATION": "local24 = local105 XOR local82",
+
+              "FINAL_WORD_LOCAL82_BUILD_LOOP_PROVEN": True,
+              "FINAL_WORD_LOCAL82_BUILD_VISITS": 3,
+              "FINAL_WORD_LOCAL82_BYTE_ORDER": "h15[len-3], h15[len-2], h15[len-1] assembled into the low 24 bits by shift-left-8/or",
+              "FINAL_WORD_LOCAL82_FINAL_REACHING_STORE_PROVEN": True,
+              "FINAL_WORD_LOCAL82_FINAL_REACHING_STORE": {"state": 596, "label": "IL_37c3"},
+              "FINAL_WORD_LOCAL105_REACHING_STORE_PROVEN": True,
+              "FINAL_WORD_LOCAL105_REACHING_STORE": {"state": 46, "label": "IL_5d20"},
+              "FINAL_WORD_LOCAL22_PRODUCER_STATE": 239,
+              "FINAL_WORD_LOCAL22_EQUATION": "local22 = local105 XOR local82",
+
+              "REMAINDER_OUTPUT_EXACT_WRITE_COUNT_PROVEN": True,
+              "REMAINDER_OUTPUT_WRITE_COUNT": 3,
+              "REMAINDER_OUTPUT_SEMANTICS": [
+                  "local37[local67+0] = local22 & 0xFF",
+                  "local37[local67+1] = (local22 >> 8) & 0xFF",
+                  "local37[local67+2] = (local22 >> 16) & 0xFF"
+              ],
+
+              "EXACT_PER_VISIT_REACHING_STORE_SELECTION_PROVEN": True,
+              "LOCAL76_REACHING_DEFINITION_FULLY_RESOLVED_FOR_FULL_WORD_INPUT": True,
+              "LOCAL82_REACHING_DEFINITION_FULLY_RESOLVED": True,
+              "LOCAL105_REACHING_DEFINITION_FULLY_RESOLVED_AT_PRODUCERS": True,
+
+              "EXACT_LOCAL37_BYTES_PROVEN": False,
+              "LOCAL29_BYTES_AT_STATE94_PROVEN": False,
+              "WHY_NOT_YET": "Reaching store sites and loop schedules are now exact, but local105's concrete value still depends on the iterative state46 transform and local53 word input. Those concrete values have not yet been reconstructed.",
+              "OFFLINE_DECRYPT_AUTHORIZED": False,
+              "H15_PLAINTEXT_RECOVERED": False,
+              "ANY_DISCOVERED_FRAME_AUTHORIZED_FOR_BOARD": False,
+              "FLASH_ALLOWED": False,
+              "NEXT": "R171: statically reconstruct the concrete local53 source schedule and the iterative state46 uint32 transform across 151992 outer-loop visits, then derive exact local24/local22 outputs and local37 bytes. Keep this offline and fail closed; do not start AES/CryptoStream decryption until local37/state94 bytes are proven."
+          }
+
+          (out / "R170_DECISION.json").write_text(json.dumps(result, indent=2) + "\n")
+          (out / "R170_EXACT_REACHING_DEFINITION_MODEL.json").write_text(json.dumps({
+              "full_word": {
+                  "indices": [0, full_words - 1],
+                  "local76": "state15/IL_5444",
+                  "local82": "state342/IL_61d4",
+                  "local105": "state46/IL_5d20",
+                  "producer": "state57/IL_1177",
+              },
+              "partial_word": {
+                  "index": full_words,
+                  "remainder_bytes": rem,
+                  "local82_loop": "state523 -> state490 -> state401/state583 -> state403/state669/state596/state687 x3 -> state323",
+                  "local82_final": "state596/IL_37c3",
+                  "local105": "state46/IL_5d20",
+                  "producer": "state239/IL_1c9c",
+                  "output": "state78 -> state134/state327/state308/state534/state244 x3 -> state175",
+              },
+          }, indent=2) + "\n")
+          (out / "R169_DECISION.json").write_text(json.dumps(prior, indent=2) + "\n")
+          print(json.dumps(result, indent=2))
+          PYCODE
+
+      - name: Package R170 evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /tmp/r170/evidence
+          zip -9 -r /tmp/R170_N9_EXACT_PER_VISIT_PRODUCER_REACHING_DEFINITIONS_EVIDENCE.zip . >/dev/null
+          sha256sum /tmp/R170_N9_EXACT_PER_VISIT_PRODUCER_REACHING_DEFINITIONS_EVIDENCE.zip \
+            > /tmp/R170_N9_EXACT_PER_VISIT_PRODUCER_REACHING_DEFINITIONS_EVIDENCE.zip.sha256
+
+      - name: Upload R170 evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: R170-N9-EXACT-PER-VISIT-PRODUCER-REACHING-DEFINITIONS-STATIC-EVIDENCE
+          path: |
+            /tmp/R170_N9_EXACT_PER_VISIT_PRODUCER_REACHING_DEFINITIONS_EVIDENCE.zip
+            /tmp/R170_N9_EXACT_PER_VISIT_PRODUCER_REACHING_DEFINITIONS_EVIDENCE.zip.sha256
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Final fail-closed gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$FLASH_ALLOWED" = "NO"
+          grep -F '"EXACT_PER_VISIT_REACHING_STORE_SELECTION_PROVEN": true' /tmp/r170/evidence/R170_DECISION.json
+          grep -F '"OUTER_LOOP_EXACT_ITERATION_COUNT_PROVEN": true' /tmp/r170/evidence/R170_DECISION.json
+          grep -F '"REMAINDER_OUTPUT_EXACT_WRITE_COUNT_PROVEN": true' /tmp/r170/evidence/R170_DECISION.json
+          grep -F '"EXACT_LOCAL37_BYTES_PROVEN": false' /tmp/r170/evidence/R170_DECISION.json
+          grep -F '"OFFLINE_DECRYPT_AUTHORIZED": false' /tmp/r170/evidence/R170_DECISION.json
+          grep -F '"FLASH_ALLOWED": false' /tmp/r170/evidence/R170_DECISION.json
+          echo R170_EXACT_PER_VISIT_REACHING_DEFINITIONS_STATIC_AUDIT_COMPLETE=YES
+          echo FLASH_ALLOWED=NO
