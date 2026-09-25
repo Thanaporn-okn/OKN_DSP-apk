@@ -1,0 +1,680 @@
+name: Build BP1048 USB Inspector APK v3 HID Probe
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ "main" ]
+    paths:
+      - ".github/workflows/build-bp1048-usb-inspector-v3.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.10.2"
+
+      - name: Ensure Android SDK packages
+        shell: bash
+        run: |
+          set -e
+          SDKMANAGER="${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager"
+          if [ ! -x "$SDKMANAGER" ]; then
+            SDKMANAGER="$(command -v sdkmanager || true)"
+          fi
+          if [ -z "$SDKMANAGER" ] || [ ! -x "$SDKMANAGER" ]; then
+            echo "sdkmanager not found on runner"
+            exit 1
+          fi
+          yes | "$SDKMANAGER" --licenses >/dev/null 2>&1 || true
+          "$SDKMANAGER" "platforms;android-35" "build-tools;35.0.0" "platform-tools"
+
+      - name: Generate Android project
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p app/src/main/java/com/example/bp1048usb
+
+          cat > settings.gradle.kts <<'EOF'
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+          rootProject.name = "BP1048UsbInspector"
+          include(":app")
+          EOF
+
+          cat > build.gradle.kts <<'EOF'
+          plugins {
+              id("com.android.application") version "8.7.3" apply false
+              id("org.jetbrains.kotlin.android") version "2.0.21" apply false
+          }
+          EOF
+
+          cat > gradle.properties <<'EOF'
+          org.gradle.jvmargs=-Xmx2048m -Dfile.encoding=UTF-8
+          android.useAndroidX=true
+          kotlin.code.style=official
+          EOF
+
+          cat > app/build.gradle.kts <<'EOF'
+          plugins {
+              id("com.android.application")
+              id("org.jetbrains.kotlin.android")
+          }
+
+          android {
+              namespace = "com.example.bp1048usb"
+              compileSdk = 35
+
+              defaultConfig {
+                  applicationId = "com.example.bp1048usb"
+                  minSdk = 26
+                  targetSdk = 35
+                  versionCode = 3
+                  versionName = "0.3.0"
+              }
+
+              buildTypes {
+                  release {
+                      isMinifyEnabled = false
+                  }
+              }
+
+              compileOptions {
+                  sourceCompatibility = JavaVersion.VERSION_17
+                  targetCompatibility = JavaVersion.VERSION_17
+              }
+              kotlinOptions {
+                  jvmTarget = "17"
+              }
+          }
+          EOF
+
+          cat > app/src/main/AndroidManifest.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <uses-feature android:name="android.hardware.usb.host" android:required="true" />
+
+              <application
+                  android:allowBackup="true"
+                  android:label="BP1048 USB Inspector"
+                  android:supportsRtl="true"
+                  android:theme="@android:style/Theme.Material.Light.NoActionBar">
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+              </application>
+          </manifest>
+          EOF
+
+          cat > app/src/main/java/com/example/bp1048usb/MainActivity.kt <<'EOF'
+          package com.example.bp1048usb
+
+          import android.app.Activity
+          import android.app.PendingIntent
+          import android.content.BroadcastReceiver
+          import android.content.Context
+          import android.content.Intent
+          import android.content.IntentFilter
+          import android.hardware.usb.UsbConstants
+          import android.hardware.usb.UsbDevice
+          import android.hardware.usb.UsbDeviceConnection
+          import android.hardware.usb.UsbEndpoint
+          import android.hardware.usb.UsbInterface
+          import android.hardware.usb.UsbManager
+          import android.net.Uri
+          import android.os.Build
+          import android.os.Bundle
+          import android.provider.OpenableColumns
+          import android.text.method.ScrollingMovementMethod
+          import android.view.View
+          import android.widget.ArrayAdapter
+          import android.widget.Button
+          import android.widget.LinearLayout
+          import android.widget.ListView
+          import android.widget.ScrollView
+          import android.widget.TextView
+          import android.widget.Toast
+          import java.security.MessageDigest
+          import java.util.Locale
+
+          class MainActivity : Activity() {
+
+              companion object {
+                  private const val ACTION_USB_PERMISSION = "com.example.bp1048usb.USB_PERMISSION"
+                  private const val PICK_FIRMWARE = 2001
+              }
+
+              private lateinit var usbManager: UsbManager
+              private lateinit var deviceList: ListView
+              private lateinit var logView: TextView
+              private var devices: List<UsbDevice> = emptyList()
+              private var selected: UsbDevice? = null
+              private var report = StringBuilder()
+
+              private val usbReceiver = object : BroadcastReceiver() {
+                  override fun onReceive(context: Context?, intent: Intent?) {
+                      if (intent?.action != ACTION_USB_PERMISSION) return
+                      val device = if (Build.VERSION.SDK_INT >= 33) {
+                          intent.getParcelableExtra(UsbManager.EXTRA_DEVICE, UsbDevice::class.java)
+                      } else {
+                          @Suppress("DEPRECATION")
+                          intent.getParcelableExtra(UsbManager.EXTRA_DEVICE)
+                      }
+                      val granted = intent.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED, false)
+                      val actual = device?.let { usbManager.hasPermission(it) } ?: false
+                      append("USB permission callback: granted=$granted hasPermission=$actual\n")
+                      if (device != null && (granted || actual)) {
+                          selected = device
+                          inspectDevice(device)
+                      } else {
+                          append("USB permission denied. Unplug/replug USB-C and choose Allow in the Android dialog.\n")
+                      }
+                  }
+              }
+
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+                  usbManager = getSystemService(Context.USB_SERVICE) as UsbManager
+
+                  val root = LinearLayout(this).apply {
+                      orientation = LinearLayout.VERTICAL
+                      setPadding(20, 20, 20, 20)
+                  }
+
+                  val title = TextView(this).apply {
+                      text = "BP1048 / USB Inspector v3 (HID read-only)"
+                      textSize = 20f
+                  }
+                  root.addView(title)
+
+                  val note = TextView(this).apply {
+                      text = "Known board 6324:1719 exposes USB Audio + two HID interfaces. This build adds a SAFE read-only HID Report Descriptor dump. No SET_REPORT, vendor OUT, erase or flash commands are sent."
+                  }
+                  root.addView(note)
+
+                  val buttons = LinearLayout(this).apply {
+                      orientation = LinearLayout.HORIZONTAL
+                  }
+
+                  val scan = Button(this).apply {
+                      text = "Scan USB"
+                      setOnClickListener { scanUsb() }
+                  }
+                  buttons.addView(scan, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+
+                  val probe = Button(this).apply {
+                      text = "Listen HID IN"
+                      setOnClickListener {
+                          val d = selected
+                          if (d == null) toast("Select a USB device first") else ensurePermission(d) { probeReadOnly(it) }
+                      }
+                  }
+                  buttons.addView(probe, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+
+                  val hid = Button(this).apply {
+                      text = "Dump HID DESC"
+                      setOnClickListener {
+                          val d = selected
+                          if (d == null) toast("Select a USB device first") else ensurePermission(d) { dumpHidReportDescriptors(it) }
+                      }
+                  }
+                  buttons.addView(hid, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+
+                  val pick = Button(this).apply {
+                      text = "Select .MVA/.BIN"
+                      setOnClickListener { pickFirmware() }
+                  }
+                  buttons.addView(pick, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+
+                  root.addView(buttons)
+
+                  deviceList = ListView(this).apply {
+                      choiceMode = ListView.CHOICE_MODE_SINGLE
+                      setOnItemClickListener { _, _, position, _ ->
+                          selected = devices[position]
+                          ensurePermission(devices[position]) { inspectDevice(it) }
+                      }
+                  }
+                  root.addView(deviceList, LinearLayout.LayoutParams(
+                      LinearLayout.LayoutParams.MATCH_PARENT,
+                      330
+                  ))
+
+                  val share = Button(this).apply {
+                      text = "Share report"
+                      setOnClickListener { shareReport() }
+                  }
+                  root.addView(share)
+
+                  logView = TextView(this).apply {
+                      textSize = 12f
+                      setTextIsSelectable(true)
+                      movementMethod = ScrollingMovementMethod()
+                  }
+                  val scroll = ScrollView(this).apply {
+                      addView(logView)
+                  }
+                  root.addView(scroll, LinearLayout.LayoutParams(
+                      LinearLayout.LayoutParams.MATCH_PARENT,
+                      0,
+                      1f
+                  ))
+
+                  setContentView(root)
+
+                  val filter = IntentFilter(ACTION_USB_PERMISSION)
+                  if (Build.VERSION.SDK_INT >= 33) {
+                      registerReceiver(usbReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
+                  } else {
+                      @Suppress("DEPRECATION")
+                      registerReceiver(usbReceiver, filter)
+                  }
+
+                  append("Ready. Connect the board with a data-capable USB-C/OTG cable, then tap Scan USB.\n")
+                  scanUsb()
+              }
+
+              override fun onDestroy() {
+                  try { unregisterReceiver(usbReceiver) } catch (_: Exception) {}
+                  super.onDestroy()
+              }
+
+              private fun scanUsb() {
+                  devices = usbManager.deviceList.values.sortedWith(compareBy({ it.vendorId }, { it.productId }))
+                  val rows = if (devices.isEmpty()) {
+                      listOf("No USB device detected")
+                  } else {
+                      devices.mapIndexed { idx, d ->
+                          String.format(
+                              Locale.US,
+                              "%d) VID:%04X PID:%04X class=%02X name=%s",
+                              idx + 1, d.vendorId, d.productId, d.deviceClass, d.deviceName
+                          )
+                      }
+                  }
+                  deviceList.adapter = ArrayAdapter(this, android.R.layout.simple_list_item_single_choice, rows)
+                  append("Scan: ${devices.size} device(s) detected. VID/PID shown above are hexadecimal.\n")
+              }
+
+              private fun ensurePermission(device: UsbDevice, onReady: (UsbDevice) -> Unit) {
+                  if (usbManager.hasPermission(device)) {
+                      onReady(device)
+                      return
+                  }
+                  // UsbManager fills EXTRA_DEVICE and EXTRA_PERMISSION_GRANTED into the
+                  // PendingIntent result. On Android 12+ it therefore needs to be MUTABLE.
+                  // Android 14+ also requires a mutable PendingIntent to use an explicit Intent.
+                  val permissionIntent = Intent(ACTION_USB_PERMISSION).apply {
+                      setPackage(packageName)
+                  }
+                  val flags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                      PendingIntent.FLAG_MUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+                  } else {
+                      PendingIntent.FLAG_UPDATE_CURRENT
+                  }
+                  val pi = PendingIntent.getBroadcast(this, 1048, permissionIntent, flags)
+                  append("Requesting USB permission for ${vidPid(device)} (Android ${Build.VERSION.SDK_INT})...\n")
+                  try {
+                      usbManager.requestPermission(device, pi)
+                  } catch (t: Throwable) {
+                      append("USB permission request error: ${t.javaClass.simpleName}: ${t.message}\n")
+                  }
+              }
+
+              private fun inspectDevice(device: UsbDevice) {
+                  report = StringBuilder()
+                  appendReport("=== USB DEVICE REPORT ===\n")
+                  appendReport("Device: ${device.deviceName}\n")
+                  appendReport("VID:PID = ${vidPid(device)}\n")
+                  appendReport("deviceClass=${hex2(device.deviceClass)} subclass=${hex2(device.deviceSubclass)} protocol=${hex2(device.deviceProtocol)}\n")
+                  appendReport("configurations=${device.configurationCount} interfaces=${device.interfaceCount}\n")
+
+                  var conn: UsbDeviceConnection? = null
+                  try {
+                      conn = usbManager.openDevice(device)
+                      if (conn == null) {
+                          appendReport("openDevice failed\n")
+                          publishReport()
+                          return
+                      }
+                      safeString("manufacturer") { device.manufacturerName }?.let { appendReport("Manufacturer: $it\n") }
+                      safeString("product") { device.productName }?.let { appendReport("Product: $it\n") }
+                      safeString("serial") { device.serialNumber }?.let { appendReport("Serial: $it\n") }
+
+                      for (i in 0 until device.interfaceCount) {
+                          val intf = device.getInterface(i)
+                          appendReport("\nInterface[$i] id=${intf.id} class=${hex2(intf.interfaceClass)} subclass=${hex2(intf.interfaceSubclass)} protocol=${hex2(intf.interfaceProtocol)} endpoints=${intf.endpointCount}\n")
+                          for (e in 0 until intf.endpointCount) {
+                              val ep = intf.getEndpoint(e)
+                              appendReport("  EP[$e] addr=${hex2(ep.address)} dir=${direction(ep)} type=${endpointType(ep)} maxPacket=${ep.maxPacketSize} interval=${ep.interval}\n")
+                          }
+                      }
+
+                      val raw = conn.rawDescriptors
+                      appendReport("\nRaw descriptors (${raw?.size ?: 0} bytes):\n")
+                      if (raw != null) appendReport(raw.toHexLines())
+                  } catch (t: Throwable) {
+                      appendReport("Inspection error: ${t.javaClass.simpleName}: ${t.message}\n")
+                  } finally {
+                      conn?.close()
+                  }
+                  appendReport("\n=== END REPORT ===\n")
+                  publishReport()
+              }
+
+              private fun probeReadOnly(device: UsbDevice) {
+                  append("Starting 5-second read-only HID/interrupt IN listen for ${vidPid(device)} ...\n")
+                  val conn = usbManager.openDevice(device)
+                  if (conn == null) {
+                      append("Cannot open device.\n")
+                      return
+                  }
+                  try {
+                      var attempted = 0
+                      var received = 0
+                      for (i in 0 until device.interfaceCount) {
+                          val intf = device.getInterface(i)
+                          val hasReadable = (0 until intf.endpointCount).any { idx ->
+                              val ep = intf.getEndpoint(idx)
+                              ep.direction == UsbConstants.USB_DIR_IN &&
+                                  (ep.type == UsbConstants.USB_ENDPOINT_XFER_BULK || ep.type == UsbConstants.USB_ENDPOINT_XFER_INT)
+                          }
+                          if (!hasReadable) continue
+                          if (!conn.claimInterface(intf, false)) {
+                              append("Interface[$i]: claim failed (left untouched).\n")
+                              continue
+                          }
+                          try {
+                              for (e in 0 until intf.endpointCount) {
+                                  val ep = intf.getEndpoint(e)
+                                  if (ep.direction != UsbConstants.USB_DIR_IN) continue
+                                  if (ep.type != UsbConstants.USB_ENDPOINT_XFER_BULK && ep.type != UsbConstants.USB_ENDPOINT_XFER_INT) continue
+                                  attempted++
+                                  val buf = ByteArray(maxOf(64, minOf(4096, ep.maxPacketSize * 8)))
+                                  var any = false
+                                  val deadline = System.currentTimeMillis() + 5000L
+                                  while (System.currentTimeMillis() < deadline) {
+                                      val n = conn.bulkTransfer(ep, buf, buf.size, 200)
+                                      if (n > 0) {
+                                          any = true
+                                          received += n
+                                          append("IN ${hex2(ep.address)}: $n byte(s): ${buf.copyOf(n).toHexCompact()}\n")
+                                      }
+                                  }
+                                  if (!any) append("IN ${hex2(ep.address)}: no data during 5 seconds.\n")
+                              }
+                          } finally {
+                              conn.releaseInterface(intf)
+                          }
+                      }
+                      append("Listen finished: endpoints attempted=$attempted, bytes received=$received. No OUT/control write was sent.\n")
+                  } catch (t: Throwable) {
+                      append("Probe error: ${t.javaClass.simpleName}: ${t.message}\n")
+                  } finally {
+                      conn.close()
+                  }
+              }
+
+              private fun dumpHidReportDescriptors(device: UsbDevice) {
+                  append("\n=== HID REPORT DESCRIPTOR DUMP (READ-ONLY) ===\n")
+                  append("Device ${vidPid(device)}. Request used: standard GET_DESCRIPTOR type 0x22 on EP0 only.\n")
+                  val conn = usbManager.openDevice(device)
+                  if (conn == null) {
+                      append("Cannot open device.\n")
+                      return
+                  }
+                  try {
+                      var found = 0
+                      val seenIds = mutableSetOf<Int>()
+                      for (i in 0 until device.interfaceCount) {
+                          val intf = device.getInterface(i)
+                          if (intf.interfaceClass != UsbConstants.USB_CLASS_HID) continue
+                          if (!seenIds.add(intf.id)) continue
+                          found++
+                          val buf = ByteArray(1024)
+                          // bmRequestType 0x81 = IN | STANDARD | INTERFACE
+                          // bRequest 0x06 = GET_DESCRIPTOR
+                          // wValue high byte 0x22 = HID Report Descriptor
+                          val n = conn.controlTransfer(
+                              0x81,
+                              0x06,
+                              0x2200,
+                              intf.id,
+                              buf,
+                              buf.size,
+                              1500
+                          )
+                          append("HID interface id=${intf.id} endpoints=${intf.endpointCount}: result=$n\n")
+                          if (n > 0) {
+                              val got = buf.copyOf(n)
+                              append(got.toHexLines())
+                              append(describeHidDescriptor(got))
+                          } else {
+                              append("  No report descriptor returned.\n")
+                          }
+                      }
+                      if (found == 0) append("No HID interfaces found.\n")
+                  } catch (t: Throwable) {
+                      append("HID descriptor error: ${t.javaClass.simpleName}: ${t.message}\n")
+                  } finally {
+                      conn.close()
+                  }
+                  append("=== END HID REPORT DESCRIPTOR DUMP ===\n")
+                  append("No SET_REPORT, vendor OUT, erase, reset or firmware-write command was sent.\n")
+              }
+
+              private fun describeHidDescriptor(data: ByteArray): String {
+                  val sb = StringBuilder()
+                  sb.append("Decoded HID items (summary):\n")
+                  var p = 0
+                  var reportSize = 0
+                  var reportCount = 0
+                  var reportId = 0
+                  var usagePage = -1
+                  while (p < data.size) {
+                      val prefix = data[p].toInt() and 0xff
+                      p++
+                      if (prefix == 0xfe) {
+                          if (p + 1 >= data.size) break
+                          val len = data[p].toInt() and 0xff
+                          val longTag = data[p + 1].toInt() and 0xff
+                          p += 2
+                          sb.append("  LONG tag=0x${String.format(Locale.US, "%02X", longTag)} len=$len\n")
+                          p = minOf(data.size, p + len)
+                          continue
+                      }
+                      val sizeCode = prefix and 0x03
+                      val size = if (sizeCode == 3) 4 else sizeCode
+                      val type = (prefix shr 2) and 0x03
+                      val tag = (prefix shr 4) and 0x0f
+                      if (p + size > data.size) break
+                      var value = 0L
+                      for (k in 0 until size) value = value or ((data[p + k].toLong() and 0xffL) shl (8 * k))
+                      p += size
+
+                      if (type == 1) { // Global
+                          when (tag) {
+                              0 -> { usagePage = value.toInt(); sb.append("  UsagePage=0x${value.toString(16).uppercase(Locale.US)}\n") }
+                              7 -> { reportSize = value.toInt(); sb.append("  ReportSize=$reportSize bits\n") }
+                              8 -> { reportId = value.toInt(); sb.append("  ReportID=$reportId\n") }
+                              9 -> { reportCount = value.toInt(); sb.append("  ReportCount=$reportCount\n") }
+                          }
+                      } else if (type == 0) { // Main
+                          val bits = reportSize * reportCount
+                          val bytes = (bits + 7) / 8 + if (reportId != 0) 1 else 0
+                          when (tag) {
+                              8 -> sb.append("  INPUT id=$reportId payloadBits=$bits approxBytes=$bytes flags=0x${value.toString(16).uppercase(Locale.US)} page=${if (usagePage >= 0) "0x" + usagePage.toString(16).uppercase(Locale.US) else "?"}\n")
+                              9 -> sb.append("  OUTPUT id=$reportId payloadBits=$bits approxBytes=$bytes flags=0x${value.toString(16).uppercase(Locale.US)} page=${if (usagePage >= 0) "0x" + usagePage.toString(16).uppercase(Locale.US) else "?"}\n")
+                              11 -> sb.append("  FEATURE id=$reportId payloadBits=$bits approxBytes=$bytes flags=0x${value.toString(16).uppercase(Locale.US)} page=${if (usagePage >= 0) "0x" + usagePage.toString(16).uppercase(Locale.US) else "?"}\n")
+                              10 -> sb.append("  COLLECTION type=0x${value.toString(16).uppercase(Locale.US)}\n")
+                              12 -> sb.append("  END_COLLECTION\n")
+                          }
+                      }
+                  }
+                  return sb.toString()
+              }
+
+              private fun pickFirmware() {
+                  val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+                      addCategory(Intent.CATEGORY_OPENABLE)
+                      type = "*/*"
+                  }
+                  @Suppress("DEPRECATION")
+                  startActivityForResult(intent, PICK_FIRMWARE)
+              }
+
+              @Deprecated("Deprecated in Android API but kept for minSdk compatibility")
+              override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+                  super.onActivityResult(requestCode, resultCode, data)
+                  if (requestCode != PICK_FIRMWARE || resultCode != RESULT_OK) return
+                  val uri = data?.data ?: return
+                  inspectFirmwareFile(uri)
+              }
+
+              private fun inspectFirmwareFile(uri: Uri) {
+                  try {
+                      var name = "firmware"
+                      var size = -1L
+                      contentResolver.query(uri, null, null, null, null)?.use { c ->
+                          val ni = c.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                          val si = c.getColumnIndex(OpenableColumns.SIZE)
+                          if (c.moveToFirst()) {
+                              if (ni >= 0) name = c.getString(ni) ?: name
+                              if (si >= 0 && !c.isNull(si)) size = c.getLong(si)
+                          }
+                      }
+
+                      val md = MessageDigest.getInstance("SHA-256")
+                      contentResolver.openInputStream(uri)?.use { input ->
+                          val buf = ByteArray(8192)
+                          while (true) {
+                              val n = input.read(buf)
+                              if (n <= 0) break
+                              md.update(buf, 0, n)
+                          }
+                      } ?: throw IllegalStateException("Cannot open selected file")
+
+                      val digest = md.digest().joinToString("") { "%02x".format(it) }
+                      append("Firmware selected: $name, size=$size bytes\nSHA-256=$digest\n")
+                      append("FLASHING IS DISABLED in this build. This avoids erasing/bricking the board before the exact BP1048P4 bootloader command format is known.\n")
+                  } catch (t: Throwable) {
+                      append("Firmware file error: ${t.message}\n")
+                  }
+              }
+
+              private fun shareReport() {
+                  val text = if (report.isNotEmpty()) report.toString() else logView.text.toString()
+                  val send = Intent(Intent.ACTION_SEND).apply {
+                      type = "text/plain"
+                      putExtra(Intent.EXTRA_SUBJECT, "BP1048 USB report")
+                      putExtra(Intent.EXTRA_TEXT, text)
+                  }
+                  startActivity(Intent.createChooser(send, "Share USB report"))
+              }
+
+              private fun publishReport() {
+                  logView.text = report.toString()
+              }
+
+              private fun appendReport(s: String) {
+                  report.append(s)
+              }
+
+              private fun append(s: String) {
+                  logView.append(s)
+              }
+
+              private fun vidPid(d: UsbDevice): String = String.format(Locale.US, "%04X:%04X", d.vendorId, d.productId)
+              private fun hex2(v: Int): String = String.format(Locale.US, "0x%02X", v and 0xff)
+
+              private fun direction(ep: UsbEndpoint): String = if (ep.direction == UsbConstants.USB_DIR_IN) "IN" else "OUT"
+
+              private fun endpointType(ep: UsbEndpoint): String = when (ep.type) {
+                  UsbConstants.USB_ENDPOINT_XFER_CONTROL -> "CONTROL"
+                  UsbConstants.USB_ENDPOINT_XFER_ISOC -> "ISO"
+                  UsbConstants.USB_ENDPOINT_XFER_BULK -> "BULK"
+                  UsbConstants.USB_ENDPOINT_XFER_INT -> "INT"
+                  else -> "UNKNOWN(${ep.type})"
+              }
+
+              private fun ByteArray.toHexCompact(): String = joinToString(" ") { "%02X".format(it) }
+
+              private fun ByteArray.toHexLines(): String {
+                  val sb = StringBuilder()
+                  for (i in indices step 16) {
+                      sb.append(String.format(Locale.US, "%04X: ", i))
+                      val end = minOf(i + 16, size)
+                      for (j in i until end) sb.append(String.format(Locale.US, "%02X ", this[j].toInt() and 0xff))
+                      sb.append('\n')
+                  }
+                  return sb.toString()
+              }
+
+              private inline fun safeString(label: String, block: () -> String?): String? {
+                  return try { block() } catch (t: Throwable) {
+                      appendReport("$label unavailable: ${t.javaClass.simpleName}\n")
+                      null
+                  }
+              }
+
+              private fun toast(s: String) = Toast.makeText(this, s, Toast.LENGTH_SHORT).show()
+          }
+          EOF
+
+      - name: Build debug APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          gradle --no-daemon :app:assembleDebug
+
+      - name: Collect APK and source snapshot
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          cp app/build/outputs/apk/debug/app-debug.apk out/BP1048-USB-Inspector-debug.apk
+          tar -czf out/BP1048-USB-Inspector-source.tgz \
+            settings.gradle.kts build.gradle.kts gradle.properties app
+          sha256sum out/* | tee out/SHA256SUMS.txt
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: BP1048-USB-Inspector
+          path: out/
+          if-no-files-found: error
+          retention-days: 14
