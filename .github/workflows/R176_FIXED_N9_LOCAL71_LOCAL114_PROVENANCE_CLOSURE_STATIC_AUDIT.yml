@@ -1,0 +1,392 @@
+name: R176 FIXED N9 local71 local114 provenance closure static audit
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - ".github/workflows/R176_FIXED_N9_LOCAL71_LOCAL114_PROVENANCE_CLOSURE_STATIC_AUDIT.yml"
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: r176-static-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  FLASH_ALLOWED: "NO"
+
+jobs:
+  static_audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: Immutable safety gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$FLASH_ALLOWED" = "NO"
+          mkdir -p /tmp/r176/evidence
+          cat > /tmp/r176/evidence/R176_SAFETY.txt <<'EOF'
+          MODE=OFFLINE_STATIC_PROVENANCE_ONLY
+          FLASH_ALLOWED=NO
+          USB_OR_BOARD_CONTACT=NO
+          VENDOR_EXE_DLL_APK_EXECUTED=NO
+          AES_OR_CRYPTOSTREAM_DECRYPT_EXECUTED=NO
+          AA55_OR_LINEIN_AA55_SENT=NO
+          RUNTIME_0X11_OR_0XFE_SENT=NO
+          FLASH_READ_ERASE_WRITE_EXECUTED=NO
+          DISCOVERED_FRAME_LIVE_AUTHORIZED=NO
+          HARDWARE_MODIFICATION=FORBIDDEN
+          EOF
+
+      - name: Download pinned R175 evidence
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          artifact-ids: "10857548523"
+          path: /tmp/r176/r175
+          merge-multiple: true
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          repository: Thanaporn-okn/OKN_DSP-apk
+          run-id: 36122674131
+
+      - name: Download pinned R171 concrete state94 bytes
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          artifact-ids: "10856075889"
+          path: /tmp/r176/r171
+          merge-multiple: true
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          repository: Thanaporn-okn/OKN_DSP-apk
+          run-id: 36118258307
+
+      - name: Download pinned R157 historical IL chain
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          artifact-ids: "10820682068"
+          path: /tmp/r176/r157
+          merge-multiple: true
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          repository: Thanaporn-okn/OKN_DSP-apk
+          run-id: 36028455796
+
+      - name: Close local71 and local114 provenance
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PYCODE'
+          from pathlib import Path
+          import hashlib, io, json, re, struct, zipfile
+
+          base = Path("/tmp/r176")
+          out = base / "evidence"
+          out.mkdir(parents=True, exist_ok=True)
+
+          def inner(folder, name, expected_sha):
+              p = base / folder / name
+              data = p.read_bytes()
+              got = hashlib.sha256(data).hexdigest()
+              assert got == expected_sha, (name, got, expected_sha)
+              shp = p.with_name(p.name + ".sha256")
+              assert shp.exists(), f"missing {shp.name}"
+              assert shp.read_text().split()[0] == expected_sha
+              return zipfile.ZipFile(io.BytesIO(data))
+
+          r175 = inner(
+              "r175",
+              "R175_N9_PATCH_LOOP_READ_BUDGET_CONTRADICTION_EVIDENCE.zip",
+              "edf526b6cd928eefeaed21cff2a0f037ab4872a96f003723d2c56aa245e9589a",
+          )
+          d175 = json.loads(r175.read("R175_DECISION.json"))
+          d174 = json.loads(r175.read("R174_DECISION.json"))
+          d172 = json.loads(r175.read("R172_DECISION.json"))
+
+          assert d175["revision"] == "R175"
+          assert d175["MODEL_CONSISTENCY_CONTRADICTION_PROVEN"] is True
+          assert d175["SUCCESSFUL_N9_COMPLETION_FROM_R174_MODELED_PATH_PROVEN"] is False
+          assert d175["MAX_COMPLETE_PATCH_ITERATIONS_FROM_BUFFER"] == 75992
+          assert d175["OFFLINE_DECRYPT_AUTHORIZED"] is False
+          assert d175["FLASH_ALLOWED"] is False
+
+          assert d174["ACTUAL_PRODUCTION_SUCCESSOR_AFTER_STATE278"] == 558
+          assert d174["STATE402_REACHABLE_ON_PROVEN_PRODUCTION_DIRECT_EXE_PATH"] is False
+
+          r171 = inner(
+              "r171",
+              "R171_N9_CONCRETE_LOCAL37_STATE94_BYTES_EVIDENCE.zip",
+              "88161a5a174546e41d4c6803c51be16e387d9a67e7a1ef1080292c27ee68b1b8",
+          )
+          d171 = json.loads(r171.read("R171_DECISION.json"))
+          local29 = r171.read("R171_LOCAL29_STATE94.bin")
+
+          assert d171["LOCAL29_BYTES_AT_STATE94_PROVEN"] is True
+          assert len(local29) == 607967
+          assert hashlib.sha256(local29).hexdigest() == "6f9ef64dd69335e3e8b522afccc6b32a7d97973a9ce680035bee9e926a0a0ac1"
+
+          r157 = inner(
+              "r157",
+              "R157_N9_LOCAL29_LOCAL81_NONNULL_LOCAL93_LOOP_BRANCH_EVIDENCE.zip",
+              "f974c64c63eea5f2b940c76101f4ab6e769803f5630a2d87d21d08679c321609",
+          )
+
+          prefix = "r156/r155/r154/r153/r152/r151/r150/r149/r148/r147/r146/r145/r144/r143/"
+          n9_raw = r157.read(prefix + "R143_N9_METHOD.il")
+          full_raw = r157.read(
+              "r156/r155/r154/r153/r152/r151/r150/r149/r148/r147/r146/r145/r144/r143/r142/r141/r140/R140_FIXED_FULL.il"
+          )
+
+          assert hashlib.sha256(n9_raw).hexdigest() == "5a3964c1f4bd8db455e6882a4ce6f90667e1a9abc6e1fafd10440b31006e4a33"
+          assert hashlib.sha256(full_raw).hexdigest() == "aa1d369c8be7ee8d7b358fc5b0f6b0874f46711a9249fee70f413b900d234c66"
+
+          n9 = n9_raw.decode()
+          full = full_raw.decode()
+
+          rows = []
+          for line in n9.splitlines():
+              m = re.match(r"\s*(IL_[0-9a-f]+):\s+(\S+)(?:\s+(.*))?$", line)
+              if m:
+                  rows.append((m.group(1), m.group(2), (m.group(3) or "").split(" //",1)[0].strip()))
+          pos = {lab:i for i,(lab,_,_) in enumerate(rows)}
+
+          sm = re.search(r"IL_0012:\s+switch \((.*?)\)\n", n9, re.S)
+          assert sm
+          targets = [x.strip() for x in sm.group(1).split(",")]
+          assert len(targets) == 689
+
+          tpos = sorted((pos[lab], st, lab) for st,lab in enumerate(targets))
+          blocks = {}
+          for i,(p0,st,lab) in enumerate(tpos):
+              p1 = tpos[i+1][0] if i+1 < len(tpos) else len(rows)
+              blocks[st] = rows[p0:p1]
+
+          def ops(st):
+              return [(op,arg) for _,op,arg in blocks[st]]
+
+          def stores(local):
+              ret = []
+              for st,b in blocks.items():
+                  for lab,op,arg in b:
+                      if op in ("stloc","stloc.s") and arg == str(local):
+                          ret.append((st,lab))
+              return sorted(ret)
+
+          # Exact store inventories.
+          assert stores(71) == [(535, "IL_4ca4"), (628, "IL_0ca2")]
+          assert stores(114) == [(94, "IL_51fe"), (367, "IL_2213")]
+
+          # Production direct-EXE path already resolved through R173/R174.
+          production_states = [94,52,453,73,279,260,246,605,556,650,614,573,535,289,292,278,558]
+          assert targets[94] == "IL_51f2"
+          assert targets[52] == "IL_5e48"
+          assert targets[535] == "IL_4c9d"
+          assert targets[289] == "IL_1969"
+          assert targets[292] == "IL_59b1"
+          assert targets[278] == "IL_5d8f"
+          assert targets[558] == "IL_3851"
+
+          # local114 is freshly bound to MemoryStream(local29) at state94.
+          assert ops(94) == [
+              ("ldloc.s","29"),
+              ("newobj","instance void [mscorlib]System.IO.MemoryStream::.ctor(uint8[])"),
+              ("newobj","instance void Q9Wet0jLP4YxXSyJBiC.q71r2Rj8SiD9GF1BI50/Y7Uor8e58M9K22QZF7H::.ctor(class [mscorlib]System.IO.Stream)"),
+              ("stloc.s","114"),
+              ("ldc.i4","52"),
+              ("br","IL_0012"),
+          ]
+
+          # State52 resets underlying stream Position to zero.
+          assert ops(52)[:5] == [
+              ("ldloc.s","114"),
+              ("call","object Q9Wet0jLP4YxXSyJBiC.q71r2Rj8SiD9GF1BI50::oNNQE6NTi9uesXTTGZJ(object)"),
+              ("ldc.i4.0",""),
+              ("conv.i8",""),
+              ("call","void Q9Wet0jLP4YxXSyJBiC.q71r2Rj8SiD9GF1BI50::uKbcISNmDSreine16Qp(object, int64)"),
+          ]
+
+          assert re.search(
+              r"object oNNQE6NTi9uesXTTGZJ \(.*?"
+              r"ldarg 0.*?"
+              r"callvirt instance class \[mscorlib\]System\.IO\.Stream Q9Wet0jLP4YxXSyJBiC\.q71r2Rj8SiD9GF1BI50/Y7Uor8e58M9K22QZF7H::mpep2xkqqr\(\).*?"
+              r"ret",
+              full, re.S
+          )
+          assert re.search(
+              r"instance class \[mscorlib\]System\.IO\.Stream mpep2xkqqr \(\).*?"
+              r"ldfld object .*?::piIeSklUmq.*?"
+              r"callvirt instance class \[mscorlib\]System\.IO\.Stream \[mscorlib\]System\.IO\.BinaryReader::get_BaseStream\(\).*?"
+              r"ret",
+              full, re.S
+          )
+          assert re.search(
+              r"void uKbcISNmDSreine16Qp \(.*?"
+              r"ldarg 0.*?ldarg 1.*?"
+              r"callvirt instance void \[mscorlib\]System\.IO\.Stream::set_Position\(int64\).*?"
+              r"ret",
+              full, re.S
+          )
+
+          # Exact read sequence on the resolved production path.
+          read_states = [556,650,614,573,535,289]
+          expected_destinations = ["discard","discard","discard","discard","local71","local28"]
+
+          cursor = 0
+          reads = []
+          for st,dst in zip(read_states, expected_destinations):
+              b = ops(st)
+              assert b[0] == ("ldloc.s","114")
+              assert "qfkv4ZNDynVciIciQy6(object)" in b[1][1]
+              if dst == "discard":
+                  assert b[2] == ("pop","")
+              elif dst == "local71":
+                  assert b[2] == ("stloc.s","71")
+              elif dst == "local28":
+                  assert b[2] == ("stloc.s","28")
+              reads.append({"state":st, "offset":cursor, "destination":dst})
+              cursor += 4
+
+          assert cursor == 24
+
+          # No state367/local114 resource-reader assignment and no state628/local71
+          # alternative store appear on this path.
+          assert 367 not in production_states
+          assert 628 not in production_states
+
+          # No local114 store/rebind after state94 on the resolved path.
+          path_rebinds = []
+          path_local71_stores = []
+          for st in production_states[1:]:
+              for lab,op,arg in blocks[st]:
+                  if op in ("stloc","stloc.s") and arg == "114":
+                      path_rebinds.append((st,lab))
+                  if op in ("stloc","stloc.s") and arg == "71":
+                      path_local71_stores.append((st,lab))
+          assert path_rebinds == []
+          assert path_local71_stores == [(535,"IL_4ca4")]
+
+          # No reader Position reset after state52 before state558.
+          path_calls = [
+              (st,lab,arg)
+              for st in production_states[2:]
+              for lab,op,arg in blocks[st]
+              if op == "call"
+          ]
+          assert not any("uKbcISNmDSreine16Qp" in arg for _,_,arg in path_calls)
+
+          local71_bytes = local29[16:20]
+          local28_bytes = local29[20:24]
+          local71 = struct.unpack("<i", local71_bytes)[0]
+          local28 = struct.unpack("<i", local28_bytes)[0]
+
+          assert local71_bytes.hex() == "60357879"
+          assert local71 == 2037921120
+          assert local28_bytes.hex() == "a8ca2e67"
+          assert local28 == 1731119784
+          assert d172["STATE94_FIRST_SIX_READINT32_I32"][4] == local71
+          assert d172["STATE292_LOCAL28_INT32"] == local28
+
+          # R175's byte-budget contradiction therefore cannot be explained by
+          # an alternate local71 definition or a reader rebind/reset on this path.
+          max_complete = d175["MAX_COMPLETE_PATCH_ITERATIONS_FROM_BUFFER"]
+          assert max_complete == 75992
+          assert local71 > max_complete
+
+          result = {
+              "revision": "R176",
+              "R175_RUN_ID": 36122674131,
+              "R175_JOB_ID": 108031591436,
+              "R175_ARTIFACT_ID": 10857548523,
+              "R175_ARTIFACT_DIGEST": "sha256:21535d03d337c248f334d2bf1f7d07b39a667ad653fb02fec06b3a739b71c99f",
+              "R175_INNER_SHA256": "edf526b6cd928eefeaed21cff2a0f037ab4872a96f003723d2c56aa245e9589a",
+              "R171_INNER_SHA256": "88161a5a174546e41d4c6803c51be16e387d9a67e7a1ef1080292c27ee68b1b8",
+              "N9_SHA256": hashlib.sha256(n9_raw).hexdigest(),
+
+              "PRODUCTION_PATH_STATES_TO_STATE558": production_states,
+              "LOCAL114_STORE_SITES": stores(114),
+              "LOCAL71_STORE_SITES": stores(71),
+
+              "LOCAL114_STATE94_BINDING_PROVEN": True,
+              "LOCAL114_STATE94_SOURCE": "BinaryReader(MemoryStream(local29))",
+              "STATE52_READER_POSITION_RESET_ZERO_PROVEN": True,
+              "LOCAL114_REBIND_AFTER_STATE94_BEFORE_STATE558": False,
+              "READER_POSITION_RESET_AFTER_STATE52_BEFORE_STATE558": False,
+
+              "EXACT_PRE_STATE292_READ_SEQUENCE_PROVEN": True,
+              "READ_SEQUENCE": reads,
+              "READER_CURSOR_AT_STATE292_ENTRY": 24,
+
+              "LOCAL71_REACHING_DEFINITION_AT_STATE558_PROVEN": True,
+              "LOCAL71_REACHING_STORE": {"state":535,"label":"IL_4ca4","reader_offset":16},
+              "LOCAL71_ALTERNATE_STATE628_STORE_REACHES_STATE558_ON_RESOLVED_PATH": False,
+              "LOCAL71_BYTES_HEX": local71_bytes.hex(),
+              "LOCAL71_INT32": local71,
+
+              "LOCAL28_REACHING_DEFINITION_AT_STATE292_PROVEN": True,
+              "LOCAL28_READER_OFFSET": 20,
+              "LOCAL28_BYTES_HEX": local28_bytes.hex(),
+              "LOCAL28_INT32": local28,
+
+              "R175_CONTRADICTION_EXPLAINED_BY_LOCAL71_PROVENANCE_AMBIGUITY": False,
+              "R175_CONTRADICTION_EXPLAINED_BY_LOCAL114_REBIND_OR_SEEK": False,
+              "R175_MODEL_CONSISTENCY_CONTRADICTION_REMAINS": True,
+
+              "EARLIEST_REMAINING_DATA_PREMISE_TO_REAUDIT": "R171 concrete local37/local29 reconstruction and pre-state94 transform semantics",
+              "R171_LOCAL29_BYTES_RETAINED_AS_PROVEN_AFTER_R176": False,
+              "WHY_R171_BYTES_ARE_REOPENED": "R176 closes local71/local114 provenance on the resolved state94->state558 path. The proven bytes yield a patch count far beyond the reader byte budget, so the concrete pre-state94 reconstruction must be independently re-audited before it can remain a production-valid byte model.",
+
+              "OFFLINE_DECRYPT_AUTHORIZED": False,
+              "H15_PLAINTEXT_RECOVERED": False,
+              "ANY_DISCOVERED_FRAME_AUTHORIZED_FOR_BOARD": False,
+              "FLASH_ALLOWED": False,
+
+              "NEXT": "R177: independently re-audit R171 from raw pinned IL and h15/key bytes, focusing on local53 schedule, local105 state46 arithmetic, per-word write ordering, and the state179 pointer XOR pass. Do not reuse R171 output bytes as truth during the independent check. Keep all work offline; do not decrypt, execute vendor binaries, contact USB, or flash."
+          }
+
+          (out / "R176_DECISION.json").write_text(json.dumps(result, indent=2) + "\n")
+          (out / "R176_READER_PROVENANCE.json").write_text(json.dumps({
+              "production_states": production_states,
+              "reads": reads,
+              "local114_store_sites": stores(114),
+              "local71_store_sites": stores(71),
+              "local71_bytes_hex": local71_bytes.hex(),
+              "local28_bytes_hex": local28_bytes.hex(),
+          }, indent=2) + "\n")
+          (out / "R175_DECISION.json").write_text(json.dumps(d175, indent=2) + "\n")
+          print(json.dumps(result, indent=2))
+          PYCODE
+
+      - name: Package R176 evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /tmp/r176/evidence
+          zip -9 -r /tmp/R176_N9_LOCAL71_LOCAL114_PROVENANCE_CLOSURE_EVIDENCE.zip . >/dev/null
+          sha256sum /tmp/R176_N9_LOCAL71_LOCAL114_PROVENANCE_CLOSURE_EVIDENCE.zip \
+            > /tmp/R176_N9_LOCAL71_LOCAL114_PROVENANCE_CLOSURE_EVIDENCE.zip.sha256
+
+      - name: Upload R176 evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: R176-N9-LOCAL71-LOCAL114-PROVENANCE-CLOSURE-STATIC-EVIDENCE
+          path: |
+            /tmp/R176_N9_LOCAL71_LOCAL114_PROVENANCE_CLOSURE_EVIDENCE.zip
+            /tmp/R176_N9_LOCAL71_LOCAL114_PROVENANCE_CLOSURE_EVIDENCE.zip.sha256
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Final fail-closed gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$FLASH_ALLOWED" = "NO"
+          grep -F '"LOCAL71_REACHING_DEFINITION_AT_STATE558_PROVEN": true' /tmp/r176/evidence/R176_DECISION.json
+          grep -F '"LOCAL114_REBIND_AFTER_STATE94_BEFORE_STATE558": false' /tmp/r176/evidence/R176_DECISION.json
+          grep -F '"READER_POSITION_RESET_AFTER_STATE52_BEFORE_STATE558": false' /tmp/r176/evidence/R176_DECISION.json
+          grep -F '"LOCAL71_INT32": 2037921120' /tmp/r176/evidence/R176_DECISION.json
+          grep -F '"R175_MODEL_CONSISTENCY_CONTRADICTION_REMAINS": true' /tmp/r176/evidence/R176_DECISION.json
+          grep -F '"R171_LOCAL29_BYTES_RETAINED_AS_PROVEN_AFTER_R176": false' /tmp/r176/evidence/R176_DECISION.json
+          grep -F '"OFFLINE_DECRYPT_AUTHORIZED": false' /tmp/r176/evidence/R176_DECISION.json
+          grep -F '"FLASH_ALLOWED": false' /tmp/r176/evidence/R176_DECISION.json
+          echo R176_LOCAL71_LOCAL114_PROVENANCE_CLOSURE_COMPLETE=YES
+          echo FLASH_ALLOWED=NO
