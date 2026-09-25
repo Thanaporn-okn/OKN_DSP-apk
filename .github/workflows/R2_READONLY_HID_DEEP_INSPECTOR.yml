@@ -1,0 +1,829 @@
+name: R2 BP1048P4 Read-Only HID Deep Inspector
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Prepare Android SDK
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          SDK="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-/usr/local/lib/android/sdk}}"
+          export ANDROID_SDK_ROOT="$SDK"
+          export ANDROID_HOME="$SDK"
+
+          echo "Android SDK: $SDK"
+
+          if [ -x "$SDK/cmdline-tools/16.0/bin/sdkmanager" ]; then
+            SDKMANAGER="$SDK/cmdline-tools/16.0/bin/sdkmanager"
+          elif [ -x "$SDK/cmdline-tools/latest/bin/sdkmanager" ]; then
+            SDKMANAGER="$SDK/cmdline-tools/latest/bin/sdkmanager"
+          else
+            SDKMANAGER="$(command -v sdkmanager)"
+          fi
+
+          echo "sdkmanager: $SDKMANAGER"
+
+          yes | "$SDKMANAGER" --licenses >/dev/null 2>&1 || true
+          "$SDKMANAGER" "platforms;android-35" "build-tools;35.0.0"
+
+          test -d "$SDK/platforms/android-35"
+          test -d "$SDK/build-tools/35.0.0"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.10.2'
+
+      - name: Create standalone Android project
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          rm -rf R2_BP1048P4_HID_Inspector
+          mkdir -p R2_BP1048P4_HID_Inspector/app/src/main/java/com/okn/r2hid
+
+          cat > R2_BP1048P4_HID_Inspector/settings.gradle <<'EOF'
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+
+          rootProject.name = "R2_BP1048P4_HID_Inspector"
+          include ":app"
+          EOF
+
+          cat > R2_BP1048P4_HID_Inspector/build.gradle <<'EOF'
+          plugins {
+              id 'com.android.application' version '8.7.3' apply false
+          }
+          EOF
+
+          cat > R2_BP1048P4_HID_Inspector/app/build.gradle <<'EOF'
+          plugins {
+              id 'com.android.application'
+          }
+
+          android {
+              namespace 'com.okn.r2hid'
+              compileSdk 35
+
+              defaultConfig {
+                  applicationId 'com.okn.r2hid'
+                  minSdk 26
+                  targetSdk 35
+                  versionCode 2
+                  versionName '2.0-readonly'
+              }
+
+              compileOptions {
+                  sourceCompatibility JavaVersion.VERSION_17
+                  targetCompatibility JavaVersion.VERSION_17
+              }
+          }
+          EOF
+
+          cat > R2_BP1048P4_HID_Inspector/app/src/main/AndroidManifest.xml <<'EOF'
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <uses-feature
+                  android:name="android.hardware.usb.host"
+                  android:required="true" />
+
+              <application
+                  android:allowBackup="false"
+                  android:label="R2 BP1048P4 HID Inspector"
+                  android:theme="@android:style/Theme.Material.Light.NoActionBar">
+
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true"
+                      android:screenOrientation="portrait">
+
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+              </application>
+          </manifest>
+          EOF
+
+          cat > R2_BP1048P4_HID_Inspector/app/src/main/java/com/okn/r2hid/MainActivity.java <<'EOF'
+          package com.okn.r2hid;
+
+          import android.app.Activity;
+          import android.app.PendingIntent;
+          import android.content.BroadcastReceiver;
+          import android.content.ClipData;
+          import android.content.ClipboardManager;
+          import android.content.Context;
+          import android.content.Intent;
+          import android.content.IntentFilter;
+          import android.hardware.usb.UsbConstants;
+          import android.hardware.usb.UsbDevice;
+          import android.hardware.usb.UsbDeviceConnection;
+          import android.hardware.usb.UsbEndpoint;
+          import android.hardware.usb.UsbInterface;
+          import android.hardware.usb.UsbManager;
+          import android.os.Build;
+          import android.os.Bundle;
+          import android.view.ViewGroup;
+          import android.widget.Button;
+          import android.widget.LinearLayout;
+          import android.widget.ScrollView;
+          import android.widget.TextView;
+          import android.widget.Toast;
+
+          import java.util.Locale;
+          import java.util.Map;
+
+          public class MainActivity extends Activity {
+
+              private static final String ACTION_USB_PERMISSION =
+                      "com.okn.r2hid.USB_PERMISSION";
+
+              private static final int TARGET_VID = 0x6324;
+              private static final int TARGET_PID = 0x1719;
+
+              private static final int HID_IF3 = 3;
+              private static final int HID_IF4 = 4;
+
+              private static final int HID_GET_REPORT = 0x01;
+              private static final int HID_REPORT_TYPE_INPUT = 0x01;
+              private static final int HID_REPORT_TYPE_FEATURE = 0x03;
+
+              private static final int USB_REQ_GET_DESCRIPTOR = 0x06;
+              private static final int HID_REPORT_DESCRIPTOR_TYPE = 0x22;
+
+              private static final byte[] EXPECTED_FEATURE8 = new byte[] {
+                      0x00, 0x01, 0x00, 0x03, 0x04, 0x00, 0x08, 0x00
+              };
+
+              private UsbManager usbManager;
+              private TextView logView;
+              private UsbDevice targetDevice;
+
+              private final BroadcastReceiver usbReceiver = new BroadcastReceiver() {
+                  @Override
+                  public void onReceive(Context context, Intent intent) {
+                      if (!ACTION_USB_PERMISSION.equals(intent.getAction())) return;
+
+                      UsbDevice device;
+                      if (Build.VERSION.SDK_INT >= 33) {
+                          device = intent.getParcelableExtra(
+                                  UsbManager.EXTRA_DEVICE, UsbDevice.class);
+                      } else {
+                          device = intent.getParcelableExtra(
+                                  UsbManager.EXTRA_DEVICE);
+                      }
+
+                      boolean granted = intent.getBooleanExtra(
+                              UsbManager.EXTRA_PERMISSION_GRANTED, false);
+
+                      append("USB permission: " + granted);
+
+                      if (granted && device != null) {
+                          targetDevice = device;
+                          inspectDescriptors(device);
+                      }
+                  }
+              };
+
+              @Override
+              protected void onCreate(Bundle savedInstanceState) {
+                  super.onCreate(savedInstanceState);
+
+                  usbManager = (UsbManager) getSystemService(Context.USB_SERVICE);
+
+                  IntentFilter filter = new IntentFilter(ACTION_USB_PERMISSION);
+                  if (Build.VERSION.SDK_INT >= 33) {
+                      registerReceiver(
+                              usbReceiver,
+                              filter,
+                              Context.RECEIVER_NOT_EXPORTED);
+                  } else {
+                      registerReceiver(usbReceiver, filter);
+                  }
+
+                  LinearLayout root = new LinearLayout(this);
+                  root.setOrientation(LinearLayout.VERTICAL);
+                  root.setPadding(24, 24, 24, 24);
+
+                  TextView title = new TextView(this);
+                  title.setText(
+                          "R2 BP1048P4 HID DEEP INSPECTOR\n" +
+                          "READ-ONLY / FLASH_ALLOWED=NO");
+                  title.setTextSize(19);
+                  root.addView(title);
+
+                  TextView safety = new TextView(this);
+                  safety.setText(
+                          "Target locked to 6324:1719. " +
+                          "This build performs descriptor reads, HID GET_REPORT reads, " +
+                          "and passive interrupt-IN sampling only. " +
+                          "No SET_REPORT, no boot command, no erase/program/reset.");
+                  safety.setPadding(0, 8, 0, 16);
+                  root.addView(safety);
+
+                  Button scan = new Button(this);
+                  scan.setText("1. SCAN + DESCRIPTORS");
+                  scan.setOnClickListener(v -> scanUsb());
+                  root.addView(scan);
+
+                  Button reportDesc = new Button(this);
+                  reportDesc.setText("2. READ HID REPORT DESCRIPTORS IF3 + IF4");
+                  reportDesc.setOnClickListener(v -> readBothReportDescriptors());
+                  root.addView(reportDesc);
+
+                  Button feature = new Button(this);
+                  feature.setText("3. READ IF4 FEATURE8 + INPUT256");
+                  feature.setOnClickListener(v -> readIf4Reports());
+                  root.addView(feature);
+
+                  Button interrupt = new Button(this);
+                  interrupt.setText("4. PASSIVE LISTEN IF3 EP 0x81");
+                  interrupt.setOnClickListener(v -> passiveListenIf3());
+                  root.addView(interrupt);
+
+                  Button all = new Button(this);
+                  all.setText("RUN ALL READ-ONLY CHECKS");
+                  all.setOnClickListener(v -> runAll());
+                  root.addView(all);
+
+                  Button copy = new Button(this);
+                  copy.setText("COPY LOG");
+                  copy.setOnClickListener(v -> copyLog());
+                  root.addView(copy);
+
+                  ScrollView scroll = new ScrollView(this);
+                  logView = new TextView(this);
+                  logView.setTextSize(12);
+                  logView.setTextIsSelectable(true);
+                  scroll.addView(logView);
+
+                  root.addView(
+                          scroll,
+                          new LinearLayout.LayoutParams(
+                                  ViewGroup.LayoutParams.MATCH_PARENT,
+                                  0,
+                                  1f));
+
+                  setContentView(root);
+
+                  append("Ready.");
+                  append("Expected target: 6324:1719");
+                  append("Known Feature8 baseline: 00 01 00 03 04 00 08 00");
+                  append("FLASH_ALLOWED=NO");
+                  append("No OUT endpoint traffic is intentionally generated by this app.");
+              }
+
+              @Override
+              protected void onDestroy() {
+                  try {
+                      unregisterReceiver(usbReceiver);
+                  } catch (Exception ignored) {
+                  }
+                  super.onDestroy();
+              }
+
+              private boolean isTarget(UsbDevice d) {
+                  return d != null &&
+                          d.getVendorId() == TARGET_VID &&
+                          d.getProductId() == TARGET_PID;
+              }
+
+              private void scanUsb() {
+                  targetDevice = null;
+
+                  append("");
+                  append("=== USB SCAN ===");
+
+                  Map<String, UsbDevice> devices = usbManager.getDeviceList();
+
+                  if (devices.isEmpty()) {
+                      append("No USB device detected.");
+                      return;
+                  }
+
+                  for (UsbDevice d : devices.values()) {
+                      append(String.format(
+                              Locale.US,
+                              "USB %04X:%04X interfaces=%d class=0x%02X name=%s",
+                              d.getVendorId(),
+                              d.getProductId(),
+                              d.getInterfaceCount(),
+                              d.getDeviceClass(),
+                              d.getDeviceName()));
+
+                      if (isTarget(d)) targetDevice = d;
+                  }
+
+                  if (targetDevice == null) {
+                      append("REFUSED: exact target 6324:1719 not found.");
+                      return;
+                  }
+
+                  append("TARGET FOUND: 6324:1719");
+
+                  ensurePermission(targetDevice, () -> inspectDescriptors(targetDevice));
+              }
+
+              private void ensurePermission(UsbDevice device, Runnable onReady) {
+                  if (device == null || !isTarget(device)) {
+                      append("REFUSED: invalid target.");
+                      return;
+                  }
+
+                  if (usbManager.hasPermission(device)) {
+                      onReady.run();
+                      return;
+                  }
+
+                  Intent intent = new Intent(ACTION_USB_PERMISSION);
+                  intent.setPackage(getPackageName());
+
+                  int flags = PendingIntent.FLAG_UPDATE_CURRENT;
+                  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                      flags |= PendingIntent.FLAG_MUTABLE;
+                  }
+
+                  PendingIntent pi =
+                          PendingIntent.getBroadcast(this, 1048, intent, flags);
+
+                  append("Requesting Android USB permission...");
+                  usbManager.requestPermission(device, pi);
+              }
+
+              private UsbInterface findInterface(UsbDevice d, int id) {
+                  if (d == null) return null;
+
+                  for (int i = 0; i < d.getInterfaceCount(); i++) {
+                      UsbInterface intf = d.getInterface(i);
+                      if (intf.getId() == id &&
+                              intf.getInterfaceClass() == UsbConstants.USB_CLASS_HID) {
+                          return intf;
+                      }
+                  }
+                  return null;
+              }
+
+              private void inspectDescriptors(UsbDevice d) {
+                  if (!isTarget(d)) {
+                      append("REFUSED: descriptor inspection target mismatch.");
+                      return;
+                  }
+
+                  append("");
+                  append("=== TARGET DESCRIPTORS ===");
+                  append("Device: " + d.getDeviceName());
+                  append(String.format(
+                          Locale.US,
+                          "VID:PID = %04X:%04X",
+                          d.getVendorId(),
+                          d.getProductId()));
+                  append("Configurations = " + d.getConfigurationCount());
+                  append("Interfaces = " + d.getInterfaceCount());
+
+                  try {
+                      append("Manufacturer = " + d.getManufacturerName());
+                      append("Product = " + d.getProductName());
+                      append("Serial = " + d.getSerialNumber());
+                  } catch (Throwable t) {
+                      append("String descriptors unavailable: " + t.getMessage());
+                  }
+
+                  for (int i = 0; i < d.getInterfaceCount(); i++) {
+                      UsbInterface intf = d.getInterface(i);
+
+                      append(String.format(
+                              Locale.US,
+                              "IF[%d] id=%d class=0x%02X subclass=0x%02X protocol=0x%02X eps=%d",
+                              i,
+                              intf.getId(),
+                              intf.getInterfaceClass(),
+                              intf.getInterfaceSubclass(),
+                              intf.getInterfaceProtocol(),
+                              intf.getEndpointCount()));
+
+                      for (int e = 0; e < intf.getEndpointCount(); e++) {
+                          UsbEndpoint ep = intf.getEndpoint(e);
+
+                          append(String.format(
+                                  Locale.US,
+                                  "  EP[%d] addr=0x%02X dir=%s type=%d maxPacket=%d interval=%d",
+                                  e,
+                                  ep.getAddress(),
+                                  ep.getDirection() == UsbConstants.USB_DIR_IN ? "IN" : "OUT",
+                                  ep.getType(),
+                                  ep.getMaxPacketSize(),
+                                  ep.getInterval()));
+                      }
+                  }
+              }
+
+              private void readBothReportDescriptors() {
+                  if (!targetReady("READ REPORT DESCRIPTORS")) return;
+
+                  readReportDescriptor(HID_IF3);
+                  readReportDescriptor(HID_IF4);
+              }
+
+              private void readReportDescriptor(int interfaceId) {
+                  UsbInterface intf = findInterface(targetDevice, interfaceId);
+
+                  append("");
+                  append("=== HID REPORT DESCRIPTOR IF" + interfaceId + " ===");
+
+                  if (intf == null) {
+                      append("HID IF" + interfaceId + " not found.");
+                      return;
+                  }
+
+                  UsbDeviceConnection c = usbManager.openDevice(targetDevice);
+                  if (c == null) {
+                      append("openDevice() failed.");
+                      return;
+                  }
+
+                  try {
+                      boolean claimed = c.claimInterface(intf, true);
+                      append("claimInterface=" + claimed);
+                      if (!claimed) return;
+
+                      byte[] buf = new byte[1024];
+
+                      int n = c.controlTransfer(
+                              0x81,                       // Device-to-host, Standard, Interface
+                              USB_REQ_GET_DESCRIPTOR,     // GET_DESCRIPTOR
+                              HID_REPORT_DESCRIPTOR_TYPE << 8,
+                              intf.getId(),
+                              buf,
+                              buf.length,
+                              1500);
+
+                      append("GET_DESCRIPTOR type=0x22 requested=1024 result=" + n);
+
+                      if (n > 0) {
+                          appendHexLines(buf, n, 16);
+                          summarizeHidDescriptor(buf, n);
+                      }
+
+                      c.releaseInterface(intf);
+
+                  } catch (Throwable t) {
+                      append("Report descriptor read error: " +
+                              t.getClass().getSimpleName() + ": " + t.getMessage());
+                  } finally {
+                      c.close();
+                  }
+              }
+
+              private void summarizeHidDescriptor(byte[] data, int n) {
+                  int i = 0;
+                  int inputItems = 0;
+                  int outputItems = 0;
+                  int featureItems = 0;
+                  int reportIds = 0;
+
+                  while (i < n) {
+                      int prefix = data[i] & 0xFF;
+
+                      if (prefix == 0xFE) {
+                          if (i + 2 >= n) break;
+                          int size = data[i + 1] & 0xFF;
+                          i += 3 + size;
+                          continue;
+                      }
+
+                      int sizeCode = prefix & 0x03;
+                      int size = (sizeCode == 3) ? 4 : sizeCode;
+                      int type = (prefix >> 2) & 0x03;
+                      int tag = (prefix >> 4) & 0x0F;
+
+                      if (type == 0) {
+                          if (tag == 8) inputItems++;
+                          else if (tag == 9) outputItems++;
+                          else if (tag == 11) featureItems++;
+                      } else if (type == 1 && tag == 8) {
+                          reportIds++;
+                      }
+
+                      i += 1 + size;
+                  }
+
+                  append("Descriptor summary: INPUT items=" + inputItems +
+                          " OUTPUT items=" + outputItems +
+                          " FEATURE items=" + featureItems +
+                          " REPORT_ID items=" + reportIds);
+              }
+
+              private void readIf4Reports() {
+                  if (!targetReady("READ IF4 REPORTS")) return;
+
+                  UsbInterface intf = findInterface(targetDevice, HID_IF4);
+
+                  append("");
+                  append("=== IF4 FEATURE8 + INPUT256 ===");
+
+                  if (intf == null) {
+                      append("HID IF4 not found.");
+                      return;
+                  }
+
+                  UsbDeviceConnection c = usbManager.openDevice(targetDevice);
+                  if (c == null) {
+                      append("openDevice() failed.");
+                      return;
+                  }
+
+                  try {
+                      boolean claimed = c.claimInterface(intf, true);
+                      append("claimInterface=" + claimed);
+                      if (!claimed) return;
+
+                      byte[] feature = new byte[8];
+
+                      int n = c.controlTransfer(
+                              0xA1,
+                              HID_GET_REPORT,
+                              HID_REPORT_TYPE_FEATURE << 8,
+                              intf.getId(),
+                              feature,
+                              feature.length,
+                              1500);
+
+                      append("FEATURE GET_REPORT requested=8 result=" + n);
+
+                      if (n > 0) {
+                          append("FEATURE HEX = " + hex(feature, n));
+                      }
+
+                      if (n == 8) {
+                          append("FEATURE8 baseline match = " +
+                                  equalsPrefix(feature, EXPECTED_FEATURE8, 8));
+                      }
+
+                      byte[] input = new byte[256];
+
+                      int m = c.controlTransfer(
+                              0xA1,
+                              HID_GET_REPORT,
+                              HID_REPORT_TYPE_INPUT << 8,
+                              intf.getId(),
+                              input,
+                              input.length,
+                              1500);
+
+                      append("INPUT GET_REPORT requested=256 result=" + m);
+
+                      if (m > 0) {
+                          appendHexLines(input, m, 16);
+                      }
+
+                      c.releaseInterface(intf);
+
+                  } catch (Throwable t) {
+                      append("IF4 report read error: " +
+                              t.getClass().getSimpleName() + ": " + t.getMessage());
+                  } finally {
+                      c.close();
+                  }
+              }
+
+              private void passiveListenIf3() {
+                  if (!targetReady("PASSIVE IF3 LISTEN")) return;
+
+                  UsbInterface intf = findInterface(targetDevice, HID_IF3);
+
+                  append("");
+                  append("=== PASSIVE IF3 INTERRUPT-IN LISTEN ===");
+
+                  if (intf == null) {
+                      append("HID IF3 not found.");
+                      return;
+                  }
+
+                  UsbEndpoint inEp = null;
+
+                  for (int i = 0; i < intf.getEndpointCount(); i++) {
+                      UsbEndpoint ep = intf.getEndpoint(i);
+
+                      if (ep.getDirection() == UsbConstants.USB_DIR_IN &&
+                              ep.getType() == UsbConstants.USB_ENDPOINT_XFER_INT) {
+                          inEp = ep;
+                          break;
+                      }
+                  }
+
+                  if (inEp == null) {
+                      append("No interrupt-IN endpoint found on IF3.");
+                      return;
+                  }
+
+                  append(String.format(
+                          Locale.US,
+                          "Listening EP=0x%02X maxPacket=%d; 8 reads x 250ms. No OUT traffic.",
+                          inEp.getAddress(),
+                          inEp.getMaxPacketSize()));
+
+                  UsbDeviceConnection c = usbManager.openDevice(targetDevice);
+                  if (c == null) {
+                      append("openDevice() failed.");
+                      return;
+                  }
+
+                  try {
+                      boolean claimed = c.claimInterface(intf, true);
+                      append("claimInterface=" + claimed);
+                      if (!claimed) return;
+
+                      byte[] buf = new byte[Math.max(64, inEp.getMaxPacketSize())];
+                      int hits = 0;
+
+                      for (int i = 0; i < 8; i++) {
+                          int n = c.bulkTransfer(
+                                  inEp,
+                                  buf,
+                                  buf.length,
+                                  250);
+
+                          append("sample[" + i + "] result=" + n);
+
+                          if (n > 0) {
+                              hits++;
+                              append("  HEX = " + hex(buf, n));
+                          }
+                      }
+
+                      append("Passive listen complete. packets_received=" + hits);
+
+                      c.releaseInterface(intf);
+
+                  } catch (Throwable t) {
+                      append("Passive listen error: " +
+                              t.getClass().getSimpleName() + ": " + t.getMessage());
+                  } finally {
+                      c.close();
+                  }
+              }
+
+              private boolean targetReady(String operation) {
+                  if (targetDevice == null) {
+                      append(operation + ": scan target first.");
+                      return false;
+                  }
+
+                  if (!isTarget(targetDevice)) {
+                      append(operation + ": REFUSED target mismatch.");
+                      return false;
+                  }
+
+                  if (!usbManager.hasPermission(targetDevice)) {
+                      ensurePermission(targetDevice, () -> {});
+                      append(operation + ": permission requested; retry after approval.");
+                      return false;
+                  }
+
+                  return true;
+              }
+
+              private void runAll() {
+                  if (targetDevice == null) {
+                      scanUsb();
+                      append("RUN ALL: after permission/scan completes, tap RUN ALL again.");
+                      return;
+                  }
+
+                  if (!targetReady("RUN ALL")) return;
+
+                  inspectDescriptors(targetDevice);
+                  readBothReportDescriptors();
+                  readIf4Reports();
+                  passiveListenIf3();
+
+                  append("");
+                  append("=== R2 COMPLETE ===");
+                  append("No SET_REPORT / boot / erase / program command was issued.");
+                  append("FLASH_ALLOWED=NO");
+              }
+
+              private void copyLog() {
+                  ClipboardManager cm =
+                          (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
+
+                  cm.setPrimaryClip(
+                          ClipData.newPlainText(
+                                  "R2 BP1048P4 HID Log",
+                                  logView.getText()));
+
+                  Toast.makeText(
+                          this,
+                          "Log copied",
+                          Toast.LENGTH_SHORT).show();
+              }
+
+              private static boolean equalsPrefix(
+                      byte[] a, byte[] b, int n) {
+
+                  if (a == null || b == null ||
+                          a.length < n || b.length < n) return false;
+
+                  for (int i = 0; i < n; i++) {
+                      if (a[i] != b[i]) return false;
+                  }
+                  return true;
+              }
+
+              private void appendHexLines(
+                      byte[] data, int length, int perLine) {
+
+                  int safe = Math.min(length, data.length);
+
+                  for (int off = 0; off < safe; off += perLine) {
+                      int n = Math.min(perLine, safe - off);
+
+                      StringBuilder sb = new StringBuilder();
+                      sb.append(String.format(Locale.US, "%04X: ", off));
+
+                      for (int i = 0; i < n; i++) {
+                          if (i > 0) sb.append(' ');
+                          sb.append(String.format(
+                                  Locale.US,
+                                  "%02X",
+                                  data[off + i] & 0xFF));
+                      }
+
+                      append(sb.toString());
+                  }
+              }
+
+              private String hex(byte[] data, int length) {
+                  int safe = Math.min(length, data.length);
+                  StringBuilder sb = new StringBuilder();
+
+                  for (int i = 0; i < safe; i++) {
+                      if (i > 0) sb.append(' ');
+                      sb.append(String.format(
+                              Locale.US,
+                              "%02X",
+                              data[i] & 0xFF));
+                  }
+
+                  return sb.toString();
+              }
+
+              private void append(String s) {
+                  runOnUiThread(() -> logView.append(s + "\n"));
+              }
+          }
+          EOF
+
+      - name: Build debug APK
+        shell: bash
+        working-directory: R2_BP1048P4_HID_Inspector
+        run: |
+          set -euo pipefail
+          gradle --no-daemon :app:assembleDebug
+
+      - name: Show APK SHA-256
+        shell: bash
+        run: |
+          set -euo pipefail
+          sha256sum \
+            R2_BP1048P4_HID_Inspector/app/build/outputs/apk/debug/app-debug.apk
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: R2-BP1048P4-READONLY-HID-DEEP-INSPECTOR-APK
+          path: R2_BP1048P4_HID_Inspector/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
