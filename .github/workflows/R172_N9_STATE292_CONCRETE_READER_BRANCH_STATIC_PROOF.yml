@@ -1,0 +1,331 @@
+name: R172 N9 state292 concrete reader branch static proof
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - ".github/workflows/R172_N9_STATE292_CONCRETE_READER_BRANCH_STATIC_PROOF.yml"
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: r172-static-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  FLASH_ALLOWED: "NO"
+
+jobs:
+  static_audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: Immutable safety gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$FLASH_ALLOWED" = "NO"
+          mkdir -p /tmp/r172/evidence
+          cat > /tmp/r172/evidence/R172_SAFETY.txt <<'EOF'
+          MODE=OFFLINE_STATIC_DATA_AWARE_BRANCH_PROOF_ONLY
+          FLASH_ALLOWED=NO
+          USB_OR_BOARD_CONTACT=NO
+          VENDOR_EXE_DLL_APK_EXECUTED=NO
+          AES_OR_CRYPTOSTREAM_DECRYPT_EXECUTED=NO
+          AA55_OR_LINEIN_AA55_SENT=NO
+          RUNTIME_0X11_OR_0XFE_SENT=NO
+          FLASH_READ_ERASE_WRITE_EXECUTED=NO
+          DISCOVERED_FRAME_LIVE_AUTHORIZED=NO
+          HARDWARE_MODIFICATION=FORBIDDEN
+          EOF
+
+      - name: Download pinned R171 evidence
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          artifact-ids: "10856075889"
+          path: /tmp/r172/r171
+          merge-multiple: true
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          repository: Thanaporn-okn/OKN_DSP-apk
+          run-id: 36118258307
+
+      - name: Download pinned R163 reader proof
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          artifact-ids: "10827347973"
+          path: /tmp/r172/r163
+          merge-multiple: true
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          repository: Thanaporn-okn/OKN_DSP-apk
+          run-id: 36044080362
+
+      - name: Download pinned R157 historical evidence chain
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          artifact-ids: "10820682068"
+          path: /tmp/r172/r157
+          merge-multiple: true
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          repository: Thanaporn-okn/OKN_DSP-apk
+          run-id: 36028455796
+
+      - name: Resolve state292 from proven state94 bytes
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PYCODE'
+          from pathlib import Path
+          import hashlib, io, json, re, struct, zipfile
+
+          base = Path("/tmp/r172")
+          out = base / "evidence"
+          out.mkdir(parents=True, exist_ok=True)
+
+          def inner(folder, name, expected):
+              p = base / folder / name
+              data = p.read_bytes()
+              got = hashlib.sha256(data).hexdigest()
+              assert got == expected, (name, got, expected)
+              shp = p.with_name(p.name + ".sha256")
+              assert shp.exists()
+              assert shp.read_text().split()[0] == expected
+              return zipfile.ZipFile(io.BytesIO(data))
+
+          r171 = inner(
+              "r171",
+              "R171_N9_CONCRETE_LOCAL37_STATE94_BYTES_EVIDENCE.zip",
+              "88161a5a174546e41d4c6803c51be16e387d9a67e7a1ef1080292c27ee68b1b8",
+          )
+          d171 = json.loads(r171.read("R171_DECISION.json"))
+          local29 = r171.read("R171_LOCAL29_STATE94.bin")
+
+          assert d171["revision"] == "R171"
+          assert d171["EXACT_LOCAL37_BYTES_PROVEN"] is True
+          assert d171["LOCAL29_BYTES_AT_STATE94_PROVEN"] is True
+          assert d171["LOCAL29_STATE94_LENGTH"] == len(local29) == 607967
+          assert hashlib.sha256(local29).hexdigest() == d171["LOCAL29_STATE94_SHA256"]
+          assert d171["LOCAL29_STATE94_SHA256"] == "6f9ef64dd69335e3e8b522afccc6b32a7d97973a9ce680035bee9e926a0a0ac1"
+          assert d171["AES_OR_CRYPTOSTREAM_DECRYPT_EXECUTED"] is False
+          assert d171["OFFLINE_DECRYPT_AUTHORIZED"] is False
+          assert d171["FLASH_ALLOWED"] is False
+
+          r163 = inner(
+              "r163",
+              "R163_N9_READER_SOURCE_ZERO_CURSOR_EVIDENCE.zip",
+              "fc75233a047ab3e8f9fc8e5a3c7d833d84f4f1c645c74f1f53d63ffc41ee4d2c",
+          )
+          d163 = json.loads(r163.read("R163_DECISION.json"))
+          traces = json.loads(r163.read("R163_READER_SOURCE_CURSOR_TRACES.json"))
+
+          assert d163["revision"] == "R163"
+          assert d163["READER_SOURCE_ON_STATE94_PATH"] == "new MemoryStream(local29) wrapped in BinaryReader"
+          assert d163["READER_POSITION_RESET_ON_STATE94_PATH"] == 0
+          assert d163["LOCAL28_BYTE_RANGE_ON_STATE94_PATH"] == [20, 24]
+          assert d163["BYTE_RANGE_CONVENTION"] == "zero-based, end exclusive; signed little-endian Int32"
+          assert set(traces) == {"null", "empty", "nonempty"}
+
+          expected_offsets = [0, 4, 8, 12, 16, 20]
+          for scenario, tr in traces.items():
+              assert [x["offset"] for x in tr["reads"]] == expected_offsets
+              assert [x["destination"] for x in tr["reads"]] == ["discard"]*4 + ["local71", "local28"]
+              assert tr["states"][0] == 94 and tr["states"][-1] == 292
+
+          six_u32 = [struct.unpack_from("<I", local29, off)[0] for off in expected_offsets]
+          six_i32 = [struct.unpack_from("<i", local29, off)[0] for off in expected_offsets]
+
+          local28_bytes = local29[20:24]
+          local28_u32 = struct.unpack("<I", local28_bytes)[0]
+          local28_i32 = struct.unpack("<i", local28_bytes)[0]
+
+          assert local28_bytes.hex() == "a8ca2e67"
+          assert local28_u32 == 1731119784
+          assert local28_i32 == 1731119784
+          assert local28_u32 != 4
+          assert local28_u32 != 1
+
+          # Historical chain for exact N9/state292 and earlier CryptoStream contradiction.
+          r157 = inner(
+              "r157",
+              "R157_N9_LOCAL29_LOCAL81_NONNULL_LOCAL93_LOOP_BRANCH_EVIDENCE.zip",
+              "f974c64c63eea5f2b940c76101f4ab6e769803f5630a2d87d21d08679c321609",
+          )
+          prefix = "r156/r155/r154/r153/r152/r151/r150/r149/r148/r147/r146/r145/r144/r143/"
+          raw = r157.read(prefix + "R143_N9_METHOD.il")
+          assert hashlib.sha256(raw).hexdigest() == "5a3964c1f4bd8db455e6882a4ce6f90667e1a9abc6e1fafd10440b31006e4a33"
+          text = raw.decode()
+
+          rows = []
+          for line in text.splitlines():
+              m = re.match(r"\s*(IL_[0-9a-f]+):\s+(\S+)(?:\s+(.*))?$", line)
+              if m:
+                  rows.append((m.group(1), m.group(2), (m.group(3) or "").split(" //", 1)[0].strip()))
+          pos = {lab:i for i,(lab,_,_) in enumerate(rows)}
+
+          sm = re.search(r"IL_0012:\s+switch \((.*?)\)\n", text, re.S)
+          assert sm
+          targets = [x.strip() for x in sm.group(1).split(",")]
+          assert len(targets) == 689
+
+          target_positions = sorted((pos[lab], st, lab) for st, lab in enumerate(targets))
+          blocks = {}
+          for i, (p0, st, lab) in enumerate(target_positions):
+              p1 = target_positions[i+1][0] if i+1 < len(target_positions) else len(rows)
+              blocks[st] = rows[p0:p1]
+
+          def ops(st):
+              return [(op,arg) for _,op,arg in blocks[st]]
+
+          assert targets[94] == "IL_51f2"
+          assert targets[292] == "IL_59b1"
+          assert targets[402] == "IL_23ed"
+          assert targets[278] == "IL_5d8f"
+
+          assert ops(292) == [
+              ("ldloc.s","28"),
+              ("ldc.i4.4",""),
+              ("bne.un","IL_5d8f"),
+              ("ldc.i4","402"),
+              ("br","IL_0012"),
+          ]
+          assert ops(278) == [
+              ("ldloc.s","28"),
+              ("ldc.i4.1",""),
+              ("bne.un","IL_45a9"),
+              ("ldc.i4","634"),
+              ("call","bool Q9Wet0jLP4YxXSyJBiC.q71r2Rj8SiD9GF1BI50::zfos5ENLukrcbiO4qNQ()"),
+              ("brtrue","IL_0012"),
+              ("pop",""),
+              ("ldc.i4","262"),
+              ("br","IL_0012"),
+          ]
+
+          # Prove branch result from concrete data.
+          state292_fallthrough_to_402 = (local28_u32 == 4)
+          state292_branch_to_278 = not state292_fallthrough_to_402
+          state278_equal_one = (local28_u32 == 1)
+
+          assert state292_fallthrough_to_402 is False
+          assert state292_branch_to_278 is True
+          assert state278_equal_one is False
+
+          # Reconcile only what this new byte proof can legitimately resolve.
+          d147 = json.loads(r157.read(
+              "r156/r155/r154/r153/r152/r151/r150/r149/r148/r147/R147_DECISION.json"
+          ))
+          d148 = json.loads(r157.read(
+              "r156/r155/r154/r153/r152/r151/r150/r149/r148/R148_DECISION.json"
+          ))
+          d150 = json.loads(r157.read(
+              "r156/r155/r154/r153/r152/r151/r150/R150_DECISION.json"
+          ))
+
+          assert d147["CRYPTOSTREAM_WRITE_SOURCE_LOCAL12_PROVEN"] is True
+          assert d147["CRYPTOSTREAM_WRITE_LENGTH"] == 607967
+          assert d147["PROVEN_EXACT_CIPHERTEXT_SLICE"]["sha256"] == "a46885bb2f09a600f6f16e6206f49d304ca829d441c5077b360b25ac8e6a33aa"
+          assert d148["STATIC_SEMANTICS_CONTRADICTION_CONFIRMED"] is True
+          assert d148["CRYPTOSTREAM_FINAL_REMAINDER_BYTES"] == 15
+          assert d150["STATIC_SEMANTICS_CONTRADICTION_REMAINS_UNRESOLVED"] is True
+
+          remaining = [
+              x for x in d163["remaining_unaccounted_conditionals"]
+              if x["state"] in (246,605)
+          ]
+          assert [x["state"] for x in remaining] == [246,605]
+
+          result = {
+              "revision": "R172",
+              "R171_RUN_ID": 36118258307,
+              "R171_JOB_ID": 108017350902,
+              "R171_ARTIFACT_ID": 10856075889,
+              "R171_ARTIFACT_DIGEST": "sha256:7a6e36075e4e53aab2098cd9d8b7a249050464ec2e8d606fad250c88b463041a",
+              "R171_INNER_SHA256": "88161a5a174546e41d4c6803c51be16e387d9a67e7a1ef1080292c27ee68b1b8",
+              "R163_INNER_SHA256": "fc75233a047ab3e8f9fc8e5a3c7d833d84f4f1c645c74f1f53d63ffc41ee4d2c",
+              "N9_SHA256": hashlib.sha256(raw).hexdigest(),
+
+              "STATE94_LOCAL29_BYTES_PROVEN": True,
+              "STATE94_READER_SOURCE_PROVEN": True,
+              "STATE94_READER_CURSOR_RESET_ZERO_PROVEN": True,
+              "STATE94_FIRST_SIX_READINT32_OFFSETS": expected_offsets,
+              "STATE94_FIRST_SIX_READINT32_U32": six_u32,
+              "STATE94_FIRST_SIX_READINT32_I32": six_i32,
+
+              "STATE292_LOCAL28_BYTE_OFFSET": 20,
+              "STATE292_LOCAL28_BYTES_HEX": local28_bytes.hex(),
+              "STATE292_LOCAL28_INT32": local28_i32,
+              "STATE292_LOCAL28_UINT32": local28_u32,
+              "STATE292_LOCAL28_EQUALS_4": False,
+              "STATE292_BRANCH_TO_IL_5D8F_PROVEN": True,
+              "STATE292_FALLTHROUGH_TO_STATE402_EXCLUDED_ON_STATE94_PATH": True,
+
+              "STATE278_LOCAL28_EQUALS_1": False,
+              "STATE278_BNE_TO_IL_45A9_PROVEN": True,
+
+              "STATE94_PATH_CANNOT_ENTER_CRYPTOSTREAM_STATE402_VIA_STATE292": True,
+              "R147_CRYPTOSTREAM_SOURCE_IS_DISTINCT_LOCAL12_RESOURCE_PATH": True,
+              "R147_R150_15_BYTE_FINALBLOCK_CONTRADICTION_RESOLVED_BY_R172": False,
+              "WHY_CONTRADICTION_REMAINS": "R172 excludes state402 only for the proven state94/local29 reader path. R147-R150 concern a distinct local12 raw-h15 resource path whose CryptoStream.Write input remains 607967 bytes (mod16=15). The state94 bytes do not alter that separate input.",
+
+              "STATE292_CONDITIONAL_RESOLVED": True,
+              "UNACCOUNTED_CONDITIONAL_COUNT_AFTER_R172": 2,
+              "remaining_unaccounted_conditionals": remaining,
+              "STATE246_ASSEMBLY_LOCATION_VALUE_PROVEN": False,
+              "STATE605_ASSEMBLY_LOCATION_LENGTH_VALUE_PROVEN": False,
+              "INDEPENDENT_FULL_PATH_BRANCH_COVERAGE_PROVEN": False,
+
+              "AES_OR_CRYPTOSTREAM_DECRYPT_EXECUTED": False,
+              "OFFLINE_DECRYPT_AUTHORIZED": False,
+              "H15_PLAINTEXT_RECOVERED": False,
+              "ANY_DISCOVERED_FRAME_AUTHORIZED_FOR_BOARD": False,
+              "FLASH_ALLOWED": False,
+              "NEXT": "R173: resolve states246/605 by tracing how the protected assembly containing N9 is actually loaded in the production Windows client (file-backed Assembly.Location vs byte-array/stream load yielding empty Location). Keep the analysis static; do not run vendor binaries, do not decrypt, and do not contact the board."
+          }
+
+          (out / "R172_DECISION.json").write_text(json.dumps(result, indent=2) + "\n")
+          (out / "R172_STATE94_FIRST24_BYTES.bin").write_bytes(local29[:24])
+          (out / "R172_STATE94_FIRST_SIX_INT32.json").write_text(json.dumps({
+              "offsets": expected_offsets,
+              "u32": six_u32,
+              "i32": six_i32,
+              "local28_offset20_bytes_hex": local28_bytes.hex(),
+          }, indent=2) + "\n")
+          (out / "R171_DECISION.json").write_text(json.dumps(d171, indent=2) + "\n")
+          (out / "R163_DECISION.json").write_text(json.dumps(d163, indent=2) + "\n")
+          print(json.dumps(result, indent=2))
+          PYCODE
+
+      - name: Package R172 evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /tmp/r172/evidence
+          zip -9 -r /tmp/R172_N9_STATE292_CONCRETE_READER_BRANCH_EVIDENCE.zip . >/dev/null
+          sha256sum /tmp/R172_N9_STATE292_CONCRETE_READER_BRANCH_EVIDENCE.zip \
+            > /tmp/R172_N9_STATE292_CONCRETE_READER_BRANCH_EVIDENCE.zip.sha256
+
+      - name: Upload R172 evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: R172-N9-STATE292-CONCRETE-READER-BRANCH-STATIC-EVIDENCE
+          path: |
+            /tmp/R172_N9_STATE292_CONCRETE_READER_BRANCH_EVIDENCE.zip
+            /tmp/R172_N9_STATE292_CONCRETE_READER_BRANCH_EVIDENCE.zip.sha256
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Final fail-closed gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$FLASH_ALLOWED" = "NO"
+          grep -F '"STATE292_CONDITIONAL_RESOLVED": true' /tmp/r172/evidence/R172_DECISION.json
+          grep -F '"STATE292_FALLTHROUGH_TO_STATE402_EXCLUDED_ON_STATE94_PATH": true' /tmp/r172/evidence/R172_DECISION.json
+          grep -F '"UNACCOUNTED_CONDITIONAL_COUNT_AFTER_R172": 2' /tmp/r172/evidence/R172_DECISION.json
+          grep -F '"R147_R150_15_BYTE_FINALBLOCK_CONTRADICTION_RESOLVED_BY_R172": false' /tmp/r172/evidence/R172_DECISION.json
+          grep -F '"AES_OR_CRYPTOSTREAM_DECRYPT_EXECUTED": false' /tmp/r172/evidence/R172_DECISION.json
+          grep -F '"OFFLINE_DECRYPT_AUTHORIZED": false' /tmp/r172/evidence/R172_DECISION.json
+          grep -F '"FLASH_ALLOWED": false' /tmp/r172/evidence/R172_DECISION.json
+          echo R172_STATE292_CONCRETE_READER_BRANCH_PROOF_COMPLETE=YES
+          echo FLASH_ALLOWED=NO
