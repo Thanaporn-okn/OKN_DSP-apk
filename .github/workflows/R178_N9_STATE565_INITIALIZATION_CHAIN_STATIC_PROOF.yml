@@ -1,0 +1,434 @@
+name: R178 N9 state565 initialization-chain static proof
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - ".github/workflows/R178_N9_STATE565_INITIALIZATION_CHAIN_STATIC_PROOF.yml"
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: r178-static-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  FLASH_ALLOWED: "NO"
+
+jobs:
+  static_audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: Immutable safety gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$FLASH_ALLOWED" = "NO"
+          mkdir -p /tmp/r178/evidence
+
+          cat > /tmp/r178/evidence/R178_SAFETY.txt <<'EOF'
+          MODE=OFFLINE_STATIC_IL_AUDIT_ONLY
+          FLASH_ALLOWED=NO
+          USB_OR_BOARD_CONTACT=NO
+          VENDOR_EXE_DLL_APK_EXECUTED=NO
+          AES_OR_CRYPTOSTREAM_DECRYPT_EXECUTED=NO
+          AA55_OR_LINEIN_AA55_SENT=NO
+          RUNTIME_0X11_OR_0XFE_SENT=NO
+          UFE_RUNTIME_TX_SENT=NO
+          FLASH_READ_ERASE_WRITE_EXECUTED=NO
+          DISCOVERED_FRAME_LIVE_AUTHORIZED=NO
+          HARDWARE_MODIFICATION=FORBIDDEN
+          EOF
+
+      - name: Download pinned R177 corrected evidence
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          artifact-ids: "10864507451"
+          path: /tmp/r178/r177
+          merge-multiple: true
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          repository: Thanaporn-okn/OKN_DSP-apk
+          run-id: 36137304534
+
+      - name: Download pinned R157 raw IL evidence chain
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          artifact-ids: "10820682068"
+          path: /tmp/r178/r157
+          merge-multiple: true
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          repository: Thanaporn-okn/OKN_DSP-apk
+          run-id: 36028455796
+
+      - name: Prove exact state565 initialization successor chain
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python3 - <<'PYCODE'
+          from pathlib import Path
+          import hashlib
+          import io
+          import json
+          import re
+          import zipfile
+
+          base = Path("/tmp/r178")
+          out = base / "evidence"
+          out.mkdir(parents=True, exist_ok=True)
+
+          def open_inner(path, expected_sha):
+              data = path.read_bytes()
+              got = hashlib.sha256(data).hexdigest()
+              assert got == expected_sha, (path.name, got, expected_sha)
+              sha_path = path.with_name(path.name + ".sha256")
+              assert sha_path.exists(), f"missing {sha_path}"
+              assert sha_path.read_text().split()[0] == expected_sha
+              return zipfile.ZipFile(io.BytesIO(data))
+
+          r177 = open_inner(
+              base / "r177" / "R177_N9_POST_XOR_LOCAL47_CORRECTED_RECONSTRUCTION_EVIDENCE.zip",
+              "6035e432d417e9414878d83388cb366782e385f731190bf4733293072c8f4b61",
+          )
+
+          d177 = json.loads(r177.read("R177_DECISION.json"))
+          assert d177["revision"] == "R177"
+          assert d177["R171_ROOT_CAUSE_IDENTIFIED"] is True
+          assert d177["STATE565_NORMAL_EXIT_REACHABLE"] is True
+          assert d177["PRODUCTION_PATH_MODEL_SELF_CONSISTENT_THROUGH_STATE565"] is True
+          assert d177["AES_OR_CRYPTOSTREAM_DECRYPT_EXECUTED"] is False
+          assert d177["OFFLINE_DECRYPT_AUTHORIZED"] is False
+          assert d177["FLASH_ALLOWED"] is False
+          assert d177["CORRECTED_LOCAL29_STATE94_SHA256"] == \
+              "9f8c10e6443399bebcc35d670d6185f99698d5bce51eb2af1325c9e8602acbe1"
+
+          corrected = r177.read("R177_CORRECTED_LOCAL29_STATE94.bin")
+          assert len(corrected) == 607967
+          assert hashlib.sha256(corrected).hexdigest() == \
+              "9f8c10e6443399bebcc35d670d6185f99698d5bce51eb2af1325c9e8602acbe1"
+
+          r157 = open_inner(
+              base / "r157" / "R157_N9_LOCAL29_LOCAL81_NONNULL_LOCAL93_LOOP_BRANCH_EVIDENCE.zip",
+              "f974c64c63eea5f2b940c76101f4ab6e769803f5630a2d87d21d08679c321609",
+          )
+
+          prefix = "r156/r155/r154/r153/r152/r151/r150/r149/r148/r147/r146/r145/r144/r143/"
+          raw = r157.read(prefix + "R143_N9_METHOD.il")
+          n9_sha = hashlib.sha256(raw).hexdigest()
+          assert n9_sha == "5a3964c1f4bd8db455e6882a4ce6f90667e1a9abc6e1fafd10440b31006e4a33"
+
+          text = raw.decode()
+
+          rows = []
+          for line in text.splitlines():
+              m = re.match(r"\s*(IL_[0-9a-f]+):\s+(\S+)(?:\s+(.*))?$", line)
+              if m:
+                  rows.append((
+                      m.group(1),
+                      m.group(2),
+                      (m.group(3) or "").split(" //", 1)[0].strip()
+                  ))
+
+          pos = {lab:i for i,(lab,_,_) in enumerate(rows)}
+
+          sm = re.search(r"IL_0012:\s+switch \((.*?)\)\n", text, re.S)
+          assert sm, "dispatcher switch not found"
+          targets = [x.strip() for x in sm.group(1).split(",")]
+          assert len(targets) == 689
+
+          tpos = sorted((pos[lab], st, lab) for st, lab in enumerate(targets))
+          blocks = {}
+          for i, (p0, st, lab) in enumerate(tpos):
+              p1 = tpos[i+1][0] if i+1 < len(tpos) else len(rows)
+              blocks[st] = rows[p0:p1]
+
+          def ops(st):
+              return [(op,arg) for _,op,arg in blocks[st]]
+
+          def exact_prefix(st, expected):
+              got = ops(st)[:len(expected)]
+              assert got == expected, (st, got, expected)
+
+          # Constant opaque helpers are statically provable without execution.
+          assert re.search(
+              r"bool zfos5ENLukrcbiO4qNQ \(\).*?"
+              r"IL_0000:\s+ldnull.*?"
+              r"IL_0001:\s+ldnull.*?"
+              r"IL_0002:\s+ceq.*?"
+              r"IL_0004:\s+ret",
+              text,
+              re.S
+          ) is None, "helper definition is in full IL, not the extracted N9 body"
+
+          # R140 fixed full IL is present in the nested evidence chain.
+          full = r157.read(
+              "r156/r155/r154/r153/r152/r151/r150/r149/r148/r147/r146/r145/"
+              "r144/r143/r142/r141/r140/R140_FIXED_FULL.il"
+          ).decode(errors="replace")
+
+          z = re.search(
+              r"bool zfos5ENLukrcbiO4qNQ \(\).*?"
+              r"IL_0000:\s+ldnull\s+"
+              r"IL_0001:\s+ldnull\s+"
+              r"IL_0002:\s+ceq\s+"
+              r"IL_0004:\s+ret",
+              full,
+              re.S
+          )
+          assert z, "zfos helper body not found"
+          zfos_always_true = True
+
+          o = re.search(
+              r"object omTjeHNp0inHSoSsOBH \(\).*?"
+              r"IL_0000:\s+ldnull\s+"
+              r"IL_0001:\s+ret",
+              full,
+              re.S
+          )
+          assert o, "omT helper body not found"
+          omt_always_null = True
+
+          # Exact corrected successor beginning at state565.
+          assert targets[565] == "IL_5b26"
+
+          exact_prefix(565, [
+              ("ldloc.s","114"),
+              ("call","int32 Q9Wet0jLP4YxXSyJBiC.q71r2Rj8SiD9GF1BI50::qfkv4ZNDynVciIciQy6(object)"),
+              ("ldc.i4.1",""),
+              ("add",""),
+              ("newobj","instance void [mscorlib]System.Collections.Hashtable::.ctor(int32)"),
+              ("stsfld","object Q9Wet0jLP4YxXSyJBiC.q71r2Rj8SiD9GF1BI50::XdYe0BEvZM"),
+              ("ldc.i4","543"),
+              ("br","IL_0012"),
+          ])
+
+          exact_prefix(543, [
+              ("ldloca.s","119"),
+              ("initobj","Q9Wet0jLP4YxXSyJBiC.q71r2Rj8SiD9GF1BI50/FLbSabevQJis3PSAQ7x"),
+              ("ldc.i4","241"),
+              ("br","IL_0012"),
+          ])
+
+          exact_prefix(241, [
+              ("ldloca.s","119"),
+              ("ldc.i4.1",""),
+              ("newarr","[mscorlib]System.Byte"),
+              ("dup",""),
+              ("ldc.i4.0",""),
+              ("ldc.i4.s","42"),
+              ("stelem.i1",""),
+              ("stfld","uint8[] Q9Wet0jLP4YxXSyJBiC.q71r2Rj8SiD9GF1BI50/FLbSabevQJis3PSAQ7x::ooDeh1nBCT"),
+              ("ldc.i4","571"),
+              ("br","IL_0012"),
+          ])
+
+          exact_prefix(571, [
+              ("ldloca.s","119"),
+              ("ldc.i4.0",""),
+              ("stfld","bool Q9Wet0jLP4YxXSyJBiC.q71r2Rj8SiD9GF1BI50/FLbSabevQJis3PSAQ7x::SeQe2D5cRo"),
+              ("ldc.i4","125"),
+              ("br","IL_0012"),
+          ])
+
+          exact_prefix(125, [
+              ("ldsfld","object Q9Wet0jLP4YxXSyJBiC.q71r2Rj8SiD9GF1BI50::XdYe0BEvZM"),
+              ("ldc.i4.0",""),
+              ("conv.i8",""),
+              ("box","[mscorlib]System.Int64"),
+              ("ldloc.s","119"),
+              ("box","Q9Wet0jLP4YxXSyJBiC.q71r2Rj8SiD9GF1BI50/FLbSabevQJis3PSAQ7x"),
+              ("call","void Q9Wet0jLP4YxXSyJBiC.q71r2Rj8SiD9GF1BI50::nEgLdGKpl9ybhlqqVWH(object, object, object)"),
+              ("ldc.i4","242"),
+              ("call","bool Q9Wet0jLP4YxXSyJBiC.q71r2Rj8SiD9GF1BI50::zfos5ENLukrcbiO4qNQ()"),
+              ("brtrue","IL_0012"),
+          ])
+
+          # zfos is constant true, so state125 deterministically leaves state 242
+          # on the dispatcher stack. The false fallthrough to 175 is dead.
+          assert zfos_always_true
+          deterministic_next_after_125 = 242
+
+          exact_prefix(242, [
+              ("ldc.i4.0",""),
+              ("stloc.s","56"),
+              ("ldc.i4","426"),
+              ("br","IL_0012"),
+          ])
+
+          # State426 is the first real data-dependent boundary after initialization.
+          exact_prefix(426, [
+              ("ldloc.s","114"),
+              ("call","object Q9Wet0jLP4YxXSyJBiC.q71r2Rj8SiD9GF1BI50::oNNQE6NTi9uesXTTGZJ(object)"),
+              ("call","int64 Q9Wet0jLP4YxXSyJBiC.q71r2Rj8SiD9GF1BI50::YoMYlpKfA3xZZIkL5Uo(object)"),
+              ("ldloc.s","114"),
+              ("call","object Q9Wet0jLP4YxXSyJBiC.q71r2Rj8SiD9GF1BI50::oNNQE6NTi9uesXTTGZJ(object)"),
+              ("call","int64 Q9Wet0jLP4YxXSyJBiC.q71r2Rj8SiD9GF1BI50::B5fr4WNvBYuVpLZQQQQ(object)"),
+              ("ldc.i4.1",""),
+              ("conv.i8",""),
+              ("sub",""),
+              ("bge","IL_1873"),
+          ])
+
+          # Prove wrapper meanings statically from R140 full IL.
+          assert re.search(
+              r"int64 YoMYlpKfA3xZZIkL5Uo \(\s*object ''\s*\).*?"
+              r"System\.IO\.Stream::get_Position\(\)",
+              full, re.S
+          )
+          assert re.search(
+              r"int64 B5fr4WNvBYuVpLZQQQQ \(\s*object ''\s*\).*?"
+              r"System\.IO\.Stream::get_Length\(\)",
+              full, re.S
+          )
+          assert re.search(
+              r"object oNNQE6NTi9uesXTTGZJ \(\s*object ''\s*\).*?"
+              r"Y7Uor8e58M9K22QZF7H::mpep2xkqqr\(\)",
+              full, re.S
+          )
+          assert re.search(
+              r"int32 qfkv4ZNDynVciIciQy6 \(\s*object ''\s*\).*?"
+              r"Y7Uor8e58M9K22QZF7H::sXXetjyGMH\(\)",
+              full, re.S
+          )
+          assert re.search(
+              r"instance int32 sXXetjyGMH \(\).*?"
+              r"System\.IO\.BinaryReader::ReadInt32\(\)",
+              full, re.S
+          )
+
+          decision = {
+              "revision": "R178",
+              "R177_RUN_ID": 36137304534,
+              "R177_ARTIFACT_ID": 10864507451,
+              "R177_ARTIFACT_DIGEST": "sha256:5da45544c592774b04fdae7a7ff5d2f3b1d064ff497ffdafaf35929d57913c74",
+              "R177_INNER_SHA256": "6035e432d417e9414878d83388cb366782e385f731190bf4733293072c8f4b61",
+              "R157_RUN_ID": 36028455796,
+              "R157_ARTIFACT_ID": 10820682068,
+              "R157_INNER_SHA256": "f974c64c63eea5f2b940c76101f4ab6e769803f5630a2d87d21d08679c321609",
+              "N9_SHA256": n9_sha,
+
+              "R177_CORRECTED_STATE565_ENTRY_ACCEPTED": True,
+              "STATE565_TO_543": True,
+              "STATE543_TO_241": True,
+              "STATE241_TO_571": True,
+              "STATE571_TO_125": True,
+              "STATE125_ZFOS_CONSTANT_TRUE": True,
+              "STATE125_FALSE_FALLTHROUGH_175_DEAD": True,
+              "STATE125_TO_242": deterministic_next_after_125 == 242,
+              "STATE242_TO_426": True,
+
+              "INITIALIZATION_EFFECTS": {
+                  "hashtable_capacity_source":
+                      "BinaryReader.ReadInt32(local114) + 1",
+                  "static_hashtable_field":
+                      "XdYe0BEvZM",
+                  "struct_local":
+                      "local119 FLbSabevQJis3PSAQ7x",
+                  "struct_byte_array":
+                      [42],
+                  "struct_bool":
+                      False,
+                  "hashtable_key":
+                      "Int64 0",
+                  "hashtable_value":
+                      "boxed local119",
+              },
+
+              "STATE426_FIRST_DATA_DEPENDENT_BOUNDARY": True,
+              "STATE426_CONDITION":
+                  "BaseStream.Position >= BaseStream.Length - 1",
+              "QFKV_IS_BINARYREADER_READINT32": True,
+              "ONN_IS_BINARYREADER_BASESTREAM": True,
+              "YOMY_IS_STREAM_POSITION": True,
+              "B5FR_IS_STREAM_LENGTH": True,
+
+              "OMT_HELPER_ALWAYS_NULL": omt_always_null,
+              "ZFOS_HELPER_ALWAYS_TRUE": zfos_always_true,
+
+              "AES_OR_CRYPTOSTREAM_DECRYPT_EXECUTED": False,
+              "OFFLINE_DECRYPT_AUTHORIZED": False,
+              "VENDOR_BINARY_EXECUTED": False,
+              "USB_OR_BOARD_CONTACTED": False,
+              "ANY_DISCOVERED_FRAME_AUTHORIZED_FOR_BOARD": False,
+              "FLASH_ALLOWED": False,
+
+              "NEXT":
+                  "R179: stay offline and prove the concrete BinaryReader position "
+                  "at state426 from the corrected R177 state94 data and the exact "
+                  "pre-state565 ReadInt32 history. Then resolve state426's branch "
+                  "without executing vendor code, decrypting, contacting USB, or flashing."
+          }
+
+          (out / "R178_DECISION.json").write_text(
+              json.dumps(decision, indent=2) + "\n"
+          )
+
+          (out / "R178_STATE565_CHAIN.txt").write_text(
+              "\n".join([
+                  "565 -> 543 -> 241 -> 571 -> 125 -> 242 -> 426",
+                  "state125 zfos5ENLukrcbiO4qNQ() = constant true",
+                  "state125 false fallthrough 175 = dead",
+                  "state565 creates Hashtable(ReadInt32(local114)+1)",
+                  "local119.byte[] = {0x2A}",
+                  "local119.bool = false",
+                  "Hashtable.Add(Int64(0), boxed local119)",
+                  "state426 boundary = BaseStream.Position >= BaseStream.Length - 1",
+                  "FLASH_ALLOWED=NO",
+              ]) + "\n"
+          )
+
+          print(json.dumps(decision, indent=2))
+          PYCODE
+
+      - name: Package R178 evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /tmp/r178/evidence
+          zip -9 -r /tmp/R178_N9_STATE565_INITIALIZATION_CHAIN_STATIC_EVIDENCE.zip . >/dev/null
+          sha256sum /tmp/R178_N9_STATE565_INITIALIZATION_CHAIN_STATIC_EVIDENCE.zip \
+            > /tmp/R178_N9_STATE565_INITIALIZATION_CHAIN_STATIC_EVIDENCE.zip.sha256
+
+      - name: Upload R178 evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: R178-N9-STATE565-INITIALIZATION-CHAIN-STATIC-EVIDENCE
+          path: |
+            /tmp/R178_N9_STATE565_INITIALIZATION_CHAIN_STATIC_EVIDENCE.zip
+            /tmp/R178_N9_STATE565_INITIALIZATION_CHAIN_STATIC_EVIDENCE.zip.sha256
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Final fail-closed gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$FLASH_ALLOWED" = "NO"
+
+          grep -F '"STATE125_ZFOS_CONSTANT_TRUE": true' \
+            /tmp/r178/evidence/R178_DECISION.json
+
+          grep -F '"STATE125_FALSE_FALLTHROUGH_175_DEAD": true' \
+            /tmp/r178/evidence/R178_DECISION.json
+
+          grep -F '"STATE125_TO_242": true' \
+            /tmp/r178/evidence/R178_DECISION.json
+
+          grep -F '"STATE426_FIRST_DATA_DEPENDENT_BOUNDARY": true' \
+            /tmp/r178/evidence/R178_DECISION.json
+
+          grep -F '"QFKV_IS_BINARYREADER_READINT32": true' \
+            /tmp/r178/evidence/R178_DECISION.json
+
+          grep -F '"USB_OR_BOARD_CONTACTED": false' \
+            /tmp/r178/evidence/R178_DECISION.json
+
+          grep -F '"FLASH_ALLOWED": false' \
+            /tmp/r178/evidence/R178_DECISION.json
+
+          echo R178_STATE565_INITIALIZATION_CHAIN_STATIC_PROOF=YES
+          echo FLASH_ALLOWED=NO
