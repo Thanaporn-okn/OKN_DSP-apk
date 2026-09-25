@@ -1,0 +1,653 @@
+name: Build OKN BP1048P4 Firmware Lab SAFE
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Prepare Android SDK
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          SDK="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-/usr/local/lib/android/sdk}}"
+          export ANDROID_SDK_ROOT="$SDK"
+          export ANDROID_HOME="$SDK"
+
+          echo "Android SDK: $SDK"
+
+          if [ -x "$SDK/cmdline-tools/16.0/bin/sdkmanager" ]; then
+            SDKMANAGER="$SDK/cmdline-tools/16.0/bin/sdkmanager"
+          elif [ -x "$SDK/cmdline-tools/latest/bin/sdkmanager" ]; then
+            SDKMANAGER="$SDK/cmdline-tools/latest/bin/sdkmanager"
+          else
+            SDKMANAGER="$(command -v sdkmanager)"
+          fi
+
+          echo "sdkmanager: $SDKMANAGER"
+
+          yes | "$SDKMANAGER" --licenses >/dev/null 2>&1 || true
+          "$SDKMANAGER" "platforms;android-35" "build-tools;35.0.0"
+
+          test -d "$SDK/platforms/android-35"
+          test -d "$SDK/build-tools/35.0.0"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.10.2'
+
+      - name: Create Android project
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          rm -rf OKN_BP1048P4_FirmwareLab
+          mkdir -p OKN_BP1048P4_FirmwareLab/app/src/main/java/com/okn/bp1048lab
+
+          cat > OKN_BP1048P4_FirmwareLab/settings.gradle <<'EOF'
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+
+          rootProject.name = "OKN_BP1048P4_FirmwareLab"
+          include ":app"
+          EOF
+
+          cat > OKN_BP1048P4_FirmwareLab/build.gradle <<'EOF'
+          plugins {
+              id 'com.android.application' version '8.7.3' apply false
+          }
+          EOF
+
+          cat > OKN_BP1048P4_FirmwareLab/app/build.gradle <<'EOF'
+          plugins {
+              id 'com.android.application'
+          }
+
+          android {
+              namespace 'com.okn.bp1048lab'
+              compileSdk 35
+
+              defaultConfig {
+                  applicationId 'com.okn.bp1048lab'
+                  minSdk 26
+                  targetSdk 35
+                  versionCode 1
+                  versionName '1.0-safe'
+              }
+
+              compileOptions {
+                  sourceCompatibility JavaVersion.VERSION_17
+                  targetCompatibility JavaVersion.VERSION_17
+              }
+          }
+          EOF
+
+          cat > OKN_BP1048P4_FirmwareLab/app/src/main/AndroidManifest.xml <<'EOF'
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <uses-feature
+                  android:name="android.hardware.usb.host"
+                  android:required="true" />
+
+              <application
+                  android:allowBackup="false"
+                  android:label="OKN BP1048P4 Firmware Lab"
+                  android:theme="@android:style/Theme.Material.Light.NoActionBar">
+
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true"
+                      android:screenOrientation="portrait">
+
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+              </application>
+          </manifest>
+          EOF
+
+          cat > OKN_BP1048P4_FirmwareLab/app/src/main/java/com/okn/bp1048lab/MainActivity.java <<'EOF'
+          package com.okn.bp1048lab;
+
+          import android.app.Activity;
+          import android.app.PendingIntent;
+          import android.content.BroadcastReceiver;
+          import android.content.ClipData;
+          import android.content.ClipboardManager;
+          import android.content.Context;
+          import android.content.Intent;
+          import android.content.IntentFilter;
+          import android.database.Cursor;
+          import android.hardware.usb.UsbConstants;
+          import android.hardware.usb.UsbDevice;
+          import android.hardware.usb.UsbDeviceConnection;
+          import android.hardware.usb.UsbEndpoint;
+          import android.hardware.usb.UsbInterface;
+          import android.hardware.usb.UsbManager;
+          import android.net.Uri;
+          import android.os.Build;
+          import android.os.Bundle;
+          import android.provider.OpenableColumns;
+          import android.view.ViewGroup;
+          import android.widget.Button;
+          import android.widget.LinearLayout;
+          import android.widget.ScrollView;
+          import android.widget.TextView;
+          import android.widget.Toast;
+
+          import java.io.InputStream;
+          import java.security.MessageDigest;
+          import java.util.Locale;
+          import java.util.Map;
+
+          public class MainActivity extends Activity {
+
+              private static final String ACTION_USB_PERMISSION =
+                      "com.okn.bp1048lab.USB_PERMISSION";
+
+              private static final int TARGET_VID = 0x6324;
+              private static final int TARGET_PID = 0x1719;
+              private static final int TARGET_HID_IF = 4;
+
+              private static final int PICK_FIRMWARE = 1048;
+
+              private UsbManager usbManager;
+              private TextView logView;
+              private UsbDevice targetDevice;
+
+              private final BroadcastReceiver usbReceiver = new BroadcastReceiver() {
+                  @Override
+                  public void onReceive(Context context, Intent intent) {
+                      if (!ACTION_USB_PERMISSION.equals(intent.getAction())) return;
+
+                      UsbDevice device;
+                      if (Build.VERSION.SDK_INT >= 33) {
+                          device = intent.getParcelableExtra(
+                                  UsbManager.EXTRA_DEVICE, UsbDevice.class);
+                      } else {
+                          device = intent.getParcelableExtra(
+                                  UsbManager.EXTRA_DEVICE);
+                      }
+
+                      boolean granted = intent.getBooleanExtra(
+                              UsbManager.EXTRA_PERMISSION_GRANTED, false);
+
+                      append("USB permission: " + granted);
+
+                      if (granted && device != null) {
+                          targetDevice = device;
+                          inspectDevice(device);
+                      }
+                  }
+              };
+
+              @Override
+              protected void onCreate(Bundle savedInstanceState) {
+                  super.onCreate(savedInstanceState);
+
+                  usbManager = (UsbManager) getSystemService(Context.USB_SERVICE);
+
+                  IntentFilter filter = new IntentFilter(ACTION_USB_PERMISSION);
+                  if (Build.VERSION.SDK_INT >= 33) {
+                      registerReceiver(
+                              usbReceiver,
+                              filter,
+                              Context.RECEIVER_NOT_EXPORTED);
+                  } else {
+                      registerReceiver(usbReceiver, filter);
+                  }
+
+                  LinearLayout root = new LinearLayout(this);
+                  root.setOrientation(LinearLayout.VERTICAL);
+                  root.setPadding(24, 24, 24, 24);
+
+                  TextView title = new TextView(this);
+                  title.setText(
+                          "OKN BP1048P4 Firmware Lab — SAFE\n" +
+                          "VID:PID 6324:1719");
+                  title.setTextSize(20);
+                  root.addView(title);
+
+                  TextView safety = new TextView(this);
+                  safety.setText(
+                          "READ-ONLY USB inspection. " +
+                          "No erase / no program / no guessed bootloader command.");
+                  safety.setPadding(0, 8, 0, 16);
+                  root.addView(safety);
+
+                  Button scan = new Button(this);
+                  scan.setText("1. SCAN DSP USB");
+                  scan.setOnClickListener(v -> scanUsb());
+                  root.addView(scan);
+
+                  Button feature = new Button(this);
+                  feature.setText("2. READ HID FEATURE 8 BYTES");
+                  feature.setOnClickListener(v -> readFeature8());
+                  root.addView(feature);
+
+                  Button firmware = new Button(this);
+                  firmware.setText("3. SELECT / ANALYZE FIRMWARE FILE");
+                  firmware.setOnClickListener(v -> chooseFirmware());
+                  root.addView(firmware);
+
+                  Button flash = new Button(this);
+                  flash.setText("4. FLASH FIRMWARE — LOCKED");
+                  flash.setEnabled(false);
+                  root.addView(flash);
+
+                  Button copy = new Button(this);
+                  copy.setText("COPY LOG");
+                  copy.setOnClickListener(v -> copyLog());
+                  root.addView(copy);
+
+                  ScrollView scroll = new ScrollView(this);
+                  logView = new TextView(this);
+                  logView.setTextSize(12);
+                  logView.setTextIsSelectable(true);
+                  scroll.addView(logView);
+
+                  root.addView(
+                          scroll,
+                          new LinearLayout.LayoutParams(
+                                  ViewGroup.LayoutParams.MATCH_PARENT,
+                                  0,
+                                  1f));
+
+                  setContentView(root);
+
+                  append("Ready.");
+                  append("Expected target: 6324:1719");
+                  append("FLASH_ALLOWED=NO");
+                  append("Connect board by USB-C DATA/OTG cable.");
+              }
+
+              @Override
+              protected void onDestroy() {
+                  try {
+                      unregisterReceiver(usbReceiver);
+                  } catch (Exception ignored) {
+                  }
+                  super.onDestroy();
+              }
+
+              private void scanUsb() {
+                  targetDevice = null;
+                  append("");
+                  append("=== USB SCAN ===");
+
+                  Map<String, UsbDevice> devices = usbManager.getDeviceList();
+
+                  if (devices.isEmpty()) {
+                      append("No USB device detected.");
+                      return;
+                  }
+
+                  for (UsbDevice d : devices.values()) {
+                      append(String.format(
+                              Locale.US,
+                              "Device VID:PID=%04X:%04X interfaces=%d class=0x%02X",
+                              d.getVendorId(),
+                              d.getProductId(),
+                              d.getInterfaceCount(),
+                              d.getDeviceClass()));
+
+                      if (d.getVendorId() == TARGET_VID &&
+                              d.getProductId() == TARGET_PID) {
+                          targetDevice = d;
+                      }
+                  }
+
+                  if (targetDevice == null) {
+                      append("TARGET NOT FOUND: 6324:1719");
+                      return;
+                  }
+
+                  append("TARGET FOUND: 6324:1719");
+
+                  if (!usbManager.hasPermission(targetDevice)) {
+                      requestPermission(targetDevice);
+                      return;
+                  }
+
+                  inspectDevice(targetDevice);
+              }
+
+              private void requestPermission(UsbDevice device) {
+                  Intent intent = new Intent(ACTION_USB_PERMISSION);
+                  intent.setPackage(getPackageName());
+
+                  int flags = PendingIntent.FLAG_UPDATE_CURRENT;
+                  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                      flags |= PendingIntent.FLAG_MUTABLE;
+                  }
+
+                  PendingIntent pi =
+                          PendingIntent.getBroadcast(this, 1048, intent, flags);
+
+                  append("Requesting Android USB permission...");
+                  usbManager.requestPermission(device, pi);
+              }
+
+              private void inspectDevice(UsbDevice d) {
+                  append("");
+                  append("=== TARGET DESCRIPTORS ===");
+                  append("Device: " + d.getDeviceName());
+                  append(String.format(
+                          Locale.US,
+                          "VID:PID = %04X:%04X",
+                          d.getVendorId(),
+                          d.getProductId()));
+                  append("Configurations = " + d.getConfigurationCount());
+                  append("Interfaces = " + d.getInterfaceCount());
+
+                  try {
+                      append("Manufacturer = " + d.getManufacturerName());
+                      append("Product = " + d.getProductName());
+                      append("Serial = " + d.getSerialNumber());
+                  } catch (Throwable t) {
+                      append("String descriptors unavailable: " + t.getMessage());
+                  }
+
+                  for (int i = 0; i < d.getInterfaceCount(); i++) {
+                      UsbInterface intf = d.getInterface(i);
+
+                      append(String.format(
+                              Locale.US,
+                              "IF[%d] id=%d class=0x%02X subclass=0x%02X protocol=0x%02X eps=%d",
+                              i,
+                              intf.getId(),
+                              intf.getInterfaceClass(),
+                              intf.getInterfaceSubclass(),
+                              intf.getInterfaceProtocol(),
+                              intf.getEndpointCount()));
+
+                      for (int e = 0; e < intf.getEndpointCount(); e++) {
+                          UsbEndpoint ep = intf.getEndpoint(e);
+                          append(String.format(
+                                  Locale.US,
+                                  "  EP[%d] addr=0x%02X dir=%s type=%d maxPacket=%d interval=%d",
+                                  e,
+                                  ep.getAddress(),
+                                  ep.getDirection() == UsbConstants.USB_DIR_IN
+                                          ? "IN" : "OUT",
+                                  ep.getType(),
+                                  ep.getMaxPacketSize(),
+                                  ep.getInterval()));
+                      }
+                  }
+              }
+
+              private UsbInterface findTargetHidInterface(UsbDevice d) {
+                  for (int i = 0; i < d.getInterfaceCount(); i++) {
+                      UsbInterface intf = d.getInterface(i);
+
+                      if (intf.getId() == TARGET_HID_IF &&
+                              intf.getInterfaceClass() ==
+                                      UsbConstants.USB_CLASS_HID) {
+                          return intf;
+                      }
+                  }
+                  return null;
+              }
+
+              private void readFeature8() {
+                  append("");
+                  append("=== HID FEATURE READ ===");
+
+                  if (targetDevice == null) {
+                      append("Scan target first.");
+                      return;
+                  }
+
+                  if (!usbManager.hasPermission(targetDevice)) {
+                      requestPermission(targetDevice);
+                      return;
+                  }
+
+                  UsbInterface intf =
+                          findTargetHidInterface(targetDevice);
+
+                  if (intf == null) {
+                      append("HID interface ID 4 not found.");
+                      return;
+                  }
+
+                  UsbDeviceConnection connection =
+                          usbManager.openDevice(targetDevice);
+
+                  if (connection == null) {
+                      append("openDevice() failed.");
+                      return;
+                  }
+
+                  try {
+                      boolean claimed =
+                              connection.claimInterface(intf, true);
+
+                      append("claimInterface=" + claimed);
+
+                      if (!claimed) return;
+
+                      byte[] data = new byte[8];
+
+                      // USB HID class GET_REPORT:
+                      // bmRequestType = 0xA1
+                      // bRequest      = 0x01
+                      // wValue        = Feature report type (3) << 8
+                      // wIndex        = interface ID
+                      int n = connection.controlTransfer(
+                              0xA1,
+                              0x01,
+                              3 << 8,
+                              intf.getId(),
+                              data,
+                              data.length,
+                              1500);
+
+                      append("GET_REPORT Feature requested=8 result=" + n);
+
+                      if (n > 0) {
+                          append("HEX = " + hex(data, n));
+                      }
+
+                      connection.releaseInterface(intf);
+                  } catch (Throwable t) {
+                      append("Feature read error: " +
+                              t.getClass().getSimpleName() +
+                              ": " + t.getMessage());
+                  } finally {
+                      connection.close();
+                  }
+              }
+
+              private void chooseFirmware() {
+                  Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+                  intent.addCategory(Intent.CATEGORY_OPENABLE);
+                  intent.setType("*/*");
+
+                  startActivityForResult(intent, PICK_FIRMWARE);
+              }
+
+              @Override
+              protected void onActivityResult(
+                      int requestCode,
+                      int resultCode,
+                      Intent data) {
+
+                  super.onActivityResult(requestCode, resultCode, data);
+
+                  if (requestCode != PICK_FIRMWARE ||
+                          resultCode != RESULT_OK ||
+                          data == null ||
+                          data.getData() == null) {
+                      return;
+                  }
+
+                  analyzeFirmware(data.getData());
+              }
+
+              private void analyzeFirmware(Uri uri) {
+                  append("");
+                  append("=== OFFLINE FIRMWARE FILE ANALYSIS ===");
+
+                  String name = queryName(uri);
+                  append("Name = " + name);
+
+                  try (InputStream in =
+                               getContentResolver().openInputStream(uri)) {
+
+                      if (in == null) {
+                          append("Unable to open file.");
+                          return;
+                      }
+
+                      MessageDigest digest =
+                              MessageDigest.getInstance("SHA-256");
+
+                      byte[] buffer = new byte[8192];
+                      byte[] header = new byte[64];
+
+                      long total = 0;
+                      int headerUsed = 0;
+                      int n;
+
+                      while ((n = in.read(buffer)) > 0) {
+                          digest.update(buffer, 0, n);
+
+                          if (headerUsed < header.length) {
+                              int copy = Math.min(
+                                      n,
+                                      header.length - headerUsed);
+                              System.arraycopy(
+                                      buffer, 0,
+                                      header, headerUsed,
+                                      copy);
+                              headerUsed += copy;
+                          }
+
+                          total += n;
+                      }
+
+                      append("Size = " + total + " bytes");
+                      append("SHA-256 = " + hex(digest.digest(), 32));
+                      append("Header[0.." + headerUsed + "] = " +
+                              hex(header, headerUsed));
+
+                      append("Analysis only. No bytes were sent to DSP.");
+                      append("FLASH remains locked until bootloader protocol,");
+                      append("flash map, backup/readback and recovery are proven.");
+
+                  } catch (Throwable t) {
+                      append("Analyze error: " +
+                              t.getClass().getSimpleName() +
+                              ": " + t.getMessage());
+                  }
+              }
+
+              private String queryName(Uri uri) {
+                  Cursor c = null;
+                  try {
+                      c = getContentResolver().query(
+                              uri, null, null, null, null);
+
+                      if (c != null && c.moveToFirst()) {
+                          int idx =
+                                  c.getColumnIndex(OpenableColumns.DISPLAY_NAME);
+                          if (idx >= 0) return c.getString(idx);
+                      }
+                  } catch (Throwable ignored) {
+                  } finally {
+                      if (c != null) c.close();
+                  }
+                  return uri.toString();
+              }
+
+              private void copyLog() {
+                  ClipboardManager cm =
+                          (ClipboardManager) getSystemService(
+                                  Context.CLIPBOARD_SERVICE);
+
+                  cm.setPrimaryClip(
+                          ClipData.newPlainText(
+                                  "OKN BP1048P4 Log",
+                                  logView.getText()));
+
+                  Toast.makeText(
+                          this,
+                          "Log copied",
+                          Toast.LENGTH_SHORT).show();
+              }
+
+              private String hex(byte[] data, int length) {
+                  StringBuilder sb = new StringBuilder();
+
+                  int safe = Math.min(length, data.length);
+
+                  for (int i = 0; i < safe; i++) {
+                      if (i > 0) sb.append(' ');
+                      sb.append(String.format(
+                              Locale.US,
+                              "%02X",
+                              data[i] & 0xFF));
+                  }
+
+                  return sb.toString();
+              }
+
+              private void append(String s) {
+                  logView.append(s + "\n");
+              }
+          }
+          EOF
+
+      - name: Build debug APK
+        shell: bash
+        working-directory: OKN_BP1048P4_FirmwareLab
+        run: |
+          set -euo pipefail
+          gradle --no-daemon :app:assembleDebug
+
+      - name: Show APK SHA-256
+        shell: bash
+        run: |
+          set -euo pipefail
+          sha256sum \
+            OKN_BP1048P4_FirmwareLab/app/build/outputs/apk/debug/app-debug.apk
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: OKN-BP1048P4-FirmwareLab-SAFE-APK
+          path: OKN_BP1048P4_FirmwareLab/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
