@@ -1,0 +1,307 @@
+name: R168 N9 local37 reaching definitions static audit
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - ".github/workflows/R168_N9_LOCAL37_REACHING_DEFINITIONS_STATIC_AUDIT.yml"
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: r168-static-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  FLASH_ALLOWED: "NO"
+
+jobs:
+  static_audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Immutable safety gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$FLASH_ALLOWED" = "NO"
+          mkdir -p /tmp/r168/evidence
+          cat > /tmp/r168/evidence/R168_SAFETY.txt <<'EOF'
+          MODE=OFFLINE_STATIC_IL_TEXT_ONLY
+          FLASH_ALLOWED=NO
+          USB_OR_BOARD_CONTACT=NO
+          VENDOR_EXE_DLL_APK_EXECUTED=NO
+          OFFLINE_DECRYPT_EXECUTED=NO
+          AA55_OR_LINEIN_AA55_SENT=NO
+          RUNTIME_0X11_OR_0XFE_SENT=NO
+          FLASH_READ_ERASE_WRITE_EXECUTED=NO
+          DISCOVERED_FRAME_LIVE_AUTHORIZED=NO
+          HARDWARE_MODIFICATION=FORBIDDEN
+          EOF
+
+      - name: Download pinned R167 evidence
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          artifact-ids: "10853359828"
+          path: /tmp/r168/r167
+          merge-multiple: true
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          repository: Thanaporn-okn/OKN_DSP-apk
+          run-id: 36114042547
+
+      - name: Download pinned R157 raw evidence chain
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          artifact-ids: "10820682068"
+          path: /tmp/r168/r157
+          merge-multiple: true
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          repository: Thanaporn-okn/OKN_DSP-apk
+          run-id: 36028455796
+
+      - name: Audit exact local37 producers and reaching-definition candidates
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PYCODE'
+          from pathlib import Path
+          import hashlib, io, json, re, zipfile
+
+          base = Path("/tmp/r168")
+          out = base / "evidence"
+          out.mkdir(parents=True, exist_ok=True)
+
+          def open_inner(folder, name, expected_sha):
+              p = base / folder / name
+              data = p.read_bytes()
+              got = hashlib.sha256(data).hexdigest()
+              assert got == expected_sha, (name, got, expected_sha)
+              sha_file = p.with_name(p.name + ".sha256")
+              assert sha_file.exists(), f"missing {sha_file.name}"
+              assert sha_file.read_text().split()[0] == expected_sha
+              return zipfile.ZipFile(io.BytesIO(data))
+
+          r167 = open_inner(
+              "r167",
+              "R167_N9_STATE96_TO_STATE94_POINTER_ROUTE_EVIDENCE.zip",
+              "137809e8898e9fdfa558b8b61d65ad644b709a6c93497b9eaddbd7c5a210315d",
+          )
+          prior = json.loads(r167.read("R167_DECISION.json"))
+          assert prior["revision"] == "R167"
+          assert prior["STATE96_LOCAL29_ALIAS_LOCAL37_PROVEN"] is True
+          assert prior["POINTER_XOR_LOOP_PROVEN"] is True
+          assert prior["LOCAL29_BYTES_AT_STATE94_PROVEN"] is False
+          assert prior["OFFLINE_DECRYPT_AUTHORIZED"] is False
+          assert prior["FLASH_ALLOWED"] is False
+
+          r157 = open_inner(
+              "r157",
+              "R157_N9_LOCAL29_LOCAL81_NONNULL_LOCAL93_LOOP_BRANCH_EVIDENCE.zip",
+              "f974c64c63eea5f2b940c76101f4ab6e769803f5630a2d87d21d08679c321609",
+          )
+
+          prefix = "r156/r155/r154/r153/r152/r151/r150/r149/r148/r147/r146/r145/r144/r143/"
+          raw = r157.read(prefix + "R143_N9_METHOD.il")
+          assert hashlib.sha256(raw).hexdigest() == "5a3964c1f4bd8db455e6882a4ce6f90667e1a9abc6e1fafd10440b31006e4a33"
+          text = raw.decode()
+
+          r155 = json.loads(r157.read("r156/r155/R155_DECISION.json"))
+          r156 = json.loads(r157.read("r156/R156_DECISION.json"))
+          assert r155["R155_SYMBOLICALLY_ACCOUNTED_CONDITIONAL_STATES"] == [33, 215, 458]
+          assert r156["LOCAL77_MONOTONIC_ZERO_TO_GUARD_EXIT_3"] is True
+          assert r156["LOCAL79_MONOTONIC_ZERO_TO_GUARD_EXIT_3"] is True
+          assert r156["R155_OUTER_LOOP_SYMBOLIC_MODEL_PRESERVED"] is True
+
+          rows = []
+          for line in text.splitlines():
+              m = re.match(r"\s*(IL_[0-9a-f]+):\s+(\S+)(?:\s+(.*))?$", line)
+              if m:
+                  rows.append((m.group(1), m.group(2), (m.group(3) or "").split(" //", 1)[0].strip()))
+          pos = {lab: i for i, (lab, _, _) in enumerate(rows)}
+
+          sm = re.search(r"IL_0012:\s+switch \((.*?)\)\n", text, re.S)
+          assert sm
+          targets = [x.strip() for x in sm.group(1).split(",")]
+          assert len(targets) == 689
+
+          target_positions = sorted((pos[lab], st, lab) for st, lab in enumerate(targets))
+          blocks = {}
+          for i, (p0, st, lab) in enumerate(target_positions):
+              p1 = target_positions[i + 1][0] if i + 1 < len(target_positions) else len(rows)
+              blocks[st] = rows[p0:p1]
+
+          def stores(local):
+              outv = []
+              for st, block in blocks.items():
+                  for lab, op, arg in block:
+                      if op in ("stloc", "stloc.s") and arg == str(local):
+                          outv.append((st, lab))
+              return sorted(outv)
+
+          assert stores(37) == [(668, "IL_403a")]
+          assert stores(67) == [(313, "IL_1944")]
+          assert stores(76) == [(2, "IL_21e0"), (15, "IL_5444"), (370, "IL_55e3")]
+          assert stores(82) == [(342, "IL_61d4"), (523, "IL_5a87"), (589, "IL_3dd8"), (596, "IL_37c3"), (669, "IL_53c1")]
+          assert stores(105) == [(46, "IL_5d20"), (235, "IL_2620"), (299, "IL_611c"), (368, "IL_47f6"), (664, "IL_488e")]
+
+          expected = {
+              668: [
+                  ("ldloc.s", "27"), ("ldlen", ""), ("conv.i4", ""),
+                  ("newarr", "[mscorlib]System.Byte"), ("stloc.s", "37"),
+                  ("ldc.i4", "484"), ("br", "IL_0012")
+              ],
+              313: [
+                  ("ldloc.s", "38"), ("ldc.i4.4", ""), ("mul", ""),
+                  ("stloc.s", "67"), ("ldc.i4", "2"), ("br", "IL_0012")
+              ],
+              15: [
+                  ("ldloc.s", "67"), ("stloc.s", "76"),
+                  ("ldc.i4", "299"), ("br", "IL_0012")
+              ],
+              342: [
+                  ("ldloc.s", "27"), ("ldloc.s", "76"), ("ldc.i4.3", ""), ("add", ""), ("ldelem.u1", ""),
+                  ("ldc.i4.s", "24"), ("shl", ""),
+                  ("ldloc.s", "27"), ("ldloc.s", "76"), ("ldc.i4.2", ""), ("add", ""), ("ldelem.u1", ""),
+                  ("ldc.i4.s", "16"), ("shl", ""), ("or", ""),
+                  ("ldloc.s", "27"), ("ldloc.s", "76"), ("ldc.i4.1", ""), ("add", ""), ("ldelem.u1", ""),
+                  ("ldc.i4.8", ""), ("shl", ""), ("or", ""),
+                  ("ldloc.s", "27"), ("ldloc.s", "76"), ("ldelem.u1", ""), ("or", ""),
+                  ("stloc.s", "82"), ("ldc.i4", "664"), ("stloc", "95"), ("br", "IL_000e")
+              ],
+          }
+          for st, exp in expected.items():
+              got = [(op, arg) for _, op, arg in blocks[st]]
+              assert got == exp, (st, got)
+
+          write_states = {}
+          for st in [321, 95, 199, 617, 534]:
+              write_states[str(st)] = blocks[st]
+
+          # Four-byte word writes: local37[local67+0..3] <- little-endian local24.
+          assert [(op, arg) for _, op, arg in blocks[321]][:7] == [
+              ("ldloc.s", "37"), ("ldloc.s", "67"), ("ldloc.s", "24"),
+              ("ldc.i4", "255"), ("and", ""), ("conv.u1", ""), ("stelem.i1", "")
+          ]
+          assert [(op, arg) for _, op, arg in blocks[95]][:12] == [
+              ("ldloc.s", "37"), ("ldloc.s", "67"), ("ldc.i4.1", ""), ("add", ""),
+              ("ldloc.s", "24"), ("ldc.i4", "65280"), ("and", ""), ("ldc.i4.8", ""),
+              ("shr.un", ""), ("conv.u1", ""), ("stelem.i1", ""), ("ldc.i4", "199")
+          ]
+          assert [(op, arg) for _, op, arg in blocks[199]][:12] == [
+              ("ldloc.s", "37"), ("ldloc.s", "67"), ("ldc.i4.2", ""), ("add", ""),
+              ("ldloc.s", "24"), ("ldc.i4", "16711680"), ("and", ""), ("ldc.i4.s", "16"),
+              ("shr.un", ""), ("conv.u1", ""), ("stelem.i1", ""), ("ldc.i4", "617")
+          ]
+          assert [(op, arg) for _, op, arg in blocks[617]][:12] == [
+              ("ldloc.s", "37"), ("ldloc.s", "67"), ("ldc.i4.3", ""), ("add", ""),
+              ("ldloc.s", "24"), ("ldc.i4", "-16777216"), ("and", ""), ("ldc.i4.s", "24"),
+              ("shr.un", ""), ("conv.u1", ""), ("stelem.i1", ""), ("ldc.i4", "451")
+          ]
+
+          # Remainder path writes local37[local67+local79] from transformed local22.
+          b534 = [(op, arg) for _, op, arg in blocks[534]]
+          assert b534[:14] == [
+              ("ldloc.s", "37"), ("ldloc.s", "67"), ("ldloc.s", "79"), ("add", ""),
+              ("ldloc.s", "22"), ("ldloc.s", "60"), ("and", ""),
+              ("ldloc.s", "0"), ("ldc.i4.s", "31"), ("and", ""), ("shr.un", ""),
+              ("conv.u1", ""), ("stelem.i1", ""), ("ldc.i4", "244")
+          ]
+
+          # Exact producer equations already recovered in R166.
+          local24_defs = [r for r in rows if r[1] in ("stloc", "stloc.s") and r[2] == "24"]
+          local22_defs = [r for r in rows if r[1] in ("stloc", "stloc.s") and r[2] == "22"]
+          assert ("IL_1177", "stloc.s", "24") in local24_defs
+          assert ("IL_1c9c", "stloc.s", "22") in local22_defs
+
+          result = {
+              "revision": "R168",
+              "R167_RUN_ID": 36114042547,
+              "R167_JOB_ID": 108003812938,
+              "R167_ARTIFACT_ID": 10853359828,
+              "R167_ARTIFACT_DIGEST": "sha256:2aae51a5e45b1ab98a842a5ab9483c2e76f8bcded543a17bc54b2908c6be915f",
+              "R167_INNER_SHA256": "137809e8898e9fdfa558b8b61d65ad644b709a6c93497b9eaddbd7c5a210315d",
+              "N9_SHA256": hashlib.sha256(raw).hexdigest(),
+              "LOCAL37_SINGLE_ALLOCATION_DEF_PROVEN": True,
+              "LOCAL37_ALLOCATION_STATE": 668,
+              "LOCAL67_SINGLE_DEFINITION_PROVEN": True,
+              "LOCAL67_DEFINITION": "state313: local67 = local38 * 4",
+              "LOCAL37_FOUR_BYTE_WORD_WRITE_SURFACE_PROVEN": True,
+              "LOCAL37_WORD_WRITE_STATES": [321, 95, 199, 617],
+              "LOCAL37_WORD_WRITE_SEMANTICS": "local37[local67+0..3] = little-endian bytes of local24",
+              "LOCAL37_REMAINDER_WRITE_SURFACE_PROVEN": True,
+              "LOCAL37_REMAINDER_WRITE_STATE": 534,
+              "LOCAL37_REMAINDER_INDEX": "local67 + local79",
+              "LOCAL24_PRODUCER_SITE_CONFIRMED": "IL_1177: local24 = local105 XOR local82",
+              "LOCAL22_PRODUCER_SITE_CONFIRMED": "IL_1c9c: local22 = local105 XOR local82",
+              "LOCAL76_STORE_SITES": stores(76),
+              "LOCAL82_STORE_SITES": stores(82),
+              "LOCAL105_STORE_SITES": stores(105),
+              "LOCAL76_REACHING_DEFINITION_FULLY_RESOLVED": False,
+              "LOCAL82_REACHING_DEFINITION_FULLY_RESOLVED": False,
+              "LOCAL105_REACHING_DEFINITION_FULLY_RESOLVED": False,
+              "R155_OUTER_LOOP_SYMBOLIC_MODEL_PRESERVED": True,
+              "LOCAL77_MONOTONIC_ZERO_TO_GUARD_EXIT_3": True,
+              "LOCAL79_MONOTONIC_ZERO_TO_GUARD_EXIT_3": True,
+              "LOCAL37_FULL_RECONSTRUCTION_EXECUTED": False,
+              "EXACT_LOCAL37_BYTES_PROVEN": False,
+              "LOCAL29_BYTES_AT_STATE94_PROVEN": False,
+              "WHY_NOT_YET": "The complete write surface and producer equations are now pinned, but the exact reaching definitions of local105/local82/local76 at each local24/local22 production visit are not yet selected from their multiple store sites.",
+              "UNACCOUNTED_CONDITIONAL_COUNT_AFTER_R168": 3,
+              "remaining_unaccounted_conditionals": prior["remaining_unaccounted_conditionals"],
+              "INDEPENDENT_FULL_PATH_BRANCH_COVERAGE_PROVEN": False,
+              "OFFLINE_DECRYPT_AUTHORIZED": False,
+              "H15_PLAINTEXT_RECOVERED": False,
+              "ANY_DISCOVERED_FRAME_AUTHORIZED_FOR_BOARD": False,
+              "FLASH_ALLOWED": False,
+              "NEXT": "R169: trace the exact dispatcher path from state668 allocation through every local24/local22 production visit to state96, and select the reaching stores for local105/local82/local76 at each visit. Combine with R155/R156 loop schedules. Do not reconstruct/decrypt until those reaching definitions are proven."
+          }
+
+          (out / "R168_DECISION.json").write_text(json.dumps(result, indent=2) + "\n")
+          (out / "R168_LOCAL37_WRITE_SURFACE.json").write_text(json.dumps({
+              "stores": {
+                  "local37": stores(37),
+                  "local67": stores(67),
+                  "local76": stores(76),
+                  "local82": stores(82),
+                  "local105": stores(105),
+              },
+              "write_states": write_states,
+          }, indent=2) + "\n")
+          (out / "R167_DECISION.json").write_text(json.dumps(prior, indent=2) + "\n")
+          print(json.dumps(result, indent=2))
+          PYCODE
+
+      - name: Package R168 evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /tmp/r168/evidence
+          zip -9 -r /tmp/R168_N9_LOCAL37_REACHING_DEFINITIONS_EVIDENCE.zip . >/dev/null
+          sha256sum /tmp/R168_N9_LOCAL37_REACHING_DEFINITIONS_EVIDENCE.zip \
+            > /tmp/R168_N9_LOCAL37_REACHING_DEFINITIONS_EVIDENCE.zip.sha256
+
+      - name: Upload R168 evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: R168-N9-LOCAL37-REACHING-DEFINITIONS-STATIC-EVIDENCE
+          path: |
+            /tmp/R168_N9_LOCAL37_REACHING_DEFINITIONS_EVIDENCE.zip
+            /tmp/R168_N9_LOCAL37_REACHING_DEFINITIONS_EVIDENCE.zip.sha256
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Final fail-closed gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$FLASH_ALLOWED" = "NO"
+          grep -F '"LOCAL37_FOUR_BYTE_WORD_WRITE_SURFACE_PROVEN": true' /tmp/r168/evidence/R168_DECISION.json
+          grep -F '"LOCAL67_SINGLE_DEFINITION_PROVEN": true' /tmp/r168/evidence/R168_DECISION.json
+          grep -F '"EXACT_LOCAL37_BYTES_PROVEN": false' /tmp/r168/evidence/R168_DECISION.json
+          grep -F '"OFFLINE_DECRYPT_AUTHORIZED": false' /tmp/r168/evidence/R168_DECISION.json
+          grep -F '"FLASH_ALLOWED": false' /tmp/r168/evidence/R168_DECISION.json
+          echo R168_LOCAL37_REACHING_DEFINITIONS_STATIC_AUDIT_COMPLETE=YES
+          echo FLASH_ALLOWED=NO
