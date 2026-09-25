@@ -1,0 +1,504 @@
+name: R175 N9 patch-loop read-budget contradiction static audit
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - ".github/workflows/R175_N9_PATCH_LOOP_READ_BUDGET_CONTRADICTION_STATIC_AUDIT.yml"
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: r175-static-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  FLASH_ALLOWED: "NO"
+
+jobs:
+  static_audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: Immutable safety gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$FLASH_ALLOWED" = "NO"
+          mkdir -p /tmp/r175/evidence
+          cat > /tmp/r175/evidence/R175_SAFETY.txt <<'EOF'
+          MODE=OFFLINE_STATIC_CONTROL_FLOW_AND_READ_BUDGET_ONLY
+          FLASH_ALLOWED=NO
+          USB_OR_BOARD_CONTACT=NO
+          VENDOR_EXE_DLL_APK_EXECUTED=NO
+          AES_OR_CRYPTOSTREAM_DECRYPT_EXECUTED=NO
+          AA55_OR_LINEIN_AA55_SENT=NO
+          RUNTIME_0X11_OR_0XFE_SENT=NO
+          FLASH_READ_ERASE_WRITE_EXECUTED=NO
+          DISCOVERED_FRAME_LIVE_AUTHORIZED=NO
+          HARDWARE_MODIFICATION=FORBIDDEN
+          EOF
+
+      - name: Download pinned R174 evidence
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          artifact-ids: "10857447338"
+          path: /tmp/r175/r174
+          merge-multiple: true
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          repository: Thanaporn-okn/OKN_DSP-apk
+          run-id: 36121745207
+
+      - name: Download pinned R171 concrete state94 bytes
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          artifact-ids: "10856075889"
+          path: /tmp/r175/r171
+          merge-multiple: true
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          repository: Thanaporn-okn/OKN_DSP-apk
+          run-id: 36118258307
+
+      - name: Download pinned R157 historical IL chain
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          artifact-ids: "10820682068"
+          path: /tmp/r175/r157
+          merge-multiple: true
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          repository: Thanaporn-okn/OKN_DSP-apk
+          run-id: 36028455796
+
+      - name: Prove patch-loop byte budget contradiction
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PYCODE'
+          from pathlib import Path
+          import hashlib, io, json, re, struct, zipfile
+
+          base = Path("/tmp/r175")
+          out = base / "evidence"
+          out.mkdir(parents=True, exist_ok=True)
+
+          def inner(folder, name, expected_sha):
+              p = base / folder / name
+              data = p.read_bytes()
+              got = hashlib.sha256(data).hexdigest()
+              assert got == expected_sha, (name, got, expected_sha)
+              shp = p.with_name(p.name + ".sha256")
+              assert shp.exists(), f"missing {shp.name}"
+              assert shp.read_text().split()[0] == expected_sha
+              return zipfile.ZipFile(io.BytesIO(data))
+
+          r174 = inner(
+              "r174",
+              "R174_N9_UNREACHABLE_CRYPTOSTREAM_PATH_EVIDENCE.zip",
+              "907ba2ac21312363c9c6dc6bbeda1af04a4983cabc77c96abb0a7ca55c8cbef7",
+          )
+          d174 = json.loads(r174.read("R174_DECISION.json"))
+          d172 = json.loads(r174.read("R172_DECISION.json"))
+
+          assert d174["revision"] == "R174"
+          assert d174["STATE402_REACHABLE_ON_PROVEN_PRODUCTION_DIRECT_EXE_PATH"] is False
+          assert d174["ACTUAL_PRODUCTION_SUCCESSOR_AFTER_STATE278"] == 558
+          assert d174["UNACCOUNTED_CONDITIONAL_COUNT_AFTER_R174_PRODUCTION_DISTRIBUTION_MODEL"] == 0
+          assert d174["OFFLINE_DECRYPT_AUTHORIZED"] is False
+          assert d174["FLASH_ALLOWED"] is False
+
+          assert d172["STATE94_READER_CURSOR_RESET_ZERO_PROVEN"] is True
+          assert d172["STATE94_FIRST_SIX_READINT32_OFFSETS"] == [0,4,8,12,16,20]
+          assert d172["STATE94_FIRST_SIX_READINT32_I32"][4] == 2037921120
+          assert d172["STATE292_LOCAL28_INT32"] == 1731119784
+
+          r171 = inner(
+              "r171",
+              "R171_N9_CONCRETE_LOCAL37_STATE94_BYTES_EVIDENCE.zip",
+              "88161a5a174546e41d4c6803c51be16e387d9a67e7a1ef1080292c27ee68b1b8",
+          )
+          d171 = json.loads(r171.read("R171_DECISION.json"))
+          local29 = r171.read("R171_LOCAL29_STATE94.bin")
+
+          assert d171["revision"] == "R171"
+          assert d171["LOCAL29_BYTES_AT_STATE94_PROVEN"] is True
+          assert len(local29) == d171["LOCAL29_STATE94_LENGTH"] == 607967
+          assert hashlib.sha256(local29).hexdigest() == d171["LOCAL29_STATE94_SHA256"]
+          assert d171["OFFLINE_DECRYPT_AUTHORIZED"] is False
+
+          r157 = inner(
+              "r157",
+              "R157_N9_LOCAL29_LOCAL81_NONNULL_LOCAL93_LOOP_BRANCH_EVIDENCE.zip",
+              "f974c64c63eea5f2b940c76101f4ab6e769803f5630a2d87d21d08679c321609",
+          )
+
+          prefix = "r156/r155/r154/r153/r152/r151/r150/r149/r148/r147/r146/r145/r144/r143/"
+          n9_raw = r157.read(prefix + "R143_N9_METHOD.il")
+          full_raw = r157.read(
+              "r156/r155/r154/r153/r152/r151/r150/r149/r148/r147/r146/r145/r144/r143/r142/r141/r140/R140_FIXED_FULL.il"
+          )
+          assert hashlib.sha256(n9_raw).hexdigest() == "5a3964c1f4bd8db455e6882a4ce6f90667e1a9abc6e1fafd10440b31006e4a33"
+          assert hashlib.sha256(full_raw).hexdigest() == "aa1d369c8be7ee8d7b358fc5b0f6b0874f46711a9249fee70f413b900d234c66"
+
+          n9 = n9_raw.decode()
+          full = full_raw.decode()
+
+          rows = []
+          try_depth = {}
+          stack = []
+          for line in n9.splitlines():
+              s = line.strip()
+              if s == ".try":
+                  stack.append("try")
+              m = re.match(r"(IL_[0-9a-f]+):\s+(\S+)(?:\s+(.*))?$", s)
+              if m:
+                  lab = m.group(1)
+                  rows.append((lab, m.group(2), (m.group(3) or "").split(" //",1)[0].strip()))
+                  try_depth[lab] = len(stack)
+              if "// end .try" in s:
+                  assert stack
+                  stack.pop()
+          assert not stack
+
+          pos = {lab:i for i,(lab,_,_) in enumerate(rows)}
+          sm = re.search(r"IL_0012:\s+switch \((.*?)\)\n", n9, re.S)
+          assert sm
+          targets = [x.strip() for x in sm.group(1).split(",")]
+          assert len(targets) == 689
+
+          tpos = sorted((pos[lab], st, lab) for st,lab in enumerate(targets))
+          blocks = {}
+          for i,(p0,st,lab) in enumerate(tpos):
+              p1 = tpos[i+1][0] if i+1 < len(tpos) else len(rows)
+              blocks[st] = rows[p0:p1]
+
+          def ops(st):
+              return [(op,arg) for _,op,arg in blocks[st]]
+
+          # R174 successor enters state558, which jumps to loop guard IL_31f4.
+          assert targets[558] == "IL_3851"
+          assert ops(558) == [
+              ("br","IL_31f4"),
+              ("ldc.i4","194"),
+              ("stloc","95"),
+              ("br","IL_000e"),
+          ]
+
+          # IL_31f4 lives in physical state183 and tests local35 < local71.
+          assert targets[183] == "IL_31f4"
+          assert ops(183)[:6] == [
+              ("ldloc.s","35"),
+              ("ldloc.s","71"),
+              ("blt","IL_3e63"),
+              ("ldc.i4","565"),
+              ("stloc","95"),
+              ("br","IL_000e"),
+          ]
+
+          # IL_45a9 path initializes local35=0 before state558.
+          i45 = pos["IL_45a9"]
+          assert [(op,arg) for _,op,arg in rows[i45:i45+5]] == [
+              ("ldc.i4.0",""),
+              ("stloc.s","35"),
+              ("ldc.i4","558"),
+              ("call","bool Q9Wet0jLP4YxXSyJBiC.q71r2Rj8SiD9GF1BI50::zfos5ENLukrcbiO4qNQ()"),
+              ("brtrue","IL_0012"),
+          ]
+
+          local35_entry = 0
+          local71 = d172["STATE94_FIRST_SIX_READINT32_I32"][4]
+          assert local71 == 2037921120
+          assert local35_entry < local71
+
+          # Each complete patch iteration reads exactly two Int32s:
+          # state194 = address delta, state533 = replacement word.
+          assert targets[194] == "IL_3e63"
+          assert ops(194) == [
+              ("ldloca.s","33"),
+              ("ldloc.s","68"),
+              ("ldloc.s","114"),
+              ("call","int32 Q9Wet0jLP4YxXSyJBiC.q71r2Rj8SiD9GF1BI50::qfkv4ZNDynVciIciQy6(object)"),
+              ("conv.i8",""),
+              ("add",""),
+              ("ldloc.s","99"),
+              ("conv.i8",""),
+              ("sub",""),
+              ("call","instance void [mscorlib]System.IntPtr::.ctor(int64)"),
+              ("ldc.i4","266"),
+              ("stloc","95"),
+              ("br","IL_000e"),
+          ]
+
+          assert targets[266] == "IL_6049"
+          assert ops(266)[:7] == [
+              ("ldloc.s","33"),
+              ("ldc.i4.4",""),
+              ("ldc.i4.4",""),
+              ("ldloca.s","106"),
+              ("call","int32 Q9Wet0jLP4YxXSyJBiC.q71r2Rj8SiD9GF1BI50::KNljOOvDry(native int, int32, int32, int32&)"),
+              ("brtrue","IL_2a4c"),
+              ("ldc.i4","291"),
+          ]
+          assert ops(266)[7:] == [
+              ("call","object Q9Wet0jLP4YxXSyJBiC.q71r2Rj8SiD9GF1BI50::omTjeHNp0inHSoSsOBH()"),
+              ("brtrue","IL_0012"),
+              ("pop",""),
+              ("ldc.i4","336"),
+              ("br","IL_0012"),
+          ]
+
+          assert targets[336] == "IL_5b43"
+          assert ops(336) == [
+              ("ldloc.s","33"),
+              ("ldc.i4.4",""),
+              ("ldc.i4.8",""),
+              ("ldloca.s","106"),
+              ("call","int32 Q9Wet0jLP4YxXSyJBiC.q71r2Rj8SiD9GF1BI50::KNljOOvDry(native int, int32, int32, int32&)"),
+              ("pop",""),
+              ("ldc.i4","533"),
+              ("br","IL_0012"),
+          ]
+
+          assert targets[533] == "IL_2a4c"
+          assert ops(533) == [
+              ("ldloc.s","33"),
+              ("ldloc.s","114"),
+              ("call","int32 Q9Wet0jLP4YxXSyJBiC.q71r2Rj8SiD9GF1BI50::qfkv4ZNDynVciIciQy6(object)"),
+              ("call","void Q9Wet0jLP4YxXSyJBiC.q71r2Rj8SiD9GF1BI50::cWTufTK81AUpaDL6ruM(native int, int32)"),
+              ("ldc.i4","306"),
+              ("call","object Q9Wet0jLP4YxXSyJBiC.q71r2Rj8SiD9GF1BI50::omTjeHNp0inHSoSsOBH()"),
+              ("brtrue","IL_0012"),
+              ("pop",""),
+              ("ldc.i4","518"),
+              ("br","IL_0012"),
+          ]
+
+          assert targets[518] == "IL_5e70"
+          assert ops(518) == [
+              ("ldloc.s","33"),
+              ("ldc.i4.4",""),
+              ("ldloc.s","106"),
+              ("ldloca.s","106"),
+              ("call","int32 Q9Wet0jLP4YxXSyJBiC.q71r2Rj8SiD9GF1BI50::KNljOOvDry(native int, int32, int32, int32&)"),
+              ("pop",""),
+              ("ldc.i4","3"),
+              ("call","object Q9Wet0jLP4YxXSyJBiC.q71r2Rj8SiD9GF1BI50::omTjeHNp0inHSoSsOBH()"),
+              ("brtrue","IL_0012"),
+              ("pop",""),
+              ("ldc.i4","383"),
+              ("br","IL_0012"),
+          ]
+
+          assert targets[383] == "IL_277d"
+          assert ops(383) == [
+              ("ldloc.s","35"),
+              ("ldc.i4.1",""),
+              ("add",""),
+              ("stloc.s","35"),
+              ("ldc.i4","183"),
+              ("br","IL_0012"),
+          ]
+
+          # Prove helper semantics from full IL.
+          assert re.search(
+              r"int32 qfkv4ZNDynVciIciQy6 \(.*?"
+              r"IL_0000: ldarg 0.*?"
+              r"IL_0004: callvirt instance int32 .*?::sXXetjyGMH\(\).*?"
+              r"IL_0009: ret",
+              full, re.S
+          )
+          assert re.search(
+              r"instance int32 sXXetjyGMH \(\).*?"
+              r"IL_0008: ldfld object .*?::piIeSklUmq.*?"
+              r"IL_000d: callvirt instance int32 \[mscorlib\]System\.IO\.BinaryReader::ReadInt32\(\).*?"
+              r"IL_0012: ret",
+              full, re.S
+          )
+          assert re.search(
+              r"object omTjeHNp0inHSoSsOBH \(\).*?"
+              r"IL_0000: ldnull\s+IL_0001: ret",
+              full, re.S
+          )
+          assert re.search(
+              r"int32 KNljOOvDry \(.*?"
+              r'ldstr "Virtual ".*?ldstr "Protect".*?'
+              r"GetDelegateForFunctionPointer.*?"
+              r"::Invoke\(native int, int32, int32, int32&\)",
+              full, re.S
+          )
+          assert re.search(
+              r"void cWTufTK81AUpaDL6ruM \(.*?"
+              r"Marshal::WriteInt32\(native int, int32\).*?"
+              r"IL_000e: ret",
+              full, re.S
+          )
+
+          # Both VirtualProtect outcomes converge to state533:
+          # success -> IL_2a4c directly; failure -> omTje() is null -> state336 -> state533.
+          assert "IL_2a4c" == targets[533]
+          virtualprotect_outcomes_converge = True
+
+          # No explicit seek/rebind occurs in the loop states.
+          loop_states = [183,194,266,336,533,518,383]
+          loop_text = "\n".join(" ".join(x) for st in loop_states for x in blocks[st])
+          forbidden = [
+              "uKbcISNmDSreine16Qp",  # Stream.Position setter wrapper
+              "stloc.s 114",
+              "stloc 114",
+              "MemoryStream::.ctor",
+              "BinaryReader::.ctor",
+          ]
+          for token in forbidden:
+              assert token not in loop_text
+
+          # The two read sites are outside lexical .try regions in N9.
+          assert try_depth["IL_3e63"] == 0
+          assert try_depth["IL_2a4c"] == 0
+
+          # Exact reader byte budget.
+          reader_cursor_at_loop_entry = 24
+          total_len = len(local29)
+          available = total_len - reader_cursor_at_loop_entry
+          full_iterations = available // 8
+          remainder_after_full_iterations = available % 8
+
+          assert available == 607943
+          assert full_iterations == 75992
+          assert remainder_after_full_iterations == 7
+
+          # After 75,992 complete iterations:
+          # cursor=607960, local35=75992, still far below local71.
+          cursor_after_full = reader_cursor_at_loop_entry + full_iterations * 8
+          local35_after_full = local35_entry + full_iterations
+          assert cursor_after_full == 607960
+          assert local35_after_full == 75992
+          assert local35_after_full < local71
+
+          # Next iteration's first Int32 can consume 4 of the final 7 bytes.
+          next_first_read_offset = cursor_after_full
+          next_second_read_offset = next_first_read_offset + 4
+          bytes_available_for_second = total_len - next_second_read_offset
+
+          assert total_len - next_first_read_offset == 7
+          assert bytes_available_for_second == 3
+          assert bytes_available_for_second < 4
+
+          # Therefore, under standard BinaryReader.ReadInt32 semantics, the
+          # second read in state533 cannot return normally on that iteration.
+          # This conclusion requires no vendor execution and performs no read
+          # outside the already reconstructed local29 byte array.
+          loop_exit_reachable_before_read_exhaustion = (local71 <= full_iterations)
+          assert loop_exit_reachable_before_read_exhaustion is False
+
+          assert targets[565] == "IL_5b26"
+
+          result = {
+              "revision": "R175",
+              "R174_RUN_ID": 36121745207,
+              "R174_JOB_ID": 108028601673,
+              "R174_ARTIFACT_ID": 10857447338,
+              "R174_ARTIFACT_DIGEST": "sha256:e0fe22c8a3c0a86393d4bde2d9679ff909aaf4f76ff95092a5418be01b238c22",
+              "R174_INNER_SHA256": "907ba2ac21312363c9c6dc6bbeda1af04a4983cabc77c96abb0a7ca55c8cbef7",
+              "R171_INNER_SHA256": "88161a5a174546e41d4c6803c51be16e387d9a67e7a1ef1080292c27ee68b1b8",
+              "N9_SHA256": hashlib.sha256(n9_raw).hexdigest(),
+
+              "STATE558_ENTRY_PROVEN": True,
+              "LOCAL35_AT_STATE558_ENTRY": local35_entry,
+              "LOCAL71_CONCRETE_INT32": local71,
+              "STATE558_FIRST_LOOP_BRANCH_TAKEN": True,
+
+              "PATCH_LOOP_TWO_READINT32_PER_COMPLETE_ITERATION_PROVEN": True,
+              "PATCH_LOOP_NATIVE_PROTECT_WRAPPER_IDENTIFIED_AS_VIRTUALPROTECT": True,
+              "PATCH_LOOP_WRITE_WRAPPER_IDENTIFIED_AS_MARSHAL_WRITEINT32": True,
+              "VIRTUALPROTECT_SUCCESS_AND_FAILURE_PATHS_CONVERGE_TO_STATE533": virtualprotect_outcomes_converge,
+              "PATCH_LOOP_EXPLICIT_READER_SEEK_OR_REBIND": False,
+              "PATCH_LOOP_READ_SITES_INSIDE_N9_TRY_REGION": False,
+
+              "LOCAL29_LENGTH": total_len,
+              "READER_CURSOR_AT_PATCH_LOOP_ENTRY": reader_cursor_at_loop_entry,
+              "PATCH_LOOP_BYTES_AVAILABLE": available,
+              "MAX_COMPLETE_PATCH_ITERATIONS_FROM_BUFFER": full_iterations,
+              "BYTES_REMAINING_AFTER_MAX_COMPLETE_ITERATIONS": remainder_after_full_iterations,
+              "LOCAL35_AFTER_MAX_COMPLETE_ITERATIONS": local35_after_full,
+              "LOOP_TARGET_LOCAL71": local71,
+              "LOOP_EXIT_CONDITION_CAN_BE_MET_BEFORE_READ_EXHAUSTION": False,
+
+              "NEXT_PARTIAL_ITERATION_FIRST_READ_OFFSET": next_first_read_offset,
+              "NEXT_PARTIAL_ITERATION_SECOND_READ_OFFSET": next_second_read_offset,
+              "BYTES_AVAILABLE_FOR_SECOND_READ": bytes_available_for_second,
+              "SECOND_READ_CAN_RETURN_NORMAL_INT32_UNDER_STANDARD_BINARYREADER_SEMANTICS": False,
+
+              "STATE565_NORMAL_LOOP_EXIT_REACHABLE_WITH_PROVEN_STATE94_BUFFER": False,
+              "SUCCESSFUL_N9_COMPLETION_FROM_R174_MODELED_PATH_PROVEN": False,
+              "R174_PRODUCTION_PATH_MODEL_SELF_CONSISTENT_THROUGH_PATCH_LOOP": False,
+              "MODEL_CONSISTENCY_CONTRADICTION_PROVEN": True,
+              "CONTRADICTION": "The R174-modeled state558 path requires local71=2037921120 patch iterations, but the proven 607967-byte state94 buffer permits only 75992 complete two-Int32 patch iterations plus 7 bytes. The next state's second ReadInt32 has only 3 bytes available, before local35 can reach local71.",
+
+              "UNACCOUNTED_CONDITIONAL_COUNT_REMAINS_ZERO_FOR_PREVIOUS_BRANCH_SET": True,
+              "NEW_BLOCKER_IS_NOT_AN_UNACCOUNTED_BRANCH": "reader byte-budget / normal-return contradiction",
+
+              "AES_OR_CRYPTOSTREAM_DECRYPT_EXECUTED": False,
+              "OFFLINE_DECRYPT_AUTHORIZED": False,
+              "H15_PLAINTEXT_RECOVERED": False,
+              "ANY_DISCOVERED_FRAME_AUTHORIZED_FOR_BOARD": False,
+              "FLASH_ALLOWED": False,
+
+              "NEXT": "R176: backtrack the earliest premise that can explain the patch-loop contradiction. Audit the provenance and reaching definition of local71 and local114 at the state558 entry, plus any earlier reader reset/rebind/transform between state94 and state292. Do not assume the R174 state558 route is a successful production initialization path; do not execute vendor code, decrypt raw h15, contact USB, or flash."
+          }
+
+          (out / "R175_DECISION.json").write_text(json.dumps(result, indent=2) + "\n")
+          (out / "R175_PATCH_LOOP_BUDGET.json").write_text(json.dumps({
+              "reader_cursor_entry": reader_cursor_at_loop_entry,
+              "buffer_length": total_len,
+              "local71": local71,
+              "full_iterations_possible": full_iterations,
+              "cursor_after_full_iterations": cursor_after_full,
+              "local35_after_full_iterations": local35_after_full,
+              "remaining_bytes": remainder_after_full_iterations,
+              "next_first_read_offset": next_first_read_offset,
+              "next_second_read_offset": next_second_read_offset,
+              "bytes_available_for_second_read": bytes_available_for_second,
+              "loop_states": loop_states,
+          }, indent=2) + "\n")
+          (out / "R174_DECISION.json").write_text(json.dumps(d174, indent=2) + "\n")
+          (out / "R172_DECISION.json").write_text(json.dumps(d172, indent=2) + "\n")
+          print(json.dumps(result, indent=2))
+          PYCODE
+
+      - name: Package R175 evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /tmp/r175/evidence
+          zip -9 -r /tmp/R175_N9_PATCH_LOOP_READ_BUDGET_CONTRADICTION_EVIDENCE.zip . >/dev/null
+          sha256sum /tmp/R175_N9_PATCH_LOOP_READ_BUDGET_CONTRADICTION_EVIDENCE.zip \
+            > /tmp/R175_N9_PATCH_LOOP_READ_BUDGET_CONTRADICTION_EVIDENCE.zip.sha256
+
+      - name: Upload R175 evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: R175-N9-PATCH-LOOP-READ-BUDGET-CONTRADICTION-STATIC-EVIDENCE
+          path: |
+            /tmp/R175_N9_PATCH_LOOP_READ_BUDGET_CONTRADICTION_EVIDENCE.zip
+            /tmp/R175_N9_PATCH_LOOP_READ_BUDGET_CONTRADICTION_EVIDENCE.zip.sha256
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Final fail-closed gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$FLASH_ALLOWED" = "NO"
+          grep -F '"STATE558_ENTRY_PROVEN": true' /tmp/r175/evidence/R175_DECISION.json
+          grep -F '"PATCH_LOOP_TWO_READINT32_PER_COMPLETE_ITERATION_PROVEN": true' /tmp/r175/evidence/R175_DECISION.json
+          grep -F '"MAX_COMPLETE_PATCH_ITERATIONS_FROM_BUFFER": 75992' /tmp/r175/evidence/R175_DECISION.json
+          grep -F '"BYTES_AVAILABLE_FOR_SECOND_READ": 3' /tmp/r175/evidence/R175_DECISION.json
+          grep -F '"LOOP_EXIT_CONDITION_CAN_BE_MET_BEFORE_READ_EXHAUSTION": false' /tmp/r175/evidence/R175_DECISION.json
+          grep -F '"MODEL_CONSISTENCY_CONTRADICTION_PROVEN": true' /tmp/r175/evidence/R175_DECISION.json
+          grep -F '"SUCCESSFUL_N9_COMPLETION_FROM_R174_MODELED_PATH_PROVEN": false' /tmp/r175/evidence/R175_DECISION.json
+          grep -F '"OFFLINE_DECRYPT_AUTHORIZED": false' /tmp/r175/evidence/R175_DECISION.json
+          grep -F '"FLASH_ALLOWED": false' /tmp/r175/evidence/R175_DECISION.json
+          echo R175_PATCH_LOOP_READ_BUDGET_CONTRADICTION_STATIC_AUDIT_COMPLETE=YES
+          echo FLASH_ALLOWED=NO
