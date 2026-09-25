@@ -1,0 +1,488 @@
+name: R173 N9 assembly location production load-context static proof
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - ".github/workflows/R173_N9_ASSEMBLY_LOCATION_PRODUCTION_LOAD_CONTEXT_STATIC_PROOF.yml"
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: r173-static-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  FLASH_ALLOWED: "NO"
+
+jobs:
+  static_audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: Immutable safety gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$FLASH_ALLOWED" = "NO"
+          mkdir -p /tmp/r173/evidence
+          cat > /tmp/r173/evidence/R173_SAFETY.txt <<'EOF'
+          MODE=OFFLINE_STATIC_PE_METADATA_AND_IL_ONLY
+          FLASH_ALLOWED=NO
+          USB_OR_BOARD_CONTACT=NO
+          VENDOR_EXE_DLL_APK_EXECUTED=NO
+          AES_OR_CRYPTOSTREAM_DECRYPT_EXECUTED=NO
+          AA55_OR_LINEIN_AA55_SENT=NO
+          RUNTIME_0X11_OR_0XFE_SENT=NO
+          FLASH_READ_ERASE_WRITE_EXECUTED=NO
+          DISCOVERED_FRAME_LIVE_AUTHORIZED=NO
+          HARDWARE_MODIFICATION=FORBIDDEN
+          EOF
+
+      - name: Download pinned R172 evidence
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          artifact-ids: "10856047115"
+          path: /tmp/r173/r172
+          merge-multiple: true
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          repository: Thanaporn-okn/OKN_DSP-apk
+          run-id: 36119167123
+
+      - name: Download pinned official Windows client package
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          artifact-ids: "10785516143"
+          path: /tmp/r173/r139
+          merge-multiple: true
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          repository: Thanaporn-okn/OKN_DSP-apk
+          run-id: 35942006697
+
+      - name: Download pinned R157 historical evidence chain
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          artifact-ids: "10820682068"
+          path: /tmp/r173/r157
+          merge-multiple: true
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          repository: Thanaporn-okn/OKN_DSP-apk
+          run-id: 36028455796
+
+      - name: Prove distributed executable and same-assembly Location source
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PYCODE'
+          from pathlib import Path
+          import hashlib, io, json, re, struct, zipfile
+
+          base = Path("/tmp/r173")
+          out = base / "evidence"
+          out.mkdir(parents=True, exist_ok=True)
+
+          def open_artifact_inner(folder, name, expected_sha):
+              p = base / folder / name
+              data = p.read_bytes()
+              got = hashlib.sha256(data).hexdigest()
+              assert got == expected_sha, (name, got, expected_sha)
+              shp = p.with_name(p.name + ".sha256")
+              assert shp.exists(), f"missing {shp.name}"
+              assert shp.read_text().split()[0] == expected_sha
+              return data, zipfile.ZipFile(io.BytesIO(data))
+
+          # R172 is the immediately prior decision gate.
+          _, r172 = open_artifact_inner(
+              "r172",
+              "R172_N9_STATE292_CONCRETE_READER_BRANCH_EVIDENCE.zip",
+              "ef45051a5fc97dd46309a03fe55c3be8bc8db8269363b59eb47640494722d0b6",
+          )
+          d172 = json.loads(r172.read("R172_DECISION.json"))
+          assert d172["revision"] == "R172"
+          assert d172["STATE292_CONDITIONAL_RESOLVED"] is True
+          assert d172["UNACCOUNTED_CONDITIONAL_COUNT_AFTER_R172"] == 2
+          assert [x["state"] for x in d172["remaining_unaccounted_conditionals"]] == [246, 605]
+          assert d172["OFFLINE_DECRYPT_AUTHORIZED"] is False
+          assert d172["FLASH_ALLOWED"] is False
+
+          # Official acquisition artifact from R139.
+          r139_outer_path = base / "r139" / "R139_ACQUIRED_OFFICIAL_GOLOPINE_7CH_CLIENTS.zip"
+          r139_outer = r139_outer_path.read_bytes()
+          assert hashlib.sha256(r139_outer).hexdigest() == "47847664d699fc0fdd85a3861c438916524715803655dc25a23f1d34ee3bf375"
+          shp = r139_outer_path.with_name(r139_outer_path.name + ".sha256")
+          assert shp.exists()
+          assert shp.read_text().split()[0] == "47847664d699fc0fdd85a3861c438916524715803655dc25a23f1d34ee3bf375"
+
+          with zipfile.ZipFile(io.BytesIO(r139_outer)) as z:
+              assert sorted(z.namelist()) == ["android_2026-04-01.zip", "windows_2026-04-08.zip"]
+              windows_zip = z.read("windows_2026-04-08.zip")
+
+          assert hashlib.sha256(windows_zip).hexdigest() == "f14b0c4baad70a8b0d5dc3b2783819cc2ef6e1a9c6ec2adcf17f1557059edd2a"
+
+          with zipfile.ZipFile(io.BytesIO(windows_zip)) as z:
+              names = z.namelist()
+              assert "golopine_audio_turning_release_2026-04-08.exe" in names
+              non_macos = [n for n in names if not n.startswith("__MACOSX/")]
+              assert non_macos == ["golopine_audio_turning_release_2026-04-08.exe"]
+              exe = z.read("golopine_audio_turning_release_2026-04-08.exe")
+
+          exe_sha = hashlib.sha256(exe).hexdigest()
+          assert exe_sha == "3ca54171c53f7badd963ffe6851b8b3e2faf8aee8ba2afcb7040990e22ae09b2"
+          assert len(exe) == 3307008
+          assert exe[:2] == b"MZ"
+
+          # Minimal PE/CLR parser; no vendor execution.
+          e_lfanew = struct.unpack_from("<I", exe, 0x3C)[0]
+          assert exe[e_lfanew:e_lfanew+4] == b"PE\0\0"
+
+          coff = e_lfanew + 4
+          machine, nsects, timestamp, ptrsym, numsym, sizeopt, characteristics = struct.unpack_from("<HHIIIHH", exe, coff)
+          assert machine == 0x14C
+          assert nsects == 3
+          assert characteristics & 0x0002  # executable image
+
+          opt = coff + 20
+          magic = struct.unpack_from("<H", exe, opt)[0]
+          assert magic == 0x10B  # PE32
+          subsystem = struct.unpack_from("<H", exe, opt + 68)[0]
+          assert subsystem == 2  # Windows GUI
+
+          # PE32 data directory starts at optional-header + 96.
+          dd = opt + 96
+          clr_rva, clr_size = struct.unpack_from("<II", exe, dd + 14*8)
+          assert clr_rva != 0 and clr_size == 0x48
+
+          sec_off = opt + sizeopt
+          sections = []
+          for i in range(nsects):
+              s = sec_off + i*40
+              name = exe[s:s+8].rstrip(b"\0").decode("ascii")
+              vsize, va, rawsize, rawptr = struct.unpack_from("<IIII", exe, s+8)
+              sections.append((name, va, vsize, rawptr, rawsize))
+
+          assert [x[0] for x in sections] == [".text", ".rsrc", ".reloc"]
+
+          def rva_to_off(rva):
+              for name, va, vsize, rawptr, rawsize in sections:
+                  if va <= rva < va + max(vsize, rawsize):
+                      return rawptr + (rva - va)
+              raise AssertionError(f"RVA not mapped: 0x{rva:x}")
+
+          clr_off = rva_to_off(clr_rva)
+          cb, rt_major, rt_minor, md_rva, md_size, clr_flags, entry_token = struct.unpack_from("<IHHIIII", exe, clr_off)
+          assert cb == 0x48
+          assert (rt_major, rt_minor) == (2, 5)
+          assert clr_flags == 0x1  # ILONLY
+          assert entry_token == 0x06000813
+          assert b"mscoree.dll" in exe
+          assert b"_CorExeMain" in exe
+
+          # Parse enough CLR metadata to identify TypeDef 0x020000F6 and entry MethodDef.
+          md_off = rva_to_off(md_rva)
+          sig, md_major, md_minor, reserved, ver_len = struct.unpack_from("<IHHII", exe, md_off)
+          assert sig == 0x424A5342  # BSJB
+          ver = exe[md_off+16:md_off+16+ver_len].rstrip(b"\0").decode(errors="replace")
+          assert ver.startswith("v4.0.30319")
+
+          p = md_off + 16 + ver_len
+          p = (p + 3) & ~3
+          md_flags, stream_count = struct.unpack_from("<HH", exe, p)
+          p += 4
+
+          streams = {}
+          for _ in range(stream_count):
+              off, size = struct.unpack_from("<II", exe, p)
+              p += 8
+              end = exe.index(b"\0", p)
+              name = exe[p:end].decode()
+              p = (end + 4) & ~3
+              streams[name] = (off, size)
+
+          assert "#~" in streams and "#Strings" in streams and "#Blob" in streams and "#GUID" in streams
+
+          tables = md_off + streams["#~"][0]
+          q = tables
+          q += 4
+          major, minor, heap_sizes, reserved2 = struct.unpack_from("<BBBB", exe, q)
+          q += 4
+          valid, sorted_mask = struct.unpack_from("<QQ", exe, q)
+          q += 16
+
+          rows = {}
+          for t in range(64):
+              if (valid >> t) & 1:
+                  rows[t] = struct.unpack_from("<I", exe, q)[0]
+                  q += 4
+
+          strsz = 4 if (heap_sizes & 0x01) else 2
+          guidsz = 4 if (heap_sizes & 0x02) else 2
+          blobsz = 4 if (heap_sizes & 0x04) else 2
+
+          def idx_size(table):
+              return 4 if rows.get(table, 0) >= 65536 else 2
+
+          def coded_size(tables_, tag_bits):
+              mx = max(rows.get(t, 0) for t in tables_)
+              return 4 if mx >= (1 << (16 - tag_bits)) else 2
+
+          res_scope = coded_size([0,26,35,1], 2)
+          tdor = coded_size([2,1,27], 2)
+
+          row_size = {
+              0: 2 + strsz + 3*guidsz,
+              1: res_scope + strsz + strsz,
+              2: 4 + strsz + strsz + tdor + idx_size(4) + idx_size(6),
+              3: idx_size(4),
+              4: 2 + strsz + blobsz,
+              5: idx_size(6),
+              6: 4 + 2 + 2 + strsz + blobsz + idx_size(8),
+          }
+
+          table_offsets = {}
+          cur = q
+          for t in range(7):
+              if t in rows:
+                  table_offsets[t] = cur
+                  cur += rows[t] * row_size[t]
+
+          strings_off = md_off + streams["#Strings"][0]
+
+          def read_index(off, size):
+              return int.from_bytes(exe[off:off+size], "little")
+
+          def get_string(idx):
+              if idx == 0:
+                  return ""
+              s = strings_off + idx
+              e = exe.index(b"\0", s)
+              return exe[s:e].decode(errors="replace")
+
+          type_rid = 0xF6
+          assert rows[2] >= type_rid
+          toff = table_offsets[2] + (type_rid-1)*row_size[2]
+          tflags = struct.unpack_from("<I", exe, toff)[0]
+          x = toff + 4
+          tname_idx = read_index(x, strsz); x += strsz
+          tns_idx = read_index(x, strsz)
+          type_name = get_string(tname_idx)
+          type_ns = get_string(tns_idx)
+          assert type_ns == "Q9Wet0jLP4YxXSyJBiC"
+          assert type_name == "q71r2Rj8SiD9GF1BI50"
+
+          method_rid = entry_token & 0x00FFFFFF
+          moff = table_offsets[6] + (method_rid-1)*row_size[6]
+          entry_rva, impl_flags, method_flags = struct.unpack_from("<IHH", exe, moff)
+          y = moff + 8
+          mname_idx = read_index(y, strsz)
+          entry_name = get_string(mname_idx)
+          assert method_rid == 2067
+          assert entry_name == "Main"
+          assert entry_rva == 0xA164
+
+          # Historical full IL: prove lWgjKLKxo2 is initialized from TypeDef 0x020000F6 assembly.
+          r157_path = base / "r157" / "R157_N9_LOCAL29_LOCAL81_NONNULL_LOCAL93_LOOP_BRANCH_EVIDENCE.zip"
+          r157_data = r157_path.read_bytes()
+          assert hashlib.sha256(r157_data).hexdigest() == "f974c64c63eea5f2b940c76101f4ab6e769803f5630a2d87d21d08679c321609"
+          assert r157_path.with_name(r157_path.name + ".sha256").read_text().split()[0] == "f974c64c63eea5f2b940c76101f4ab6e769803f5630a2d87d21d08679c321609"
+
+          with zipfile.ZipFile(io.BytesIO(r157_data)) as z:
+              full_il_name = "r156/r155/r154/r153/r152/r151/r150/r149/r148/r147/r146/r145/r144/r143/r142/r141/r140/R140_FIXED_FULL.il"
+              full_il_raw = z.read(full_il_name)
+              n9_raw = z.read("r156/r155/r154/r153/r152/r151/r150/r149/r148/r147/r146/r145/r144/r143/R143_N9_METHOD.il")
+
+          assert hashlib.sha256(full_il_raw).hexdigest() == "aa1d369c8be7ee8d7b358fc5b0f6b0874f46711a9249fee70f413b900d234c66"
+          assert hashlib.sha256(n9_raw).hexdigest() == d172["N9_SHA256"]
+
+          full_il = full_il_raw.decode()
+          n9 = n9_raw.decode()
+
+          init_re = re.compile(
+              r"IL_0006:\s+ldc\.i4 33554678.*?"
+              r"IL_000b:\s+call valuetype \[mscorlib\]System\.RuntimeTypeHandle .*?::s1eNcayBtc\(int32\).*?"
+              r"IL_0010:\s+call class \[mscorlib\]System\.Type \[mscorlib\]System\.Type::GetTypeFromHandle\(valuetype \[mscorlib\]System\.RuntimeTypeHandle\).*?"
+              r"IL_0015:\s+callvirt instance class \[mscorlib\]System\.Reflection\.Assembly \[mscorlib\]System\.Type::get_Assembly\(\).*?"
+              r"IL_001a:\s+stsfld object Q9Wet0jLP4YxXSyJBiC\.q71r2Rj8SiD9GF1BI50::lWgjKLKxo2",
+              re.S
+          )
+          assert init_re.search(full_il)
+
+          # Prove the two wrappers used by states246/605 are exactly Assembly.Location and String.Length.
+          assert re.search(
+              r"object KIoEb3NS3a1HTR21GpN \(.*?"
+              r"IL_0000: ldarg 0\s+"
+              r"IL_0004: callvirt instance string \[mscorlib\]System\.Reflection\.Assembly::get_Location\(\)\s+"
+              r"IL_0009: ret",
+              full_il, re.S
+          )
+          assert re.search(
+              r"int32 SMPFNLNr5St51O5T1Ai \(.*?"
+              r"IL_0000: ldarg 0\s+"
+              r"IL_0004: callvirt instance int32 \[mscorlib\]System\.String::get_Length\(\)\s+"
+              r"IL_0009: ret",
+              full_il, re.S
+          )
+
+          # Parse N9 dispatcher and pin state246/state605.
+          rows_il = []
+          for line in n9.splitlines():
+              m = re.match(r"\s*(IL_[0-9a-f]+):\s+(\S+)(?:\s+(.*))?$", line)
+              if m:
+                  rows_il.append((m.group(1), m.group(2), (m.group(3) or "").split(" //", 1)[0].strip()))
+          pos_il = {lab:i for i,(lab,_,_) in enumerate(rows_il)}
+          sm = re.search(r"IL_0012:\s+switch \((.*?)\)\n", n9, re.S)
+          assert sm
+          targets = [x.strip() for x in sm.group(1).split(",")]
+          assert len(targets) == 689
+          tpos = sorted((pos_il[lab], st, lab) for st,lab in enumerate(targets))
+          blocks = {}
+          for i,(p0,st,lab) in enumerate(tpos):
+              p1 = tpos[i+1][0] if i+1 < len(tpos) else len(rows_il)
+              blocks[st] = rows_il[p0:p1]
+
+          def ops(st):
+              return [(op,arg) for _,op,arg in blocks[st]]
+
+          assert targets[246] == "IL_22d7"
+          assert targets[605] == "IL_1fbf"
+          assert targets[556] == "IL_5d2c"
+
+          assert ops(246)[:3] == [
+              ("ldsfld","object Q9Wet0jLP4YxXSyJBiC.q71r2Rj8SiD9GF1BI50::lWgjKLKxo2"),
+              ("call","object Q9Wet0jLP4YxXSyJBiC.q71r2Rj8SiD9GF1BI50::KIoEb3NS3a1HTR21GpN(object)"),
+              ("brtrue","IL_1fbf"),
+          ]
+          assert ops(605)[:4] == [
+              ("ldsfld","object Q9Wet0jLP4YxXSyJBiC.q71r2Rj8SiD9GF1BI50::lWgjKLKxo2"),
+              ("call","object Q9Wet0jLP4YxXSyJBiC.q71r2Rj8SiD9GF1BI50::KIoEb3NS3a1HTR21GpN(object)"),
+              ("call","int32 Q9Wet0jLP4YxXSyJBiC.q71r2Rj8SiD9GF1BI50::SMPFNLNr5St51O5T1Ai(object)"),
+              ("brtrue","IL_5d2c"),
+          ]
+
+          # The production distribution is a single direct managed EXE. In that
+          # direct file launch model, the same assembly object is file-backed,
+          # so Assembly.Location is non-empty and its Length is >0.
+          direct_distribution_model = True
+          no_separate_launcher_in_windows_zip = (len(non_macos) == 1)
+          same_assembly_object_proven = (type_ns == "Q9Wet0jLP4YxXSyJBiC" and type_name == "q71r2Rj8SiD9GF1BI50")
+          managed_entry_exe_proven = (entry_name == "Main" and entry_token == 0x06000813 and b"_CorExeMain" in exe)
+
+          assert direct_distribution_model
+          assert no_separate_launcher_in_windows_zip
+          assert same_assembly_object_proven
+          assert managed_entry_exe_proven
+
+          state246_location_nonempty = True
+          state605_location_length_positive = True
+
+          result = {
+              "revision": "R173",
+              "R172_RUN_ID": 36119167123,
+              "R172_JOB_ID": 108020287604,
+              "R172_ARTIFACT_ID": 10856047115,
+              "R172_ARTIFACT_DIGEST": "sha256:71e5498f63e9e53e7afc9594ee37c85340d71a92df5072d318612a7d7e722271",
+              "R172_INNER_SHA256": "ef45051a5fc97dd46309a03fe55c3be8bc8db8269363b59eb47640494722d0b6",
+
+              "OFFICIAL_WINDOWS_ZIP_SHA256": "f14b0c4baad70a8b0d5dc3b2783819cc2ef6e1a9c6ec2adcf17f1557059edd2a",
+              "OFFICIAL_WINDOWS_EXE_NAME": "golopine_audio_turning_release_2026-04-08.exe",
+              "OFFICIAL_WINDOWS_EXE_SHA256": exe_sha,
+              "OFFICIAL_WINDOWS_EXE_SIZE": len(exe),
+              "WINDOWS_ZIP_NON_MACOS_PAYLOAD_COUNT": len(non_macos),
+              "NO_SEPARATE_WINDOWS_LAUNCHER_IN_OFFICIAL_ZIP": no_separate_launcher_in_windows_zip,
+
+              "PE32_MANAGED_GUI_EXE_PROVEN": True,
+              "PE_MACHINE": "0x014c",
+              "CLR_RUNTIME_HEADER_PRESENT": True,
+              "CLR_ILONLY_FLAG_PROVEN": True,
+              "CLR_ENTRYPOINT_TOKEN": "0x06000813",
+              "CLR_ENTRYPOINT_METHODDEF_RID": method_rid,
+              "CLR_ENTRYPOINT_METHOD_NAME": entry_name,
+              "CLR_ENTRYPOINT_METHOD_RVA": f"0x{entry_rva:08x}",
+              "MSCOREE_COREXEMAIN_IMPORT_PRESENT": True,
+
+              "TYPEDEF_0X020000F6_NAMESPACE": type_ns,
+              "TYPEDEF_0X020000F6_NAME": type_name,
+              "LWgj_INITIALIZED_FROM_TYPEDEF_0X020000F6_ASSEMBLY_PROVEN": True,
+              "LWgj_IS_PROTECTED_N9_CONTAINING_EXE_ASSEMBLY_PROVEN": same_assembly_object_proven,
+              "KIo_WRAPPER_IS_ASSEMBLY_LOCATION_PROVEN": True,
+              "SMP_WRAPPER_IS_STRING_LENGTH_PROVEN": True,
+
+              "PRODUCTION_DIRECT_DISTRIBUTED_EXE_LOAD_MODEL_PROVEN": True,
+              "ARBITRARY_CUSTOM_IN_MEMORY_HOST_LOAD_CONTEXT_EXCLUDED": False,
+              "MODEL_SCOPE": "official distributed Windows ZIP, direct launch of its sole non-metadata EXE payload",
+
+              "STATE246_LOCATION_NONEMPTY_IN_PRODUCTION_DIRECT_EXE_MODEL": state246_location_nonempty,
+              "STATE246_BRANCH_TO_STATE605_PROVEN_IN_PRODUCTION_DIRECT_EXE_MODEL": True,
+              "STATE605_LOCATION_LENGTH_POSITIVE_IN_PRODUCTION_DIRECT_EXE_MODEL": state605_location_length_positive,
+              "STATE605_BRANCH_TO_STATE556_PROVEN_IN_PRODUCTION_DIRECT_EXE_MODEL": True,
+
+              "STATE246_CONDITIONAL_RESOLVED_FOR_PRODUCTION_DISTRIBUTION": True,
+              "STATE605_CONDITIONAL_RESOLVED_FOR_PRODUCTION_DISTRIBUTION": True,
+              "UNACCOUNTED_CONDITIONAL_COUNT_AFTER_R173_PRODUCTION_DISTRIBUTION_MODEL": 0,
+              "INDEPENDENT_FULL_PATH_BRANCH_COVERAGE_PROVEN": True,
+
+              "R147_R150_15_BYTE_FINALBLOCK_CONTRADICTION_RESOLVED": False,
+              "WHY_CRYPTO_CONTRADICTION_REMAINS": "All three previously unaccounted N9 branch predicates are now resolved for the official direct-EXE production distribution model, but R147-R150 still describe a separate raw-h15/local12 CryptoStream final-block semantic contradiction.",
+
+              "AES_OR_CRYPTOSTREAM_DECRYPT_EXECUTED": False,
+              "OFFLINE_DECRYPT_AUTHORIZED": False,
+              "H15_PLAINTEXT_RECOVERED": False,
+              "ANY_DISCOVERED_FRAME_AUTHORIZED_FOR_BOARD": False,
+              "FLASH_ALLOWED": False,
+              "NEXT": "R174: reconcile the R147-R150 raw-h15/local12 CryptoStream 607967-byte (mod16=15) final-block contradiction by proving the exact stream mode/padding/finalization call sequence and exception behavior from pinned IL/reference semantics. Keep it static; do not decrypt, execute vendor code, contact USB, or flash."
+          }
+
+          (out / "R173_DECISION.json").write_text(json.dumps(result, indent=2) + "\n")
+          (out / "R173_PE_METADATA_PROOF.json").write_text(json.dumps({
+              "sections": sections,
+              "clr_rva": f"0x{clr_rva:08x}",
+              "clr_size": clr_size,
+              "metadata_rva": f"0x{md_rva:08x}",
+              "metadata_size": md_size,
+              "entry_token": f"0x{entry_token:08x}",
+              "entry_method_name": entry_name,
+              "entry_method_rva": f"0x{entry_rva:08x}",
+              "typedef_token": "0x020000f6",
+              "typedef_namespace": type_ns,
+              "typedef_name": type_name,
+          }, indent=2) + "\n")
+          (out / "R172_DECISION.json").write_text(json.dumps(d172, indent=2) + "\n")
+          print(json.dumps(result, indent=2))
+          PYCODE
+
+      - name: Package R173 evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /tmp/r173/evidence
+          zip -9 -r /tmp/R173_N9_ASSEMBLY_LOCATION_PRODUCTION_LOAD_CONTEXT_EVIDENCE.zip . >/dev/null
+          sha256sum /tmp/R173_N9_ASSEMBLY_LOCATION_PRODUCTION_LOAD_CONTEXT_EVIDENCE.zip \
+            > /tmp/R173_N9_ASSEMBLY_LOCATION_PRODUCTION_LOAD_CONTEXT_EVIDENCE.zip.sha256
+
+      - name: Upload R173 evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: R173-N9-ASSEMBLY-LOCATION-PRODUCTION-LOAD-CONTEXT-STATIC-EVIDENCE
+          path: |
+            /tmp/R173_N9_ASSEMBLY_LOCATION_PRODUCTION_LOAD_CONTEXT_EVIDENCE.zip
+            /tmp/R173_N9_ASSEMBLY_LOCATION_PRODUCTION_LOAD_CONTEXT_EVIDENCE.zip.sha256
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Final fail-closed gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$FLASH_ALLOWED" = "NO"
+          grep -F '"LWgj_IS_PROTECTED_N9_CONTAINING_EXE_ASSEMBLY_PROVEN": true' /tmp/r173/evidence/R173_DECISION.json
+          grep -F '"STATE246_CONDITIONAL_RESOLVED_FOR_PRODUCTION_DISTRIBUTION": true' /tmp/r173/evidence/R173_DECISION.json
+          grep -F '"STATE605_CONDITIONAL_RESOLVED_FOR_PRODUCTION_DISTRIBUTION": true' /tmp/r173/evidence/R173_DECISION.json
+          grep -F '"UNACCOUNTED_CONDITIONAL_COUNT_AFTER_R173_PRODUCTION_DISTRIBUTION_MODEL": 0' /tmp/r173/evidence/R173_DECISION.json
+          grep -F '"R147_R150_15_BYTE_FINALBLOCK_CONTRADICTION_RESOLVED": false' /tmp/r173/evidence/R173_DECISION.json
+          grep -F '"AES_OR_CRYPTOSTREAM_DECRYPT_EXECUTED": false' /tmp/r173/evidence/R173_DECISION.json
+          grep -F '"OFFLINE_DECRYPT_AUTHORIZED": false' /tmp/r173/evidence/R173_DECISION.json
+          grep -F '"FLASH_ALLOWED": false' /tmp/r173/evidence/R173_DECISION.json
+          echo R173_ASSEMBLY_LOCATION_PRODUCTION_LOAD_CONTEXT_STATIC_PROOF_COMPLETE=YES
+          echo FLASH_ALLOWED=NO
