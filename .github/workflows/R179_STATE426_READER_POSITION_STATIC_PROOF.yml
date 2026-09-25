@@ -1,0 +1,502 @@
+name: R179 N9 state426 reader-position static proof
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - ".github/workflows/R179_STATE426_READER_POSITION_STATIC_PROOF.yml"
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: r179-static-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  FLASH_ALLOWED: "NO"
+
+jobs:
+  static_audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: Immutable safety gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$FLASH_ALLOWED" = "NO"
+          mkdir -p /tmp/r179/evidence
+
+          cat > /tmp/r179/evidence/R179_SAFETY.txt <<'EOF'
+          MODE=OFFLINE_STATIC_IL_AND_BYTE_AUDIT_ONLY
+          FLASH_ALLOWED=NO
+          USB_OR_BOARD_CONTACT=NO
+          VENDOR_EXE_DLL_APK_EXECUTED=NO
+          AES_OR_CRYPTOSTREAM_DECRYPT_EXECUTED=NO
+          AA55_OR_LINEIN_AA55_SENT=NO
+          RUNTIME_0X11_OR_0XFE_SENT=NO
+          UFE_RUNTIME_TX_SENT=NO
+          FLASH_READ_ERASE_WRITE_EXECUTED=NO
+          DISCOVERED_FRAME_LIVE_AUTHORIZED=NO
+          HARDWARE_MODIFICATION=FORBIDDEN
+          EOF
+
+      - name: Download pinned R178 evidence
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          artifact-ids: "10882982581"
+          path: /tmp/r179/r178
+          merge-multiple: true
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          repository: Thanaporn-okn/OKN_DSP-apk
+          run-id: 36178663953
+
+      - name: Download pinned R177 corrected bytes
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          artifact-ids: "10864507451"
+          path: /tmp/r179/r177
+          merge-multiple: true
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          repository: Thanaporn-okn/OKN_DSP-apk
+          run-id: 36137304534
+
+      - name: Download pinned R176 provenance proof
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          artifact-ids: "10861324699"
+          path: /tmp/r179/r176
+          merge-multiple: true
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          repository: Thanaporn-okn/OKN_DSP-apk
+          run-id: 36131572981
+
+      - name: Download pinned R157 raw IL evidence
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          artifact-ids: "10820682068"
+          path: /tmp/r179/r157
+          merge-multiple: true
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          repository: Thanaporn-okn/OKN_DSP-apk
+          run-id: 36028455796
+
+      - name: Prove concrete reader cursor and state426 branch
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python3 - <<'PYCODE'
+          from pathlib import Path
+          import hashlib
+          import io
+          import json
+          import re
+          import struct
+          import zipfile
+
+          base = Path("/tmp/r179")
+          out = base / "evidence"
+          out.mkdir(parents=True, exist_ok=True)
+
+          def open_inner(folder, filename, expected_sha):
+              p = base / folder / filename
+              data = p.read_bytes()
+              got = hashlib.sha256(data).hexdigest()
+              assert got == expected_sha, (filename, got, expected_sha)
+
+              sidecar = p.with_name(p.name + ".sha256")
+              assert sidecar.exists(), f"missing {sidecar}"
+              assert sidecar.read_text().split()[0] == expected_sha
+
+              return zipfile.ZipFile(io.BytesIO(data))
+
+          r178 = open_inner(
+              "r178",
+              "R178_N9_STATE565_INITIALIZATION_CHAIN_STATIC_EVIDENCE.zip",
+              "06c8f27af60f45830d16efec21b3d057653e52a06c1ec5ac3bfe27acab63709f",
+          )
+          d178 = json.loads(r178.read("R178_DECISION.json"))
+          assert d178["revision"] == "R178"
+          assert d178["R177_CORRECTED_STATE565_ENTRY_ACCEPTED"] is True
+          assert d178["STATE565_TO_543"] is True
+          assert d178["STATE543_TO_241"] is True
+          assert d178["STATE241_TO_571"] is True
+          assert d178["STATE571_TO_125"] is True
+          assert d178["STATE125_TO_242"] is True
+          assert d178["STATE242_TO_426"] is True
+          assert d178["STATE426_FIRST_DATA_DEPENDENT_BOUNDARY"] is True
+          assert d178["QFKV_IS_BINARYREADER_READINT32"] is True
+          assert d178["YOMY_IS_STREAM_POSITION"] is True
+          assert d178["B5FR_IS_STREAM_LENGTH"] is True
+          assert d178["FLASH_ALLOWED"] is False
+
+          r176 = open_inner(
+              "r176",
+              "R176_N9_LOCAL71_LOCAL114_PROVENANCE_CLOSURE_EVIDENCE.zip",
+              "643769719120dbd83b4d2631810d45d37f5f6a99c5186785fb0a180ddf1dd379",
+          )
+          d176 = json.loads(r176.read("R176_DECISION.json"))
+          assert d176["revision"] == "R176"
+          assert d176["LOCAL114_STATE94_BINDING_PROVEN"] is True
+          assert d176["LOCAL114_STATE94_SOURCE"] == \
+              "BinaryReader(MemoryStream(local29))"
+          assert d176["STATE52_READER_POSITION_RESET_ZERO_PROVEN"] is True
+          assert d176["LOCAL114_REBIND_AFTER_STATE94_BEFORE_STATE558"] is False
+          assert d176["READER_POSITION_RESET_AFTER_STATE52_BEFORE_STATE558"] is False
+          assert d176["EXACT_PRE_STATE292_READ_SEQUENCE_PROVEN"] is True
+          assert d176["READER_CURSOR_AT_STATE292_ENTRY"] == 24
+
+          expected_path_to_558 = [
+              94, 52, 453, 73, 279, 260, 246, 605,
+              556, 650, 614, 573, 535, 289, 292, 278, 558
+          ]
+          assert d176["PRODUCTION_PATH_STATES_TO_STATE558"] == expected_path_to_558
+
+          expected_reads = [
+              {"state": 556, "offset": 0,  "destination": "discard"},
+              {"state": 650, "offset": 4,  "destination": "discard"},
+              {"state": 614, "offset": 8,  "destination": "discard"},
+              {"state": 573, "offset": 12, "destination": "discard"},
+              {"state": 535, "offset": 16, "destination": "local71"},
+              {"state": 289, "offset": 20, "destination": "local28"},
+          ]
+          assert d176["READ_SEQUENCE"] == expected_reads
+
+          r177 = open_inner(
+              "r177",
+              "R177_N9_POST_XOR_LOCAL47_CORRECTED_RECONSTRUCTION_EVIDENCE.zip",
+              "6035e432d417e9414878d83388cb366782e385f731190bf4733293072c8f4b61",
+          )
+          d177 = json.loads(r177.read("R177_DECISION.json"))
+          assert d177["revision"] == "R177"
+          assert d177["R171_OLD_RECONSTRUCTION_INVALIDATED"] is True
+          assert d177["CORRECTED_LOCAL71_INT32"] == -633322594
+          assert d177["CORRECTED_LOCAL28_INT32"] == 246360948
+          assert d177["PATCH_LOOP_TAKEN_WITH_CORRECTED_LOCAL71"] is False
+          assert d177["STATE565_NORMAL_EXIT_REACHABLE"] is True
+          assert d177["FLASH_ALLOWED"] is False
+
+          local29 = r177.read("R177_CORRECTED_LOCAL29_STATE94.bin")
+          assert len(local29) == 607967
+          assert hashlib.sha256(local29).hexdigest() == \
+              "9f8c10e6443399bebcc35d670d6185f99698d5bce51eb2af1325c9e8602acbe1"
+
+          # Re-prove corrected values from the bytes, not only JSON.
+          first6 = [
+              struct.unpack_from("<i", local29, off)[0]
+              for off in (0, 4, 8, 12, 16, 20)
+          ]
+          assert first6[4] == -633322594
+          assert first6[5] == 246360948
+
+          # The next ReadInt32 at state565 starts exactly at byte offset 24.
+          state565_value = struct.unpack_from("<i", local29, 24)[0]
+          state565_capacity = state565_value + 1
+          assert state565_value == 1921932524
+          assert state565_capacity == 1921932525
+
+          r157 = open_inner(
+              "r157",
+              "R157_N9_LOCAL29_LOCAL81_NONNULL_LOCAL93_LOOP_BRANCH_EVIDENCE.zip",
+              "f974c64c63eea5f2b940c76101f4ab6e769803f5630a2d87d21d08679c321609",
+          )
+
+          prefix = (
+              "r156/r155/r154/r153/r152/r151/r150/r149/r148/r147/"
+              "r146/r145/r144/r143/"
+          )
+          raw = r157.read(prefix + "R143_N9_METHOD.il")
+          n9_sha = hashlib.sha256(raw).hexdigest()
+          assert n9_sha == \
+              "5a3964c1f4bd8db455e6882a4ce6f90667e1a9abc6e1fafd10440b31006e4a33"
+
+          text = raw.decode()
+
+          rows = []
+          for line in text.splitlines():
+              m = re.match(
+                  r"\s*(IL_[0-9a-f]+):\s+(\S+)(?:\s+(.*))?$",
+                  line
+              )
+              if m:
+                  rows.append((
+                      m.group(1),
+                      m.group(2),
+                      (m.group(3) or "").split(" //", 1)[0].strip()
+                  ))
+
+          pos = {lab:i for i,(lab,_,_) in enumerate(rows)}
+
+          sm = re.search(r"IL_0012:\s+switch \((.*?)\)\n", text, re.S)
+          assert sm
+          targets = [x.strip() for x in sm.group(1).split(",")]
+          assert len(targets) == 689
+
+          tpos = sorted((pos[lab], st, lab) for st, lab in enumerate(targets))
+          blocks = {}
+
+          for i, (p0, st, lab) in enumerate(tpos):
+              p1 = tpos[i+1][0] if i + 1 < len(tpos) else len(rows)
+              blocks[st] = rows[p0:p1]
+
+          def ops(st):
+              return [(op,arg) for _,op,arg in blocks[st]]
+
+          # Pin the exact local114 binding and zero seek.
+          assert ops(94)[:6] == [
+              ("ldloc.s","29"),
+              ("newobj","instance void [mscorlib]System.IO.MemoryStream::.ctor(uint8[])"),
+              ("newobj","instance void Q9Wet0jLP4YxXSyJBiC.q71r2Rj8SiD9GF1BI50/Y7Uor8e58M9K22QZF7H::.ctor(class [mscorlib]System.IO.Stream)"),
+              ("stloc.s","114"),
+              ("ldc.i4","52"),
+              ("br","IL_0012"),
+          ]
+
+          assert ops(52)[:6] == [
+              ("ldloc.s","114"),
+              ("call","object Q9Wet0jLP4YxXSyJBiC.q71r2Rj8SiD9GF1BI50::oNNQE6NTi9uesXTTGZJ(object)"),
+              ("ldc.i4.0",""),
+              ("conv.i8",""),
+              ("call","void Q9Wet0jLP4YxXSyJBiC.q71r2Rj8SiD9GF1BI50::uKbcISNmDSreine16Qp(object, int64)"),
+              ("ldc.i4","453"),
+          ]
+
+          # Pin the six proven reads.
+          read_states = [556, 650, 614, 573, 535, 289]
+          for st in read_states:
+              assert any(
+                  op == "call" and "qfkv4ZNDynVciIciQy6" in arg
+                  for op,arg in ops(st)
+              ), st
+
+          # Corrected branches after the 24-byte prefix.
+          assert ops(292)[:4] == [
+              ("ldloc.s","28"),
+              ("ldc.i4.4",""),
+              ("bne.un","IL_5d8f"),
+              ("ldc.i4","402"),
+          ]
+          assert d177["CORRECTED_LOCAL28_INT32"] != 4
+
+          assert ops(278)[:3] == [
+              ("ldloc.s","28"),
+              ("ldc.i4.1",""),
+              ("bne.un","IL_45a9"),
+          ]
+          assert d177["CORRECTED_LOCAL28_INT32"] != 1
+
+          # Internal IL_45a9 sets local35=0 and dispatches to state558.
+          p = pos["IL_45a9"]
+          assert [(op,arg) for _,op,arg in rows[p:p+5]] == [
+              ("ldc.i4.0",""),
+              ("stloc.s","35"),
+              ("ldc.i4","558"),
+              ("call","bool Q9Wet0jLP4YxXSyJBiC.q71r2Rj8SiD9GF1BI50::zfos5ENLukrcbiO4qNQ()"),
+              ("brtrue","IL_0012"),
+          ]
+
+          # State558 jumps into state183's guard.
+          assert ops(558)[0] == ("br","IL_31f4")
+          assert ops(183)[:4] == [
+              ("ldloc.s","35"),
+              ("ldloc.s","71"),
+              ("blt","IL_3e63"),
+              ("ldc.i4","565"),
+          ]
+
+          local35 = 0
+          local71 = d177["CORRECTED_LOCAL71_INT32"]
+          assert (local35 < local71) is False
+
+          # No patch-loop read is therefore executed.
+          # Cursor remains 24 until state565.
+          cursor_at_state565_entry = 24
+
+          assert ops(565)[:3] == [
+              ("ldloc.s","114"),
+              ("call","int32 Q9Wet0jLP4YxXSyJBiC.q71r2Rj8SiD9GF1BI50::qfkv4ZNDynVciIciQy6(object)"),
+              ("ldc.i4.1",""),
+          ]
+
+          cursor_after_state565_read = cursor_at_state565_entry + 4
+          assert cursor_after_state565_read == 28
+
+          # R178 proved the deterministic no-reader initialization chain.
+          no_read_states = [543, 241, 571, 125, 242]
+          for st in no_read_states:
+              assert not any(
+                  "qfkv4ZNDynVciIciQy6" in arg or
+                  "sWg0PuN2fLSfxi2LB0D" in arg
+                  for op,arg in ops(st)
+              ), st
+
+          assert targets[426] == "IL_48bc"
+          assert ops(426)[:11] == [
+              ("ldloc.s","114"),
+              ("call","object Q9Wet0jLP4YxXSyJBiC.q71r2Rj8SiD9GF1BI50::oNNQE6NTi9uesXTTGZJ(object)"),
+              ("call","int64 Q9Wet0jLP4YxXSyJBiC.q71r2Rj8SiD9GF1BI50::YoMYlpKfA3xZZIkL5Uo(object)"),
+              ("ldloc.s","114"),
+              ("call","object Q9Wet0jLP4YxXSyJBiC.q71r2Rj8SiD9GF1BI50::oNNQE6NTi9uesXTTGZJ(object)"),
+              ("call","int64 Q9Wet0jLP4YxXSyJBiC.q71r2Rj8SiD9GF1BI50::B5fr4WNvBYuVpLZQQQQ(object)"),
+              ("ldc.i4.1",""),
+              ("conv.i8",""),
+              ("sub",""),
+              ("bge","IL_1873"),
+              ("ldc.i4","129"),
+          ]
+
+          stream_position = cursor_after_state565_read
+          stream_length = len(local29)
+          rhs = stream_length - 1
+          branch_taken = stream_position >= rhs
+
+          assert stream_position == 28
+          assert stream_length == 607967
+          assert rhs == 607966
+          assert branch_taken is False
+
+          state426_next_state = 129
+
+          decision = {
+              "revision": "R179",
+
+              "R178_RUN_ID": 36178663953,
+              "R178_ARTIFACT_ID": 10882982581,
+              "R178_ARTIFACT_DIGEST":
+                  "sha256:ae407c16fd575e2da596d5907fb05640b2cdecf193242e9c54ba5dda833bb097",
+              "R178_INNER_SHA256":
+                  "06c8f27af60f45830d16efec21b3d057653e52a06c1ec5ac3bfe27acab63709f",
+
+              "R176_EXACT_PRE_STATE292_READ_SEQUENCE_REUSED": True,
+              "R176_OLD_DATA_VALUES_REUSED": False,
+              "R177_CORRECTED_BYTES_USED": True,
+
+              "READER_BINDING":
+                  "local114 = BinaryReader(MemoryStream(corrected local29))",
+              "READER_RESET_POSITION": 0,
+              "PRE_STATE292_READ_COUNT": 6,
+              "READER_CURSOR_AT_STATE292_ENTRY": 24,
+
+              "CORRECTED_LOCAL71_INT32": local71,
+              "CORRECTED_LOCAL28_INT32":
+                  d177["CORRECTED_LOCAL28_INT32"],
+              "PATCH_LOOP_TAKEN": False,
+              "READER_CURSOR_AT_STATE565_ENTRY": cursor_at_state565_entry,
+
+              "STATE565_READ_OFFSET": 24,
+              "STATE565_READ_BYTES_HEX": local29[24:28].hex(),
+              "STATE565_READ_INT32_LE": state565_value,
+              "STATE565_HASHTABLE_CAPACITY_ARGUMENT": state565_capacity,
+              "READER_CURSOR_AFTER_STATE565": cursor_after_state565_read,
+
+              "STATE426_STREAM_POSITION": stream_position,
+              "STATE426_STREAM_LENGTH": stream_length,
+              "STATE426_LENGTH_MINUS_ONE": rhs,
+              "STATE426_CONDITION":
+                  "BaseStream.Position >= BaseStream.Length - 1",
+              "STATE426_CONDITION_VALUE": branch_taken,
+              "STATE426_BGE_BRANCH_TAKEN": False,
+              "STATE426_NEXT_STATE": state426_next_state,
+
+              "N9_SHA256": n9_sha,
+
+              "AES_OR_CRYPTOSTREAM_DECRYPT_EXECUTED": False,
+              "OFFLINE_DECRYPT_AUTHORIZED": False,
+              "VENDOR_BINARY_EXECUTED": False,
+              "USB_OR_BOARD_CONTACTED": False,
+              "ANY_DISCOVERED_FRAME_AUTHORIZED_FOR_BOARD": False,
+              "FLASH_ALLOWED": False,
+
+              "NEXT":
+                  "R180: remain fully offline. Audit the exact .NET Hashtable(int) "
+                  "constructor feasibility for the concrete state565 capacity "
+                  "1921932525 and independently trace state129 from reader offset 28. "
+                  "This large capacity is a new consistency check; do not assume the "
+                  "state565 initialization completes until constructor semantics are "
+                  "proven. Do not execute vendor binaries, decrypt, contact USB, or flash."
+          }
+
+          (out / "R179_DECISION.json").write_text(
+              json.dumps(decision, indent=2) + "\n"
+          )
+
+          (out / "R179_READER_TRACE.txt").write_text(
+              "\n".join([
+                  "state94: local114 = BinaryReader(MemoryStream(corrected local29))",
+                  "state52: BaseStream.Position = 0",
+                  "reads: state556@0, state650@4, state614@8, state573@12, state535@16, state289@20",
+                  "state292 entry cursor = 24",
+                  "corrected local28 = 246360948 -> state292 !=4 -> state278 !=1",
+                  "IL_45a9: local35 = 0 -> state558 -> state183",
+                  "corrected local71 = -633322594",
+                  "state183: 0 < -633322594 = false -> state565",
+                  "state565 ReadInt32 offset 24 = 1921932524",
+                  "state565 Hashtable capacity argument = 1921932525",
+                  "cursor after state565 = 28",
+                  "state426: 28 >= 607967-1 = false",
+                  "state426 next state = 129",
+                  "FLASH_ALLOWED=NO",
+              ]) + "\n"
+          )
+
+          print(json.dumps(decision, indent=2))
+          PYCODE
+
+      - name: Package R179 evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /tmp/r179/evidence
+          zip -9 -r /tmp/R179_N9_STATE426_READER_POSITION_STATIC_EVIDENCE.zip . >/dev/null
+          sha256sum /tmp/R179_N9_STATE426_READER_POSITION_STATIC_EVIDENCE.zip \
+            > /tmp/R179_N9_STATE426_READER_POSITION_STATIC_EVIDENCE.zip.sha256
+
+      - name: Upload R179 evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: R179-N9-STATE426-READER-POSITION-STATIC-EVIDENCE
+          path: |
+            /tmp/R179_N9_STATE426_READER_POSITION_STATIC_EVIDENCE.zip
+            /tmp/R179_N9_STATE426_READER_POSITION_STATIC_EVIDENCE.zip.sha256
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Final fail-closed gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$FLASH_ALLOWED" = "NO"
+
+          grep -F '"READER_CURSOR_AT_STATE292_ENTRY": 24' \
+            /tmp/r179/evidence/R179_DECISION.json
+
+          grep -F '"READER_CURSOR_AT_STATE565_ENTRY": 24' \
+            /tmp/r179/evidence/R179_DECISION.json
+
+          grep -F '"STATE565_READ_INT32_LE": 1921932524' \
+            /tmp/r179/evidence/R179_DECISION.json
+
+          grep -F '"READER_CURSOR_AFTER_STATE565": 28' \
+            /tmp/r179/evidence/R179_DECISION.json
+
+          grep -F '"STATE426_STREAM_POSITION": 28' \
+            /tmp/r179/evidence/R179_DECISION.json
+
+          grep -F '"STATE426_BGE_BRANCH_TAKEN": false' \
+            /tmp/r179/evidence/R179_DECISION.json
+
+          grep -F '"STATE426_NEXT_STATE": 129' \
+            /tmp/r179/evidence/R179_DECISION.json
+
+          grep -F '"USB_OR_BOARD_CONTACTED": false' \
+            /tmp/r179/evidence/R179_DECISION.json
+
+          grep -F '"FLASH_ALLOWED": false' \
+            /tmp/r179/evidence/R179_DECISION.json
+
+          echo R179_STATE426_READER_POSITION_STATIC_PROOF=YES
+          echo FLASH_ALLOWED=NO
