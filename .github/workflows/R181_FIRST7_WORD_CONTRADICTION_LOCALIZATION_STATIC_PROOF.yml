@@ -1,0 +1,691 @@
+name: R181 N9 first-seven-word contradiction localization static proof
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - ".github/workflows/R181_FIRST7_WORD_CONTRADICTION_LOCALIZATION_STATIC_PROOF.yml"
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: r181-static-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  FLASH_ALLOWED: "NO"
+
+jobs:
+  static_audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: Immutable safety gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$FLASH_ALLOWED" = "NO"
+          mkdir -p /tmp/r181/evidence
+          cat > /tmp/r181/evidence/R181_SAFETY.txt <<'EOF'
+          MODE=OFFLINE_STATIC_FIRST7_WORD_LOCALIZATION_ONLY
+          FLASH_ALLOWED=NO
+          USB_OR_BOARD_CONTACT=NO
+          VENDOR_EXE_DLL_APK_EXECUTED=NO
+          AES_OR_CRYPTOSTREAM_DECRYPT_EXECUTED=NO
+          AA55_OR_LINEIN_AA55_SENT=NO
+          RUNTIME_0X11_OR_0XFE_SENT=NO
+          UFE_RUNTIME_TX_SENT=NO
+          FLASH_READ_ERASE_WRITE_EXECUTED=NO
+          DISCOVERED_FRAME_LIVE_AUTHORIZED=NO
+          HARDWARE_MODIFICATION=FORBIDDEN
+          EOF
+
+      - name: Download pinned R180 contradiction evidence
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          artifact-ids: "10904556426"
+          path: /tmp/r181/r180
+          merge-multiple: true
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          repository: Thanaporn-okn/OKN_DSP-apk
+          run-id: 36237713587
+
+      - name: Download pinned R170 reaching-definition evidence
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          artifact-ids: "10855830723"
+          path: /tmp/r181/r170
+          merge-multiple: true
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          repository: Thanaporn-okn/OKN_DSP-apk
+          run-id: 36117231277
+
+      - name: Download pinned R157 raw evidence chain
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          artifact-ids: "10820682068"
+          path: /tmp/r181/r157
+          merge-multiple: true
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          repository: Thanaporn-okn/OKN_DSP-apk
+          run-id: 36028455796
+
+      - name: Localize contradiction to first seven full words
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python3 - <<'PYCODE'
+          from pathlib import Path
+          import hashlib
+          import io
+          import json
+          import re
+          import struct
+          import zipfile
+
+          MASK32 = 0xFFFFFFFF
+          XOR64_LOW32 = 0x3800CD0D
+
+          def u32(x):
+              return int(x) & MASK32
+
+          base = Path("/tmp/r181")
+          out = base / "evidence"
+          out.mkdir(parents=True, exist_ok=True)
+
+          def open_inner(folder, filename, expected_sha):
+              p = base / folder / filename
+              data = p.read_bytes()
+              got = hashlib.sha256(data).hexdigest()
+              assert got == expected_sha, (filename, got, expected_sha)
+
+              sidecar = p.with_name(p.name + ".sha256")
+              assert sidecar.exists(), f"missing sidecar {sidecar}"
+              assert sidecar.read_text().split()[0] == expected_sha
+
+              return zipfile.ZipFile(io.BytesIO(data))
+
+          # ----- R180 fail-closed oracle -----
+          r180 = open_inner(
+              "r180",
+              "R180_N9_HASHTABLE_CAPACITY_CONTRADICTION_STATIC_EVIDENCE.zip",
+              "2ea23e9031649497636ab4e07b1465ffca7cb02ff4d73ff8dfaaff3abcf13228",
+          )
+          d180 = json.loads(r180.read("R180_DECISION.json"))
+
+          assert d180["revision"] == "R180"
+          assert d180["STATE565_READ_INT32_LE"] == 1921932524
+          assert d180["STATE565_CAPACITY_ARGUMENT"] == 1921932525
+          assert d180["RAWSIZE_GT_INT32_MAX"] is True
+          assert d180["STATE565_CONSTRUCTOR_COMPLETES"] is False
+          assert d180["NEW_EARLY_MODEL_CONSISTENCY_CONTRADICTION_PROVEN"] is True
+          assert d180["FLASH_ALLOWED"] is False
+
+          # ----- R170 exact loop/reaching-definition schedule -----
+          r170 = open_inner(
+              "r170",
+              "R170_N9_EXACT_PER_VISIT_PRODUCER_REACHING_DEFINITIONS_EVIDENCE.zip",
+              "d3cf6a809ef5a6908c18dd9939a13a813c5930575bb5a3aa9486385ccd1b0194",
+          )
+          d170 = json.loads(r170.read("R170_DECISION.json"))
+
+          assert d170["revision"] == "R170"
+          assert d170["EXACT_PER_VISIT_REACHING_STORE_SELECTION_PROVEN"] is True
+          assert d170["OUTER_LOOP_EXACT_ITERATION_COUNT_PROVEN"] is True
+          assert d170["H15_FULL_WORD_COUNT"] == 151991
+          assert d170["H15_REMAINDER_BYTES"] == 3
+          assert d170["FULL_WORD_LOCAL82_REACHING_STORE_PROVEN"] is True
+          assert d170["FULL_WORD_LOCAL105_REACHING_STORE_PROVEN"] is True
+          assert d170["REMAINDER_OUTPUT_EXACT_WRITE_COUNT_PROVEN"] is True
+          assert d170["FLASH_ALLOWED"] is False
+
+          # ----- Raw IL + concrete input candidates -----
+          r157 = open_inner(
+              "r157",
+              "R157_N9_LOCAL29_LOCAL81_NONNULL_LOCAL93_LOOP_BRANCH_EVIDENCE.zip",
+              "f974c64c63eea5f2b940c76101f4ab6e769803f5630a2d87d21d08679c321609",
+          )
+
+          n9_path = (
+              "r156/r155/r154/r153/r152/r151/r150/r149/r148/r147/"
+              "r146/r145/r144/r143/R143_N9_METHOD.il"
+          )
+          n9_raw = r157.read(n9_path)
+          assert hashlib.sha256(n9_raw).hexdigest() == \
+              "5a3964c1f4bd8db455e6882a4ce6f90667e1a9abc6e1fafd10440b31006e4a33"
+          text = n9_raw.decode()
+
+          h15_path = (
+              "r156/r155/r154/r153/r152/r151/r150/r149/r148/r147/"
+              "r146/r145/r144/r143/r142/"
+              "R142_EXTRACTED_MANAGED_RESOURCES/"
+              "02_h15IL2i6yy2BZV8RqM.YuRwd1JALC4oy32W66.bin"
+          )
+          h15 = r157.read(h15_path)
+          assert len(h15) == 607967
+          assert hashlib.sha256(h15).hexdigest() == \
+              "a46885bb2f09a600f6f16e6206f49d304ca829d441c5077b360b25ac8e6a33aa"
+
+          d153 = json.loads(r157.read(
+              "r156/r155/r154/r153/R153_STATE404_IV_XOR_LOOP_KEY_TRANSFORM.json"
+          ))
+
+          pre_key = bytes.fromhex(
+              d153["PRE_LOOP_KEY_CANDIDATE_HEX_FROM_R144_R145"]
+          )
+          iv = bytes.fromhex(
+              d153["IV_CANDIDATE_HEX_FROM_R144_R145"]
+          )
+          post_key = bytes.fromhex(
+              d153["POST_LOOP_LOCAL47_KEY_CANDIDATE_HEX"]
+          )
+
+          assert len(pre_key) == 32
+          assert len(iv) == 16
+          assert len(post_key) == 32
+          assert d153["STATE404_LOOP_MUTATES_LOCAL47_FIRST_16_BYTES_BY_XOR_LOCAL8"] is True
+          assert d153["STATE404_TRUE_BRANCH_ITERATIONS"] == 16
+
+          independently_xored = bytes(
+              pre_key[i] ^ iv[i] for i in range(16)
+          ) + pre_key[16:]
+
+          assert independently_xored == post_key
+          assert post_key.hex() == \
+              "8e491ed108e5b47c8f39d70fd5c8342d8a42a068d0554a0ee526b8f7d6c844b3"
+
+          # ----- Parse N9 dispatcher -----
+          rows = []
+          for line in text.splitlines():
+              m = re.match(
+                  r"\s*(IL_[0-9a-f]+):\s+(\S+)(?:\s+(.*))?$",
+                  line
+              )
+              if m:
+                  rows.append((
+                      m.group(1),
+                      m.group(2),
+                      (m.group(3) or "").split(" //", 1)[0].strip()
+                  ))
+
+          pos = {lab:i for i,(lab,_,_) in enumerate(rows)}
+          sm = re.search(r"IL_0012:\s+switch \((.*?)\)\n", text, re.S)
+          assert sm
+          targets = [x.strip() for x in sm.group(1).split(",")]
+          assert len(targets) == 689
+
+          tpos = sorted((pos[lab], st, lab) for st,lab in enumerate(targets))
+          blocks = {}
+          for i,(p0,st,lab) in enumerate(tpos):
+              p1 = tpos[i+1][0] if i+1 < len(tpos) else len(rows)
+              blocks[st] = rows[p0:p1]
+
+          def ops(st):
+              return [(op,arg) for _,op,arg in blocks[st]]
+
+          # Allocation and exact key-word schedule.
+          assert ops(668) == [
+              ("ldloc.s","27"),
+              ("ldlen",""),
+              ("conv.i4",""),
+              ("newarr","[mscorlib]System.Byte"),
+              ("stloc.s","37"),
+              ("ldc.i4","484"),
+              ("br","IL_0012"),
+          ]
+
+          assert ops(484)[:6] == [
+              ("ldloc.s","47"),
+              ("ldlen",""),
+              ("conv.i4",""),
+              ("ldc.i4.4",""),
+              ("div",""),
+              ("stloc.s","118"),
+          ]
+
+          assert ops(539)[:4] == [
+              ("ldloc.s","38"),
+              ("ldloc.s","118"),
+              ("rem",""),
+              ("stloc.s","110"),
+          ]
+
+          assert ops(313)[:4] == [
+              ("ldloc.s","38"),
+              ("ldc.i4.4",""),
+              ("mul",""),
+              ("stloc.s","67"),
+          ]
+
+          assert ops(2)[:4] == [
+              ("ldloc.s","110"),
+              ("ldc.i4.4",""),
+              ("mul",""),
+              ("stloc.s","76"),
+          ]
+
+          expected117 = [
+              ("ldloc.s","47"), ("ldloc.s","76"), ("ldc.i4.3",""), ("add",""), ("ldelem.u1",""),
+              ("ldc.i4.s","24"), ("shl",""),
+              ("ldloc.s","47"), ("ldloc.s","76"), ("ldc.i4.2",""), ("add",""), ("ldelem.u1",""),
+              ("ldc.i4.s","16"), ("shl",""), ("or",""),
+              ("ldloc.s","47"), ("ldloc.s","76"), ("ldc.i4.1",""), ("add",""), ("ldelem.u1",""),
+              ("ldc.i4.8",""), ("shl",""), ("or",""),
+              ("ldloc.s","47"), ("ldloc.s","76"), ("ldelem.u1",""), ("or",""),
+              ("stloc.s","53"), ("ldc.i4","141"), ("br","IL_0012"),
+          ]
+          assert ops(117) == expected117
+
+          # local105 starts at zero before the full-word loop.
+          assert ops(235)[:2] == [
+              ("ldc.i4.0",""),
+              ("stloc.s","105"),
+          ]
+
+          # Full-word producer semantics.
+          assert ops(299)[:4] == [
+              ("ldloc.s","105"),
+              ("ldloc.s","53"),
+              ("add",""),
+              ("stloc.s","105"),
+          ]
+
+          expected342 = [
+              ("ldloc.s","27"), ("ldloc.s","76"), ("ldc.i4.3",""), ("add",""), ("ldelem.u1",""),
+              ("ldc.i4.s","24"), ("shl",""),
+              ("ldloc.s","27"), ("ldloc.s","76"), ("ldc.i4.2",""), ("add",""), ("ldelem.u1",""),
+              ("ldc.i4.s","16"), ("shl",""), ("or",""),
+              ("ldloc.s","27"), ("ldloc.s","76"), ("ldc.i4.1",""), ("add",""), ("ldelem.u1",""),
+              ("ldc.i4.8",""), ("shl",""), ("or",""),
+              ("ldloc.s","27"), ("ldloc.s","76"), ("ldelem.u1",""), ("or",""),
+              ("stloc.s","82"), ("ldc.i4","664"), ("stloc","95"), ("br","IL_000e"),
+          ]
+          assert ops(342) == expected342
+
+          assert ops(57)[:4] == [
+              ("ldloc.s","105"),
+              ("ldloc.s","82"),
+              ("xor",""),
+              ("stloc.s","24"),
+          ]
+
+          # Exact state46 block.
+          b46 = blocks[46]
+          canon46 = json.dumps(
+              [(lab,op,arg) for lab,op,arg in b46],
+              separators=(",",":")
+          ).encode()
+          assert hashlib.sha256(canon46).hexdigest() == \
+              "75f84c2e24085e392d83239813fd59f0cd54311e440f8c9118edddb332c6fcd9"
+          assert len(b46) == 103
+
+          def state46_il(x):
+              loc = {105:u32(x)}
+              stack = []
+
+              for _,op,arg in b46:
+                  if op in ("ldloc","ldloc.s"):
+                      stack.append(loc.get(int(arg), 0))
+                  elif op in ("stloc","stloc.s"):
+                      loc[int(arg)] = u32(stack.pop())
+                  elif op in ("ldc.i4","ldc.i4.s"):
+                      stack.append(u32(int(arg)))
+                  elif op.startswith("ldc.i4."):
+                      tail = op[len("ldc.i4."):]
+                      stack.append(u32(-1 if tail == "m1" else int(tail)))
+                  elif op == "add":
+                      b = stack.pop(); a = stack.pop()
+                      stack.append(u32(a + b))
+                  elif op == "sub":
+                      b = stack.pop(); a = stack.pop()
+                      stack.append(u32(a - b))
+                  elif op == "xor":
+                      b = stack.pop(); a = stack.pop()
+                      stack.append(u32(a ^ b))
+                  elif op == "and":
+                      b = stack.pop(); a = stack.pop()
+                      stack.append(u32(a & b))
+                  elif op == "or":
+                      b = stack.pop(); a = stack.pop()
+                      stack.append(u32(a | b))
+                  elif op == "shl":
+                      b = int(stack.pop()) & 31
+                      a = int(stack.pop())
+                      stack.append(u32(a << b))
+                  elif op == "shr.un":
+                      b = int(stack.pop()) & 31
+                      a = int(stack.pop())
+                      stack.append((a & MASK32) >> b)
+                  elif op == "conv.r.un":
+                      # Input here is uint32; binary64 represents every uint32 exactly.
+                      stack.append(float(int(stack.pop()) & MASK32))
+                  elif op == "conv.r8":
+                      stack.append(float(stack.pop()))
+                  elif op == "conv.u4":
+                      stack.append(u32(int(stack.pop())))
+                  elif op == "br":
+                      break
+                  else:
+                      raise AssertionError(("unsupported state46 op", op, arg))
+
+              return loc[105]
+
+          # ----- Reconstruct only first seven full words -----
+          key_words = [
+              struct.unpack_from("<I", post_key, i * 4)[0]
+              for i in range(8)
+          ]
+          assert key_words == [
+              3508423054,
+              2092229896,
+              265763215,
+              758434005,
+              1755333258,
+              239752656,
+              4156040933,
+              3007629526,
+          ]
+
+          s = 0
+          trace = []
+          local37_words = []
+
+          for i in range(7):
+              key_word = key_words[i % 8]
+              transform_input = u32(s + key_word)
+              s = state46_il(transform_input)
+
+              src_word = struct.unpack_from("<I", h15, i * 4)[0]
+              out_word = u32(s ^ src_word)
+              local37_words.append(out_word)
+
+              trace.append({
+                  "word_index": i,
+                  "key_word_u32": key_word,
+                  "state46_input_u32": transform_input,
+                  "state46_output_u32": s,
+                  "h15_word_u32": src_word,
+                  "local37_word_u32": out_word,
+              })
+
+          assert [x["state46_output_u32"] for x in trace] == [
+              2807810694,
+              1844494458,
+              392519535,
+              2270977542,
+              2989791314,
+              2752943170,
+              4124430519,
+          ]
+
+          assert local37_words == [
+              3160753715,
+              375379460,
+              2857773251,
+              521266791,
+              3795881619,
+              246360948,
+              1250857441,
+          ]
+
+          # ----- Prove pointer XOR effect on first seven words -----
+          assert ops(96)[:2] == [
+              ("ldloc.s","37"),
+              ("stloc.s","29"),
+          ]
+
+          assert ops(206)[:6] == [
+              ("ldloc.s","29"),
+              ("ldlen",""),
+              ("conv.i4",""),
+              ("ldc.i4.8",""),
+              ("div",""),
+              ("stloc.s","7"),
+          ]
+
+          assert ops(179)[:12] == [
+              ("ldloc.s","50"),
+              ("ldloc.s","93"),
+              ("ldc.i4.8",""),
+              ("mul",""),
+              ("add",""),
+              ("conv.u",""),
+              ("dup",""),
+              ("ldind.i8",""),
+              ("ldc.i4","939576589"),
+              ("conv.i8",""),
+              ("xor",""),
+              ("stind.i8",""),
+          ]
+
+          # Each 8-byte lane XORs with 0x000000003800CD0D:
+          # lower 32-bit word changes, upper 32-bit word is unchanged.
+          local29_words = []
+          for i,w in enumerate(local37_words):
+              if i % 2 == 0:
+                  local29_words.append(u32(w ^ XOR64_LOW32))
+              else:
+                  local29_words.append(w)
+
+          assert local29_words == [
+              2221247294,
+              375379460,
+              2455168462,
+              521266791,
+              3661644702,
+              246360948,
+              1921932524,
+          ]
+
+          local29_i32 = [
+              struct.unpack("<i", struct.pack("<I", x))[0]
+              for x in local29_words
+          ]
+          assert local29_i32 == [
+              -2073720002,
+              375379460,
+              -1839798834,
+              521266791,
+              -633322594,
+              246360948,
+              1921932524,
+          ]
+
+          # Offset 24 is word #6 and lies in XOR lane #3.
+          assert 24 // 4 == 6
+          assert 24 // 8 == 3
+          state565_int = local29_i32[6]
+          assert state565_int == 1921932524
+          assert state565_int == d180["STATE565_READ_INT32_LE"]
+
+          # The pointer loop definitely reaches lane #3 because its proven bound is 75995.
+          assert 75995 > 3
+
+          # ----- Prove final 3-byte remainder cannot cause offset-24 contradiction -----
+          # R170 proves remainder writes exactly the final three bytes only.
+          remainder_write_offsets = [
+              len(h15) - 3,
+              len(h15) - 2,
+              len(h15) - 1,
+          ]
+          assert remainder_write_offsets == [607964, 607965, 607966]
+          assert 24 not in remainder_write_offsets
+          assert 25 not in remainder_write_offsets
+          assert 26 not in remainder_write_offsets
+          assert 27 not in remainder_write_offsets
+
+          # No full reconstruction is required to reproduce the R180 oracle.
+          capacity = state565_int + 1
+          assert capacity == 1921932525
+          assert capacity == d180["STATE565_CAPACITY_ARGUMENT"]
+          assert d180["STATE565_CONSTRUCTOR_COMPLETES"] is False
+
+          result = {
+              "revision": "R181",
+
+              "R180_RUN_ID": 36237713587,
+              "R180_ARTIFACT_ID": 10904556426,
+              "R180_ARTIFACT_DIGEST":
+                  "sha256:9f808497080c3dbecf4b4ab629a90c1219b706aacbbca113c49a4adc36fdb424",
+              "R180_INNER_SHA256":
+                  "2ea23e9031649497636ab4e07b1465ffca7cb02ff4d73ff8dfaaff3abcf13228",
+
+              "R170_RUN_ID": 36117231277,
+              "R170_ARTIFACT_ID": 10855830723,
+              "R170_INNER_SHA256":
+                  "d3cf6a809ef5a6908c18dd9939a13a813c5930575bb5a3aa9486385ccd1b0194",
+
+              "R157_RUN_ID": 36028455796,
+              "R157_ARTIFACT_ID": 10820682068,
+              "R157_INNER_SHA256":
+                  "f974c64c63eea5f2b940c76101f4ab6e769803f5630a2d87d21d08679c321609",
+
+              "N9_SHA256":
+                  "5a3964c1f4bd8db455e6882a4ce6f90667e1a9abc6e1fafd10440b31006e4a33",
+              "H15_SHA256":
+                  "a46885bb2f09a600f6f16e6206f49d304ca829d441c5077b360b25ac8e6a33aa",
+
+              "POST_STATE404_LOCAL47_HEX": post_key.hex(),
+              "POST_STATE404_KEY_XOR_REPROVEN": True,
+              "KEY_WORD_SCHEDULE_RAW_IL_REPROVEN": True,
+              "LOCAL105_INITIAL_ZERO_RAW_IL_REPROVEN": True,
+              "STATE46_BODY_SHA256":
+                  "75f84c2e24085e392d83239813fd59f0cd54311e440f8c9118edddb332c6fcd9",
+              "STATE46_FIRST7_RECONSTRUCTED": True,
+              "FULL_WORD_LE32_INPUT_ASSEMBLY_REPROVEN": True,
+
+              "FIRST7_TRACE": trace,
+              "FIRST7_LOCAL37_WORDS_U32": local37_words,
+              "FIRST7_LOCAL29_WORDS_U32": local29_words,
+              "FIRST7_LOCAL29_WORDS_I32": local29_i32,
+
+              "STATE96_LOCAL37_TO_LOCAL29_ALIAS_REPROVEN": True,
+              "STATE179_64BIT_XOR_REPROVEN": True,
+              "STATE179_LOW32_MASK_HEX": "0x3800CD0D",
+              "STATE179_LANE3_REACHED": True,
+
+              "STATE565_VALUE_REPRODUCED_FROM_FIRST7_WORDS_ONLY": True,
+              "STATE565_INT32": state565_int,
+              "STATE565_CAPACITY": capacity,
+              "R180_HASHTABLE_OVERFLOW_ORACLE_REPRODUCED": True,
+
+              "FINAL_THREE_BYTE_REMAINDER_CAN_AFFECT_OFFSET24": False,
+              "FINAL_REMAINDER_EXONERATED_FOR_STATE565_CONTRADICTION": True,
+              "LATE_POINTER_LOOP_ITERATIONS_REQUIRED_FOR_OFFSET24": False,
+
+              "FULL_607967_BYTE_RECONSTRUCTION_REQUIRED_TO_REPRODUCE_CONTRADICTION":
+                  False,
+
+              "LOCALIZATION_CONCLUSION":
+                  "The R180 Hashtable contradiction is already determined by "
+                  "the first seven full 32-bit reconstruction words plus the "
+                  "first four state179 XOR lanes. The final 3-byte remainder "
+                  "and all late-word reconstruction cannot be causal for the "
+                  "bad state565 value. Re-audited raw-IL mechanics reproduce "
+                  "the same 1921932524 value, so the remaining error must be "
+                  "upstream of or inside the concrete first-seven-word inputs/"
+                  "transform assumptions rather than in the tail/remainder.",
+
+              "REMAINING_FAIL_CLOSED_SUSPECTS": [
+                  "concrete local27/h15 first-28-byte provenance at the reconstruction entry",
+                  "concrete post-state404 local47 value/timing on the same production path",
+                  "exact CLI floating-point semantics of state46 conv.r.un -> conv.r8 -> conv.u4",
+                  "any still-unproven control-flow premise before the first seven full-word visits",
+              ],
+
+              "AES_OR_CRYPTOSTREAM_DECRYPT_EXECUTED": False,
+              "OFFLINE_DECRYPT_AUTHORIZED": False,
+              "VENDOR_BINARY_EXECUTED": False,
+              "USB_OR_BOARD_CONTACTED": False,
+              "ANY_DISCOVERED_FRAME_AUTHORIZED_FOR_BOARD": False,
+              "FLASH_ALLOWED": False,
+
+              "NEXT":
+                  "R182: stay offline. Close the first-seven-word inputs one by "
+                  "one: prove local27 first-28-byte provenance and exact path timing "
+                  "relative to state404, then pin CLI conv.r.un/conv.r8/conv.u4 "
+                  "semantics for the target .NET Framework/PE32 context. Use the "
+                  "state565 Hashtable overflow as the fail-closed oracle. Do not "
+                  "execute vendor binaries, decrypt, contact USB, or flash."
+          }
+
+          (out / "R181_DECISION.json").write_text(
+              json.dumps(result, indent=2) + "\n"
+          )
+
+          (out / "R181_FIRST7_TRACE.json").write_text(
+              json.dumps(trace, indent=2) + "\n"
+          )
+
+          (out / "R181_LOCALIZATION.txt").write_text(
+              "\n".join([
+                  "R180 contradiction reproduced without reconstructing the full resource.",
+                  "Only first seven full 32-bit words are needed for state565 offset 24.",
+                  "state179 lane #3 applies XOR low32 mask 0x3800CD0D to word #6.",
+                  "word #6 after XOR = 0x728E5CEC = 1921932524.",
+                  "Hashtable capacity = 1921932525 -> R180 overflow oracle.",
+                  "Final remainder writes offsets 607964..607966 only.",
+                  "Therefore final 3-byte remainder cannot affect offset 24.",
+                  "Next: audit local27 first 28 bytes + post-state404 key timing + CLI F semantics.",
+                  "FLASH_ALLOWED=NO",
+              ]) + "\n"
+          )
+
+          print(json.dumps(result, indent=2))
+          PYCODE
+
+      - name: Package R181 evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /tmp/r181/evidence
+          zip -9 -r /tmp/R181_N9_FIRST7_WORD_LOCALIZATION_STATIC_EVIDENCE.zip . >/dev/null
+          sha256sum /tmp/R181_N9_FIRST7_WORD_LOCALIZATION_STATIC_EVIDENCE.zip \
+            > /tmp/R181_N9_FIRST7_WORD_LOCALIZATION_STATIC_EVIDENCE.zip.sha256
+
+      - name: Upload R181 evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: R181-N9-FIRST7-WORD-CONTRADICTION-LOCALIZATION-STATIC-EVIDENCE
+          path: |
+            /tmp/R181_N9_FIRST7_WORD_LOCALIZATION_STATIC_EVIDENCE.zip
+            /tmp/R181_N9_FIRST7_WORD_LOCALIZATION_STATIC_EVIDENCE.zip.sha256
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Final fail-closed gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$FLASH_ALLOWED" = "NO"
+
+          grep -F '"STATE565_VALUE_REPRODUCED_FROM_FIRST7_WORDS_ONLY": true' \
+            /tmp/r181/evidence/R181_DECISION.json
+
+          grep -F '"STATE565_INT32": 1921932524' \
+            /tmp/r181/evidence/R181_DECISION.json
+
+          grep -F '"R180_HASHTABLE_OVERFLOW_ORACLE_REPRODUCED": true' \
+            /tmp/r181/evidence/R181_DECISION.json
+
+          grep -F '"FINAL_THREE_BYTE_REMAINDER_CAN_AFFECT_OFFSET24": false' \
+            /tmp/r181/evidence/R181_DECISION.json
+
+          grep -F '"FINAL_REMAINDER_EXONERATED_FOR_STATE565_CONTRADICTION": true' \
+            /tmp/r181/evidence/R181_DECISION.json
+
+          grep -F '"FULL_607967_BYTE_RECONSTRUCTION_REQUIRED_TO_REPRODUCE_CONTRADICTION": false' \
+            /tmp/r181/evidence/R181_DECISION.json
+
+          grep -F '"USB_OR_BOARD_CONTACTED": false' \
+            /tmp/r181/evidence/R181_DECISION.json
+
+          grep -F '"FLASH_ALLOWED": false' \
+            /tmp/r181/evidence/R181_DECISION.json
+
+          echo R181_FIRST7_WORD_CONTRADICTION_LOCALIZATION_STATIC_PROOF=YES
+          echo FLASH_ALLOWED=NO
