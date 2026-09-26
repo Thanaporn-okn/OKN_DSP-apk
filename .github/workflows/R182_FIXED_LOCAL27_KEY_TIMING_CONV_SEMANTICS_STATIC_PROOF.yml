@@ -1,0 +1,678 @@
+name: R182 FIXED N9 local27 key-timing and conv-semantics static proof
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - ".github/workflows/R182_FIXED_LOCAL27_KEY_TIMING_CONV_SEMANTICS_STATIC_PROOF.yml"
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: r182-static-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  FLASH_ALLOWED: "NO"
+
+jobs:
+  static_audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: Immutable safety gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$FLASH_ALLOWED" = "NO"
+          mkdir -p /tmp/r182/evidence
+
+          cat > /tmp/r182/evidence/R182_SAFETY.txt <<'EOF'
+          MODE=OFFLINE_STATIC_PROVENANCE_AND_CLI_SEMANTICS_ONLY
+          FLASH_ALLOWED=NO
+          USB_OR_BOARD_CONTACT=NO
+          VENDOR_EXE_DLL_APK_EXECUTED=NO
+          AES_OR_CRYPTOSTREAM_DECRYPT_EXECUTED=NO
+          AA55_OR_LINEIN_AA55_SENT=NO
+          RUNTIME_0X11_OR_0XFE_SENT=NO
+          UFE_RUNTIME_TX_SENT=NO
+          FLASH_READ_ERASE_WRITE_EXECUTED=NO
+          DISCOVERED_FRAME_LIVE_AUTHORIZED=NO
+          HARDWARE_MODIFICATION=FORBIDDEN
+          EOF
+
+      - name: Download pinned R181 localization evidence
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          artifact-ids: "10905530304"
+          path: /tmp/r182/r181
+          merge-multiple: true
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          repository: Thanaporn-okn/OKN_DSP-apk
+          run-id: 36238250238
+
+      - name: Download pinned R177 corrected timing evidence
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          artifact-ids: "10864507451"
+          path: /tmp/r182/r177
+          merge-multiple: true
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          repository: Thanaporn-okn/OKN_DSP-apk
+          run-id: 36137304534
+
+      - name: Download pinned R157 raw evidence chain
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          artifact-ids: "10820682068"
+          path: /tmp/r182/r157
+          merge-multiple: true
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          repository: Thanaporn-okn/OKN_DSP-apk
+          run-id: 36028455796
+
+      - name: Close local27 provenance key timing and CLI conversion semantics
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python3 - <<'PYCODE'
+          from pathlib import Path
+          import hashlib
+          import io
+          import json
+          import re
+          import struct
+          import zipfile
+
+          MASK32 = 0xFFFFFFFF
+
+          def u32(x):
+              return int(x) & MASK32
+
+          base = Path("/tmp/r182")
+          out = base / "evidence"
+          out.mkdir(parents=True, exist_ok=True)
+
+          def open_inner(folder, filename, expected_sha):
+              p = base / folder / filename
+              data = p.read_bytes()
+              got = hashlib.sha256(data).hexdigest()
+              assert got == expected_sha, (filename, got, expected_sha)
+
+              sidecar = p.with_name(p.name + ".sha256")
+              assert sidecar.exists(), f"missing {sidecar}"
+              assert sidecar.read_text().split()[0] == expected_sha
+
+              return zipfile.ZipFile(io.BytesIO(data))
+
+          # ------------------------------------------------------------
+          # Pin R181: contradiction is already in first seven full words.
+          # ------------------------------------------------------------
+          r181 = open_inner(
+              "r181",
+              "R181_N9_FIRST7_WORD_LOCALIZATION_STATIC_EVIDENCE.zip",
+              "6fadc12b2596635d566e8740df945db089edc27e042adc483e235a104e73f64e",
+          )
+          d181 = json.loads(r181.read("R181_DECISION.json"))
+
+          assert d181["revision"] == "R181"
+          assert d181["STATE565_VALUE_REPRODUCED_FROM_FIRST7_WORDS_ONLY"] is True
+          assert d181["STATE565_INT32"] == 1921932524
+          assert d181["STATE565_CAPACITY"] == 1921932525
+          assert d181["R180_HASHTABLE_OVERFLOW_ORACLE_REPRODUCED"] is True
+          assert d181["FINAL_REMAINDER_EXONERATED_FOR_STATE565_CONTRADICTION"] is True
+          assert d181["FLASH_ALLOWED"] is False
+
+          # ------------------------------------------------------------
+          # Pin R177 only for pre-reconstruction key mutation/timing.
+          # Do NOT revive its retired post-state565 production path.
+          # ------------------------------------------------------------
+          r177 = open_inner(
+              "r177",
+              "R177_N9_POST_XOR_LOCAL47_CORRECTED_RECONSTRUCTION_EVIDENCE.zip",
+              "6035e432d417e9414878d83388cb366782e385f731190bf4733293072c8f4b61",
+          )
+          d177 = json.loads(r177.read("R177_DECISION.json"))
+
+          assert d177["revision"] == "R177"
+          assert d177["R171_ROOT_CAUSE_IDENTIFIED"] is True
+          assert d177["R171_OLD_RECONSTRUCTION_INVALIDATED"] is True
+          assert d177["POST_XOR_LOCAL47_MATCHES_R157_CANDIDATE"] is True
+          assert d177["STATE309_XOR_LOOP_ITERATIONS"] == 16
+          assert d177["FLASH_ALLOWED"] is False
+
+          # ------------------------------------------------------------
+          # Pin R157 nested raw IL and old resource-reader proof.
+          # ------------------------------------------------------------
+          r157 = open_inner(
+              "r157",
+              "R157_N9_LOCAL29_LOCAL81_NONNULL_LOCAL93_LOOP_BRANCH_EVIDENCE.zip",
+              "f974c64c63eea5f2b940c76101f4ab6e769803f5630a2d87d21d08679c321609",
+          )
+
+          r150 = json.loads(r157.read(
+              "r156/r155/r154/r153/r152/r151/r150/R150_DECISION.json"
+          ))
+
+          assert r150["H15_LENGTH"] == 607967
+          assert r150["H15_SHA256"] == \
+              "a46885bb2f09a600f6f16e6206f49d304ca829d441c5077b360b25ac8e6a33aa"
+          assert r150["CLR_RESOURCE_STREAM_LENGTH_SEMANTICS_PROVEN"] is True
+          assert r150["CUSTOM_READER_STANDARD_BINARYREADER_SEMANTICS_PROVEN"] is True
+          assert r150["FIRST_CALL_RESOURCE_READER_SEQUENCE_PROVEN"] is True
+          assert r150["FIRST_READER_POSITION_BEFORE_READBYTES"] == 0
+          assert r150["FIRST_READER_READBYTES_REQUESTED_COUNT"] == 607967
+          assert r150["LOCAL12_SINGLE_ASSIGNMENT"] is True
+          assert r150["LOCAL27_ALIAS_READ_ONLY"] is True
+          assert r150["FLASH_ALLOWED"] is False
+
+          d153 = json.loads(r157.read(
+              "r156/r155/r154/r153/R153_STATE404_IV_XOR_LOOP_KEY_TRANSFORM.json"
+          ))
+          assert d153["STATE404_LOOP_MUTATES_LOCAL47_FIRST_16_BYTES_BY_XOR_LOCAL8"] is True
+          assert d153["STATE404_TRUE_BRANCH_ITERATIONS"] == 16
+          assert d153["STATE404_EXIT_LOCAL83"] == 16
+
+          n9_name = (
+              "r156/r155/r154/r153/r152/r151/r150/r149/r148/r147/"
+              "r146/r145/r144/r143/R143_N9_METHOD.il"
+          )
+          n9_raw = r157.read(n9_name)
+          assert hashlib.sha256(n9_raw).hexdigest() == \
+              "5a3964c1f4bd8db455e6882a4ce6f90667e1a9abc6e1fafd10440b31006e4a33"
+          text = n9_raw.decode()
+
+          h15_name = (
+              "r156/r155/r154/r153/r152/r151/r150/r149/r148/r147/"
+              "r146/r145/r144/r143/r142/"
+              "R142_EXTRACTED_MANAGED_RESOURCES/"
+              "02_h15IL2i6yy2BZV8RqM.YuRwd1JALC4oy32W66.bin"
+          )
+          h15 = r157.read(h15_name)
+          assert len(h15) == 607967
+          assert hashlib.sha256(h15).hexdigest() == r150["H15_SHA256"]
+          assert h15[:28].hex() == \
+              "b58c3e1b7e16af7bac7733bd61b84d98c116745036bfb9aa56415bbf"
+
+          h15_first7 = [
+              struct.unpack_from("<I", h15, i * 4)[0]
+              for i in range(7)
+          ]
+          assert h15_first7 == [
+              457084085,
+              2075072126,
+              3174266796,
+              2555230305,
+              1349785281,
+              2864299830,
+              3210428758,
+          ]
+
+          # ------------------------------------------------------------
+          # Parse exact N9 state blocks.
+          # ------------------------------------------------------------
+          rows = []
+          for line in text.splitlines():
+              m = re.match(
+                  r"\s*(IL_[0-9a-f]+):\s+(\S+)(?:\s+(.*))?$",
+                  line
+              )
+              if m:
+                  rows.append((
+                      m.group(1),
+                      m.group(2),
+                      (m.group(3) or "").split(" //", 1)[0].strip()
+                  ))
+
+          pos = {lab:i for i,(lab,_,_) in enumerate(rows)}
+          sm = re.search(r"IL_0012:\s+switch \((.*?)\)\n", text, re.S)
+          assert sm
+          targets = [x.strip() for x in sm.group(1).split(",")]
+          assert len(targets) == 689
+
+          tpos = sorted((pos[lab], st, lab) for st,lab in enumerate(targets))
+          blocks = {}
+          for i,(p0,st,lab) in enumerate(tpos):
+              p1 = tpos[i+1][0] if i + 1 < len(tpos) else len(rows)
+              blocks[st] = rows[p0:p1]
+
+          def ops(st):
+              return [(op,arg) for _,op,arg in blocks[st]]
+
+          # ------------------------------------------------------------
+          # A) local27 first-28-byte provenance.
+          # state604 performs reference alias local27 = local12.
+          # R150 already proved local12 is the single full h15 ReadBytes result
+          # and local27 is read-only.
+          # ------------------------------------------------------------
+          assert ops(604) == [
+              ("ldloc.s","12"),
+              ("stloc.s","27"),
+              ("ldc.i4","149"),
+              ("br","IL_0012"),
+          ]
+
+          # local27 has no reassignment anywhere else.
+          local27_stores = [
+              (st,lab)
+              for st,b in blocks.items()
+              for lab,op,arg in b
+              if op in ("stloc","stloc.s") and arg == "27"
+          ]
+          assert local27_stores == [(604, "IL_0faa")]
+
+          # Full-word input assembly reads bytes directly from local27.
+          assert ops(342)[:28] == [
+              ("ldloc.s","27"), ("ldloc.s","76"), ("ldc.i4.3",""), ("add",""), ("ldelem.u1",""),
+              ("ldc.i4.s","24"), ("shl",""),
+              ("ldloc.s","27"), ("ldloc.s","76"), ("ldc.i4.2",""), ("add",""), ("ldelem.u1",""),
+              ("ldc.i4.s","16"), ("shl",""), ("or",""),
+              ("ldloc.s","27"), ("ldloc.s","76"), ("ldc.i4.1",""), ("add",""), ("ldelem.u1",""),
+              ("ldc.i4.8",""), ("shl",""), ("or",""),
+              ("ldloc.s","27"), ("ldloc.s","76"), ("ldelem.u1",""), ("or",""),
+              ("stloc.s","82"),
+          ]
+
+          local27_first28_proven = True
+
+          # ------------------------------------------------------------
+          # B) Exact state404 timing relative to local27/reconstruction.
+          # local47 is assigned once at state626; state309 mutates its bytes.
+          # state404 exits to state604 under zfos=true after local83 reaches 16.
+          # No later local47 reference reassignment exists.
+          # ------------------------------------------------------------
+          local47_stores = [
+              (st,lab)
+              for st,b in blocks.items()
+              for lab,op,arg in b
+              if op in ("stloc","stloc.s") and arg == "47"
+          ]
+          assert local47_stores == [(626, "IL_2f38")]
+
+          assert ops(626)[:3] == [
+              ("ldloc","17"),
+              ("stloc.s","47"),
+              ("ldc.i4","662"),
+          ]
+
+          assert ops(404) == [
+              ("ldloc.s","83"),
+              ("ldloc.s","8"),
+              ("ldlen",""),
+              ("conv.i4",""),
+              ("blt","IL_33d9"),
+              ("ldc.i4","604"),
+              ("call","bool Q9Wet0jLP4YxXSyJBiC.q71r2Rj8SiD9GF1BI50::zfos5ENLukrcbiO4qNQ()"),
+              ("brtrue","IL_0012"),
+              ("pop",""),
+              ("ldc.i4","2"),
+              ("br","IL_0012"),
+          ]
+
+          assert ops(309)[:12] == [
+              ("ldloc.s","47"),
+              ("ldloc.s","83"),
+              ("ldloc.s","47"),
+              ("ldloc.s","83"),
+              ("ldelem.u1",""),
+              ("ldloc.s","8"),
+              ("ldloc.s","83"),
+              ("ldelem.u1",""),
+              ("xor",""),
+              ("conv.u1",""),
+              ("stelem.i1",""),
+              ("ldc.i4","625"),
+          ]
+
+          assert ops(625)[:6] == [
+              ("ldloc.s","83"),
+              ("ldc.i4.1",""),
+              ("add",""),
+              ("stloc.s","83"),
+              ("ldc.i4","404"),
+              ("br","IL_0012"),
+          ]
+
+          # Only state309 mutates an array addressed through local47.
+          local47_stelem_states = []
+          for st,b in blocks.items():
+              for j,(lab,op,arg) in enumerate(b):
+                  if op == "stelem.i1":
+                      prefix = b[max(0, j-12):j]
+                      if any(
+                          pop in ("ldloc","ldloc.s") and parg == "47"
+                          for _,pop,parg in prefix
+                      ):
+                          local47_stelem_states.append(st)
+          assert sorted(set(local47_stelem_states)) == [309]
+
+          # State668 allocates reconstruction output; state484/117 consume the
+          # same still-bound local47 array after the state404 mutation.
+          assert ops(668)[:7] == [
+              ("ldloc.s","27"),
+              ("ldlen",""),
+              ("conv.i4",""),
+              ("newarr","[mscorlib]System.Byte"),
+              ("stloc.s","37"),
+              ("ldc.i4","484"),
+              ("br","IL_0012"),
+          ]
+
+          assert ops(484)[:6] == [
+              ("ldloc.s","47"),
+              ("ldlen",""),
+              ("conv.i4",""),
+              ("ldc.i4.4",""),
+              ("div",""),
+              ("stloc.s","118"),
+          ]
+
+          # R177 independently proved the mutation precedes state604/local27
+          # and state668 reconstruction. Keep only that timing conclusion.
+          assert "before state604/local27 and before state668 reconstruction" in \
+              d177["R171_ROOT_CAUSE"]
+
+          state404_key_timing_proven = True
+
+          # ------------------------------------------------------------
+          # C) conv.r.un -> conv.r8 -> conv.u4 is identity for uint32 here.
+          #
+          # ECMA-335 Partition III 3.27 rule used:
+          # conv.r.un represents an unsigned integer as float32 only when
+          # float32 can represent it without loss; otherwise it uses float64.
+          # Therefore every uint32 input is represented exactly.
+          # conv.r8 preserves that exact value as float64.
+          # conv.u4 then converts the in-range integral value back to itself.
+          #
+          # Re-run state46 with that conversion chain as an exact identity,
+          # with no Python floating-point operation at all.
+          # ------------------------------------------------------------
+          b46 = blocks[46]
+          canon46 = json.dumps(
+              [(lab,op,arg) for lab,op,arg in b46],
+              separators=(",",":")
+          ).encode()
+          assert hashlib.sha256(canon46).hexdigest() == \
+              "75f84c2e24085e392d83239813fd59f0cd54311e440f8c9118edddb332c6fcd9"
+
+          conv_sequence = [
+              (op,arg)
+              for _,op,arg in b46
+              if op in ("conv.r.un","conv.r8","conv.u4")
+          ]
+          assert conv_sequence == [
+              ("conv.r.un",""),
+              ("conv.r8",""),
+              ("conv.u4",""),
+          ]
+
+          def state46_integer_semantics(x):
+              loc = {105:u32(x)}
+              stack = []
+
+              for _,op,arg in b46:
+                  if op in ("ldloc","ldloc.s"):
+                      stack.append(loc.get(int(arg), 0))
+                  elif op in ("stloc","stloc.s"):
+                      loc[int(arg)] = u32(stack.pop())
+                  elif op in ("ldc.i4","ldc.i4.s"):
+                      stack.append(u32(int(arg)))
+                  elif op.startswith("ldc.i4."):
+                      tail = op[len("ldc.i4."):]
+                      stack.append(u32(-1 if tail == "m1" else int(tail)))
+                  elif op == "add":
+                      b = stack.pop(); a = stack.pop()
+                      stack.append(u32(a + b))
+                  elif op == "sub":
+                      b = stack.pop(); a = stack.pop()
+                      stack.append(u32(a - b))
+                  elif op == "xor":
+                      b = stack.pop(); a = stack.pop()
+                      stack.append(u32(a ^ b))
+                  elif op == "and":
+                      b = stack.pop(); a = stack.pop()
+                      stack.append(u32(a & b))
+                  elif op == "or":
+                      b = stack.pop(); a = stack.pop()
+                      stack.append(u32(a | b))
+                  elif op == "shl":
+                      b = int(stack.pop()) & 31
+                      a = int(stack.pop())
+                      stack.append(u32(a << b))
+                  elif op == "shr.un":
+                      b = int(stack.pop()) & 31
+                      a = int(stack.pop())
+                      stack.append((a & MASK32) >> b)
+                  elif op in ("conv.r.un","conv.r8","conv.u4"):
+                      # Exact identity lemma for this specific uint32 chain.
+                      v = stack.pop()
+                      assert 0 <= v <= MASK32
+                      stack.append(v)
+                  elif op == "br":
+                      break
+                  else:
+                      raise AssertionError(("unsupported state46 op", op, arg))
+
+              return loc[105]
+
+          post_key = bytes.fromhex(
+              d153["POST_LOOP_LOCAL47_KEY_CANDIDATE_HEX"]
+          )
+          assert post_key.hex() == \
+              "8e491ed108e5b47c8f39d70fd5c8342d8a42a068d0554a0ee526b8f7d6c844b3"
+
+          key_words = [
+              struct.unpack_from("<I", post_key, i * 4)[0]
+              for i in range(8)
+          ]
+
+          # Reconstruct exactly first seven words with no float arithmetic.
+          s = 0
+          trace = []
+          local37_words = []
+
+          for i in range(7):
+              transform_input = u32(s + key_words[i % 8])
+              s = state46_integer_semantics(transform_input)
+              src = h15_first7[i]
+              dst = u32(s ^ src)
+              local37_words.append(dst)
+
+              trace.append({
+                  "index": i,
+                  "key_word_u32": key_words[i % 8],
+                  "state46_input_u32": transform_input,
+                  "state46_output_u32": s,
+                  "h15_u32": src,
+                  "local37_u32": dst,
+              })
+
+          assert [x["state46_output_u32"] for x in trace] == [
+              x["state46_output_u32"] for x in d181["FIRST7_TRACE"]
+          ]
+          assert local37_words == d181["FIRST7_LOCAL37_WORDS_U32"]
+
+          # First four 8-byte state179 lanes: lower u32 of each lane is XORed.
+          local29_words = []
+          for i,w in enumerate(local37_words):
+              if i % 2 == 0:
+                  local29_words.append(u32(w ^ 0x3800CD0D))
+              else:
+                  local29_words.append(w)
+
+          assert local29_words == d181["FIRST7_LOCAL29_WORDS_U32"]
+
+          state565_i32 = struct.unpack(
+              "<i",
+              struct.pack("<I", local29_words[6])
+          )[0]
+
+          assert state565_i32 == 1921932524
+          assert state565_i32 == d181["STATE565_INT32"]
+
+          conv_chain_identity_proven = True
+
+          # ------------------------------------------------------------
+          # Conclusion:
+          # - h15/local27 first 28 bytes are not the source of the mismatch.
+          # - state404 post-XOR timing is not the source.
+          # - R181's Python float approximation is not the source.
+          # Remaining fail-closed focus moves upstream to local17/local100
+          # concrete candidate provenance / earlier path assumptions.
+          # ------------------------------------------------------------
+          decision = {
+              "revision": "R182",
+
+              "R181_RUN_ID": 36238250238,
+              "R181_ARTIFACT_ID": 10905530304,
+              "R181_ARTIFACT_DIGEST":
+                  "sha256:15f505d92abe4175064a94ea3533b408fb9cac45e2dfd56a21640ef8219883c6",
+              "R181_INNER_SHA256":
+                  "6fadc12b2596635d566e8740df945db089edc27e042adc483e235a104e73f64e",
+
+              "R177_RUN_ID": 36137304534,
+              "R177_ARTIFACT_ID": 10864507451,
+              "R177_INNER_SHA256":
+                  "6035e432d417e9414878d83388cb366782e385f731190bf4733293072c8f4b61",
+
+              "R157_RUN_ID": 36028455796,
+              "R157_ARTIFACT_ID": 10820682068,
+              "R157_INNER_SHA256":
+                  "f974c64c63eea5f2b940c76101f4ab6e769803f5630a2d87d21d08679c321609",
+
+              "H15_LENGTH": len(h15),
+              "H15_SHA256": hashlib.sha256(h15).hexdigest(),
+              "H15_FIRST28_HEX": h15[:28].hex(),
+              "H15_FIRST7_U32": h15_first7,
+
+              "LOCAL12_SINGLE_FULL_RESOURCE_READ_PROVEN": True,
+              "LOCAL27_SINGLE_ALIAS_FROM_LOCAL12_PROVEN": True,
+              "LOCAL27_READ_ONLY_PROVEN": True,
+              "LOCAL27_FIRST28_EQUAL_H15_FIRST28_PROVEN":
+                  local27_first28_proven,
+              "LOCAL27_H15_FIRST28_EXONERATED": True,
+
+              "STATE404_16_BYTE_XOR_MUTATION_PROVEN": True,
+              "STATE404_EXIT_TO_STATE604_UNDER_ZFOS_TRUE_PROVEN": True,
+              "LOCAL47_SINGLE_REFERENCE_BINDING_PROVEN": True,
+              "LOCAL47_ONLY_INPLACE_STELEM_MUTATOR_STATE": 309,
+              "STATE404_MUTATION_BEFORE_STATE604_LOCAL27_PROVEN": True,
+              "POST_STATE404_LOCAL47_PERSISTS_TO_WORD_SCHEDULE_PROVEN":
+                  state404_key_timing_proven,
+              "POST_STATE404_KEY_TIMING_EXONERATED": True,
+
+              "ECMA335_CONV_R_UN_RULE_APPLIED":
+                  "unsigned integer is represented by float32 only if exact, otherwise float64",
+              "CONV_R_UN_R8_U4_CHAIN_IDENTITY_FOR_UINT32_PROVEN":
+                  conv_chain_identity_proven,
+              "STATE46_FIRST7_RECOMPUTED_WITHOUT_PYTHON_FLOATS": True,
+              "STATE565_VALUE_REPRODUCED_WITH_INTEGER_ONLY_CONV_MODEL": True,
+              "STATE565_INT32": state565_i32,
+              "R181_FLOAT_EMULATION_EXONERATED": True,
+
+              "R180_HASHTABLE_CONTRADICTION_STILL_STANDS": True,
+              "R177_CORRECTED_LOCAL29_RETAINED_AS_PRODUCTION_VALID": False,
+
+              "REMAINING_FAIL_CLOSED_FOCUS": [
+                  "concrete local17 pre-state404 key candidate provenance",
+                  "concrete local100/local8 IV candidate provenance",
+                  "earlier PE32/control-flow assumptions used to derive those candidates",
+              ],
+
+              "NEXT":
+                  "R183: remain fully offline and independently reconstruct local17 "
+                  "and local100 provenance from raw IL/resources without trusting the "
+                  "R144/R145 concrete key/IV values as inputs. Stop at the earliest "
+                  "candidate mismatch and use the state565 Hashtable overflow as the "
+                  "fail-closed oracle. Do not decrypt, execute vendor binaries, contact "
+                  "USB, or flash.",
+
+              "AES_OR_CRYPTOSTREAM_DECRYPT_EXECUTED": False,
+              "OFFLINE_DECRYPT_AUTHORIZED": False,
+              "VENDOR_BINARY_EXECUTED": False,
+              "USB_OR_BOARD_CONTACTED": False,
+              "ANY_DISCOVERED_FRAME_AUTHORIZED_FOR_BOARD": False,
+              "FLASH_ALLOWED": False,
+          }
+
+          (out / "R182_DECISION.json").write_text(
+              json.dumps(decision, indent=2) + "\n"
+          )
+
+          (out / "R182_FIRST7_INTEGER_ONLY_TRACE.json").write_text(
+              json.dumps(trace, indent=2) + "\n"
+          )
+
+          (out / "R182_SUMMARY.txt").write_text(
+              "\n".join([
+                  "local27 first 28 bytes = exact h15 first 28 bytes: PROVEN",
+                  f"h15 first28 = {h15[:28].hex()}",
+                  "state404 XOR mutation occurs before state604/local27 and before reconstruction: PROVEN",
+                  "no later local47 reference rebind: PROVEN",
+                  "conv.r.un -> conv.r8 -> conv.u4 is identity for uint32 under ECMA rule: PROVEN",
+                  "first seven state46 words recomputed with integer-only conversion model: MATCH R181",
+                  f"state565 value remains {state565_i32}",
+                  "R180 Hashtable overflow contradiction remains",
+                  "remaining focus: independent local17/local100 provenance",
+                  "FLASH_ALLOWED=NO",
+              ]) + "\n"
+          )
+
+          print(json.dumps(decision, indent=2))
+          PYCODE
+
+      - name: Package R182 evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /tmp/r182/evidence
+          zip -9 -r /tmp/R182_N9_LOCAL27_KEY_TIMING_CONV_SEMANTICS_STATIC_EVIDENCE.zip . >/dev/null
+          sha256sum /tmp/R182_N9_LOCAL27_KEY_TIMING_CONV_SEMANTICS_STATIC_EVIDENCE.zip \
+            > /tmp/R182_N9_LOCAL27_KEY_TIMING_CONV_SEMANTICS_STATIC_EVIDENCE.zip.sha256
+
+      - name: Upload R182 evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: R182-N9-LOCAL27-KEY-TIMING-CONV-SEMANTICS-STATIC-EVIDENCE
+          path: |
+            /tmp/R182_N9_LOCAL27_KEY_TIMING_CONV_SEMANTICS_STATIC_EVIDENCE.zip
+            /tmp/R182_N9_LOCAL27_KEY_TIMING_CONV_SEMANTICS_STATIC_EVIDENCE.zip.sha256
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Final fail-closed gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$FLASH_ALLOWED" = "NO"
+
+          grep -F '"LOCAL27_H15_FIRST28_EXONERATED": true' \
+            /tmp/r182/evidence/R182_DECISION.json
+
+          grep -F '"POST_STATE404_KEY_TIMING_EXONERATED": true' \
+            /tmp/r182/evidence/R182_DECISION.json
+
+          grep -F '"CONV_R_UN_R8_U4_CHAIN_IDENTITY_FOR_UINT32_PROVEN": true' \
+            /tmp/r182/evidence/R182_DECISION.json
+
+          grep -F '"STATE46_FIRST7_RECOMPUTED_WITHOUT_PYTHON_FLOATS": true' \
+            /tmp/r182/evidence/R182_DECISION.json
+
+          grep -F '"STATE565_INT32": 1921932524' \
+            /tmp/r182/evidence/R182_DECISION.json
+
+          grep -F '"R180_HASHTABLE_CONTRADICTION_STILL_STANDS": true' \
+            /tmp/r182/evidence/R182_DECISION.json
+
+          grep -F '"USB_OR_BOARD_CONTACTED": false' \
+            /tmp/r182/evidence/R182_DECISION.json
+
+          grep -F '"FLASH_ALLOWED": false' \
+            /tmp/r182/evidence/R182_DECISION.json
+
+          echo R182_LOCAL27_KEY_TIMING_CONV_SEMANTICS_STATIC_PROOF=YES
+          echo FLASH_ALLOWED=NO
