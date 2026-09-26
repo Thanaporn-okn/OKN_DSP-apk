@@ -1,0 +1,436 @@
+name: R185 N9 post-state404 branch closure static proof
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - ".github/workflows/R185_POST_STATE404_BRANCH_CLOSURE_STATIC_PROOF.yml"
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: r185-static-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  FLASH_ALLOWED: "NO"
+
+jobs:
+  static_audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: Immutable safety gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$FLASH_ALLOWED" = "NO"
+          mkdir -p /tmp/r185/evidence
+          cat > /tmp/r185/evidence/R185_SAFETY.txt <<'EOF'
+          MODE=OFFLINE_STATIC_POST_STATE404_BRANCH_CLOSURE_ONLY
+          FLASH_ALLOWED=NO
+          USB_OR_BOARD_CONTACT=NO
+          VENDOR_EXE_DLL_APK_EXECUTED=NO
+          AES_OR_CRYPTOSTREAM_DECRYPT_EXECUTED=NO
+          UFE_RUNTIME_TX_SENT=NO
+          FLASH_READ_ERASE_WRITE_EXECUTED=NO
+          DISCOVERED_FRAME_LIVE_AUTHORIZED=NO
+          HARDWARE_MODIFICATION=FORBIDDEN
+          EOF
+
+      - name: Download pinned R184 evidence
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          artifact-ids: "10911710929"
+          path: /tmp/r185/r184
+          merge-multiple: true
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          repository: Thanaporn-okn/OKN_DSP-apk
+          run-id: 36258289066
+
+      - name: Download pinned R173 production-load evidence
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          artifact-ids: "10858700069"
+          path: /tmp/r185/r173
+          merge-multiple: true
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          repository: Thanaporn-okn/OKN_DSP-apk
+          run-id: 36120987803
+
+      - name: Download pinned R179 corrected-reader evidence
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          artifact-ids: "10882879800"
+          path: /tmp/r185/r179
+          merge-multiple: true
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          repository: Thanaporn-okn/OKN_DSP-apk
+          run-id: 36179736477
+
+      - name: Download pinned R157 raw IL evidence
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          artifact-ids: "10820682068"
+          path: /tmp/r185/r157
+          merge-multiple: true
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          repository: Thanaporn-okn/OKN_DSP-apk
+          run-id: 36028455796
+
+      - name: Close states246 605 and corrected state292
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python3 - <<'PYCODE'
+          from pathlib import Path
+          import hashlib, io, json, re, zipfile
+
+          base = Path("/tmp/r185")
+          out = base / "evidence"
+          out.mkdir(parents=True, exist_ok=True)
+
+          def open_inner(folder, filename, expected_sha):
+              p = base / folder / filename
+              data = p.read_bytes()
+              got = hashlib.sha256(data).hexdigest()
+              assert got == expected_sha, (filename, got, expected_sha)
+
+              side = p.with_name(p.name + ".sha256")
+              assert side.exists(), f"missing {side}"
+              assert side.read_text().split()[0] == expected_sha
+
+              return zipfile.ZipFile(io.BytesIO(data))
+
+          # R184: pre-resource normal reachability is already closed.
+          r184 = open_inner(
+              "r184",
+              "R184_N9_PRE_RESOURCE_BRANCH_CONVERGENCE_STATIC_EVIDENCE.zip",
+              "04550e34f5e153566e262abd57fc1dc326cd571e509419b3ec7b176d6a459f1c",
+          )
+          d184 = json.loads(r184.read("R184_DECISION.json"))
+          assert d184["revision"] == "R184"
+          assert d184["STATE262_BNE_TAKEN"] is True
+          assert d184["STATE665_DETOUR_RETIRED"] is True
+          assert d184["NORMAL_NONEXCEPTION_STATE367_REACHABILITY_PROVEN"] is True
+          assert d184["R180_HASHTABLE_CONTRADICTION_STILL_STANDS"] is True
+          assert d184["FLASH_ALLOWED"] is False
+
+          # R173: production direct-EXE load context proves non-empty Location.
+          r173 = open_inner(
+              "r173",
+              "R173_N9_ASSEMBLY_LOCATION_PRODUCTION_LOAD_CONTEXT_EVIDENCE.zip",
+              "e47a69090594ca3f6424d8f82fa12eb4b3b5bc745ebb725baee8160ec9985098",
+          )
+          d173 = json.loads(r173.read("R173_DECISION.json"))
+          assert d173["revision"] == "R173"
+          assert d173["PRODUCTION_DIRECT_DISTRIBUTED_EXE_LOAD_MODEL_PROVEN"] is True
+          assert d173["LWgj_IS_PROTECTED_N9_CONTAINING_EXE_ASSEMBLY_PROVEN"] is True
+          assert d173["KIo_WRAPPER_IS_ASSEMBLY_LOCATION_PROVEN"] is True
+          assert d173["SMP_WRAPPER_IS_STRING_LENGTH_PROVEN"] is True
+          assert d173["STATE246_BRANCH_TO_STATE605_PROVEN_IN_PRODUCTION_DIRECT_EXE_MODEL"] is True
+          assert d173["STATE605_BRANCH_TO_STATE556_PROVEN_IN_PRODUCTION_DIRECT_EXE_MODEL"] is True
+          assert d173["STATE246_CONDITIONAL_RESOLVED_FOR_PRODUCTION_DISTRIBUTION"] is True
+          assert d173["STATE605_CONDITIONAL_RESOLVED_FOR_PRODUCTION_DISTRIBUTION"] is True
+          assert d173["FLASH_ALLOWED"] is False
+
+          # R179: corrected R177 data replaces the old R172 concrete word values.
+          r179 = open_inner(
+              "r179",
+              "R179_N9_STATE426_READER_POSITION_STATIC_EVIDENCE.zip",
+              "67b944776038888e2946084a6e3f8d9d4f8402fe306877283dfecb5f1149bd65",
+          )
+          d179 = json.loads(r179.read("R179_DECISION.json"))
+          assert d179["revision"] == "R179"
+          assert d179["R177_CORRECTED_BYTES_USED"] is True
+          assert d179["PRE_STATE292_READ_COUNT"] == 6
+          assert d179["READER_CURSOR_AT_STATE292_ENTRY"] == 24
+          assert d179["CORRECTED_LOCAL28_INT32"] == 246360948
+          assert d179["READER_CURSOR_AT_STATE565_ENTRY"] == 24
+          assert d179["STATE565_READ_INT32_LE"] == 1921932524
+          assert d179["STATE565_HASHTABLE_CAPACITY_ARGUMENT"] == 1921932525
+          assert d179["FLASH_ALLOWED"] is False
+
+          # Raw IL.
+          r157 = open_inner(
+              "r157",
+              "R157_N9_LOCAL29_LOCAL81_NONNULL_LOCAL93_LOOP_BRANCH_EVIDENCE.zip",
+              "f974c64c63eea5f2b940c76101f4ab6e769803f5630a2d87d21d08679c321609",
+          )
+          prefix = (
+              "r156/r155/r154/r153/r152/r151/r150/r149/r148/r147/"
+              "r146/r145/r144/r143/"
+          )
+          raw = r157.read(prefix + "R143_N9_METHOD.il")
+          assert hashlib.sha256(raw).hexdigest() == \
+              "5a3964c1f4bd8db455e6882a4ce6f90667e1a9abc6e1fafd10440b31006e4a33"
+          text = raw.decode()
+
+          rows = []
+          for line in text.splitlines():
+              m = re.match(
+                  r"\s*(IL_[0-9a-fA-F]+):\s+(\S+)(?:\s+(.*))?$",
+                  line
+              )
+              if m:
+                  rows.append((
+                      m.group(1),
+                      m.group(2),
+                      (m.group(3) or "").split(" //", 1)[0].strip()
+                  ))
+
+          pos = {lab:i for i,(lab,_,_) in enumerate(rows)}
+          sm = re.search(r"IL_0012:\s+switch \((.*?)\)\n", text, re.S)
+          assert sm
+          labels = [x.strip() for x in sm.group(1).split(",")]
+          assert len(labels) == 689
+
+          tpos = sorted((pos[lab], st, lab) for st,lab in enumerate(labels))
+          blocks = {}
+          for i,(p0,st,lab) in enumerate(tpos):
+              p1 = tpos[i+1][0] if i + 1 < len(tpos) else len(rows)
+              blocks[st] = rows[p0:p1]
+
+          def ops(st):
+              return [(op,arg) for _,op,arg in blocks[st]]
+
+          # Reader binding/reset.
+          assert ops(94)[:6] == [
+              ("ldloc.s","29"),
+              ("newobj","instance void [mscorlib]System.IO.MemoryStream::.ctor(uint8[])"),
+              ("newobj","instance void Q9Wet0jLP4YxXSyJBiC.q71r2Rj8SiD9GF1BI50/Y7Uor8e58M9K22QZF7H::.ctor(class [mscorlib]System.IO.Stream)"),
+              ("stloc.s","114"),
+              ("ldc.i4","52"),
+              ("br","IL_0012"),
+          ]
+          assert ops(52)[:5] == [
+              ("ldloc.s","114"),
+              ("call","object Q9Wet0jLP4YxXSyJBiC.q71r2Rj8SiD9GF1BI50::oNNQE6NTi9uesXTTGZJ(object)"),
+              ("ldc.i4.0",""),
+              ("conv.i8",""),
+              ("call","void Q9Wet0jLP4YxXSyJBiC.q71r2Rj8SiD9GF1BI50::uKbcISNmDSreine16Qp(object, int64)"),
+          ]
+
+          # Exact production branches.
+          assert ops(246)[:3] == [
+              ("ldsfld","object Q9Wet0jLP4YxXSyJBiC.q71r2Rj8SiD9GF1BI50::lWgjKLKxo2"),
+              ("call","object Q9Wet0jLP4YxXSyJBiC.q71r2Rj8SiD9GF1BI50::KIoEb3NS3a1HTR21GpN(object)"),
+              ("brtrue","IL_1fbf"),
+          ]
+          assert labels[605] == "IL_1fbf"
+
+          assert ops(605)[:4] == [
+              ("ldsfld","object Q9Wet0jLP4YxXSyJBiC.q71r2Rj8SiD9GF1BI50::lWgjKLKxo2"),
+              ("call","object Q9Wet0jLP4YxXSyJBiC.q71r2Rj8SiD9GF1BI50::KIoEb3NS3a1HTR21GpN(object)"),
+              ("call","int32 Q9Wet0jLP4YxXSyJBiC.q71r2Rj8SiD9GF1BI50::SMPFNLNr5St51O5T1Ai(object)"),
+              ("brtrue","IL_5d2c"),
+          ]
+          assert labels[556] == "IL_5d2c"
+
+          # The untaken null/empty detours can only set local99=7680 before
+          # converging to state556. They do not write local29/local114.
+          assert ops(516)[0] == ("br","IL_46a9")
+          assert labels[610] == "IL_46a9"
+          assert ops(610) == [
+              ("ldc.i4","7680"),
+              ("stloc.s","99"),
+              ("ldc.i4","556"),
+              ("stloc","95"),
+              ("br","IL_000e"),
+          ]
+
+          audited_states = [246, 605, 516, 610]
+          prohibited_reader_writes = []
+          for st in audited_states:
+              for lab,op,arg in blocks[st]:
+                  if op in ("stloc","stloc.s") and arg in ("29","114"):
+                      prohibited_reader_writes.append((st,lab,op,arg))
+          assert prohibited_reader_writes == []
+
+          # Production direct EXE path skips 516/610:
+          # 246(true)->605, then 605(true)->556.
+          production_branch_path = [246, 605, 556]
+
+          # Six exact ReadInt32 calls then state292.
+          read_states = [556,650,614,573,535,289]
+          for st in read_states:
+              assert any(
+                  op == "call" and "qfkv4ZNDynVciIciQy6" in arg
+                  for op,arg in ops(st)
+              ), st
+
+          assert ops(535)[:2] == [
+              ("ldloc.s","114"),
+              ("call","int32 Q9Wet0jLP4YxXSyJBiC.q71r2Rj8SiD9GF1BI50::qfkv4ZNDynVciIciQy6(object)"),
+          ]
+          assert ("stloc.s","71") in ops(535)
+
+          assert ops(289)[:3] == [
+              ("ldloc.s","114"),
+              ("call","int32 Q9Wet0jLP4YxXSyJBiC.q71r2Rj8SiD9GF1BI50::qfkv4ZNDynVciIciQy6(object)"),
+              ("stloc.s","28"),
+          ]
+
+          # Corrected local28 controls state292 and state278.
+          local28 = d179["CORRECTED_LOCAL28_INT32"]
+          assert local28 != 4
+          assert local28 != 1
+
+          assert ops(292)[:4] == [
+              ("ldloc.s","28"),
+              ("ldc.i4.4",""),
+              ("bne.un","IL_5d8f"),
+              ("ldc.i4","402"),
+          ]
+          assert labels[278] == "IL_5d8f"
+
+          assert ops(278)[:3] == [
+              ("ldloc.s","28"),
+              ("ldc.i4.1",""),
+              ("bne.un","IL_45a9"),
+          ]
+
+          p45 = pos["IL_45a9"]
+          assert [(op,arg) for _,op,arg in rows[p45:p45+5]] == [
+              ("ldc.i4.0",""),
+              ("stloc.s","35"),
+              ("ldc.i4","558"),
+              ("call","bool Q9Wet0jLP4YxXSyJBiC.q71r2Rj8SiD9GF1BI50::zfos5ENLukrcbiO4qNQ()"),
+              ("brtrue","IL_0012"),
+          ]
+
+          decision = {
+              "revision": "R185",
+
+              "R184_RUN_ID": 36258289066,
+              "R184_ARTIFACT_ID": 10911710929,
+              "R184_ARTIFACT_DIGEST":
+                  "sha256:8717ba761bd8b04d99f55b9e5c313e980fc4f754df7a0fe2fa7ab5a6afb748f7",
+              "R184_INNER_SHA256":
+                  "04550e34f5e153566e262abd57fc1dc326cd571e509419b3ec7b176d6a459f1c",
+
+              "R173_RUN_ID": 36120987803,
+              "R173_ARTIFACT_ID": 10858700069,
+              "R173_ARTIFACT_DIGEST":
+                  "sha256:075fe0fb741dc1d1c60db64f7285ccbd34e9d0d44c69436b44522affeb6099b2",
+              "R173_INNER_SHA256":
+                  "e47a69090594ca3f6424d8f82fa12eb4b3b5bc745ebb725baee8160ec9985098",
+
+              "R179_RUN_ID": 36179736477,
+              "R179_ARTIFACT_ID": 10882879800,
+              "R179_ARTIFACT_DIGEST":
+                  "sha256:2c37922c94e8a9fc1b6e1d0d000a68df3aa7dd6efc5096b9f2902bbf055dc51c",
+              "R179_INNER_SHA256":
+                  "67b944776038888e2946084a6e3f8d9d4f8402fe306877283dfecb5f1149bd65",
+
+              "OFFICIAL_DIRECT_EXE_MODEL_SCOPE": d173["MODEL_SCOPE"],
+              "STATE246_BRANCH_TO_STATE605": True,
+              "STATE605_BRANCH_TO_STATE556": True,
+              "PRODUCTION_BRANCH_PATH": production_branch_path,
+              "NULL_EMPTY_DETOURS_TAKEN_IN_PRODUCTION_DIRECT_EXE_MODEL": False,
+              "STATES246_605_516_610_WRITE_LOCAL29_OR_LOCAL114": False,
+              "STATES246_605_CAN_MUTATE_RECONSTRUCTED_LOCAL29": False,
+              "STATES246_605_CAN_CHANGE_READER_CURSOR_BEFORE_STATE556": False,
+
+              "PRE_STATE292_READ_STATES": read_states,
+              "PRE_STATE292_READ_COUNT": 6,
+              "READER_CURSOR_AT_STATE292_ENTRY": 24,
+              "CORRECTED_LOCAL28_INT32": local28,
+              "STATE292_LOCAL28_NE_4": True,
+              "STATE292_BRANCH_TO_STATE278": True,
+              "STATE278_LOCAL28_NE_1": True,
+              "STATE278_BRANCH_TO_IL45A9": True,
+              "IL45A9_DISPATCHES_STATE558": True,
+
+              "POST_STATE404_BRANCH_CLUSTER_CLOSED_FOR_OFFICIAL_DIRECT_EXE_MODEL": True,
+              "BRANCH_CLUSTER_EXPLAINS_R180_HASHTABLE_CONTRADICTION": False,
+              "R180_HASHTABLE_CONTRADICTION_STILL_STANDS": True,
+              "STATE565_INT32_FROM_R179": d179["STATE565_READ_INT32_LE"],
+              "STATE565_CAPACITY_FROM_R179":
+                  d179["STATE565_HASHTABLE_CAPACITY_ARGUMENT"],
+
+              "NEXT":
+                  "R186: remain fully offline and independently replay only the "
+                  "first seven reconstruction word visits from raw dispatcher IL, "
+                  "without trusting R170's per-visit reaching-definition schedule. "
+                  "Track local38/local110/local76/local53/local105/local82/local24 "
+                  "and the writes to local37[0..27]. Compare the independently "
+                  "derived first seven words with R181/R182. This is the next "
+                  "remaining place where a control-flow/reaching-definition model "
+                  "error could explain the state565 Hashtable contradiction. Do not "
+                  "decrypt, execute vendor binaries, contact USB, or flash.",
+
+              "AES_OR_CRYPTOSTREAM_DECRYPT_EXECUTED": False,
+              "OFFLINE_DECRYPT_AUTHORIZED": False,
+              "VENDOR_BINARY_EXECUTED": False,
+              "USB_OR_BOARD_CONTACTED": False,
+              "ANY_DISCOVERED_FRAME_AUTHORIZED_FOR_BOARD": False,
+              "FLASH_ALLOWED": False,
+          }
+
+          (out / "R185_DECISION.json").write_text(
+              json.dumps(decision, indent=2) + "\n"
+          )
+
+          (out / "R185_BRANCH_TRACE.txt").write_text(
+              "\n".join([
+                  "official direct-EXE production model:",
+                  "state246 Location non-empty -> state605",
+                  "state605 Location.Length > 0 -> state556",
+                  "states516/610 not taken",
+                  "states246/605/516/610 do not write local29 or local114",
+                  "ReadInt32 states: 556,650,614,573,535,289",
+                  "reader cursor at state292 entry = 24",
+                  f"corrected local28 = {local28}",
+                  "state292 local28 != 4 -> state278",
+                  "state278 local28 != 1 -> IL_45a9 -> state558",
+                  "post-state404 branch cluster closed",
+                  "R180 Hashtable contradiction remains",
+                  "FLASH_ALLOWED=NO",
+              ]) + "\n"
+          )
+
+          print(json.dumps(decision, indent=2))
+          PYCODE
+
+      - name: Package R185 evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /tmp/r185/evidence
+          zip -9 -r /tmp/R185_N9_POST_STATE404_BRANCH_CLOSURE_STATIC_EVIDENCE.zip . >/dev/null
+          sha256sum /tmp/R185_N9_POST_STATE404_BRANCH_CLOSURE_STATIC_EVIDENCE.zip \
+            > /tmp/R185_N9_POST_STATE404_BRANCH_CLOSURE_STATIC_EVIDENCE.zip.sha256
+
+      - name: Upload R185 evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: R185-N9-POST-STATE404-BRANCH-CLOSURE-STATIC-EVIDENCE
+          path: |
+            /tmp/R185_N9_POST_STATE404_BRANCH_CLOSURE_STATIC_EVIDENCE.zip
+            /tmp/R185_N9_POST_STATE404_BRANCH_CLOSURE_STATIC_EVIDENCE.zip.sha256
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Final fail-closed gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$FLASH_ALLOWED" = "NO"
+
+          grep -F '"STATE246_BRANCH_TO_STATE605": true' /tmp/r185/evidence/R185_DECISION.json
+          grep -F '"STATE605_BRANCH_TO_STATE556": true' /tmp/r185/evidence/R185_DECISION.json
+          grep -F '"STATES246_605_CAN_MUTATE_RECONSTRUCTED_LOCAL29": false' /tmp/r185/evidence/R185_DECISION.json
+          grep -F '"STATE292_BRANCH_TO_STATE278": true' /tmp/r185/evidence/R185_DECISION.json
+          grep -F '"STATE278_BRANCH_TO_IL45A9": true' /tmp/r185/evidence/R185_DECISION.json
+          grep -F '"POST_STATE404_BRANCH_CLUSTER_CLOSED_FOR_OFFICIAL_DIRECT_EXE_MODEL": true' /tmp/r185/evidence/R185_DECISION.json
+          grep -F '"R180_HASHTABLE_CONTRADICTION_STILL_STANDS": true' /tmp/r185/evidence/R185_DECISION.json
+          grep -F '"USB_OR_BOARD_CONTACTED": false' /tmp/r185/evidence/R185_DECISION.json
+          grep -F '"FLASH_ALLOWED": false' /tmp/r185/evidence/R185_DECISION.json
+
+          echo R185_POST_STATE404_BRANCH_CLOSURE_STATIC_PROOF=YES
+          echo FLASH_ALLOWED=NO
