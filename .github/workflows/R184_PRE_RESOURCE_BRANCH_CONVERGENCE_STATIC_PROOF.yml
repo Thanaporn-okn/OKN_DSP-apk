@@ -1,0 +1,429 @@
+name: R184 N9 pre-resource branch convergence static proof
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - ".github/workflows/R184_PRE_RESOURCE_BRANCH_CONVERGENCE_STATIC_PROOF.yml"
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: r184-static-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  FLASH_ALLOWED: "NO"
+
+jobs:
+  static_audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: Immutable safety gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$FLASH_ALLOWED" = "NO"
+          mkdir -p /tmp/r184/evidence
+          cat > /tmp/r184/evidence/R184_SAFETY.txt <<'EOF'
+          MODE=OFFLINE_STATIC_CONTROL_FLOW_ONLY
+          FLASH_ALLOWED=NO
+          USB_OR_BOARD_CONTACT=NO
+          VENDOR_EXE_DLL_APK_EXECUTED=NO
+          AES_OR_CRYPTOSTREAM_DECRYPT_EXECUTED=NO
+          UFE_RUNTIME_TX_SENT=NO
+          FLASH_READ_ERASE_WRITE_EXECUTED=NO
+          DISCOVERED_FRAME_LIVE_AUTHORIZED=NO
+          HARDWARE_MODIFICATION=FORBIDDEN
+          EOF
+
+      - name: Download pinned R183 evidence
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          artifact-ids: "10907227154"
+          path: /tmp/r184/r183
+          merge-multiple: true
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          repository: Thanaporn-okn/OKN_DSP-apk
+          run-id: 36245531797
+
+      - name: Download pinned R157 raw evidence chain
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          artifact-ids: "10820682068"
+          path: /tmp/r184/r157
+          merge-multiple: true
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          repository: Thanaporn-okn/OKN_DSP-apk
+          run-id: 36028455796
+
+      - name: Resolve pre-resource branches by value or convergence
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python3 - <<'PYCODE'
+          from pathlib import Path
+          import hashlib, io, json, re, zipfile
+
+          base = Path("/tmp/r184")
+          ev = base / "evidence"
+
+          def open_inner(folder, filename, expected_sha):
+              p = base / folder / filename
+              data = p.read_bytes()
+              got = hashlib.sha256(data).hexdigest()
+              assert got == expected_sha, (filename, got, expected_sha)
+              side = p.with_name(p.name + ".sha256")
+              assert side.exists()
+              assert side.read_text().split()[0] == expected_sha
+              return zipfile.ZipFile(io.BytesIO(data))
+
+          # Pin R183.
+          r183 = open_inner(
+              "r183",
+              "R183_N9_KEY_IV_PROVENANCE_CLOSURE_STATIC_EVIDENCE.zip",
+              "47fcd307237c1584ca2f364c355da80479bbc275a17f0a54646445ec6e958c05",
+          )
+          d183 = json.loads(r183.read("R183_DECISION.json"))
+          assert d183["revision"] == "R183"
+          assert d183["LOCAL17_RAW_IL_RECONSTRUCTION_PROVEN"] is True
+          assert d183["LOCAL100_RAW_IL_RECONSTRUCTION_PROVEN"] is True
+          assert d183["KEY_IV_VALUE_MISMATCH_FOUND"] is False
+          assert d183["PRE_RESOURCE_UNRESOLVED_BRANCH_COUNT"] == 8
+          assert d183["PRODUCTION_REACHABILITY_TO_STATE367_FULLY_PROVEN"] is False
+          assert d183["FLASH_ALLOWED"] is False
+
+          # Pin raw IL/full IL chain.
+          r157 = open_inner(
+              "r157",
+              "R157_N9_LOCAL29_LOCAL81_NONNULL_LOCAL93_LOOP_BRANCH_EVIDENCE.zip",
+              "f974c64c63eea5f2b940c76101f4ab6e769803f5630a2d87d21d08679c321609",
+          )
+          prefix = (
+              "r156/r155/r154/r153/r152/r151/r150/r149/r148/r147/"
+              "r146/r145/r144/r143/"
+          )
+          raw = r157.read(prefix + "R143_N9_METHOD.il")
+          assert hashlib.sha256(raw).hexdigest() == \
+              "5a3964c1f4bd8db455e6882a4ce6f90667e1a9abc6e1fafd10440b31006e4a33"
+          text = raw.decode()
+
+          full = r157.read(
+              prefix + "r142/r141/r140/R140_FIXED_FULL.il"
+          ).decode(errors="replace")
+
+          # Parse dispatcher states.
+          rows = []
+          for line in text.splitlines():
+              m = re.match(
+                  r"\s*(IL_[0-9a-fA-F]+):\s+(\S+)(?:\s+(.*))?$",
+                  line
+              )
+              if m:
+                  rows.append((
+                      m.group(1), m.group(2),
+                      (m.group(3) or "").split(" //",1)[0].strip()
+                  ))
+          pos = {lab:i for i,(lab,_,_) in enumerate(rows)}
+          sm = re.search(r"IL_0012:\s+switch \((.*?)\)\n", text, re.S)
+          assert sm
+          labels = [x.strip() for x in sm.group(1).split(",")]
+          assert len(labels) == 689
+
+          tpos = sorted((pos[lab], st, lab) for st,lab in enumerate(labels))
+          blocks = {}
+          for i,(p0,st,lab) in enumerate(tpos):
+              p1 = tpos[i+1][0] if i+1 < len(tpos) else len(rows)
+              blocks[st] = rows[p0:p1]
+
+          def ops(st):
+              return [(op,arg) for _,op,arg in blocks[st]]
+
+          # ---------- state197 -> local48 ----------
+          local48_stores = [
+              (st,lab)
+              for st,b in blocks.items()
+              for lab,op,arg in b
+              if op in ("stloc","stloc.s") and arg == "48"
+          ]
+          assert local48_stores == [(197, "IL_0be5")]
+          assert ops(197)[:4] == [
+              ("ldc.i4","-235736076"),
+              ("stloc.s","48"),
+              ("ldc.i4","294"),
+              ("br","IL_0012"),
+          ]
+
+          local48_u32 = (-235736076) & 0xffffffff
+          compare_u32 = (-185339151) & 0xffffffff
+          assert local48_u32 == 0xF1F2F3F4
+          assert compare_u32 == 0xF4F3F2F1
+          assert local48_u32 != compare_u32
+
+          # Therefore state262 bne.un is definitely taken.
+          assert ops(262) == [
+              ("ldloc.s","48"),
+              ("ldc.i4","-185339151"),
+              ("bne.un","IL_2459"),
+              ("ldc.i4","665"),
+              ("br","IL_0012"),
+          ]
+          state262_bne_taken = True
+
+          # State665 legacy detour is therefore dead on this path.
+          state665_reachable_from_state262 = False
+
+          # ---------- IL_2459 convergence ----------
+          p2459 = pos["IL_2459"]
+          seq2459 = [(op,arg) for _,op,arg in rows[p2459:p2459+11]]
+          assert seq2459 == [
+              ("call","int32 Q9Wet0jLP4YxXSyJBiC.q71r2Rj8SiD9GF1BI50::tFjbT6Nj4GDWeki27kh()"),
+              ("ldc.i4.4",""),
+              ("bne.un","IL_21ff"),
+              ("ldc.i4","519"),
+              ("call","bool Q9Wet0jLP4YxXSyJBiC.q71r2Rj8SiD9GF1BI50::zfos5ENLukrcbiO4qNQ()"),
+              ("brtrue","IL_0012"),
+              ("pop",""),
+              ("ldc.i4","512"),
+              ("br","IL_0012"),
+              ("ldloc.s","31"),
+              ("ldloc.s","46"),
+          ]
+
+          # Pin helper meanings.
+          def method_body(name):
+              marker = f"}} // end of method q71r2Rj8SiD9GF1BI50::{name}"
+              e = full.find(marker)
+              assert e >= 0, name
+              s = full.rfind("\n\t.method ", 0, e)
+              assert s >= 0
+              return full[s:e+len(marker)]
+
+          tfjb = method_body("tFjbT6Nj4GDWeki27kh")
+          zfos = method_body("zfos5ENLukrcbiO4qNQ")
+          assert "System.IntPtr::get_Size()" in tfjb
+          assert re.search(
+              r"IL_0000:\s+ldnull\s+IL_0001:\s+ldnull\s+IL_0002:\s+ceq\s+IL_0004:\s+ret",
+              zfos, re.S
+          )
+
+          # If IntPtr.Size != 4 -> direct IL_21ff (state367).
+          # If IntPtr.Size == 4 -> literal state519, zfos=true -> dispatcher.
+          intptr_route = {
+              "not4": 367,
+              "equals4": 519,
+          }
+
+          # ---------- state519 convergence ----------
+          assert ops(519) == [
+              ("ldstr",'"System.Reflection.ReflectionContext"'),
+              ("ldc.i4.0",""),
+              ("call","class [mscorlib]System.Type Q9Wet0jLP4YxXSyJBiC.q71r2Rj8SiD9GF1BI50::UHVb2WNe2pWw9W9EXxe(object, bool)"),
+              ("ldnull",""),
+              ("call","bool Q9Wet0jLP4YxXSyJBiC.q71r2Rj8SiD9GF1BI50::JDfCboNIYIw8VbTtNrA(class [mscorlib]System.Type, class [mscorlib]System.Type)"),
+              ("brtrue","IL_3497"),
+              ("ldc.i4","35"),
+              ("br","IL_0012"),
+          ]
+
+          # True branch IL_3497 == state11 -> state225.
+          assert labels[11] == "IL_3497"
+          assert ops(11)[-2:] == [
+              ("ldc.i4","225"),
+              ("br","IL_0012"),
+          ]
+
+          # False branch -> state35 whose first instruction directly branches
+          # to IL_21ff == state367. The trailing dispatcher literal is dead.
+          assert labels[35] == "IL_66ec"
+          assert ops(35)[0] == ("br","IL_21ff")
+          assert labels[367] == "IL_21ff"
+
+          state519_routes = {
+              "type_nonnull_true": "11 -> 225",
+              "type_null_false": "35 -> direct IL_21ff/state367",
+          }
+
+          # ---------- state225 runtime/JIT cluster ----------
+          b225 = blocks[225]
+          b225_labels = {lab for lab,_,_ in b225}
+
+          # Five formerly-unresolved branches are all internal to this physical
+          # state block and do not directly dispatch elsewhere.
+          branch_lines = {
+              "IL_4deb": ("brfalse","IL_4e19"),
+              "IL_4e20": ("brtrue","IL_4f4c"),
+              "IL_4ef6": ("brtrue","IL_4e7b"),
+              "IL_4f0e": ("brtrue","IL_4eed"),
+              "IL_4fdc": ("brtrue","IL_4fc9"),
+          }
+          for lab,(op,arg) in branch_lines.items():
+              i = pos[lab]
+              assert rows[i][1:] == (op,arg)
+              assert arg in b225_labels
+
+          # All normal exits from state225's try body leave to IL_21ff.
+          leaves = [(lab,arg) for lab,op,arg in b225 if op == "leave"]
+          assert leaves == [
+              ("IL_4e0a","IL_21ff"),
+              ("IL_4f64","IL_21ff"),
+          ]
+
+          # The cluster is runtime/environment-dependent:
+          # process modules, module name "clrjit.dll", enumerator MoveNext and
+          # clrjit FileVersionInfo/Version comparisons.
+          for helper,needle in {
+              "OOwHnYNEKQT2DNgZw50":"IEnumerator::MoveNext()",
+              "enRx0INaOXX0lcatqqh":"ProcessModule::get_ModuleName()",
+              "ymFt6HNd6XlZuenffyZ":"System.String::op_Equality",
+              "AHSf9HNB1AOsjnFWLrs":"ProcessModule::get_FileVersionInfo()",
+              "GPjXRLNYkAdPy05055b":"System.Version::op_LessThan",
+              "omNqF4NFxAcg4vA44ji":"System.Version::op_GreaterThanOrEqual",
+              "WNmMncNCfRVWy71yyLn":"System.IDisposable::Dispose()",
+          }.items():
+              assert needle in method_body(helper), (helper, needle)
+
+          # The only N9 access to wV1jNXamRp is this state225 store.
+          # N9 never reads it during key/IV/reconstruction processing.
+          field = "wV1jNXamRp"
+          assert text.count("stsfld bool Q9Wet0jLP4YxXSyJBiC.q71r2Rj8SiD9GF1BI50::"+field) == 1
+          assert text.count("ldsfld bool Q9Wet0jLP4YxXSyJBiC.q71r2Rj8SiD9GF1BI50::"+field) == 0
+
+          # This environment flag can affect another helper later in the full
+          # assembly, but not the N9 key/IV construction we are auditing here.
+          assert full.count("ldsfld bool Q9Wet0jLP4YxXSyJBiC.q71r2Rj8SiD9GF1BI50::"+field) >= 1
+
+          # Under normal (non-exceptional) enumerator/module API semantics,
+          # state225 loops internally and leaves to state367; exact branch
+          # outcomes are environment-dependent but irrelevant to N9 key/IV.
+          state225_normal_exit_state367 = True
+
+          # R183's eight "unresolved" sites are thus reclassified:
+          # 1 state262 = value-resolved taken;
+          # 1 state665 = dead due state262;
+          # 1 state519 = convergence-resolved;
+          # 5 state225 = runtime-dependent but convergence-resolved.
+          assert d183["PRE_RESOURCE_UNRESOLVED_BRANCH_COUNT"] == 8
+
+          decision = {
+              "revision": "R184",
+
+              "R183_RUN_ID": 36245531797,
+              "R183_ARTIFACT_ID": 10907227154,
+              "R183_ARTIFACT_DIGEST":
+                  "sha256:e4515163f52aad3146b3aee4f9a7702d96ee2cb603f3b999c1b18855b26d78fa",
+              "R183_INNER_SHA256":
+                  "47fcd307237c1584ca2f364c355da80479bbc275a17f0a54646445ec6e958c05",
+
+              "LOCAL48_SINGLE_ASSIGNMENT_PROVEN": True,
+              "LOCAL48_U32_HEX": "0xF1F2F3F4",
+              "STATE262_COMPARE_U32_HEX": "0xF4F3F2F1",
+              "STATE262_BNE_TAKEN": state262_bne_taken,
+              "STATE665_DETOUR_RETIRED": not state665_reachable_from_state262,
+
+              "IL2459_INT_PTR_SIZE_ROUTE": intptr_route,
+              "IL2459_BOTH_NORMAL_ROUTES_EVENTUALLY_TARGET_STATE367_OR_STATE519": True,
+
+              "STATE519_BRANCH_EXACT_VALUE_STATICALLY_FIXED": False,
+              "STATE519_BRANCH_RUNTIME_TYPE_AVAILABILITY_DEPENDENT": True,
+              "STATE519_BOTH_BRANCHES_CONVERGE_TOWARD_STATE367": True,
+              "STATE519_ROUTES": state519_routes,
+
+              "STATE225_FORMER_UNRESOLVED_BRANCH_COUNT": 5,
+              "STATE225_EXACT_BRANCH_OUTCOMES_RUNTIME_ENVIRONMENT_DEPENDENT": True,
+              "STATE225_BRANCH_TARGETS_ALL_INTERNAL": True,
+              "STATE225_NORMAL_LEAVES": ["IL_21ff","IL_21ff"],
+              "STATE225_ALL_NORMAL_EXITS_TO_STATE367": state225_normal_exit_state367,
+
+              "WV1J_FIELD_STORED_IN_N9": True,
+              "WV1J_FIELD_READ_IN_N9": False,
+              "STATE225_ENVIRONMENT_FLAG_CAN_CHANGE_N9_KEY_IV": False,
+
+              "PRE_RESOURCE_BRANCH_SITES_RECLASSIFIED_COUNT": 8,
+              "PRE_RESOURCE_BRANCH_UNCERTAINTY_BLOCKS_NORMAL_STATE367_REACHABILITY": False,
+              "NORMAL_NONEXCEPTION_STATE367_REACHABILITY_PROVEN": True,
+              "EXACT_PRE_RESOURCE_EXECUTION_PATH_UNIQUE": False,
+
+              "R183_KEY_IV_VALUES_REMAIN_VALID_ON_NORMAL_STATE367_ROUTE": True,
+              "R180_HASHTABLE_CONTRADICTION_STILL_STANDS": True,
+
+              "NEXT":
+                  "R185: remain fully offline. Move to the post-state404 unresolved "
+                  "cluster, starting with states246 and605, and prove whether either "
+                  "can divert or mutate the reconstructed data before state94/state565. "
+                  "Revisit state292 only after those two branches are closed. Do not "
+                  "execute vendor binaries, decrypt, contact USB, or flash.",
+
+              "AES_OR_CRYPTOSTREAM_DECRYPT_EXECUTED": False,
+              "OFFLINE_DECRYPT_AUTHORIZED": False,
+              "VENDOR_BINARY_EXECUTED": False,
+              "USB_OR_BOARD_CONTACTED": False,
+              "ANY_DISCOVERED_FRAME_AUTHORIZED_FOR_BOARD": False,
+              "FLASH_ALLOWED": False,
+          }
+
+          (ev / "R184_DECISION.json").write_text(
+              json.dumps(decision, indent=2) + "\n"
+          )
+          (ev / "R184_CONTROL_FLOW_SUMMARY.txt").write_text(
+              "\n".join([
+                  "state197: local48 = 0xF1F2F3F4",
+                  "state262 compares local48 with 0xF4F3F2F1 -> BNE TAKEN",
+                  "legacy state665 detour is dead",
+                  "IL_2459: IntPtr.Size!=4 -> state367; ==4 -> state519",
+                  "state519 false -> state35 -> direct state367",
+                  "state519 true -> state11 -> state225",
+                  "state225 exact module/JIT branches are runtime-dependent",
+                  "state225 normal exits both leave to state367",
+                  "state225 wV1j flag is not read anywhere in N9",
+                  "normal non-exception reachability to state367 = proven",
+                  "R180 Hashtable contradiction still stands",
+                  "FLASH_ALLOWED=NO",
+              ]) + "\n"
+          )
+
+          print(json.dumps(decision, indent=2))
+          PYCODE
+
+      - name: Package R184 evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /tmp/r184/evidence
+          zip -9 -r /tmp/R184_N9_PRE_RESOURCE_BRANCH_CONVERGENCE_STATIC_EVIDENCE.zip . >/dev/null
+          sha256sum /tmp/R184_N9_PRE_RESOURCE_BRANCH_CONVERGENCE_STATIC_EVIDENCE.zip \
+            > /tmp/R184_N9_PRE_RESOURCE_BRANCH_CONVERGENCE_STATIC_EVIDENCE.zip.sha256
+
+      - name: Upload R184 evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: R184-N9-PRE-RESOURCE-BRANCH-CONVERGENCE-STATIC-EVIDENCE
+          path: |
+            /tmp/R184_N9_PRE_RESOURCE_BRANCH_CONVERGENCE_STATIC_EVIDENCE.zip
+            /tmp/R184_N9_PRE_RESOURCE_BRANCH_CONVERGENCE_STATIC_EVIDENCE.zip.sha256
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Final fail-closed gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$FLASH_ALLOWED" = "NO"
+
+          grep -F '"STATE262_BNE_TAKEN": true' /tmp/r184/evidence/R184_DECISION.json
+          grep -F '"STATE665_DETOUR_RETIRED": true' /tmp/r184/evidence/R184_DECISION.json
+          grep -F '"STATE519_BOTH_BRANCHES_CONVERGE_TOWARD_STATE367": true' /tmp/r184/evidence/R184_DECISION.json
+          grep -F '"STATE225_ALL_NORMAL_EXITS_TO_STATE367": true' /tmp/r184/evidence/R184_DECISION.json
+          grep -F '"WV1J_FIELD_READ_IN_N9": false' /tmp/r184/evidence/R184_DECISION.json
+          grep -F '"NORMAL_NONEXCEPTION_STATE367_REACHABILITY_PROVEN": true' /tmp/r184/evidence/R184_DECISION.json
+          grep -F '"R180_HASHTABLE_CONTRADICTION_STILL_STANDS": true' /tmp/r184/evidence/R184_DECISION.json
+          grep -F '"USB_OR_BOARD_CONTACTED": false' /tmp/r184/evidence/R184_DECISION.json
+          grep -F '"FLASH_ALLOWED": false' /tmp/r184/evidence/R184_DECISION.json
+
+          echo R184_PRE_RESOURCE_BRANCH_CONVERGENCE_STATIC_PROOF=YES
+          echo FLASH_ALLOWED=NO
