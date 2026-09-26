@@ -1,0 +1,413 @@
+name: R180 N9 Hashtable capacity contradiction static proof
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - ".github/workflows/R180_HASHTABLE_CAPACITY_CONTRADICTION_STATIC_PROOF.yml"
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: r180-static-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  FLASH_ALLOWED: "NO"
+  REFSOURCE_COMMIT: "ec9fa9ae770d522a5b5f0607898044b7478574a3"
+
+jobs:
+  static_audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: Immutable safety gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$FLASH_ALLOWED" = "NO"
+          mkdir -p /tmp/r180/evidence
+
+          cat > /tmp/r180/evidence/R180_SAFETY.txt <<'EOF'
+          MODE=OFFLINE_STATIC_SEMANTICS_AUDIT_ONLY
+          FLASH_ALLOWED=NO
+          USB_OR_BOARD_CONTACT=NO
+          VENDOR_EXE_DLL_APK_EXECUTED=NO
+          AES_OR_CRYPTOSTREAM_DECRYPT_EXECUTED=NO
+          AA55_OR_LINEIN_AA55_SENT=NO
+          RUNTIME_0X11_OR_0XFE_SENT=NO
+          UFE_RUNTIME_TX_SENT=NO
+          FLASH_READ_ERASE_WRITE_EXECUTED=NO
+          DISCOVERED_FRAME_LIVE_AUTHORIZED=NO
+          HARDWARE_MODIFICATION=FORBIDDEN
+          EOF
+
+      - name: Download pinned R179 evidence
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          artifact-ids: "10882879800"
+          path: /tmp/r180/r179
+          merge-multiple: true
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          repository: Thanaporn-okn/OKN_DSP-apk
+          run-id: 36179736477
+
+      - name: Download pinned R157 evidence chain
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          artifact-ids: "10820682068"
+          path: /tmp/r180/r157
+          merge-multiple: true
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          repository: Thanaporn-okn/OKN_DSP-apk
+          run-id: 36028455796
+
+      - name: Checkout pinned Microsoft .NET Framework Reference Source
+        uses: actions/checkout@v5
+        with:
+          repository: microsoft/referencesource
+          ref: ${{ env.REFSOURCE_COMMIT }}
+          path: reference-source
+          fetch-depth: 1
+
+      - name: Prove Hashtable constructor cannot complete
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          test "$(git -C reference-source rev-parse HEAD)" = "$REFSOURCE_COMMIT"
+          test -s reference-source/mscorlib/system/collections/hashtable.cs
+
+          python3 - <<'PYCODE'
+          from pathlib import Path
+          import hashlib
+          import io
+          import json
+          import re
+          import struct
+          import zipfile
+
+          base = Path("/tmp/r180")
+          out = base / "evidence"
+          out.mkdir(parents=True, exist_ok=True)
+
+          def open_inner(folder, filename, expected_sha):
+              p = base / folder / filename
+              data = p.read_bytes()
+              got = hashlib.sha256(data).hexdigest()
+              assert got == expected_sha, (filename, got, expected_sha)
+
+              sidecar = p.with_name(p.name + ".sha256")
+              assert sidecar.exists(), f"missing sidecar for {filename}"
+              assert sidecar.read_text().split()[0] == expected_sha
+
+              return zipfile.ZipFile(io.BytesIO(data))
+
+          # ----- Pin R179 -----
+          r179 = open_inner(
+              "r179",
+              "R179_N9_STATE426_READER_POSITION_STATIC_EVIDENCE.zip",
+              "67b944776038888e2946084a6e3f8d9d4f8402fe306877283dfecb5f1149bd65",
+          )
+          d179 = json.loads(r179.read("R179_DECISION.json"))
+
+          assert d179["revision"] == "R179"
+          assert d179["R177_CORRECTED_BYTES_USED"] is True
+          assert d179["STATE565_READ_OFFSET"] == 24
+          assert d179["STATE565_READ_BYTES_HEX"] == "ec5c8e72"
+          assert d179["STATE565_READ_INT32_LE"] == 1921932524
+          assert d179["STATE565_HASHTABLE_CAPACITY_ARGUMENT"] == 1921932525
+          assert d179["READER_CURSOR_AFTER_STATE565"] == 28
+          assert d179["FLASH_ALLOWED"] is False
+
+          capacity = d179["STATE565_HASHTABLE_CAPACITY_ARGUMENT"]
+
+          # ----- Pin historical target/runtime evidence and exact IL -----
+          r157 = open_inner(
+              "r157",
+              "R157_N9_LOCAL29_LOCAL81_NONNULL_LOCAL93_LOOP_BRANCH_EVIDENCE.zip",
+              "f974c64c63eea5f2b940c76101f4ab6e769803f5630a2d87d21d08679c321609",
+          )
+
+          r148_prefix = (
+              "r156/r155/r154/r153/r152/r151/r150/r149/r148/"
+          )
+          crypto_path = json.loads(
+              r157.read(r148_prefix + "R148_N9_CONCRETE_CRYPTO_PATH_PROOF.json")
+          )
+          r148_decision = json.loads(
+              r157.read(r148_prefix + "R148_DECISION.json")
+          )
+
+          assert crypto_path["framework_facts"]["clr_v4_string"] is True
+          assert crypto_path["framework_facts"]["target_framework_v471_string"] is True
+          assert r148_decision["REFERENCE_SOURCE_COMMIT"] == \
+              "ec9fa9ae770d522a5b5f0607898044b7478574a3"
+
+          n9_name = (
+              "r156/r155/r154/r153/r152/r151/r150/r149/r148/r147/"
+              "r146/r145/r144/r143/R143_N9_METHOD.il"
+          )
+          raw = r157.read(n9_name)
+          assert hashlib.sha256(raw).hexdigest() == \
+              "5a3964c1f4bd8db455e6882a4ce6f90667e1a9abc6e1fafd10440b31006e4a33"
+
+          text = raw.decode()
+
+          # Exact state565 call site: ReadInt32 + 1 -> Hashtable(int).
+          rows = []
+          for line in text.splitlines():
+              m = re.match(
+                  r"\s*(IL_[0-9a-f]+):\s+(\S+)(?:\s+(.*))?$",
+                  line
+              )
+              if m:
+                  rows.append((
+                      m.group(1),
+                      m.group(2),
+                      (m.group(3) or "").split(" //", 1)[0].strip()
+                  ))
+
+          pos = {lab:i for i,(lab,_,_) in enumerate(rows)}
+          sm = re.search(r"IL_0012:\s+switch \((.*?)\)\n", text, re.S)
+          assert sm
+          targets = [x.strip() for x in sm.group(1).split(",")]
+          assert len(targets) == 689
+
+          tpos = sorted((pos[lab], st, lab) for st,lab in enumerate(targets))
+          blocks = {}
+          for i,(p0,st,lab) in enumerate(tpos):
+              p1 = tpos[i+1][0] if i+1 < len(tpos) else len(rows)
+              blocks[st] = rows[p0:p1]
+
+          ops565 = [(op,arg) for _,op,arg in blocks[565]]
+          assert ops565 == [
+              ("ldloc.s","114"),
+              ("call","int32 Q9Wet0jLP4YxXSyJBiC.q71r2Rj8SiD9GF1BI50::qfkv4ZNDynVciIciQy6(object)"),
+              ("ldc.i4.1",""),
+              ("add",""),
+              ("newobj","instance void [mscorlib]System.Collections.Hashtable::.ctor(int32)"),
+              ("stsfld","object Q9Wet0jLP4YxXSyJBiC.q71r2Rj8SiD9GF1BI50::XdYe0BEvZM"),
+              ("ldc.i4","543"),
+              ("br","IL_0012"),
+          ]
+
+          # ----- Pin .NET Framework Hashtable semantics from source -----
+          src_path = Path(
+              "reference-source/mscorlib/system/collections/hashtable.cs"
+          )
+          src = src_path.read_text(errors="replace")
+          src_sha = hashlib.sha256(src_path.read_bytes()).hexdigest()
+
+          # Constructor delegation.
+          assert re.search(
+              r"public\s+Hashtable\s*\(\s*int\s+capacity\s*\)"
+              r"\s*:\s*this\s*\(\s*capacity\s*,\s*1\.0f\s*\)",
+              src
+          )
+
+          # Effective internal load factor and overflow guard.
+          assert "this.loadFactor = 0.72f * loadFactor;" in src
+          assert "double rawsize = capacity / this.loadFactor;" in src
+          assert "if (rawsize > Int32.MaxValue)" in src
+          assert "Arg_HTCapacityOverflow" in src
+
+          overflow_pos = src.index("if (rawsize > Int32.MaxValue)")
+          allocation_pos = src.index("buckets = new bucket[hashsize];")
+          assert overflow_pos < allocation_pos
+
+          # Emulate the relevant C# single-precision operations:
+          # int -> float, 0.72f, float division, then widen result to double.
+          def f32(x):
+              return struct.unpack("<f", struct.pack("<f", float(x)))[0]
+
+          load_factor_input = f32(1.0)
+          internal_load_factor = f32(f32(0.72) * load_factor_input)
+          capacity_as_float = f32(capacity)
+          rawsize_float = f32(capacity_as_float / internal_load_factor)
+          rawsize_double = float(rawsize_float)
+
+          int32_max = 2147483647
+          capacity_overflow = rawsize_double > int32_max
+
+          assert internal_load_factor == f32(0.72)
+          assert capacity_as_float == 1921932544.0
+          assert rawsize_float == 2669350656.0
+          assert capacity_overflow is True
+
+          # Therefore Hashtable(int) throws before allocating buckets and
+          # before state565's stsfld/state543 continuation can execute.
+          state565_constructor_completes = False
+          state565_stsfld_reached = False
+          state543_reached = False
+
+          assert not state565_constructor_completes
+          assert not state565_stsfld_reached
+          assert not state543_reached
+
+          decision = {
+              "revision": "R180",
+
+              "R179_RUN_ID": 36179736477,
+              "R179_ARTIFACT_ID": 10882879800,
+              "R179_ARTIFACT_DIGEST":
+                  "sha256:2c37922c94e8a9fc1b6e1d0d000a68df3aa7dd6efc5096b9f2902bbf055dc51c",
+              "R179_INNER_SHA256":
+                  "67b944776038888e2946084a6e3f8d9d4f8402fe306877283dfecb5f1149bd65",
+
+              "R157_RUN_ID": 36028455796,
+              "R157_ARTIFACT_ID": 10820682068,
+              "R157_INNER_SHA256":
+                  "f974c64c63eea5f2b940c76101f4ab6e769803f5630a2d87d21d08679c321609",
+
+              "TARGET_FRAMEWORK_V471_STATIC_EVIDENCE": True,
+              "CLR_V4_STATIC_EVIDENCE": True,
+              "REFERENCE_SOURCE_COMMIT":
+                  "ec9fa9ae770d522a5b5f0607898044b7478574a3",
+              "HASHTABLE_REFERENCE_SOURCE_SHA256": src_sha,
+
+              "STATE565_EXACT_HASHTABLE_INT_CALL_PROVEN": True,
+              "STATE565_READ_INT32_LE": 1921932524,
+              "STATE565_CAPACITY_ARGUMENT": capacity,
+
+              "HASHTABLE_INT_DELEGATES_TO_LOADFACTOR_1": True,
+              "HASHTABLE_INTERNAL_LOAD_FACTOR_FLOAT32":
+                  internal_load_factor,
+              "CAPACITY_AS_FLOAT32": capacity_as_float,
+              "RAWSIZE_FLOAT32": rawsize_float,
+              "INT32_MAX": int32_max,
+              "RAWSIZE_GT_INT32_MAX": capacity_overflow,
+              "EXPECTED_CONSTRUCTOR_EXCEPTION":
+                  "ArgumentException(Arg_HTCapacityOverflow)",
+              "OVERFLOW_CHECK_PRECEDES_BUCKET_ALLOCATION": True,
+
+              "STATE565_CONSTRUCTOR_COMPLETES": False,
+              "STATE565_STSFLD_REACHED": False,
+              "STATE543_REACHED": False,
+
+              "R178_STATE565_TO_543_RETIRED_AS_PRODUCTION_PATH": True,
+              "R179_STATE426_BRANCH_RETIRED_AS_PRODUCTION_PATH": True,
+              "R179_READER_ARITHMETIC_REMAINS_LOCALLY_CORRECT":
+                  True,
+
+              "R177_PRE_XOR_LOCAL47_ROOT_CAUSE_REMAINS_PROVEN":
+                  True,
+              "R177_CORRECTED_LOCAL29_RETAINED_AS_PRODUCTION_VALID":
+                  False,
+              "NEW_EARLY_MODEL_CONSISTENCY_CONTRADICTION_PROVEN":
+                  True,
+              "CONTRADICTION":
+                  "The corrected R177 bytes produce state565 capacity "
+                  "1921932525. Under the pinned .NET Framework Hashtable(int) "
+                  "implementation, effective load factor is 0.72f and the "
+                  "computed rawsize is 2669350656.0, greater than Int32.MaxValue. "
+                  "Hashtable(int) therefore throws Arg_HTCapacityOverflow before "
+                  "bucket allocation; the normal state543 continuation cannot occur.",
+
+              "AES_OR_CRYPTOSTREAM_DECRYPT_EXECUTED": False,
+              "OFFLINE_DECRYPT_AUTHORIZED": False,
+              "VENDOR_BINARY_EXECUTED": False,
+              "USB_OR_BOARD_CONTACTED": False,
+              "ANY_DISCOVERED_FRAME_AUTHORIZED_FOR_BOARD": False,
+              "FLASH_ALLOWED": False,
+
+              "NEXT":
+                  "R181: remain fully offline and localize the remaining upstream "
+                  "reconstruction error. Re-audit the exact state668/local37 word "
+                  "schedule, state46 transform, three-byte remainder, state96 alias, "
+                  "and state179 8-byte XOR using raw IL and corrected post-XOR local47. "
+                  "Use state565 Hashtable overflow as a fail-closed oracle. Do not "
+                  "execute vendor binaries, decrypt, contact USB, or flash."
+          }
+
+          (out / "R180_DECISION.json").write_text(
+              json.dumps(decision, indent=2) + "\n"
+          )
+
+          (out / "R180_HASHTABLE_SEMANTICS.txt").write_text(
+              "\n".join([
+                  "Target static evidence: .NET Framework 4.7.1 / CLR v4",
+                  f"Reference source commit: {decision['REFERENCE_SOURCE_COMMIT']}",
+                  f"Hashtable source SHA256: {src_sha}",
+                  "Hashtable(int capacity) -> Hashtable(capacity, 1.0f)",
+                  f"state565 capacity = {capacity}",
+                  f"internal load factor float32 = {internal_load_factor!r}",
+                  f"capacity converted to float32 = {capacity_as_float!r}",
+                  f"rawsize float32 = {rawsize_float!r}",
+                  f"Int32.MaxValue = {int32_max}",
+                  "rawsize > Int32.MaxValue = true",
+                  "constructor outcome = ArgumentException(Arg_HTCapacityOverflow)",
+                  "state565 stsfld not reached",
+                  "state543 not reached",
+                  "R178/R179 downstream path retired as production-valid",
+                  "FLASH_ALLOWED=NO",
+              ]) + "\n"
+          )
+
+          # Preserve the exact reference-source constructor excerpt for audit.
+          ctor_start = src.index("public Hashtable(int capacity) : this(capacity, 1.0f)")
+          ctor_end = src.index(
+              "// Constructs a new hashtable with the given initial capacity and load",
+              ctor_start + 10
+          )
+          (out / "R180_HASHTABLE_REFERENCE_EXCERPT.txt").write_text(
+              src[ctor_start:ctor_end]
+          )
+
+          print(json.dumps(decision, indent=2))
+          PYCODE
+
+      - name: Package R180 evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /tmp/r180/evidence
+          zip -9 -r /tmp/R180_N9_HASHTABLE_CAPACITY_CONTRADICTION_STATIC_EVIDENCE.zip . >/dev/null
+          sha256sum /tmp/R180_N9_HASHTABLE_CAPACITY_CONTRADICTION_STATIC_EVIDENCE.zip \
+            > /tmp/R180_N9_HASHTABLE_CAPACITY_CONTRADICTION_STATIC_EVIDENCE.zip.sha256
+
+      - name: Upload R180 evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: R180-N9-HASHTABLE-CAPACITY-CONTRADICTION-STATIC-EVIDENCE
+          path: |
+            /tmp/R180_N9_HASHTABLE_CAPACITY_CONTRADICTION_STATIC_EVIDENCE.zip
+            /tmp/R180_N9_HASHTABLE_CAPACITY_CONTRADICTION_STATIC_EVIDENCE.zip.sha256
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Final fail-closed gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$FLASH_ALLOWED" = "NO"
+
+          grep -F '"STATE565_CAPACITY_ARGUMENT": 1921932525' \
+            /tmp/r180/evidence/R180_DECISION.json
+
+          grep -F '"RAWSIZE_FLOAT32": 2669350656.0' \
+            /tmp/r180/evidence/R180_DECISION.json
+
+          grep -F '"RAWSIZE_GT_INT32_MAX": true' \
+            /tmp/r180/evidence/R180_DECISION.json
+
+          grep -F '"STATE565_CONSTRUCTOR_COMPLETES": false' \
+            /tmp/r180/evidence/R180_DECISION.json
+
+          grep -F '"STATE543_REACHED": false' \
+            /tmp/r180/evidence/R180_DECISION.json
+
+          grep -F '"R179_STATE426_BRANCH_RETIRED_AS_PRODUCTION_PATH": true' \
+            /tmp/r180/evidence/R180_DECISION.json
+
+          grep -F '"USB_OR_BOARD_CONTACTED": false' \
+            /tmp/r180/evidence/R180_DECISION.json
+
+          grep -F '"FLASH_ALLOWED": false' \
+            /tmp/r180/evidence/R180_DECISION.json
+
+          echo R180_HASHTABLE_CAPACITY_CONTRADICTION_STATIC_PROOF=YES
+          echo FLASH_ALLOWED=NO
