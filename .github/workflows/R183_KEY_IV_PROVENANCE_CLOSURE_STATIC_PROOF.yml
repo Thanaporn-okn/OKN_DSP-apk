@@ -1,0 +1,681 @@
+name: R183 N9 key-IV provenance closure static proof
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - ".github/workflows/R183_KEY_IV_PROVENANCE_CLOSURE_STATIC_PROOF.yml"
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: r183-static-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  FLASH_ALLOWED: "NO"
+
+jobs:
+  static_audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: Immutable safety gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$FLASH_ALLOWED" = "NO"
+          mkdir -p /tmp/r183/evidence
+
+          cat > /tmp/r183/evidence/R183_SAFETY.txt <<'EOF'
+          MODE=OFFLINE_STATIC_KEY_IV_PROVENANCE_ONLY
+          FLASH_ALLOWED=NO
+          USB_OR_BOARD_CONTACT=NO
+          VENDOR_EXE_DLL_APK_EXECUTED=NO
+          AES_OR_CRYPTOSTREAM_DECRYPT_EXECUTED=NO
+          AA55_OR_LINEIN_AA55_SENT=NO
+          RUNTIME_0X11_OR_0XFE_SENT=NO
+          UFE_RUNTIME_TX_SENT=NO
+          FLASH_READ_ERASE_WRITE_EXECUTED=NO
+          DISCOVERED_FRAME_LIVE_AUTHORIZED=NO
+          HARDWARE_MODIFICATION=FORBIDDEN
+          EOF
+
+      - name: Download pinned R182 evidence
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          artifact-ids: "10906918453"
+          path: /tmp/r183/r182
+          merge-multiple: true
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          repository: Thanaporn-okn/OKN_DSP-apk
+          run-id: 36244162966
+
+      - name: Download pinned R157 raw evidence chain
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          artifact-ids: "10820682068"
+          path: /tmp/r183/r157
+          merge-multiple: true
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          repository: Thanaporn-okn/OKN_DSP-apk
+          run-id: 36028455796
+
+      - name: Independently close key-IV value provenance
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python3 - <<'PYCODE'
+          from pathlib import Path
+          import hashlib
+          import io
+          import json
+          import re
+          import zipfile
+
+          base = Path("/tmp/r183")
+          out = base / "evidence"
+          out.mkdir(parents=True, exist_ok=True)
+
+          def open_inner(folder, filename, expected_sha):
+              p = base / folder / filename
+              data = p.read_bytes()
+              got = hashlib.sha256(data).hexdigest()
+              assert got == expected_sha, (filename, got, expected_sha)
+
+              sidecar = p.with_name(p.name + ".sha256")
+              assert sidecar.exists(), f"missing sidecar: {sidecar}"
+              assert sidecar.read_text().split()[0] == expected_sha
+
+              return zipfile.ZipFile(io.BytesIO(data))
+
+          # ------------------------------------------------------------
+          # Pin R182: local27/key timing/conv semantics are already exonerated.
+          # ------------------------------------------------------------
+          r182 = open_inner(
+              "r182",
+              "R182_N9_LOCAL27_KEY_TIMING_CONV_SEMANTICS_STATIC_EVIDENCE.zip",
+              "714cefc2c081951f106c41f5ac940a0902af6671f43cf34fc0c158cfcf315b40",
+          )
+          d182 = json.loads(r182.read("R182_DECISION.json"))
+
+          assert d182["revision"] == "R182"
+          assert d182["LOCAL27_H15_FIRST28_EXONERATED"] is True
+          assert d182["POST_STATE404_KEY_TIMING_EXONERATED"] is True
+          assert d182["CONV_R_UN_R8_U4_CHAIN_IDENTITY_FOR_UINT32_PROVEN"] is True
+          assert d182["STATE565_INT32"] == 1921932524
+          assert d182["R180_HASHTABLE_CONTRADICTION_STILL_STANDS"] is True
+          assert d182["FLASH_ALLOWED"] is False
+
+          # ------------------------------------------------------------
+          # Pin the historical raw IL chain.
+          # ------------------------------------------------------------
+          r157 = open_inner(
+              "r157",
+              "R157_N9_LOCAL29_LOCAL81_NONNULL_LOCAL93_LOOP_BRANCH_EVIDENCE.zip",
+              "f974c64c63eea5f2b940c76101f4ab6e769803f5630a2d87d21d08679c321609",
+          )
+
+          n9_path = (
+              "r156/r155/r154/r153/r152/r151/r150/r149/r148/r147/"
+              "r146/r145/r144/r143/R143_N9_METHOD.il"
+          )
+          raw = r157.read(n9_path)
+          assert hashlib.sha256(raw).hexdigest() == \
+              "5a3964c1f4bd8db455e6882a4ce6f90667e1a9abc6e1fafd10440b31006e4a33"
+          text = raw.decode()
+
+          r151 = json.loads(r157.read(
+              "r156/r155/r154/r153/r152/r151/"
+              "R151_INDEPENDENT_RAW_IL_BRANCH_COVERAGE.json"
+          ))
+          r151d = json.loads(r157.read(
+              "r156/r155/r154/r153/r152/r151/R151_DECISION.json"
+          ))
+          r157d = json.loads(r157.read("R157_DECISION.json"))
+          r144 = json.loads(r157.read(
+              "r156/r155/r154/r153/r152/r151/r150/r149/r148/r147/"
+              "r146/r145/r144/R144_PE32_CONCRETE_KEYIV_PATH.json"
+          ))
+          d153 = json.loads(r157.read(
+              "r156/r155/r154/r153/"
+              "R153_STATE404_IV_XOR_LOOP_KEY_TRANSFORM.json"
+          ))
+
+          assert r151d["RAW_IL_CANDIDATE_PATH_REBUILT_WITHOUT_R144_PATH_INPUT"] is True
+          assert r151d["RAW_IL_CANDIDATE_PATH_MATCHES_R144_POST_DERIVATION"] is True
+          assert r151["candidate_path_state_count_to_402"] == 473
+          assert r151["candidate_path_reaches_state367"] is True
+          assert r151["candidate_path_reaches_state402"] is True
+
+          # Use R144's serialized state list only after proving its SHA equals
+          # the independently derived R151 candidate path SHA.
+          path = r144["path_states"]
+          path_sha = hashlib.sha256(
+              ",".join(map(str, path)).encode()
+          ).hexdigest()
+
+          assert path_sha == r151["candidate_path_sha256"]
+          assert len(path) == r151["candidate_path_state_count_to_402"]
+          assert path[-1] == 402
+
+          # ------------------------------------------------------------
+          # Parse raw IL into dispatcher state blocks.
+          # ------------------------------------------------------------
+          rows = []
+          for line in text.splitlines():
+              m = re.match(
+                  r"\s*(IL_[0-9a-fA-F]+):\s+(\S+)(?:\s+(.*))?$",
+                  line
+              )
+              if m:
+                  rows.append((
+                      m.group(1),
+                      m.group(2),
+                      (m.group(3) or "").split(" //", 1)[0].strip()
+                  ))
+
+          pos = {lab:i for i,(lab,_,_) in enumerate(rows)}
+          sm = re.search(r"IL_0012:\s*switch \((.*?)\)\n", text, re.S)
+          assert sm
+          labels = [x.strip() for x in sm.group(1).split(",")]
+          assert len(labels) == 689
+
+          state_of = {lab:i for i,lab in enumerate(labels)}
+          tpos = sorted((pos[lab], st, lab) for st,lab in enumerate(labels))
+          blocks = {}
+
+          for i,(p0,st,lab) in enumerate(tpos):
+              p1 = tpos[i+1][0] if i + 1 < len(tpos) else len(rows)
+              blocks[st] = rows[p0:p1]
+
+          def ops(st):
+              return [(op,arg) for _,op,arg in blocks[st]]
+
+          # ------------------------------------------------------------
+          # Inventory unresolved candidate-path branches before resource367.
+          # These were outside R151->R157's post-resource closure.
+          # ------------------------------------------------------------
+          cond_pat = re.compile(
+              r"\b(brtrue|brfalse|beq|bne\.un|bgt(?:\.un)?|blt(?:\.un)?|"
+              r"bge(?:\.un)?|ble(?:\.un)?)\s+(IL_[0-9A-Fa-f]+)"
+          )
+
+          idx367 = path.index(367)
+          idx404 = path.index(404)
+
+          unresolved_pre_resource = []
+          seen = set()
+
+          for step,st in enumerate(path[:idx367]):
+              bl = [
+                  f"{lab}: {op}" + (f" {arg}" if arg else "")
+                  for lab,op,arg in blocks[st]
+              ]
+
+              for j,line in enumerate(bl):
+                  m = cond_pat.search(line)
+                  if not m:
+                      continue
+
+                  prev = "\n".join(bl[max(0, j-5):j])
+
+                  known = any(
+                      k in prev
+                      for k in [
+                          "zfos5ENLukrcbiO4qNQ",
+                          "omTjeHNp0inHSoSsOBH",
+                          "tFjbT6Nj4GDWeki27kh",
+                          "NaheA732Kj",
+                      ]
+                  )
+
+                  if known:
+                      continue
+
+                  item = {
+                      "step": step,
+                      "state": st,
+                      "label": labels[st],
+                      "branch_line": line.strip(),
+                      "context": prev,
+                  }
+
+                  key = (st, line.strip())
+                  if key not in seen:
+                      seen.add(key)
+                      unresolved_pre_resource.append(item)
+
+          assert len(unresolved_pre_resource) == 8
+          assert [x["state"] for x in unresolved_pre_resource] == [
+              262, 665, 519, 225, 225, 225, 225, 225
+          ]
+
+          # R157's three remaining post-resource conditions all occur AFTER
+          # state404, so the state367->state404 candidate segment is closed.
+          remaining = r157d["remaining_unaccounted_conditionals"]
+          assert len(remaining) == 3
+          assert [x["state"] for x in remaining] == [246, 605, 292]
+          assert all(path.index(x["state"]) > idx404 for x in remaining)
+
+          # Key/IV construction landmarks.
+          assert path.index(443) == 24    # local17 byte[32] allocation
+          assert path.index(626) == 255   # local47 = local17
+          assert path.index(662) == 256   # local100 byte[16] allocation
+          assert path.index(631) == 366   # local8 = local100
+          assert idx404 == 385
+
+          assert ops(443)[:3] == [
+              ("ldc.i4","32"),
+              ("newarr","[mscorlib]System.Byte"),
+              ("stloc","17"),
+          ]
+          assert ops(662)[:3] == [
+              ("ldc.i4","16"),
+              ("newarr","[mscorlib]System.Byte"),
+              ("stloc","100"),
+          ]
+          assert ops(626)[:2] == [
+              ("ldloc","17"),
+              ("stloc.s","47"),
+          ]
+          assert ops(631)[:2] == [
+              ("ldloc","100"),
+              ("stloc.s","8"),
+          ]
+
+          # ------------------------------------------------------------
+          # Independently reconstruct local17/local100 from RAW IL along the
+          # hash-validated candidate path. No R144 key_hex/iv_hex is used as
+          # an input.
+          # ------------------------------------------------------------
+          UNKNOWN = object()
+
+          locals_map = {
+              17: None,
+              100: None,
+              55: UNKNOWN,
+              104: UNKNOWN,
+          }
+
+          target_writes = []
+          allocations = {}
+
+          def const_i4(op, arg):
+              if op in ("ldc.i4", "ldc.i4.s"):
+                  return int(arg) & 0xFFFFFFFF
+
+              if op.startswith("ldc.i4."):
+                  tail = op[len("ldc.i4."):]
+                  if tail == "m1":
+                      return 0xFFFFFFFF
+                  if tail.isdigit():
+                      return int(tail) & 0xFFFFFFFF
+
+              return None
+
+          for step,st in enumerate(path[:idx404]):
+              stack = []
+
+              for lab,op,arg in blocks[st]:
+                  c = const_i4(op, arg)
+                  if c is not None:
+                      stack.append(c)
+                      continue
+
+                  if op in ("ldloc", "ldloc.s"):
+                      try:
+                          li = int(arg)
+                      except Exception:
+                          stack.append(UNKNOWN)
+                          continue
+
+                      stack.append(locals_map.get(li, UNKNOWN))
+                      continue
+
+                  if op in ("stloc", "stloc.s"):
+                      li = int(arg)
+                      v = stack.pop() if stack else UNKNOWN
+
+                      if li in (17, 100, 55, 104):
+                          locals_map[li] = v
+
+                          if (
+                              li in (17, 100)
+                              and isinstance(v, dict)
+                              and li not in allocations
+                          ):
+                              v["array_local"] = li
+                              allocations[li] = {
+                                  "step": step,
+                                  "state": st,
+                                  "length": v["length"],
+                              }
+
+                      continue
+
+                  if op == "newarr" and "System.Byte" in arg:
+                      n = stack.pop() if stack else UNKNOWN
+
+                      arr = {
+                          "length": n,
+                          "bytes": bytearray(n)
+                          if isinstance(n, int) and 0 <= n <= 4096
+                          else None,
+                          "array_local": None,
+                      }
+
+                      stack.append(arr)
+                      continue
+
+                  if op == "dup":
+                      stack.append(stack[-1] if stack else UNKNOWN)
+                      continue
+
+                  if op == "pop":
+                      if stack:
+                          stack.pop()
+                      continue
+
+                  if op in ("add", "sub", "xor", "and", "or"):
+                      b = stack.pop() if stack else UNKNOWN
+                      a = stack.pop() if stack else UNKNOWN
+
+                      if isinstance(a, int) and isinstance(b, int):
+                          if op == "add":
+                              v = a + b
+                          elif op == "sub":
+                              v = a - b
+                          elif op == "xor":
+                              v = a ^ b
+                          elif op == "and":
+                              v = a & b
+                          else:
+                              v = a | b
+
+                          stack.append(v & 0xFFFFFFFF)
+                      else:
+                          stack.append(UNKNOWN)
+
+                      continue
+
+                  if op in ("shl", "shr.un"):
+                      b = stack.pop() if stack else UNKNOWN
+                      a = stack.pop() if stack else UNKNOWN
+
+                      if isinstance(a, int) and isinstance(b, int):
+                          shift = b & 31
+
+                          if op == "shl":
+                              v = (a << shift) & 0xFFFFFFFF
+                          else:
+                              v = (a & 0xFFFFFFFF) >> shift
+
+                          stack.append(v)
+                      else:
+                          stack.append(UNKNOWN)
+
+                      continue
+
+                  if op == "conv.u1":
+                      a = stack.pop() if stack else UNKNOWN
+                      stack.append(
+                          (a & 0xFF) if isinstance(a, int) else UNKNOWN
+                      )
+                      continue
+
+                  if op in ("conv.i4", "conv.u4", "conv.i8", "conv.u"):
+                      # Identity is sufficient for the constant-only byte
+                      # construction expressions encountered here.
+                      continue
+
+                  if op == "stelem.i1":
+                      value = stack.pop() if stack else UNKNOWN
+                      index = stack.pop() if stack else UNKNOWN
+                      arr = stack.pop() if stack else UNKNOWN
+
+                      arrloc = None
+                      for li in (17, 100):
+                          if arr is locals_map.get(li) and arr is not None:
+                              arrloc = li
+
+                      if arrloc in (17, 100):
+                          assert isinstance(index, int), (step, st, lab, index)
+                          assert isinstance(value, int), (step, st, lab, value)
+                          assert arr["bytes"] is not None
+                          assert 0 <= index < len(arr["bytes"])
+
+                          arr["bytes"][index] = value & 0xFF
+
+                          target_writes.append({
+                              "step": step,
+                              "state": st,
+                              "label": lab,
+                              "array_local": arrloc,
+                              "index": index,
+                              "value": value & 0xFF,
+                          })
+
+                      continue
+
+                  if op == "call":
+                      # Target key/IV byte-write states are constant/local-scalar
+                      # operations. Calls in unrelated states must not leak stack
+                      # values into a later flattened state.
+                      stack.clear()
+                      continue
+
+                  # Branch/control opcodes do not change persistent locals used
+                  # by this narrow array-write reconstruction.
+                  if (
+                      op.startswith("br")
+                      or op in ("leave", "switch", "ret", "throw", "nop")
+                  ):
+                      continue
+
+          assert allocations[17] == {
+              "step": 24,
+              "state": 443,
+              "length": 32,
+          }
+          assert allocations[100] == {
+              "step": 256,
+              "state": 662,
+              "length": 16,
+          }
+
+          assert len(target_writes) == 228
+          assert sum(x["array_local"] == 17 for x in target_writes) == 155
+          assert sum(x["array_local"] == 100 for x in target_writes) == 73
+
+          local17 = bytes(locals_map[17]["bytes"])
+          local100 = bytes(locals_map[100]["bytes"])
+
+          # These values are derived above. Only now compare to old R144.
+          assert local17.hex() == \
+              "ef3259221c86959fd2122f8afb00fb208a42a068d0554a0ee526b8f7d6c844b3"
+          assert local100.hex() == \
+              "617b47f3146321e35d2bf8852ec8cf0d"
+
+          key_matches_r144 = local17.hex() == r144["key_hex"]
+          iv_matches_r144 = local100.hex() == r144["iv_hex"]
+
+          assert key_matches_r144
+          assert iv_matches_r144
+
+          # Independently derive the state404 post-XOR key.
+          post = bytearray(local17)
+          for i,b in enumerate(local100):
+              post[i] ^= b
+          post = bytes(post)
+
+          assert post.hex() == \
+              "8e491ed108e5b47c8f39d70fd5c8342d8a42a068d0554a0ee526b8f7d6c844b3"
+          assert post.hex() == d153["POST_LOOP_LOCAL47_KEY_CANDIDATE_HEX"]
+
+          decision = {
+              "revision": "R183",
+
+              "R182_RUN_ID": 36244162966,
+              "R182_ARTIFACT_ID": 10906918453,
+              "R182_ARTIFACT_DIGEST":
+                  "sha256:fbd2eb5752bf55797b7eeef5cf72165695ffde836bc973b21b7c172aedba1204",
+              "R182_INNER_SHA256":
+                  "714cefc2c081951f106c41f5ac940a0902af6671f43cf34fc0c158cfcf315b40",
+
+              "R157_RUN_ID": 36028455796,
+              "R157_ARTIFACT_ID": 10820682068,
+              "R157_INNER_SHA256":
+                  "f974c64c63eea5f2b940c76101f4ab6e769803f5630a2d87d21d08679c321609",
+
+              "N9_SHA256":
+                  "5a3964c1f4bd8db455e6882a4ce6f90667e1a9abc6e1fafd10440b31006e4a33",
+
+              "R151_CANDIDATE_PATH_REBUILT_WITHOUT_R144_INPUT": True,
+              "R151_CANDIDATE_PATH_SHA256": path_sha,
+              "R144_PATH_USED_ONLY_AFTER_HASH_EQUIVALENCE": True,
+
+              "STATE367_STEP": idx367,
+              "LOCAL17_ALLOC_STEP": path.index(443),
+              "LOCAL47_ALIAS_STEP": path.index(626),
+              "LOCAL100_ALLOC_STEP": path.index(662),
+              "LOCAL8_ALIAS_STEP": path.index(631),
+              "FIRST_STATE404_STEP": idx404,
+
+              "POST_RESOURCE_REMAINING_BRANCHES_BEFORE_STATE404": 0,
+              "R157_REMAINING_BRANCH_STATES": [246, 605, 292],
+              "R157_REMAINING_BRANCHES_ALL_AFTER_STATE404": True,
+
+              "LOCAL17_RAW_IL_RECONSTRUCTION_PROVEN": True,
+              "LOCAL17_WRITE_COUNT": 155,
+              "LOCAL17_HEX": local17.hex(),
+              "LOCAL17_SHA256": hashlib.sha256(local17).hexdigest(),
+
+              "LOCAL100_RAW_IL_RECONSTRUCTION_PROVEN": True,
+              "LOCAL100_WRITE_COUNT": 73,
+              "LOCAL100_HEX": local100.hex(),
+              "LOCAL100_SHA256": hashlib.sha256(local100).hexdigest(),
+
+              "INDEPENDENT_KEY_MATCHES_R144": key_matches_r144,
+              "INDEPENDENT_IV_MATCHES_R144": iv_matches_r144,
+
+              "POST_STATE404_KEY_HEX": post.hex(),
+              "POST_STATE404_KEY_MATCHES_R153": True,
+
+              "KEY_IV_VALUE_MISMATCH_FOUND": False,
+              "KEY_IV_CONSTRUCTION_EXONERATED_ON_STATE367_CANDIDATE_PATH": True,
+
+              "PRE_RESOURCE_UNRESOLVED_BRANCH_COUNT":
+                  len(unresolved_pre_resource),
+              "PRE_RESOURCE_UNRESOLVED_BRANCHES":
+                  unresolved_pre_resource,
+              "PRODUCTION_REACHABILITY_TO_STATE367_FULLY_PROVEN": False,
+
+              "R180_HASHTABLE_CONTRADICTION_STILL_STANDS_ON_CANDIDATE_PATH":
+                  True,
+
+              "INTERPRETATION":
+                  "Raw IL independently reproduces the same 32-byte local17 key "
+                  "and 16-byte local100 IV without using R144 key/iv values as "
+                  "inputs. The state367-to-state404 segment has no remaining "
+                  "R157 branch gaps, so key/IV construction is closed on that "
+                  "candidate path. However, eight unresolved conditional branch "
+                  "sites occur before state367; therefore production reachability "
+                  "to this candidate path is still not proven. The next audit "
+                  "must resolve those earlier environment/control-flow branches.",
+
+              "NEXT":
+                  "R184: remain fully offline and resolve the eight pre-resource "
+                  "branch sites in execution order, beginning with state262 "
+                  "IL_19f7 (local48 versus 0xF4F3F2F1), then state665, state519, "
+                  "and the state225 runtime/JIT cluster. Determine whether the "
+                  "production path actually reaches state367. Do not execute "
+                  "vendor binaries, decrypt, contact USB, or flash.",
+
+              "AES_OR_CRYPTOSTREAM_DECRYPT_EXECUTED": False,
+              "OFFLINE_DECRYPT_AUTHORIZED": False,
+              "VENDOR_BINARY_EXECUTED": False,
+              "USB_OR_BOARD_CONTACTED": False,
+              "ANY_DISCOVERED_FRAME_AUTHORIZED_FOR_BOARD": False,
+              "FLASH_ALLOWED": False,
+          }
+
+          (out / "R183_DECISION.json").write_text(
+              json.dumps(decision, indent=2) + "\n"
+          )
+
+          (out / "R183_KEY_IV_RECONSTRUCTION.json").write_text(
+              json.dumps({
+                  "local17_hex": local17.hex(),
+                  "local100_hex": local100.hex(),
+                  "post_state404_key_hex": post.hex(),
+                  "local17_write_count": 155,
+                  "local100_write_count": 73,
+              }, indent=2) + "\n"
+          )
+
+          (out / "R183_PRE_RESOURCE_UNRESOLVED.json").write_text(
+              json.dumps(unresolved_pre_resource, indent=2) + "\n"
+          )
+
+          print(json.dumps(decision, indent=2))
+          PYCODE
+
+      - name: Package R183 evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /tmp/r183/evidence
+          zip -9 -r /tmp/R183_N9_KEY_IV_PROVENANCE_CLOSURE_STATIC_EVIDENCE.zip . >/dev/null
+          sha256sum /tmp/R183_N9_KEY_IV_PROVENANCE_CLOSURE_STATIC_EVIDENCE.zip \
+            > /tmp/R183_N9_KEY_IV_PROVENANCE_CLOSURE_STATIC_EVIDENCE.zip.sha256
+
+      - name: Upload R183 evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: R183-N9-KEY-IV-PROVENANCE-CLOSURE-STATIC-EVIDENCE
+          path: |
+            /tmp/R183_N9_KEY_IV_PROVENANCE_CLOSURE_STATIC_EVIDENCE.zip
+            /tmp/R183_N9_KEY_IV_PROVENANCE_CLOSURE_STATIC_EVIDENCE.zip.sha256
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Final fail-closed gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$FLASH_ALLOWED" = "NO"
+
+          grep -F '"LOCAL17_RAW_IL_RECONSTRUCTION_PROVEN": true' \
+            /tmp/r183/evidence/R183_DECISION.json
+
+          grep -F '"LOCAL100_RAW_IL_RECONSTRUCTION_PROVEN": true' \
+            /tmp/r183/evidence/R183_DECISION.json
+
+          grep -F '"INDEPENDENT_KEY_MATCHES_R144": true' \
+            /tmp/r183/evidence/R183_DECISION.json
+
+          grep -F '"INDEPENDENT_IV_MATCHES_R144": true' \
+            /tmp/r183/evidence/R183_DECISION.json
+
+          grep -F '"KEY_IV_VALUE_MISMATCH_FOUND": false' \
+            /tmp/r183/evidence/R183_DECISION.json
+
+          grep -F '"PRE_RESOURCE_UNRESOLVED_BRANCH_COUNT": 8' \
+            /tmp/r183/evidence/R183_DECISION.json
+
+          grep -F '"PRODUCTION_REACHABILITY_TO_STATE367_FULLY_PROVEN": false' \
+            /tmp/r183/evidence/R183_DECISION.json
+
+          grep -F '"USB_OR_BOARD_CONTACTED": false' \
+            /tmp/r183/evidence/R183_DECISION.json
+
+          grep -F '"FLASH_ALLOWED": false' \
+            /tmp/r183/evidence/R183_DECISION.json
+
+          echo R183_KEY_IV_PROVENANCE_CLOSURE_STATIC_PROOF=YES
+          echo FLASH_ALLOWED=NO
