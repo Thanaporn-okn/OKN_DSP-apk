@@ -1,0 +1,507 @@
+name: R187 N9 state565 exception escape static proof
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - ".github/workflows/R187_STATE565_EXCEPTION_ESCAPE_STATIC_PROOF.yml"
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: r187-static-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  FLASH_ALLOWED: "NO"
+
+jobs:
+  static_audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: Immutable safety gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$FLASH_ALLOWED" = "NO"
+          mkdir -p /tmp/r187/evidence
+
+          cat > /tmp/r187/evidence/R187_SAFETY.txt <<'EOF'
+          MODE=OFFLINE_STATIC_EXCEPTION_REGION_AUDIT_ONLY
+          FLASH_ALLOWED=NO
+          USB_OR_BOARD_CONTACT=NO
+          VENDOR_EXE_DLL_APK_EXECUTED=NO
+          AES_OR_CRYPTOSTREAM_DECRYPT_EXECUTED=NO
+          UFE_RUNTIME_TX_SENT=NO
+          FLASH_READ_ERASE_WRITE_EXECUTED=NO
+          DISCOVERED_FRAME_LIVE_AUTHORIZED=NO
+          HARDWARE_MODIFICATION=FORBIDDEN
+          EOF
+
+      - name: Download pinned R186 evidence
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          artifact-ids: "10922047452"
+          path: /tmp/r187/r186
+          merge-multiple: true
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          repository: Thanaporn-okn/OKN_DSP-apk
+          run-id: 36290595714
+
+      - name: Download pinned R180 Hashtable evidence
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          artifact-ids: "10904556426"
+          path: /tmp/r187/r180
+          merge-multiple: true
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          repository: Thanaporn-okn/OKN_DSP-apk
+          run-id: 36237713587
+
+      - name: Download pinned R157 raw IL evidence
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          artifact-ids: "10820682068"
+          path: /tmp/r187/r157
+          merge-multiple: true
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          repository: Thanaporn-okn/OKN_DSP-apk
+          run-id: 36028455796
+
+      - name: Prove state565 overflow is not caught inside N9 or module cctor
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python3 - <<'PYCODE'
+          from pathlib import Path
+          import hashlib
+          import io
+          import json
+          import re
+          import zipfile
+
+          base = Path("/tmp/r187")
+          out = base / "evidence"
+          out.mkdir(parents=True, exist_ok=True)
+
+          def open_inner(folder, filename, expected_sha):
+              p = base / folder / filename
+              data = p.read_bytes()
+              got = hashlib.sha256(data).hexdigest()
+              assert got == expected_sha, (filename, got, expected_sha)
+
+              side = p.with_name(p.name + ".sha256")
+              assert side.exists(), f"missing {side}"
+              assert side.read_text().split()[0] == expected_sha
+
+              return zipfile.ZipFile(io.BytesIO(data))
+
+          # ------------------------------------------------------------
+          # Pin R186: raw-dispatch replay still reproduces the bad state565.
+          # ------------------------------------------------------------
+          r186 = open_inner(
+              "r186",
+              "R186_N9_FIRST7_RAW_DISPATCH_REPLAY_STATIC_EVIDENCE.zip",
+              "a36362b884062e43e3a24e6a7cbeba157737c19eb9868e54898ff3483b78cb54",
+          )
+          d186 = json.loads(r186.read("R186_DECISION.json"))
+
+          assert d186["revision"] == "R186"
+          assert d186["RAW_DISPATCH_IL_DIRECTLY_INTERPRETED"] is True
+          assert d186["FIRST7_MATCH_R181"] is True
+          assert d186["STATE565_INT32_REPRODUCED"] == 1921932524
+          assert d186["R180_HASHTABLE_CONTRADICTION_STILL_STANDS"] is True
+          assert d186["FLASH_ALLOWED"] is False
+
+          # ------------------------------------------------------------
+          # Pin R180: exact Hashtable(int) constructor semantics.
+          # ------------------------------------------------------------
+          r180 = open_inner(
+              "r180",
+              "R180_N9_HASHTABLE_CAPACITY_CONTRADICTION_STATIC_EVIDENCE.zip",
+              "2ea23e9031649497636ab4e07b1465ffca7cb02ff4d73ff8dfaaff3abcf13228",
+          )
+          d180 = json.loads(r180.read("R180_DECISION.json"))
+
+          assert d180["revision"] == "R180"
+          assert d180["STATE565_EXACT_HASHTABLE_INT_CALL_PROVEN"] is True
+          assert d180["STATE565_READ_INT32_LE"] == 1921932524
+          assert d180["STATE565_CAPACITY_ARGUMENT"] == 1921932525
+          assert d180["RAWSIZE_GT_INT32_MAX"] is True
+          assert d180["EXPECTED_CONSTRUCTOR_EXCEPTION"] == \
+              "ArgumentException(Arg_HTCapacityOverflow)"
+          assert d180["STATE565_CONSTRUCTOR_COMPLETES"] is False
+          assert d180["STATE565_STSFLD_REACHED"] is False
+          assert d180["STATE543_REACHED"] is False
+          assert d180["FLASH_ALLOWED"] is False
+
+          # ------------------------------------------------------------
+          # Raw N9 + full assembly IL.
+          # ------------------------------------------------------------
+          r157 = open_inner(
+              "r157",
+              "R157_N9_LOCAL29_LOCAL81_NONNULL_LOCAL93_LOOP_BRANCH_EVIDENCE.zip",
+              "f974c64c63eea5f2b940c76101f4ab6e769803f5630a2d87d21d08679c321609",
+          )
+
+          prefix = (
+              "r156/r155/r154/r153/r152/r151/r150/r149/r148/r147/"
+              "r146/r145/r144/r143/"
+          )
+
+          raw = r157.read(prefix + "R143_N9_METHOD.il")
+          full = r157.read(
+              prefix + "r142/r141/r140/R140_FIXED_FULL.il"
+          )
+
+          assert hashlib.sha256(raw).hexdigest() == \
+              "5a3964c1f4bd8db455e6882a4ce6f90667e1a9abc6e1fafd10440b31006e4a33"
+          assert hashlib.sha256(full).hexdigest() == \
+              "aa1d369c8be7ee8d7b358fc5b0f6b0874f46711a9249fee70f413b900d234c66"
+
+          text = raw.decode()
+          fulltext = full.decode(errors="replace")
+
+          assert "void N9jju8llVi () cil managed noinlining" in text
+          assert "Method begins at RVA 0x1226c" in text
+          assert "Code size: 26851 (0x68e3)" in text
+
+          # Exact state565 sequence.
+          exact565 = (
+              "IL_5b26: ldloc.s 114\n"
+              "\t\t\t\tIL_5b28: call int32 "
+              "Q9Wet0jLP4YxXSyJBiC.q71r2Rj8SiD9GF1BI50::"
+              "qfkv4ZNDynVciIciQy6(object)\n"
+              "\t\t\t\tIL_5b2d: ldc.i4.1\n"
+              "\t\t\t\tIL_5b2e: add\n"
+              "\t\t\t\tIL_5b2f: newobj instance void "
+              "[mscorlib]System.Collections.Hashtable::.ctor(int32)"
+          )
+          assert exact565 in text
+
+          # ------------------------------------------------------------
+          # Independently map lexical CLR EH regions in the N9 IL.
+          # Record try/handler depth at every IL label.
+          # ------------------------------------------------------------
+          try_depth = 0
+          handler_depth = 0
+          coverage = {}
+
+          try_start_count = 0
+          catch_start_count = 0
+          finally_start_count = 0
+          filter_start_count = 0
+
+          for line in text.splitlines():
+              s = line.strip()
+
+              if s == ".try":
+                  try_depth += 1
+                  try_start_count += 1
+
+              if s.startswith("catch "):
+                  handler_depth += 1
+                  catch_start_count += 1
+              elif s == "finally":
+                  handler_depth += 1
+                  finally_start_count += 1
+              elif s.startswith("filter"):
+                  handler_depth += 1
+                  filter_start_count += 1
+
+              m = re.match(r"(IL_[0-9a-fA-F]+):", s)
+              if m:
+                  coverage[m.group(1)] = {
+                      "try_depth": try_depth,
+                      "handler_depth": handler_depth,
+                  }
+
+              if "// end .try" in s:
+                  try_depth -= 1
+                  assert try_depth >= 0
+
+              if "// end handler" in s:
+                  handler_depth -= 1
+                  assert handler_depth >= 0
+
+          assert try_depth == 0
+          assert handler_depth == 0
+
+          assert try_start_count == 9
+          assert catch_start_count == 5
+          assert finally_start_count == 4
+          assert filter_start_count == 0
+
+          state565_cov = coverage["IL_5b26"]
+          ctor_cov = coverage["IL_5b2f"]
+          stsfld_cov = coverage["IL_5b34"]
+
+          assert state565_cov == {
+              "try_depth": 0,
+              "handler_depth": 0,
+          }
+          assert ctor_cov == {
+              "try_depth": 0,
+              "handler_depth": 0,
+          }
+          assert stsfld_cov == {
+              "try_depth": 0,
+              "handler_depth": 0,
+          }
+
+          covered_labels = [
+              (int(lab[3:], 16), lab, cov)
+              for lab,cov in coverage.items()
+              if cov["try_depth"] > 0 or cov["handler_depth"] > 0
+          ]
+
+          assert covered_labels
+          max_eh = max(covered_labels)
+          assert max_eh[1] == "IL_4ffb"
+          assert max_eh[2] == {
+              "try_depth": 0,
+              "handler_depth": 1,
+          }
+
+          state565_offset = int("5b26", 16)
+          max_eh_offset = max_eh[0]
+
+          assert state565_offset > max_eh_offset
+          assert coverage["IL_4ffc"] == {
+              "try_depth": 0,
+              "handler_depth": 0,
+          }
+
+          # No later EH region appears after the last handler.
+          labels_after_last_eh = [
+              lab for lab,cov in coverage.items()
+              if int(lab[3:],16) > max_eh_offset
+              and (cov["try_depth"] or cov["handler_depth"])
+          ]
+          assert labels_after_last_eh == []
+
+          # ------------------------------------------------------------
+          # First assembly-level caller: <Module>::.cctor.
+          # N9 is its first IL instruction and the caller has no lexical EH.
+          # ------------------------------------------------------------
+          end_marker = "} // end of method '<Module>'::.cctor"
+          end = fulltext.find(end_marker)
+          assert end >= 0
+
+          start = fulltext.rfind("\n\t.method ", 0, end)
+          assert start >= 0
+
+          module_cctor = fulltext[start:end + len(end_marker)]
+
+          n9_call = (
+              "IL_0000: call void "
+              "Q9Wet0jLP4YxXSyJBiC.q71r2Rj8SiD9GF1BI50::"
+              "N9jju8llVi()"
+          )
+          assert n9_call in module_cctor
+
+          # First executable IL is the N9 call.
+          il_lines = [
+              x.strip()
+              for x in module_cctor.splitlines()
+              if re.match(r"\s*IL_[0-9a-fA-F]+:", x)
+          ]
+          assert il_lines
+          assert il_lines[0] == n9_call
+
+          assert ".try" not in module_cctor
+          assert "catch " not in module_cctor
+          assert "\n\t\tfinally" not in module_cctor
+          assert "\n\t\tfilter" not in module_cctor
+
+          total_n9_calls = fulltext.count("::N9jju8llVi()")
+          assert total_n9_calls == 824
+
+          # Historical independent static audit: 619 PST initializers call N9 first.
+          d149 = json.loads(r157.read(
+              "r156/r155/r154/r153/r152/r151/r150/r149/"
+              "R149_DECISION.json"
+          ))
+          assert d149["ALL_619_PST_INITIALIZERS_CALL_N9_FIRST"] is True
+
+          # ------------------------------------------------------------
+          # Fail-closed conclusion.
+          # ------------------------------------------------------------
+          decision = {
+              "revision": "R187",
+
+              "R186_RUN_ID": 36290595714,
+              "R186_ARTIFACT_ID": 10922047452,
+              "R186_ARTIFACT_DIGEST":
+                  "sha256:b36f2b0c26b4dcd602d32839131ed619a3b37930b41c154f7e6bed65c00c2bcb",
+              "R186_INNER_SHA256":
+                  "a36362b884062e43e3a24e6a7cbeba157737c19eb9868e54898ff3483b78cb54",
+
+              "R180_RUN_ID": 36237713587,
+              "R180_ARTIFACT_ID": 10904556426,
+              "R180_INNER_SHA256":
+                  "2ea23e9031649497636ab4e07b1465ffca7cb02ff4d73ff8dfaaff3abcf13228",
+
+              "N9_SHA256":
+                  "5a3964c1f4bd8db455e6882a4ce6f90667e1a9abc6e1fafd10440b31006e4a33",
+              "FULL_IL_SHA256":
+                  "aa1d369c8be7ee8d7b358fc5b0f6b0874f46711a9249fee70f413b900d234c66",
+
+              "STATE565_LABEL": "IL_5b26",
+              "STATE565_HASHTABLE_NEWOBJ_LABEL": "IL_5b2f",
+              "STATE565_READ_INT32": 1921932524,
+              "STATE565_CAPACITY": 1921932525,
+              "STATE565_EXPECTED_EXCEPTION":
+                  "ArgumentException(Arg_HTCapacityOverflow)",
+
+              "N9_TRY_REGION_COUNT": try_start_count,
+              "N9_CATCH_HANDLER_COUNT": catch_start_count,
+              "N9_FINALLY_HANDLER_COUNT": finally_start_count,
+              "N9_FILTER_HANDLER_COUNT": filter_start_count,
+
+              "STATE565_TRY_DEPTH": state565_cov["try_depth"],
+              "STATE565_HANDLER_DEPTH": state565_cov["handler_depth"],
+              "HASHTABLE_NEWOBJ_TRY_DEPTH": ctor_cov["try_depth"],
+              "HASHTABLE_NEWOBJ_HANDLER_DEPTH": ctor_cov["handler_depth"],
+
+              "LAST_N9_EH_COVERED_LABEL": max_eh[1],
+              "LAST_N9_EH_COVERED_OFFSET_HEX":
+                  f"0x{max_eh_offset:04x}",
+              "STATE565_OFFSET_HEX": "0x5b26",
+
+              "STATE565_INSIDE_N9_TRY_REGION": False,
+              "STATE565_INSIDE_N9_HANDLER_REGION": False,
+              "N9_INTERNAL_HANDLER_CAN_CATCH_STATE565_HASHTABLE_OVERFLOW":
+                  False,
+
+              "MODULE_CCTOR_FIRST_IL_IS_N9_CALL": True,
+              "MODULE_CCTOR_HAS_TRY_CATCH_FINALLY_FILTER": False,
+              "MODULE_CCTOR_CAN_STATICALLY_CATCH_N9_STATE565_EXCEPTION":
+                  False,
+
+              "TOTAL_STATIC_N9_CALL_SITES": total_n9_calls,
+              "ALL_619_PST_INITIALIZERS_CALL_N9_FIRST": True,
+
+              "STATE565_OVERFLOW_REDIRECT_HYPOTHESIS_RESOLVED": False,
+              "STATE565_OVERFLOW_IS_NOT_REDIRECTED_INSIDE_N9": True,
+              "STATE565_OVERFLOW_IS_NOT_CAUGHT_BY_MODULE_CCTOR": True,
+
+              "SUCCESSFUL_NORMAL_INITIALIZATION_WITH_REPRODUCED_STATE565_VALUE":
+                  False,
+
+              "INTERPRETATION":
+                  "The exact Hashtable(int) call at IL_5b2f is outside every "
+                  "lexical N9 try/handler region. The last N9 EH-covered "
+                  "instruction is IL_4ffb, well before state565 at IL_5b26. "
+                  "The first assembly-level caller, <Module>::.cctor, invokes "
+                  "N9 as its first IL instruction and itself contains no "
+                  "try/catch/finally/filter region. Therefore the proven "
+                  "Hashtable overflow cannot be explained by an intentional "
+                  "N9 or module-cctor exception redirection. The reproduced "
+                  "state565 value remains incompatible with successful normal "
+                  "initialization.",
+
+              "NEXT":
+                  "R188: stay fully offline and re-audit the state96->state94 "
+                  "unsafe pointer mutation from first principles, including "
+                  "local81/local29 alias identity, ldelema byte[0] address "
+                  "semantics, native-int arithmetic, ldind.i8/stind.i8 width "
+                  "and endianness, PE32/native-pointer assumptions, and whether "
+                  "any GC/safepoint or intervening call can invalidate local50 "
+                  "before each write. Do not execute vendor binaries, decrypt, "
+                  "contact USB, or flash.",
+
+              "AES_OR_CRYPTOSTREAM_DECRYPT_EXECUTED": False,
+              "OFFLINE_DECRYPT_AUTHORIZED": False,
+              "VENDOR_BINARY_EXECUTED": False,
+              "USB_OR_BOARD_CONTACTED": False,
+              "ANY_DISCOVERED_FRAME_AUTHORIZED_FOR_BOARD": False,
+              "FLASH_ALLOWED": False,
+          }
+
+          (out / "R187_DECISION.json").write_text(
+              json.dumps(decision, indent=2) + "\n"
+          )
+
+          (out / "R187_EH_SUMMARY.txt").write_text(
+              "\n".join([
+                  "R186 reproduces state565 int32 = 1921932524",
+                  "Hashtable capacity = 1921932525",
+                  "R180 expected constructor exception = ArgumentException(Arg_HTCapacityOverflow)",
+                  f"N9 try regions = {try_start_count}",
+                  f"N9 catch handlers = {catch_start_count}",
+                  f"N9 finally handlers = {finally_start_count}",
+                  "state565 try depth = 0",
+                  "state565 handler depth = 0",
+                  f"last EH-covered IL label = {max_eh[1]}",
+                  "<Module>::.cctor first IL = call N9jju8llVi()",
+                  "<Module>::.cctor has no lexical EH region",
+                  f"static N9 call sites in full IL = {total_n9_calls}",
+                  "state565 overflow is not internally redirected",
+                  "successful normal initialization with reproduced value = false",
+                  "FLASH_ALLOWED=NO",
+              ]) + "\n"
+          )
+
+          print(json.dumps(decision, indent=2))
+          PYCODE
+
+      - name: Package R187 evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /tmp/r187/evidence
+          zip -9 -r /tmp/R187_N9_STATE565_EXCEPTION_ESCAPE_STATIC_EVIDENCE.zip . >/dev/null
+          sha256sum /tmp/R187_N9_STATE565_EXCEPTION_ESCAPE_STATIC_EVIDENCE.zip \
+            > /tmp/R187_N9_STATE565_EXCEPTION_ESCAPE_STATIC_EVIDENCE.zip.sha256
+
+      - name: Upload R187 evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: R187-N9-STATE565-EXCEPTION-ESCAPE-STATIC-EVIDENCE
+          path: |
+            /tmp/R187_N9_STATE565_EXCEPTION_ESCAPE_STATIC_EVIDENCE.zip
+            /tmp/R187_N9_STATE565_EXCEPTION_ESCAPE_STATIC_EVIDENCE.zip.sha256
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Final fail-closed gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$FLASH_ALLOWED" = "NO"
+
+          grep -F '"STATE565_INSIDE_N9_TRY_REGION": false' \
+            /tmp/r187/evidence/R187_DECISION.json
+
+          grep -F '"N9_INTERNAL_HANDLER_CAN_CATCH_STATE565_HASHTABLE_OVERFLOW": false' \
+            /tmp/r187/evidence/R187_DECISION.json
+
+          grep -F '"MODULE_CCTOR_FIRST_IL_IS_N9_CALL": true' \
+            /tmp/r187/evidence/R187_DECISION.json
+
+          grep -F '"MODULE_CCTOR_HAS_TRY_CATCH_FINALLY_FILTER": false' \
+            /tmp/r187/evidence/R187_DECISION.json
+
+          grep -F '"STATE565_OVERFLOW_IS_NOT_REDIRECTED_INSIDE_N9": true' \
+            /tmp/r187/evidence/R187_DECISION.json
+
+          grep -F '"STATE565_OVERFLOW_IS_NOT_CAUGHT_BY_MODULE_CCTOR": true' \
+            /tmp/r187/evidence/R187_DECISION.json
+
+          grep -F '"SUCCESSFUL_NORMAL_INITIALIZATION_WITH_REPRODUCED_STATE565_VALUE": false' \
+            /tmp/r187/evidence/R187_DECISION.json
+
+          grep -F '"USB_OR_BOARD_CONTACTED": false' \
+            /tmp/r187/evidence/R187_DECISION.json
+
+          grep -F '"FLASH_ALLOWED": false' \
+            /tmp/r187/evidence/R187_DECISION.json
+
+          echo R187_STATE565_EXCEPTION_ESCAPE_STATIC_PROOF=YES
+          echo FLASH_ALLOWED=NO
