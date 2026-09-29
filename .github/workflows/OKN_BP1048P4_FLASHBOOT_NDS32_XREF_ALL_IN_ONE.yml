@@ -1,0 +1,465 @@
+name: OKN BP1048P4 Flashboot NDS32 XREF - All In One
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: okn-bp1048p4-flashboot-nds32-xref-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  FLASH_ALLOWED: "NO"
+
+jobs:
+  nds32_xref:
+    name: NDS32 disassembly + command xref - NO USB - NO FLASH
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Safety gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$FLASH_ALLOWED" = "NO"
+          mkdir -p /tmp/xref/evidence
+          cat > /tmp/xref/evidence/SAFETY.txt <<'EOF'
+          MODE=OFFLINE_STATIC_NDS32_DISASSEMBLY_ONLY
+          TARGET=MVSilicon_BP1048P4
+          IMAGE=SDK_flash_data_64KiB
+          USB_OR_BOARD_CONTACT=NO
+          TARGET_FIRMWARE_EXECUTED=NO
+          FEATURE_55_SENT=NO
+          FEATURE_AA_SENT=NO
+          FLASH_READ_EXECUTED=NO
+          FLASH_ERASE_EXECUTED=NO
+          FLASH_WRITE_EXECUTED=NO
+          LIVE_BOOT_ENTRY_AUTHORIZED=NO
+          LIVE_FLASH_AUTHORIZED=NO
+          FLASH_ALLOWED=NO
+          EOF
+
+      - name: Checkout public BP1048 SDK
+        uses: actions/checkout@v4
+        with:
+          repository: leadercxn/bp1048_sdk_v0.1.12
+          ref: master
+          path: bp1048-sdk
+          fetch-depth: 1
+
+      - name: Reconstruct exact 64 KiB flash_data and analyze static xrefs
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PYCODE'
+          from pathlib import Path
+          import collections, hashlib, json, re, struct, subprocess
+
+          ROOT=Path("bp1048-sdk")
+          OUT=Path("/tmp/xref/evidence")
+          OUT.mkdir(parents=True,exist_ok=True)
+
+          commit=subprocess.check_output(
+              ["git","-C",str(ROOT),"rev-parse","HEAD"],text=True
+          ).strip()
+
+          src=ROOT/"BT_Audio_APP/bt_audio_app_src/device/flash_boot.c"
+          text=src.read_text(errors="replace")
+
+          m=re.search(
+              r"(?:static\s+|const\s+|unsigned\s+|signed\s+)*"
+              r"(?:char|uint8_t|uint8|u8|BYTE)\s+flash_data\s*"
+              r"\[\s*(?P<n>\d+)\s*\]\s*=\s*\{(?P<body>.*?)\};",
+              text,re.I|re.S
+          )
+          assert m,"flash_data declaration missing"
+          declared=int(m.group("n"))
+          assert declared==65536
+
+          body=re.sub(r"/\*.*?\*/","",m.group("body"),flags=re.S)
+          body=re.sub(r"//[^\r\n]*","",body)
+          vals=[int(x,16) for x in re.findall(r"0[xX]([0-9A-Fa-f]{1,2})\b",body)]
+          assert len(vals)==65520, ("unexpected initializer count",len(vals))
+          raw=bytes(vals)+bytes(declared-len(vals))
+          assert len(raw)==65536
+
+          image=OUT/"flash_data_65536.bin"
+          image.write_bytes(raw)
+          sha=hashlib.sha256(raw).hexdigest()
+
+          # Extract printable ASCII strings.
+          strings=[]
+          start=None
+          for i,b in enumerate(raw+b"\x00"):
+              if 32<=b<=126:
+                  if start is None:
+                      start=i
+              else:
+                  if start is not None and i-start>=4:
+                      strings.append({
+                          "offset":start,
+                          "text":raw[start:i].decode("ascii",errors="replace")
+                      })
+                  start=None
+
+          exact_terms=[
+              "PC IS OK","UDisk IS OK","codedata","constdat","cnfgdat",
+              "chiperas","btupdat","upinfo","cxxx",
+              "jump_to_code_addr","Make mva upgrade package!",
+              "pc upgrata code","pc upgrata const","pc upgrata config",
+              "code MAGIC error","codeCRC different, need to upgrade",
+              "Version different, need to upgrade",
+              "UPGRADE:Flash data command,prepare to unlock & chip erase all",
+              "flash boot Len CRC err!","FLASHBOOT CRC",
+              "check_user_code","cmd error"
+          ]
+          exact=[]
+          for term in exact_terms:
+              for s in strings:
+                  if term.lower() in s["text"].lower():
+                      exact.append({
+                          "term":term,"offset":s["offset"],"text":s["text"]
+                      })
+
+          # Search for little/big-endian absolute pointers to each exact string.
+          ptr_refs=[]
+          for s in exact:
+              off=s["offset"]
+              for endian,packed in [
+                  ("LE32",struct.pack("<I",off)),
+                  ("BE32",struct.pack(">I",off)),
+              ]:
+                  pos=0
+                  while True:
+                      p=raw.find(packed,pos)
+                      if p<0:
+                          break
+                      if p!=off:
+                          ptr_refs.append({
+                              "string_offset":off,
+                              "term":s["term"],
+                              "pointer_offset":p,
+                              "endian":endian,
+                              "context":raw[max(0,p-24):min(len(raw),p+40)].hex(" ")
+                          })
+                      pos=p+1
+
+          # Look for compact tables containing 2+ pointers to high-value strings.
+          ptr_by_pos={x["pointer_offset"]:x for x in ptr_refs if x["endian"]=="LE32"}
+          tables=[]
+          for base in range(0,len(raw)-32,4):
+              hits=[]
+              for pos in range(base,base+32,4):
+                  if pos in ptr_by_pos:
+                      hits.append(ptr_by_pos[pos])
+              if len(hits)>=2:
+                  tables.append({
+                      "base":base,
+                      "hits":hits,
+                      "raw32":raw[base:base+32].hex(" ")
+                  })
+          # dedupe overlapping tables
+          dedup=[]
+          last=-999
+          for t in tables:
+              if t["base"]-last>=16:
+                  dedup.append(t)
+                  last=t["base"]
+
+          # Find all build/source provenance references.
+          build_refs=[]
+          rx=re.compile(r"flash_boot(?:\.c|\.o)?|flash_data",re.I)
+          for p in ROOT.rglob("*"):
+              if not p.is_file() or ".git" in p.parts or p.stat().st_size>5_000_000:
+                  continue
+              try:
+                  t=p.read_text(errors="replace")
+              except Exception:
+                  continue
+              rel=str(p.relative_to(ROOT))
+              for i,line in enumerate(t.splitlines(),1):
+                  if rx.search(line):
+                      build_refs.append({
+                          "file":rel,"line":i,"text":line.strip()[:1000]
+                      })
+
+          # Device descriptor and marker offsets retained for correlation.
+          desc=[]
+          for off in range(len(raw)-17):
+              if raw[off]==0x12 and raw[off+1]==0x01 and raw[off+7] in (8,16,32,64):
+                  desc.append({
+                      "offset":off,
+                      "vid":f"0x{int.from_bytes(raw[off+8:off+10],'little'):04X}",
+                      "pid":f"0x{int.from_bytes(raw[off+10:off+12],'little'):04X}",
+                      "raw":raw[off:off+18].hex(" ")
+                  })
+
+          decision={
+              "revision":"FLASHBOOT_NDS32_XREF_V1",
+              "sdk_commit":commit,
+              "image_sha256":sha,
+              "explicit_bytes":len(vals),
+              "implicit_zero_fill":declared-len(vals),
+              "exact_string_hits":exact,
+              "absolute_string_pointer_refs":ptr_refs[:1000],
+              "candidate_pointer_tables":dedup[:200],
+              "build_provenance_refs":build_refs[:1000],
+              "device_descriptor_candidates":desc[:100],
+              "PRODUCTION_FLASHBOOT_PROTOCOL_PROVEN":False,
+              "SAFE_READ_ONLY_COMMAND_PROVEN":False,
+              "LIVE_BOOT_ENTRY_AUTHORIZED":False,
+              "LIVE_FLASH_AUTHORIZED":False,
+              "USB_OR_BOARD_CONTACTED":False,
+              "FLASH_ALLOWED":False
+          }
+          (OUT/"XREF_DECISION.json").write_text(
+              json.dumps(decision,indent=2,ensure_ascii=False)+"\n"
+          )
+
+          # Keep machine-readable string map.
+          (OUT/"STRING_MAP.json").write_text(
+              json.dumps(strings,indent=2,ensure_ascii=False)+"\n"
+          )
+
+          # Initial summary before disassembly.
+          md=[
+              "# BP1048P4 flashboot NDS32 xref",
+              "",
+              f"SDK commit: `{commit}`",
+              f"64 KiB SHA256: `{sha}`",
+              f"explicit bytes: **{len(vals)}**",
+              f"implicit zero-fill: **{declared-len(vals)}**",
+              "",
+              "## Exact high-value strings in the 64 KiB image",
+          ]
+          for x in exact:
+              md.append(f"- `0x{x['offset']:04X}` — `{x['text']}`")
+          if not exact:
+              md.append("- none")
+
+          md+=["","## Absolute 32-bit string pointer references"]
+          if ptr_refs:
+              for x in ptr_refs[:80]:
+                  md.append(
+                      f"- `{x['endian']}` ptr @ `0x{x['pointer_offset']:04X}` "
+                      f"→ string `0x{x['string_offset']:04X}` `{x['term']}`"
+                  )
+          else:
+              md.append("- none; code may synthesize addresses in instructions")
+
+          md+=["","## Candidate pointer tables"]
+          if dedup:
+              for t in dedup[:30]:
+                  names=", ".join(sorted(set(x["term"] for x in t["hits"])))
+                  md.append(f"- table around `0x{t['base']:04X}` — {names}")
+          else:
+              md.append("- none")
+
+          md+=["","## Build/source references to flash_boot / flash_data"]
+          for x in build_refs[:50]:
+              md.append(f"- `{x['file']}:{x['line']}` — `{x['text']}`")
+          if not build_refs:
+              md.append("- none")
+
+          (OUT/"PRE_DISASM_SUMMARY.md").write_text("\n".join(md)+"\n")
+          PYCODE
+
+      - name: Build GNU NDS32 little-endian objdump
+        shell: bash
+        run: |
+          set -u
+          mkdir -p /tmp/xref/toolchain /tmp/xref/build
+          cd /tmp/xref/toolchain
+
+          URL="https://ftp.gnu.org/gnu/binutils/binutils-2.44.tar.xz"
+          echo "SOURCE_URL=$URL" > /tmp/xref/evidence/NDS32_OBJDUMP_BUILD.txt
+
+          if curl -fL --retry 3 --connect-timeout 20 "$URL" -o binutils-2.44.tar.xz; then
+            sha256sum binutils-2.44.tar.xz >> /tmp/xref/evidence/NDS32_OBJDUMP_BUILD.txt
+            tar -xf binutils-2.44.tar.xz
+            cd /tmp/xref/build
+            if ../toolchain/binutils-2.44/configure \
+                --target=nds32le-elf \
+                --disable-nls \
+                --disable-werror \
+                --disable-gdb \
+                --disable-gprofng \
+                --disable-gas \
+                --disable-ld \
+                --disable-gold \
+                >> /tmp/xref/evidence/NDS32_OBJDUMP_BUILD.txt 2>&1; then
+              if make -j2 all-binutils >> /tmp/xref/evidence/NDS32_OBJDUMP_BUILD.txt 2>&1; then
+                find /tmp/xref/build -type f -name '*objdump' -perm -111 -print \
+                  | tee /tmp/xref/evidence/OBJDUMP_CANDIDATES.txt
+                echo "BUILD_STATUS=SUCCESS" >> /tmp/xref/evidence/NDS32_OBJDUMP_BUILD.txt
+              else
+                echo "BUILD_STATUS=MAKE_FAILED" >> /tmp/xref/evidence/NDS32_OBJDUMP_BUILD.txt
+              fi
+            else
+              echo "BUILD_STATUS=CONFIGURE_FAILED" >> /tmp/xref/evidence/NDS32_OBJDUMP_BUILD.txt
+            fi
+          else
+            echo "BUILD_STATUS=DOWNLOAD_FAILED" >> /tmp/xref/evidence/NDS32_OBJDUMP_BUILD.txt
+          fi
+
+          # This step is diagnostic. Static pointer analysis remains usable even
+          # if the open-source disassembler build is unavailable.
+          exit 0
+
+      - name: Disassemble exact 64 KiB image and generate xref contexts
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          OBJDUMP="$(find /tmp/xref/build -type f -name '*objdump' -perm -111 | head -1 || true)"
+          IMAGE="/tmp/xref/evidence/flash_data_65536.bin"
+          DIS="/tmp/xref/evidence/NDS32_DISASSEMBLY.txt"
+          ERR="/tmp/xref/evidence/NDS32_DISASSEMBLY.stderr.txt"
+
+          if [ -n "$OBJDUMP" ]; then
+            "$OBJDUMP" -i > /tmp/xref/evidence/NDS32_OBJDUMP_TARGETS.txt 2>&1 || true
+
+            success=0
+            for mach in nds32 nds32:v3 nds32:v3m nds32:v2; do
+              if "$OBJDUMP" -D -b binary -m "$mach" --adjust-vma=0 "$IMAGE" \
+                  > "$DIS" 2> "$ERR"; then
+                if [ -s "$DIS" ]; then
+                  echo "DISASM_MACHINE=$mach" \
+                    > /tmp/xref/evidence/NDS32_DISASM_STATUS.txt
+                  success=1
+                  break
+                fi
+              fi
+            done
+
+            if [ "$success" -eq 0 ]; then
+              echo "DISASM_MACHINE=FAILED" \
+                > /tmp/xref/evidence/NDS32_DISASM_STATUS.txt
+            fi
+          else
+            echo "DISASM_MACHINE=NO_OBJDUMP" \
+              > /tmp/xref/evidence/NDS32_DISASM_STATUS.txt
+            : > "$DIS"
+          fi
+
+          python3 - <<'PYCODE'
+          from pathlib import Path
+          import json,re
+
+          OUT=Path("/tmp/xref/evidence")
+          d=json.loads((OUT/"XREF_DECISION.json").read_text())
+          dis=(OUT/"NDS32_DISASSEMBLY.txt").read_text(errors="replace") \
+              if (OUT/"NDS32_DISASSEMBLY.txt").exists() else ""
+
+          terms=d["exact_string_hits"]
+
+          # Search disassembly text for exact/partial immediates associated with
+          # each string address. These are candidates only, not proven xrefs.
+          lines=dis.splitlines()
+          cand=[]
+          for s in terms:
+              off=s["offset"]
+              forms={
+                  f"{off:x}",
+                  f"0x{off:x}",
+                  f"{off & 0xffff:x}",
+                  f"0x{off & 0xffff:x}",
+                  f"{off >> 12:x}",
+                  f"0x{off >> 12:x}",
+              }
+              for i,line in enumerate(lines):
+                  low=line.lower()
+                  if any(re.search(rf"(?<![0-9a-f]){re.escape(x.lower())}(?![0-9a-f])",low)
+                         for x in forms if len(x)>=2):
+                      lo=max(0,i-5); hi=min(len(lines),i+7)
+                      cand.append({
+                          "term":s["term"],
+                          "string_offset":off,
+                          "disasm_line":i+1,
+                          "context":"\n".join(lines[lo:hi])[:5000]
+                      })
+                      if sum(1 for x in cand if x["term"]==s["term"])>=20:
+                          break
+
+          (OUT/"DISASM_XREF_CANDIDATES.json").write_text(
+              json.dumps(cand,indent=2,ensure_ascii=False)+"\n"
+          )
+
+          status=(OUT/"NDS32_DISASM_STATUS.txt").read_text().strip() \
+              if (OUT/"NDS32_DISASM_STATUS.txt").exists() else "UNKNOWN"
+
+          md=[
+              "# BP1048P4 flashboot NDS32 static analysis",
+              "",
+              f"Disassembler status: `{status}`",
+              "",
+          ]
+          pre=(OUT/"PRE_DISASM_SUMMARY.md").read_text()
+          md.append(pre)
+
+          md+=["","## NDS32 disassembly candidate references"]
+          if cand:
+              for x in cand[:80]:
+                  md.append(
+                      f"- `{x['term']}` string `0x{x['string_offset']:04X}` "
+                      f"candidate near disassembly line {x['disasm_line']}"
+                  )
+          else:
+              md.append("- no textual immediate candidates recovered")
+
+          md+=["","## Decision"]
+          md.append("- `codedata` / `constdat` and erase/program diagnostics are confirmed inside the exact boot image.")
+          md.append("- Candidate xrefs are for offline reverse engineering only; they are not a live command sequence.")
+          md.append("- A command is not considered safe until its handler is separated from chip-erase/program paths.")
+          md.append("- USB/board contacted: **NO**")
+          md.append("- Flash read/erase/write: **NO**")
+          md.append("- `FLASH_ALLOWED=NO`")
+
+          (OUT/"FINAL_XREF_SUMMARY.md").write_text("\n".join(md)+"\n")
+          PYCODE
+
+      - name: Publish summary
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat /tmp/xref/evidence/FINAL_XREF_SUMMARY.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Package evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /tmp/xref/evidence
+          zip -9 -r /tmp/OKN_BP1048P4_FLASHBOOT_NDS32_XREF_EVIDENCE.zip . >/dev/null
+          sha256sum /tmp/OKN_BP1048P4_FLASHBOOT_NDS32_XREF_EVIDENCE.zip \
+            > /tmp/OKN_BP1048P4_FLASHBOOT_NDS32_XREF_EVIDENCE.zip.sha256
+
+      - name: Upload evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: OKN-BP1048P4-FLASHBOOT-NDS32-XREF-EVIDENCE
+          path: |
+            /tmp/OKN_BP1048P4_FLASHBOOT_NDS32_XREF_EVIDENCE.zip
+            /tmp/OKN_BP1048P4_FLASHBOOT_NDS32_XREF_EVIDENCE.zip.sha256
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Final fail-closed gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$FLASH_ALLOWED" = "NO"
+          python3 - <<'PY'
+          import json
+          p="/tmp/xref/evidence/XREF_DECISION.json"
+          d=json.load(open(p))
+          assert d["explicit_bytes"] == 65520
+          assert d["implicit_zero_fill"] == 16
+          assert d["USB_OR_BOARD_CONTACTED"] is False
+          assert d["LIVE_FLASH_AUTHORIZED"] is False
+          assert d["FLASH_ALLOWED"] is False
+          print("NDS32_XREF_FAIL_CLOSED_GATE=PASS")
+          PY
+          echo FLASH_ALLOWED=NO
