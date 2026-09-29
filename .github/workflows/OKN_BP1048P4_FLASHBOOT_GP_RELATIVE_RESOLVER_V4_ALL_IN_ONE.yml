@@ -1,0 +1,628 @@
+name: OKN BP1048P4 Flashboot GP Relative Resolver V4 - All In One
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: okn-bp1048p4-flashboot-gp-relative-v4-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  FLASH_ALLOWED: "NO"
+
+jobs:
+  gp_relative:
+    name: Recover GP-relative command references - NO USB - NO FLASH
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Safety gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$FLASH_ALLOWED" = "NO"
+          mkdir -p /tmp/gp/evidence
+          cat > /tmp/gp/evidence/SAFETY.txt <<'EOF'
+          MODE=OFFLINE_STATIC_GP_RELATIVE_ANALYSIS_ONLY
+          TARGET=MVSilicon_BP1048P4
+          IMAGE=SDK_flash_data_64KiB
+          USB_OR_BOARD_CONTACT=NO
+          TARGET_FIRMWARE_EXECUTED=NO
+          FEATURE_55_SENT=NO
+          FEATURE_AA_SENT=NO
+          FLASH_READ_EXECUTED=NO
+          FLASH_ERASE_EXECUTED=NO
+          FLASH_WRITE_EXECUTED=NO
+          LIVE_BOOT_ENTRY_AUTHORIZED=NO
+          LIVE_FLASH_AUTHORIZED=NO
+          FLASH_ALLOWED=NO
+          EOF
+
+      - name: Checkout public BP1048 SDK
+        uses: actions/checkout@v4
+        with:
+          repository: leadercxn/bp1048_sdk_v0.1.12
+          ref: master
+          path: bp1048-sdk
+          fetch-depth: 1
+
+      - name: Reconstruct exact image and collect linker GP clues
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PYCODE'
+          from pathlib import Path
+          import hashlib, json, re, subprocess
+
+          ROOT=Path("bp1048-sdk")
+          OUT=Path("/tmp/gp/evidence")
+          OUT.mkdir(parents=True,exist_ok=True)
+
+          commit=subprocess.check_output(
+              ["git","-C",str(ROOT),"rev-parse","HEAD"],text=True
+          ).strip()
+
+          src=ROOT/"BT_Audio_APP/bt_audio_app_src/device/flash_boot.c"
+          text=src.read_text(errors="replace")
+
+          m=re.search(
+              r"(?:static\s+|const\s+|unsigned\s+|signed\s+)*"
+              r"(?:char|uint8_t|uint8|u8|BYTE)\s+flash_data\s*"
+              r"\[\s*(?P<n>\d+)\s*\]\s*=\s*\{(?P<body>.*?)\};",
+              text,re.I|re.S
+          )
+          assert m,"flash_data missing"
+          declared=int(m.group("n"))
+          body=re.sub(r"/\*.*?\*/","",m.group("body"),flags=re.S)
+          body=re.sub(r"//[^\r\n]*","",body)
+          vals=[int(x,16) for x in re.findall(
+              r"0[xX]([0-9A-Fa-f]{1,2})\b",body
+          )]
+          assert declared==65536 and len(vals)==65520
+          raw=bytes(vals)+bytes(declared-len(vals))
+          assert len(raw)==65536
+          (OUT/"flash_data_65536.bin").write_bytes(raw)
+
+          # Exact command strings.
+          strings=[]
+          st=None
+          for i,b in enumerate(raw+b"\x00"):
+              if 32<=b<=126:
+                  if st is None:
+                      st=i
+              else:
+                  if st is not None and i-st>=3:
+                      strings.append((st,raw[st:i].decode("ascii",errors="replace")))
+                  st=None
+
+          exact_names=[
+              "chiperas","upinfo","btupdat","cnfgdat","constdat","codedata","cxxx"
+          ]
+          commands={}
+          for name in exact_names:
+              commands[name]=[off for off,s in strings if s==name]
+
+          # All aligned slots whose 32-bit value points to a printable string.
+          string_starts={off:s for off,s in strings}
+          pointer_slots=[]
+          for pos in range(0,len(raw)-3,4):
+              w=int.from_bytes(raw[pos:pos+4],"little")
+              if w in string_starts:
+                  pointer_slots.append({
+                      "slot":pos,
+                      "value":w,
+                      "string":string_starts[w],
+                      "command":next(
+                          (name for name,hits in commands.items() if w in hits),
+                          None
+                      )
+                  })
+
+          # Linker/source GP/GOT/SDA clues.
+          gp_clues=[]
+          gp_rx=re.compile(
+              r"\b(gp|global_pointer|GLOBAL_OFFSET_TABLE|GOT|SDA_BASE|"
+              r"small data|\.sdata|\.sbss)\b",re.I
+          )
+          for p in ROOT.rglob("*"):
+              if not p.is_file() or ".git" in p.parts or p.stat().st_size>2_000_000:
+                  continue
+              if p.suffix.lower() not in {
+                  ".ld",".lds",".sag",".map",".c",".h",".s",".S",".asm",".txt"
+              }:
+                  continue
+              try:
+                  t=p.read_text(errors="replace")
+              except Exception:
+                  continue
+              rel=str(p.relative_to(ROOT))
+              for i,line in enumerate(t.splitlines(),1):
+                  if gp_rx.search(line):
+                      gp_clues.append({
+                          "file":rel,"line":i,"text":line.strip()[:1200]
+                      })
+
+          prep={
+              "revision":"FLASHBOOT_GP_RELATIVE_RESOLVER_V4",
+              "sdk_commit":commit,
+              "image_sha256":hashlib.sha256(raw).hexdigest(),
+              "command_offsets":commands,
+              "printable_string_pointer_slots":pointer_slots,
+              "gp_linker_source_clues":gp_clues[:1000],
+              "USB_OR_BOARD_CONTACTED":False,
+              "LIVE_FLASH_AUTHORIZED":False,
+              "FLASH_ALLOWED":False,
+          }
+          (OUT/"PREP.json").write_text(
+              json.dumps(prep,indent=2,ensure_ascii=False)+"\n"
+          )
+
+          (OUT/"GP_LINKER_SOURCE_CLUES.txt").write_text(
+              "\n".join(
+                  f"{x['file']}:{x['line']}: {x['text']}" for x in gp_clues
+              )+"\n"
+          )
+          PYCODE
+
+      - name: Build GNU NDS32 objdump
+        shell: bash
+        run: |
+          set -u
+          mkdir -p /tmp/gp/toolchain /tmp/gp/build
+          cd /tmp/gp/toolchain
+          URL="https://ftp.gnu.org/gnu/binutils/binutils-2.44.tar.xz"
+
+          if curl -fL --retry 3 --connect-timeout 20 "$URL" -o binutils-2.44.tar.xz; then
+            tar -xf binutils-2.44.tar.xz
+            cd /tmp/gp/build
+            if ../toolchain/binutils-2.44/configure \
+                --target=nds32le-elf \
+                --disable-nls \
+                --disable-werror \
+                --disable-gdb \
+                --disable-gprofng \
+                --disable-gas \
+                --disable-ld \
+                --disable-gold \
+                >/tmp/gp/evidence/NDS32_BUILD.log 2>&1 &&
+               make -j2 all-binutils >>/tmp/gp/evidence/NDS32_BUILD.log 2>&1; then
+              find /tmp/gp/build -type f -name '*objdump' -perm -111 -print \
+                > /tmp/gp/evidence/OBJDUMP_CANDIDATES.txt
+              echo BUILD_STATUS=SUCCESS > /tmp/gp/evidence/NDS32_BUILD_STATUS.txt
+            else
+              echo BUILD_STATUS=FAILED > /tmp/gp/evidence/NDS32_BUILD_STATUS.txt
+            fi
+          else
+            echo BUILD_STATUS=DOWNLOAD_FAILED > /tmp/gp/evidence/NDS32_BUILD_STATUS.txt
+          fi
+          exit 0
+
+      - name: Disassemble and infer GP base from GP-relative references
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          OBJDUMP="$(find /tmp/gp/build -type f -name '*objdump' -perm -111 | head -1 || true)"
+          IMAGE="/tmp/gp/evidence/flash_data_65536.bin"
+          DIS="/tmp/gp/evidence/NDS32_DISASSEMBLY.txt"
+
+          if [ -n "$OBJDUMP" ]; then
+            "$OBJDUMP" -D -b binary -m nds32 --adjust-vma=0 "$IMAGE" \
+              > "$DIS" 2>/tmp/gp/evidence/NDS32_DISASSEMBLY.stderr.txt
+            echo DISASM_STATUS=SUCCESS > /tmp/gp/evidence/NDS32_DISASM_STATUS.txt
+          else
+            : > "$DIS"
+            echo DISASM_STATUS=NO_OBJDUMP > /tmp/gp/evidence/NDS32_DISASM_STATUS.txt
+          fi
+
+          python3 - <<'PYCODE'
+          from pathlib import Path
+          import collections,json,re
+
+          OUT=Path("/tmp/gp/evidence")
+          raw=(OUT/"flash_data_65536.bin").read_bytes()
+          prep=json.loads((OUT/"PREP.json").read_text())
+          dlines=(OUT/"NDS32_DISASSEMBLY.txt").read_text(
+              errors="replace"
+          ).splitlines()
+
+          row_rx=re.compile(
+              r"^\s*([0-9A-Fa-f]+):\s+(?:[0-9A-Fa-f]{2,8}\s+)+(.+?)\s*$"
+          )
+          ins=[]
+          for line_no,line in enumerate(dlines,1):
+              m=row_rx.match(line)
+              if m:
+                  ins.append({
+                      "line_no":line_no,
+                      "addr":int(m.group(1),16),
+                      "text":m.group(2).strip(),
+                      "raw":line,
+                  })
+
+          def pint(s):
+              s=s.strip().replace("#","")
+              try:
+                  return int(s,0)
+              except Exception:
+                  return None
+
+          # NDS32 ABI: r29 is gp. Binutils prints dedicated GPREL opcodes as
+          # lwi.gp/lhi.gp/lbi.gp/addi.gp and may omit the register from brackets.
+          gp_mem_rx=re.compile(
+              r"\b(?P<op>lwi\.gp|lhi\.gp|lhsi\.gp|lbi\.gp|lbsi\.gp|"
+              r"swi\.gp|shi\.gp|sbi\.gp)\s+"
+              r"(?P<rt>\$[A-Za-z0-9]+)\s*,\s*"
+              r"\[\s*(?:(?:\$gp|\$r29)\s*)?\+?\s*#?"
+              r"(?P<imm>-?0x[0-9A-Fa-f]+|-?\d+)\s*\]",
+              re.I
+          )
+          addi_gp_rx=re.compile(
+              r"\baddi\.gp\s+(?P<rt>\$[A-Za-z0-9]+)\s*,\s*#?"
+              r"(?P<imm>-?0x[0-9A-Fa-f]+|-?\d+)",
+              re.I
+          )
+
+          gp_ops=[]
+          for idx,x in enumerate(ins):
+              mm=gp_mem_rx.search(x["text"])
+              if mm:
+                  imm=pint(mm.group("imm"))
+                  if imm is not None:
+                      gp_ops.append({
+                          "idx":idx,"addr":x["addr"],"kind":"mem",
+                          "op":mm.group("op").lower(),
+                          "rt":mm.group("rt"),
+                          "disp":imm,"text":x["text"],
+                      })
+                  continue
+              am=addi_gp_rx.search(x["text"])
+              if am:
+                  imm=pint(am.group("imm"))
+                  if imm is not None:
+                      gp_ops.append({
+                          "idx":idx,"addr":x["addr"],"kind":"addi",
+                          "op":"addi.gp","rt":am.group("rt"),
+                          "disp":imm,"text":x["text"],
+                      })
+
+          # Explicit GP/r29 constructors in the raw code, independent of GPREL ops.
+          gp_ctor_lines=[]
+          gp_name_rx=re.compile(r"\$(?:gp|r29)\b",re.I)
+          for x in ins:
+              if gp_name_rx.search(x["text"]):
+                  gp_ctor_lines.append(x)
+
+          # Build string map for dereference scoring.
+          strings={}
+          st=None
+          for i,b in enumerate(raw+b"\x00"):
+              if 32<=b<=126:
+                  if st is None:
+                      st=i
+              else:
+                  if st is not None and i-st>=3:
+                      strings[st]=raw[st:i].decode("ascii",errors="replace")
+                  st=None
+
+          command_by_offset={}
+          for name,hits in prep["command_offsets"].items():
+              for off in hits:
+                  command_by_offset[off]=name
+
+          pointer_slots=prep["printable_string_pointer_slots"]
+          command_slots=[x for x in pointer_slots if x.get("command")]
+
+          # GP candidates from:
+          #   gp + disp == known command pointer slot
+          # and from addi.gp directly constructing a command string address.
+          candidate_reasons=collections.defaultdict(list)
+
+          for op in gp_ops:
+              d=op["disp"]
+              if op["kind"]=="mem":
+                  for slot in command_slots:
+                      gp=(slot["slot"]-d)&0xffffffff
+                      if gp < 0x100000 and gp%4==0:
+                          candidate_reasons[gp].append({
+                              "reason":"mem_to_command_pointer_slot",
+                              "instruction_addr":op["addr"],
+                              "disp":d,
+                              "slot":slot["slot"],
+                              "command":slot["command"],
+                          })
+              else:
+                  for off,name in command_by_offset.items():
+                      gp=(off-d)&0xffffffff
+                      if gp < 0x100000 and gp%4==0:
+                          candidate_reasons[gp].append({
+                              "reason":"addi_gp_to_command_string",
+                              "instruction_addr":op["addr"],
+                              "disp":d,
+                              "string_offset":off,
+                              "command":name,
+                          })
+
+          # Also infer candidates from any printable-string pointer slot, but
+          # rank these much lower than command-specific evidence.
+          for op in gp_ops:
+              if op["kind"]!="mem":
+                  continue
+              d=op["disp"]
+              for slot in pointer_slots:
+                  gp=(slot["slot"]-d)&0xffffffff
+                  if gp < 0x100000 and gp%4==0:
+                      candidate_reasons[gp].append({
+                          "reason":"mem_to_printable_pointer_slot",
+                          "instruction_addr":op["addr"],
+                          "disp":d,
+                          "slot":slot["slot"],
+                          "string":slot["string"][:80],
+                      })
+
+          def score_gp(gp):
+              score=0
+              command_names=set()
+              printable_hits=0
+              in_image=0
+              accesses=[]
+
+              for op in gp_ops:
+                  ea=(gp+op["disp"])&0xffffffff
+                  item={**op,"gp":gp,"ea":ea}
+
+                  if 0<=ea<len(raw):
+                      in_image+=1
+                      score+=1
+
+                      if op["kind"]=="mem":
+                          if op["op"].startswith("lwi") and ea+4<=len(raw):
+                              val=int.from_bytes(raw[ea:ea+4],"little")
+                              item["loaded_u32"]=val
+                              item["loaded_u32_hex"]=f"0x{val:08X}"
+
+                              if val in strings:
+                                  printable_hits+=1
+                                  score+=6
+                                  item["loaded_string"]=strings[val]
+                              if val in command_by_offset:
+                                  name=command_by_offset[val]
+                                  command_names.add(name)
+                                  score+=35
+                                  item["loaded_command"]=name
+
+                              if any(s["slot"]==ea and s.get("command")
+                                     for s in command_slots):
+                                  score+=25
+                                  item["ea_is_command_pointer_slot"]=True
+
+                          elif op["op"].startswith("lbi"):
+                              item["loaded_u8"]=raw[ea]
+                          elif op["op"].startswith("lhi") and ea+2<=len(raw):
+                              item["loaded_u16"]=int.from_bytes(
+                                  raw[ea:ea+2],"little"
+                              )
+
+                      elif op["kind"]=="addi":
+                          if ea in strings:
+                              printable_hits+=1
+                              score+=7
+                              item["points_to_string"]=strings[ea]
+                          if ea in command_by_offset:
+                              name=command_by_offset[ea]
+                              command_names.add(name)
+                              score+=40
+                              item["points_to_command"]=name
+
+                  accesses.append(item)
+
+              # Reward multiple distinct command names heavily.
+              score += len(command_names)*50
+
+              # Prior reason weights.
+              for r in candidate_reasons.get(gp,[]):
+                  if "command" in r:
+                      score+=30
+                  else:
+                      score+=1
+
+              return {
+                  "gp":gp,
+                  "gp_hex":f"0x{gp:08X}",
+                  "score":score,
+                  "distinct_commands":sorted(command_names),
+                  "printable_hits":printable_hits,
+                  "in_image_accesses":in_image,
+                  "reasons":candidate_reasons.get(gp,[])[:80],
+                  "accesses":accesses,
+              }
+
+          # Limit candidates before expensive scoring: keep bases with strongest
+          # reason counts, plus common aligned image/data values.
+          ranked_seed=sorted(
+              candidate_reasons,
+              key=lambda g:(
+                  -sum(10 if "command" in r else 1
+                       for r in candidate_reasons[g]),
+                  g
+              )
+          )[:400]
+
+          scored=[score_gp(g) for g in ranked_seed]
+          scored.sort(
+              key=lambda x:(
+                  -len(x["distinct_commands"]),
+                  -x["score"],
+                  -x["printable_hits"],
+                  x["gp"]
+              )
+          )
+          top=scored[:30]
+
+          best=top[0] if top else None
+
+          # Pull exact command-related accesses and nearby control flow for best GP.
+          best_command_accesses=[]
+          contexts=[]
+          control_rx=re.compile(
+              r"\b(jal|jral|jr|j|beq|bne|beqz|bnez|bgez|bltz|bgtz|blez)\b",
+              re.I
+          )
+
+          if best:
+              for a in best["accesses"]:
+                  cmd=a.get("loaded_command") or a.get("points_to_command")
+                  if not cmd:
+                      continue
+                  best_command_accesses.append(a)
+                  idx=a["idx"]
+                  rows=ins[max(0,idx-18):min(len(ins),idx+31)]
+                  controls=[
+                      {"addr":r["addr"],"text":r["text"]}
+                      for r in rows if control_rx.search(r["text"])
+                  ]
+                  contexts.append({
+                      "command":cmd,
+                      "instruction_addr":a["addr"],
+                      "access":a,
+                      "controls":controls,
+                      "text":"\n".join(r["raw"] for r in rows),
+                  })
+
+          # Save contexts.
+          for i,c in enumerate(contexts):
+              safe=re.sub(r"[^A-Za-z0-9_.-]+","_",c["command"])
+              (OUT/f"GP_CMD_CONTEXT_{i:02d}_{safe}.asm").write_text(
+                  c["text"]+"\n"
+              )
+
+          result={
+              "gp_relative_instruction_count":len(gp_ops),
+              "gp_relative_instructions":gp_ops,
+              "explicit_gp_r29_instruction_count":len(gp_ctor_lines),
+              "explicit_gp_r29_instructions":gp_ctor_lines[:300],
+              "candidate_gp_bases":top,
+              "best_gp_candidate":best,
+              "best_gp_command_accesses":best_command_accesses,
+              "best_gp_command_contexts":contexts,
+          }
+          (OUT/"GP_RESOLUTION.json").write_text(
+              json.dumps(result,indent=2,ensure_ascii=False)+"\n"
+          )
+
+          # Human summary.
+          md=[
+              "# BP1048P4 Flashboot GP Relative Resolver V4",
+              "",
+              f"64 KiB SHA256: `{prep['image_sha256']}`",
+              "",
+              "## NDS32 GP-relative instructions",
+              f"- parsed GP-relative instructions: **{len(gp_ops)}**",
+              f"- instructions explicitly mentioning `$gp/$r29`: **{len(gp_ctor_lines)}**",
+          ]
+
+          if gp_ctor_lines:
+              md+=["","### Explicit `$gp/$r29` instruction samples"]
+              for x in gp_ctor_lines[:40]:
+                  md.append(f"- `0x{x['addr']:04X}` `{x['text']}`")
+
+          md+=["","## Top inferred GP bases"]
+          if top:
+              for x in top[:15]:
+                  cmds=", ".join(x["distinct_commands"]) or "-"
+                  md.append(
+                      f"- `{x['gp_hex']}` score `{x['score']}`; "
+                      f"commands `{cmds}`; printable `{x['printable_hits']}`; "
+                      f"in-image accesses `{x['in_image_accesses']}`"
+                  )
+          else:
+              md.append("- no GP candidate could be inferred")
+
+          md+=["","## Best GP candidate command accesses"]
+          if best_command_accesses:
+              for a in best_command_accesses[:80]:
+                  cmd=a.get("loaded_command") or a.get("points_to_command")
+                  extra=""
+                  if "loaded_u32_hex" in a:
+                      extra=f" loads `{a['loaded_u32_hex']}`"
+                  md.append(
+                      f"- `0x{a['addr']:04X}` `{a['text']}`; "
+                      f"GP `{best['gp_hex']}` → EA `0x{a['ea']:04X}` "
+                      f"→ **{cmd}**{extra}"
+                  )
+          else:
+              md.append("- none")
+
+          md+=["","## Nearby control transfers for command accesses"]
+          if contexts:
+              for c in contexts[:60]:
+                  ctrls=" | ".join(
+                      f"0x{x['addr']:04X} {x['text']}" for x in c["controls"][:10]
+                  )
+                  md.append(
+                      f"- **{c['command']}** access @ `0x{c['instruction_addr']:04X}`: "
+                      + (ctrls if ctrls else "no nearby control-transfer parsed")
+                  )
+          else:
+              md.append("- none")
+
+          md+=["","## Linker/source GP clues"]
+          for x in prep["gp_linker_source_clues"][:50]:
+              md.append(f"- `{x['file']}:{x['line']}` — `{x['text']}`")
+          if not prep["gp_linker_source_clues"]:
+              md.append("- none")
+
+          md+=["","## Interpretation"]
+          md.append("- NDS32 uses register r29 as the global pointer; this run therefore analyzes dedicated `.gp` instructions instead of assuming ordinary DFxx base loads are the command-table base.")
+          md.append("- A GP candidate is only strong if the same base resolves multiple independent GP-relative accesses to exact command strings or command-pointer slots.")
+          md.append("- `chiperas` remains destructive. `upinfo`/`cxxx` are not read-only until their specific control-flow handlers are separated from erase/write paths.")
+          md.append("- USB/board contacted: **NO**")
+          md.append("- Flash read/erase/write: **NO**")
+          md.append("- `FLASH_ALLOWED=NO`")
+
+          (OUT/"GP_RESOLUTION_SUMMARY.md").write_text("\n".join(md)+"\n")
+          PYCODE
+
+      - name: Publish summary
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat /tmp/gp/evidence/GP_RESOLUTION_SUMMARY.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Package evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /tmp/gp/evidence
+          zip -9 -r /tmp/OKN_BP1048P4_GP_RELATIVE_V4_EVIDENCE.zip . >/dev/null
+          sha256sum /tmp/OKN_BP1048P4_GP_RELATIVE_V4_EVIDENCE.zip \
+            > /tmp/OKN_BP1048P4_GP_RELATIVE_V4_EVIDENCE.zip.sha256
+
+      - name: Upload evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: OKN-BP1048P4-GP-RELATIVE-V4-EVIDENCE
+          path: |
+            /tmp/OKN_BP1048P4_GP_RELATIVE_V4_EVIDENCE.zip
+            /tmp/OKN_BP1048P4_GP_RELATIVE_V4_EVIDENCE.zip.sha256
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Final fail-closed gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$FLASH_ALLOWED" = "NO"
+          python3 - <<'PY'
+          import json
+          d=json.load(open("/tmp/gp/evidence/PREP.json"))
+          assert d["USB_OR_BOARD_CONTACTED"] is False
+          assert d["LIVE_FLASH_AUTHORIZED"] is False
+          assert d["FLASH_ALLOWED"] is False
+          print("GP_RELATIVE_V4_FAIL_CLOSED_GATE=PASS")
+          PY
+          echo FLASH_ALLOWED=NO
