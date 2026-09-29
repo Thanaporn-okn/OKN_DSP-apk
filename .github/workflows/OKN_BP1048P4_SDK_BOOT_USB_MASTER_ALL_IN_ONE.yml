@@ -1,0 +1,373 @@
+name: OKN BP1048P4 SDK Boot USB Master - All In One
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: okn-bp1048p4-sdk-boot-usb-master-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  FLASH_ALLOWED: "NO"
+
+jobs:
+  sdk_boot_usb_static_audit:
+    name: Public SDK static audit - NO USB - NO FLASH
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: Safety gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$FLASH_ALLOWED" = "NO"
+          mkdir -p /tmp/okn-sdk/evidence
+          cat > /tmp/okn-sdk/evidence/SAFETY.txt <<'EOF'
+          MODE=PUBLIC_BP1048_SDK_STATIC_SOURCE_AUDIT_ONLY
+          TARGET=BP1048P4
+          FINAL_GOAL=SAMSUNG_S25_PLUS_USB_C_DIRECT_FIRMWARE_UPDATE
+          USB_OR_BOARD_CONTACT=NO
+          VENDOR_BINARY_EXECUTED=NO
+          FLASH_READ_EXECUTED=NO
+          FLASH_ERASE_EXECUTED=NO
+          FLASH_WRITE_EXECUTED=NO
+          DISCOVERED_FRAME_LIVE_AUTHORIZED=NO
+          HARDWARE_MODIFICATION=FORBIDDEN
+          FLASH_ALLOWED=NO
+          EOF
+
+      - name: Checkout public BP1048 SDK
+        uses: actions/checkout@v4
+        with:
+          repository: leadercxn/bp1048_sdk_v0.1.12
+          ref: master
+          path: bp1048-sdk
+          fetch-depth: 1
+
+      - name: Record SDK identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd bp1048-sdk
+          git rev-parse HEAD | tee /tmp/okn-sdk/evidence/SDK_COMMIT.txt
+          git status --short
+          printf 'repository=https://github.com/leadercxn/bp1048_sdk_v0.1.12\n' \
+            > /tmp/okn-sdk/evidence/SDK_SOURCE.txt
+          printf 'commit=' >> /tmp/okn-sdk/evidence/SDK_SOURCE.txt
+          git rev-parse HEAD >> /tmp/okn-sdk/evidence/SDK_SOURCE.txt
+
+      - name: Static source inventory and protocol hunt
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PYCODE'
+          from pathlib import Path
+          import hashlib, json, os, re
+
+          root = Path("bp1048-sdk")
+          out = Path("/tmp/okn-sdk/evidence")
+          out.mkdir(parents=True, exist_ok=True)
+
+          TEXT_EXTS = {
+              ".c",".h",".hpp",".cpp",".s",".S",".asm",".ld",".lds",".mk",
+              ".mak",".make",".txt",".md",".py",".sh",".bat",".cmd",".ini",
+              ".cfg",".conf",".xml",".project",".cproject",".properties",
+          }
+
+          def is_text_candidate(p: Path):
+              if p.suffix in TEXT_EXTS:
+                  return True
+              n = p.name.lower()
+              return n in {"makefile","readme","readme.txt","readme.md"}
+
+          files = []
+          for p in root.rglob("*"):
+              if p.is_file() and ".git" not in p.parts and p.stat().st_size <= 5_000_000:
+                  files.append(p)
+
+          text_files = []
+          for p in files:
+              if not is_text_candidate(p):
+                  continue
+              try:
+                  text = p.read_text(errors="replace")
+              except Exception:
+                  continue
+              text_files.append((p, text))
+
+          categories = {
+              "firmware_update": [
+                  r"\bbootloader\b", r"\bupgrade\b", r"\bfirmware\s*update\b",
+                  r"\bota\b", r"\biap\b", r"\bdfu\b", r"dual[\s_-]*bank",
+                  r"bank[\s_-]*switch", r"update[\s_-]*flag",
+              ],
+              "flash_programming": [
+                  r"flash[\s_-]*(?:write|erase|program|burn|update|download)",
+                  r"(?:write|erase|program)[\s_-]*flash",
+                  r"spi[\s_-]*flash", r"nor[\s_-]*flash",
+                  r"\bflashburner\b", r"\bburner\b",
+              ],
+              "usb_transport": [
+                  r"\busb\b", r"\bhid\b", r"usb[\s_-]*device",
+                  r"vendor[\s_-]*class", r"control[\s_-]*transfer",
+                  r"report[\s_-]*(?:descriptor|input|output|feature)",
+              ],
+              "ufe_or_frame": [
+                  r"\bufe\b", r"0xA5", r"0x5A", r"0x16",
+                  r"A5\s+5A", r"control\s*word", r"command[\s_-]*id",
+              ],
+              "integrity_crypto": [
+                  r"\bcrc\b", r"checksum", r"\bencrypt", r"\bdecrypt",
+                  r"firmware[\s_-]*key", r"user[\s_-]*key", r"unique[\s_-]*id",
+              ],
+              "build_toolchain": [
+                  r"nds32", r"AndeSight", r"gcc", r"objcopy", r"objdump",
+                  r"linker", r"\.bin\b", r"\.hex\b", r"\.elf\b",
+              ],
+          }
+
+          hits = {k: [] for k in categories}
+          file_scores = {}
+
+          for p, text in text_files:
+              rel = str(p.relative_to(root))
+              lines = text.splitlines()
+              score = 0
+              for cat, pats in categories.items():
+                  local = []
+                  for i, line in enumerate(lines, 1):
+                      for pat in pats:
+                          if re.search(pat, line, re.I):
+                              local.append({
+                                  "line": i,
+                                  "pattern": pat,
+                                  "text": line.strip()[:320],
+                              })
+                              break
+                      if len(local) >= 40:
+                          break
+                  if local:
+                      hits[cat].append({"file": rel, "matches": local})
+                      score += min(len(local), 10)
+              if score:
+                  file_scores[rel] = score
+
+          # Strong framing signatures: A5/5A/16 in same file and possible arrays.
+          framing = []
+          for p, text in text_files:
+              rel = str(p.relative_to(root))
+              low = text.lower()
+              if ("0xa5" in low or "a5 5a" in low) and ("0x5a" in low or "a5 5a" in low):
+                  snippets = []
+                  lines = text.splitlines()
+                  for i, line in enumerate(lines, 1):
+                      if re.search(r"0xA5|0x5A|A5\s+5A", line, re.I):
+                          lo = max(0, i-3)
+                          hi = min(len(lines), i+3)
+                          snippets.append({
+                              "line": i,
+                              "context": "\n".join(lines[lo:hi])[:1600]
+                          })
+                          if len(snippets) >= 20:
+                              break
+                  framing.append({"file": rel, "snippets": snippets})
+
+          # Identify likely flash APIs / update entry points from function-like names.
+          symbols = []
+          symbol_rx = re.compile(
+              r"\b([A-Za-z_][A-Za-z0-9_]*(?:flash|upgrade|update|boot|ota|dfu|burn)"
+              r"[A-Za-z0-9_]*)\s*\(",
+              re.I
+          )
+          for p, text in text_files:
+              rel = str(p.relative_to(root))
+              found = sorted(set(m.group(1) for m in symbol_rx.finditer(text)))
+              if found:
+                  symbols.append({"file": rel, "symbols": found[:200]})
+
+          # Linker/memory-map landmarks.
+          linker = []
+          for p, text in text_files:
+              if p.suffix not in {".ld",".lds"}:
+                  continue
+              rel = str(p.relative_to(root))
+              lines = []
+              for i, line in enumerate(text.splitlines(), 1):
+                  if re.search(
+                      r"ENTRY|MEMORY|SECTIONS|executable_start|EILM|DLM|FLASH|ROM|"
+                      r"0x[0-9A-Fa-f]{5,}",
+                      line
+                  ):
+                      lines.append({"line": i, "text": line.strip()[:320]})
+                      if len(lines) >= 120:
+                          break
+              linker.append({"file": rel, "lines": lines})
+
+          # USB descriptors and endpoint definitions.
+          usb_descriptor_files = []
+          for p, text in text_files:
+              rel = str(p.relative_to(root))
+              if re.search(r"descriptor|endpoint|ep\d|bEndpointAddress|USB_?EP", text, re.I) \
+                 and re.search(r"\bUSB\b", text, re.I):
+                  usb_descriptor_files.append(rel)
+
+          # Build scripts and likely output image names.
+          build_files = []
+          for p, text in text_files:
+              rel = str(p.relative_to(root))
+              if p.name.lower() == "makefile" or p.suffix.lower() in {".mk",".mak",".bat",".sh"}:
+                  if re.search(r"objcopy|\.bin\b|\.hex\b|\.elf\b|nds32|gcc", text, re.I):
+                      build_files.append(rel)
+
+          ranked = sorted(file_scores.items(), key=lambda x: (-x[1], x[0]))
+
+          report = {
+              "sdk_commit": (out/"SDK_COMMIT.txt").read_text().strip(),
+              "total_files": len(files),
+              "text_files_scanned": len(text_files),
+              "category_file_counts": {k: len(v) for k,v in hits.items()},
+              "top_ranked_files": ranked[:80],
+              "strong_a5_5a_framing_files": framing,
+              "candidate_function_symbols": symbols,
+              "linker_files": linker,
+              "usb_descriptor_files": sorted(set(usb_descriptor_files)),
+              "build_files": sorted(set(build_files)),
+              "hits": hits,
+              "safety": {
+                  "USB_OR_BOARD_CONTACTED": False,
+                  "FLASH_ALLOWED": False,
+              },
+          }
+
+          (out/"SDK_STATIC_AUDIT.json").write_text(
+              json.dumps(report, indent=2, ensure_ascii=False) + "\n"
+          )
+
+          # Compact human-readable candidate list.
+          lines = [
+              "# BP1048 SDK static audit",
+              "",
+              f"SDK commit: `{report['sdk_commit']}`",
+              f"Files scanned: {report['text_files_scanned']}",
+              "",
+              "## Category counts",
+          ]
+          for k,v in report["category_file_counts"].items():
+              lines.append(f"- {k}: {v} files")
+          lines += ["", "## Top candidate files"]
+          for rel,score in ranked[:30]:
+              lines.append(f"- `{rel}` — score {score}")
+          lines += ["", "## Strong A5/5A framing candidates"]
+          if framing:
+              for item in framing[:20]:
+                  lines.append(f"- `{item['file']}`")
+          else:
+              lines.append("- none found")
+          lines += ["", "## USB descriptor candidates"]
+          for rel in report["usb_descriptor_files"][:30]:
+              lines.append(f"- `{rel}`")
+          lines += ["", "## Build / image-generation candidates"]
+          for rel in report["build_files"][:30]:
+              lines.append(f"- `{rel}`")
+          lines += [
+              "",
+              "## Safety",
+              "- USB/board contacted: NO",
+              "- Flash read/erase/write: NO",
+              "- FLASH_ALLOWED=NO",
+          ]
+          (out/"SDK_STATIC_AUDIT.md").write_text("\n".join(lines) + "\n")
+
+          print(json.dumps({
+              "commit": report["sdk_commit"],
+              "category_file_counts": report["category_file_counts"],
+              "top10": ranked[:10],
+              "a5_5a_files": [x["file"] for x in framing[:10]],
+          }, indent=2, ensure_ascii=False))
+          PYCODE
+
+      - name: Extract high-value source contexts
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PYCODE'
+          from pathlib import Path
+          import json
+
+          root = Path("bp1048-sdk")
+          out = Path("/tmp/okn-sdk/evidence")
+          d = json.loads((out/"SDK_STATIC_AUDIT.json").read_text())
+
+          selected = []
+          for rel,_score in d.get("top_ranked_files", [])[:30]:
+              p = root / rel
+              if p.exists() and p.stat().st_size <= 300000:
+                  selected.append(rel)
+
+          for rel in d.get("usb_descriptor_files", [])[:20]:
+              if rel not in selected:
+                  p = root / rel
+                  if p.exists() and p.stat().st_size <= 300000:
+                      selected.append(rel)
+
+          for item in d.get("strong_a5_5a_framing_files", [])[:20]:
+              rel = item["file"]
+              if rel not in selected:
+                  p = root / rel
+                  if p.exists() and p.stat().st_size <= 300000:
+                      selected.append(rel)
+
+          dst = out / "candidate_sources"
+          dst.mkdir(parents=True, exist_ok=True)
+          manifest = []
+          for n,rel in enumerate(selected[:60]):
+              p = root / rel
+              target = dst / f"{n:02d}_{p.name}"
+              target.write_bytes(p.read_bytes())
+              manifest.append({"index": n, "source": rel, "copy": target.name})
+
+          (out/"CANDIDATE_SOURCE_MANIFEST.json").write_text(
+              json.dumps(manifest, indent=2, ensure_ascii=False) + "\n"
+          )
+          PYCODE
+
+      - name: Publish SDK audit summary
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat /tmp/okn-sdk/evidence/SDK_STATIC_AUDIT.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Package evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /tmp/okn-sdk/evidence
+          zip -9 -r /tmp/OKN_BP1048P4_SDK_BOOT_USB_MASTER_EVIDENCE.zip . >/dev/null
+          sha256sum /tmp/OKN_BP1048P4_SDK_BOOT_USB_MASTER_EVIDENCE.zip \
+            > /tmp/OKN_BP1048P4_SDK_BOOT_USB_MASTER_EVIDENCE.zip.sha256
+
+      - name: Upload evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: OKN-BP1048P4-SDK-BOOT-USB-MASTER-EVIDENCE
+          path: |
+            /tmp/OKN_BP1048P4_SDK_BOOT_USB_MASTER_EVIDENCE.zip
+            /tmp/OKN_BP1048P4_SDK_BOOT_USB_MASTER_EVIDENCE.zip.sha256
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Final fail-closed gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$FLASH_ALLOWED" = "NO"
+          grep -F '"USB_OR_BOARD_CONTACTED": false' \
+            /tmp/okn-sdk/evidence/SDK_STATIC_AUDIT.json
+          grep -F '"FLASH_ALLOWED": false' \
+            /tmp/okn-sdk/evidence/SDK_STATIC_AUDIT.json
+          echo SDK_BOOT_USB_MASTER_COMPLETE=YES
+          echo FLASH_ALLOWED=NO
