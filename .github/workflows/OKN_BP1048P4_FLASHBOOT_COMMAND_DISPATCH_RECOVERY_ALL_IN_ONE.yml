@@ -1,0 +1,543 @@
+name: OKN BP1048P4 Flashboot Command Dispatcher Recovery - All In One
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: okn-bp1048p4-flashboot-command-dispatch-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  FLASH_ALLOWED: "NO"
+
+jobs:
+  recover_dispatcher:
+    name: Recover command table and dispatcher - NO USB - NO FLASH
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Safety gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$FLASH_ALLOWED" = "NO"
+          mkdir -p /tmp/dispatch/evidence
+          cat > /tmp/dispatch/evidence/SAFETY.txt <<'EOF'
+          MODE=OFFLINE_STATIC_COMMAND_DISPATCH_RECOVERY_ONLY
+          TARGET=MVSilicon_BP1048P4
+          IMAGE=SDK_flash_data_64KiB
+          USB_OR_BOARD_CONTACT=NO
+          TARGET_FIRMWARE_EXECUTED=NO
+          FEATURE_55_SENT=NO
+          FEATURE_AA_SENT=NO
+          FLASH_READ_EXECUTED=NO
+          FLASH_ERASE_EXECUTED=NO
+          FLASH_WRITE_EXECUTED=NO
+          LIVE_BOOT_ENTRY_AUTHORIZED=NO
+          LIVE_FLASH_AUTHORIZED=NO
+          FLASH_ALLOWED=NO
+          EOF
+
+      - name: Checkout public BP1048 SDK
+        uses: actions/checkout@v4
+        with:
+          repository: leadercxn/bp1048_sdk_v0.1.12
+          ref: master
+          path: bp1048-sdk
+          fetch-depth: 1
+
+      - name: Reconstruct exact 64 KiB image and recover tables
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PYCODE'
+          from pathlib import Path
+          import collections, hashlib, json, re, struct, subprocess
+
+          ROOT=Path("bp1048-sdk")
+          OUT=Path("/tmp/dispatch/evidence")
+          OUT.mkdir(parents=True,exist_ok=True)
+
+          commit=subprocess.check_output(
+              ["git","-C",str(ROOT),"rev-parse","HEAD"],text=True
+          ).strip()
+
+          src=ROOT/"BT_Audio_APP/bt_audio_app_src/device/flash_boot.c"
+          text=src.read_text(errors="replace")
+
+          m=re.search(
+              r"(?:static\s+|const\s+|unsigned\s+|signed\s+)*"
+              r"(?:char|uint8_t|uint8|u8|BYTE)\s+flash_data\s*"
+              r"\[\s*(?P<n>\d+)\s*\]\s*=\s*\{(?P<body>.*?)\};",
+              text,re.I|re.S
+          )
+          assert m
+          declared=int(m.group("n"))
+          body=re.sub(r"/\*.*?\*/","",m.group("body"),flags=re.S)
+          body=re.sub(r"//[^\r\n]*","",body)
+          vals=[int(x,16) for x in re.findall(r"0[xX]([0-9A-Fa-f]{1,2})\b",body)]
+          assert declared==65536 and len(vals)==65520
+          raw=bytes(vals)+bytes(declared-len(vals))
+          assert len(raw)==65536
+          (OUT/"flash_data_65536.bin").write_bytes(raw)
+
+          sha=hashlib.sha256(raw).hexdigest()
+
+          # Exact command-vocabulary strings.
+          wanted=[
+              "chiperas","upinfo","btupdat","cnfgdat","constdat","codedata","cxxx",
+              "cmd_cxxx :","cmd_cxxx ACK",
+              "PC IS OK","UDisk IS OK",
+              "pc upgrata code","pc upgrata const","pc upgrata config",
+              "jump_to_code_addr","check_user_code",
+              "UPGRADE:Flash data command,prepare to unlock & chip erase all"
+          ]
+
+          strings=[]
+          st=None
+          for i,b in enumerate(raw+b"\x00"):
+              if 32<=b<=126:
+                  if st is None:
+                      st=i
+              else:
+                  if st is not None and i-st>=4:
+                      strings.append({
+                          "offset":st,
+                          "text":raw[st:i].decode("ascii",errors="replace")
+                      })
+                  st=None
+
+          command_strings=[]
+          for term in wanted:
+              for s in strings:
+                  if term.lower() in s["text"].lower():
+                      command_strings.append({
+                          "term":term,
+                          "offset":s["offset"],
+                          "text":s["text"],
+                      })
+
+          # Unique exact command word positions.
+          term_offsets={}
+          for x in command_strings:
+              term_offsets.setdefault(x["term"],x["offset"])
+
+          # Dump 32-bit word table around the known 0xE020/0xE024 references.
+          table_words=[]
+          for pos in range(0xDF80,0xE100,4):
+              if pos+4>len(raw):
+                  break
+              w=int.from_bytes(raw[pos:pos+4],"little")
+              targets=[]
+              for term,off in term_offsets.items():
+                  if w==off:
+                      targets.append(term)
+              table_words.append({
+                  "offset":pos,
+                  "word":f"0x{w:08X}",
+                  "points_to_terms":targets,
+              })
+
+          # Direct exact pointers to all command strings.
+          exact_ptrs=[]
+          for term,off in term_offsets.items():
+              pat=struct.pack("<I",off)
+              pos=0
+              while True:
+                  p=raw.find(pat,pos)
+                  if p<0:
+                      break
+                  if p!=off:
+                      exact_ptrs.append({
+                          "term":term,
+                          "string_offset":off,
+                          "pointer_offset":p,
+                          "pointer_value":f"0x{off:08X}",
+                      })
+                  pos=p+1
+
+          # Infer possible relocation bases. A true absolute pointer table often
+          # contains base+string_offset for several different strings.
+          aligned_words=[]
+          for pos in range(0,len(raw)-3,4):
+              w=int.from_bytes(raw[pos:pos+4],"little")
+              aligned_words.append((pos,w))
+
+          base_hits=collections.defaultdict(list)
+          core_terms=["chiperas","upinfo","btupdat","cnfgdat","constdat","codedata","cxxx"]
+          core={t:term_offsets[t] for t in core_terms if t in term_offsets}
+
+          for pos,w in aligned_words:
+              for term,off in core.items():
+                  base=(w-off)&0xffffffff
+                  # Real image/RAM bases are commonly at least 0x100 aligned.
+                  if base & 0xff:
+                      continue
+                  base_hits[base].append({
+                      "word_offset":pos,
+                      "word":w,
+                      "term":term,
+                      "string_offset":off,
+                  })
+
+          relocation_candidates=[]
+          for base,hits in base_hits.items():
+              uniq=sorted(set(x["term"] for x in hits))
+              if len(uniq)>=2:
+                  relocation_candidates.append({
+                      "base":f"0x{base:08X}",
+                      "unique_terms":uniq,
+                      "hit_count":len(hits),
+                      "hits":hits[:50],
+                  })
+          relocation_candidates.sort(
+              key=lambda x:(-len(x["unique_terms"]),-x["hit_count"],x["base"])
+          )
+
+          # Search for command strings in a contiguous region and report order.
+          command_region=[
+              s for s in strings
+              if 0xC700 <= s["offset"] <= 0xCE50
+          ]
+
+          # Keep bytes around the suspected pointer table and command string cluster.
+          (OUT/"TABLE_E000_HEX.txt").write_text(
+              "\n".join(
+                  f"{x['offset']:04X}: {x['word']} "
+                  + (" -> "+",".join(x["points_to_terms"]) if x["points_to_terms"] else "")
+                  for x in table_words
+              )+"\n"
+          )
+          (OUT/"COMMAND_STRING_REGION.txt").write_text(
+              "\n".join(
+                  f"{s['offset']:04X}: {s['text']}" for s in command_region
+              )+"\n"
+          )
+
+          decision={
+              "revision":"FLASHBOOT_COMMAND_DISPATCH_RECOVERY_V1",
+              "sdk_commit":commit,
+              "image_sha256":sha,
+              "command_strings":command_strings,
+              "exact_le32_command_pointers":exact_ptrs,
+              "table_e000_words":table_words,
+              "relocation_base_candidates":relocation_candidates[:100],
+              "command_string_region":command_region,
+              "PRODUCTION_COMMAND_DISPATCHER_PROVEN":False,
+              "SAFE_READ_ONLY_COMMAND_PROVEN":False,
+              "LIVE_BOOT_ENTRY_AUTHORIZED":False,
+              "LIVE_FLASH_AUTHORIZED":False,
+              "USB_OR_BOARD_CONTACTED":False,
+              "FLASH_ALLOWED":False
+          }
+          (OUT/"DISPATCH_PREP.json").write_text(
+              json.dumps(decision,indent=2,ensure_ascii=False)+"\n"
+          )
+          PYCODE
+
+      - name: Build GNU NDS32 objdump
+        shell: bash
+        run: |
+          set -u
+          mkdir -p /tmp/dispatch/toolchain /tmp/dispatch/build
+          cd /tmp/dispatch/toolchain
+          URL="https://ftp.gnu.org/gnu/binutils/binutils-2.44.tar.xz"
+          echo "SOURCE_URL=$URL" > /tmp/dispatch/evidence/NDS32_BUILD.txt
+
+          if curl -fL --retry 3 --connect-timeout 20 "$URL" -o binutils-2.44.tar.xz; then
+            sha256sum binutils-2.44.tar.xz >> /tmp/dispatch/evidence/NDS32_BUILD.txt
+            tar -xf binutils-2.44.tar.xz
+            cd /tmp/dispatch/build
+            if ../toolchain/binutils-2.44/configure \
+                --target=nds32le-elf \
+                --disable-nls \
+                --disable-werror \
+                --disable-gdb \
+                --disable-gprofng \
+                --disable-gas \
+                --disable-ld \
+                --disable-gold \
+                >> /tmp/dispatch/evidence/NDS32_BUILD.txt 2>&1 &&
+               make -j2 all-binutils >> /tmp/dispatch/evidence/NDS32_BUILD.txt 2>&1; then
+              find /tmp/dispatch/build -type f -name '*objdump' -perm -111 -print \
+                | tee /tmp/dispatch/evidence/OBJDUMP_CANDIDATES.txt
+              echo "BUILD_STATUS=SUCCESS" >> /tmp/dispatch/evidence/NDS32_BUILD.txt
+            else
+              echo "BUILD_STATUS=FAILED" >> /tmp/dispatch/evidence/NDS32_BUILD.txt
+            fi
+          else
+            echo "BUILD_STATUS=DOWNLOAD_FAILED" >> /tmp/dispatch/evidence/NDS32_BUILD.txt
+          fi
+          exit 0
+
+      - name: Disassemble and recover exact command-load clusters
+        shell: bash
+        run: |
+          set -euo pipefail
+          OBJDUMP="$(find /tmp/dispatch/build -type f -name '*objdump' -perm -111 | head -1 || true)"
+          IMAGE="/tmp/dispatch/evidence/flash_data_65536.bin"
+          DIS="/tmp/dispatch/evidence/NDS32_DISASSEMBLY.txt"
+
+          if [ -n "$OBJDUMP" ]; then
+            "$OBJDUMP" -D -b binary -m nds32 --adjust-vma=0 "$IMAGE" \
+              > "$DIS" 2>/tmp/dispatch/evidence/NDS32_DISASSEMBLY.stderr.txt
+            echo "DISASM_STATUS=SUCCESS" > /tmp/dispatch/evidence/NDS32_DISASM_STATUS.txt
+          else
+            : > "$DIS"
+            echo "DISASM_STATUS=NO_OBJDUMP" > /tmp/dispatch/evidence/NDS32_DISASM_STATUS.txt
+          fi
+
+          python3 - <<'PYCODE'
+          from pathlib import Path
+          import collections,json,re
+
+          OUT=Path("/tmp/dispatch/evidence")
+          prep=json.loads((OUT/"DISPATCH_PREP.json").read_text())
+          lines=(OUT/"NDS32_DISASSEMBLY.txt").read_text(errors="replace").splitlines()
+
+          # Parse instruction address and text.
+          ins=[]
+          rx=re.compile(r"^\s*([0-9a-fA-F]+):\s+(?:[0-9a-fA-F]{2,8}\s+)+(.+?)\s*$")
+          for idx,line in enumerate(lines):
+              m=rx.match(line)
+              if m:
+                  ins.append({
+                      "line_index":idx,
+                      "address":int(m.group(1),16),
+                      "text":m.group(2),
+                      "raw_line":line,
+                  })
+
+          # Core command strings only.
+          offsets={}
+          for x in prep["command_strings"]:
+              if x["term"] in ["chiperas","upinfo","btupdat","cnfgdat","constdat","codedata","cxxx"]:
+                  offsets.setdefault(x["term"],x["offset"])
+
+          # Exact-immediate matches. Do NOT use high-nibble-only matching.
+          # For a string address 0xCBB8, accepted forms include:
+          #   full 0xCBB8 / CBB8
+          #   low12 0xBB8 / BB8 only on immediate-form instructions.
+          imm_mnemonics=re.compile(
+              r"\b(sethi|ori|addi|movi|movpi|lwi|lw|lbi|lb|swi|sw|li)\b",re.I
+          )
+          hits=[]
+          for term,off in offsets.items():
+              full=f"{off:x}"
+              low12=f"{off & 0xfff:x}"
+              for item in ins:
+                  t=item["text"].lower()
+                  exact_full=bool(re.search(
+                      rf"(?<![0-9a-f])(?:0x)?{re.escape(full)}(?![0-9a-f])",t
+                  ))
+                  exact_low=False
+                  if imm_mnemonics.search(t):
+                      exact_low=bool(re.search(
+                          rf"(?<![0-9a-f])(?:0x)?{re.escape(low12)}(?![0-9a-f])",t
+                      ))
+                  if exact_full or exact_low:
+                      hits.append({
+                          "term":term,
+                          "string_offset":off,
+                          "instruction_address":item["address"],
+                          "line_index":item["line_index"],
+                          "instruction":item["text"],
+                          "match_kind":"full" if exact_full else "low12",
+                      })
+
+          # Pair low12 loads with a nearby SETHI. This is far more selective than
+          # the previous fuzzy search.
+          paired=[]
+          by_line={x["line_index"]:x for x in ins}
+          for h in hits:
+              if h["match_kind"]!="low12":
+                  continue
+              li=h["line_index"]
+              preceding=[
+                  x for x in ins
+                  if li-8 <= x["line_index"] < li
+              ]
+              sethis=[x for x in preceding if re.search(r"\bsethi\b",x["text"],re.I)]
+              if sethis:
+                  paired.append({
+                      **h,
+                      "nearby_sethi":[x["raw_line"] for x in sethis[-3:]],
+                  })
+
+          # Cluster hits by instruction address. A real dispatcher often references
+          # several command names within a relatively small code region.
+          all_hits=hits
+          addresses=sorted(set(x["instruction_address"] for x in all_hits))
+          clusters=[]
+          for a in addresses:
+              members=[x for x in all_hits if a <= x["instruction_address"] <= a+0x400]
+              uniq=sorted(set(x["term"] for x in members))
+              if len(uniq)>=2:
+                  clusters.append({
+                      "start":a,
+                      "end":a+0x400,
+                      "unique_terms":uniq,
+                      "hit_count":len(members),
+                      "members":members,
+                  })
+          clusters.sort(key=lambda x:(-len(x["unique_terms"]),-x["hit_count"],x["start"]))
+
+          # De-duplicate strongly overlapping clusters.
+          chosen=[]
+          for c in clusters:
+              if any(abs(c["start"]-x["start"])<0x100 for x in chosen):
+                  continue
+              chosen.append(c)
+              if len(chosen)>=12:
+                  break
+
+          # Render exact disassembly snippets by address around chosen clusters.
+          snippets=[]
+          for c in chosen:
+              rows=[
+                  x for x in ins
+                  if max(0,c["start"]-0x80) <= x["address"] <= c["end"]+0x80
+              ]
+              snippets.append({
+                  "start":c["start"],"end":c["end"],
+                  "unique_terms":c["unique_terms"],
+                  "text":"\n".join(x["raw_line"] for x in rows)[:40000],
+              })
+
+          result={
+              "exact_immediate_hits":all_hits,
+              "paired_sethi_low12_hits":paired,
+              "dispatcher_clusters":chosen,
+              "dispatcher_snippets":snippets,
+          }
+          (OUT/"DISPATCH_XREF.json").write_text(
+              json.dumps(result,indent=2,ensure_ascii=False)+"\n"
+          )
+
+          # Human summary.
+          md=[
+              "# BP1048P4 command dispatcher recovery",
+              "",
+              f"64 KiB SHA256: `{prep['image_sha256']}`",
+              "",
+              "## Command vocabulary",
+          ]
+          seen=set()
+          for x in prep["command_strings"]:
+              if x["term"] in seen:
+                  continue
+              seen.add(x["term"])
+              md.append(f"- `{x['term']}` @ `0x{x['offset']:04X}`")
+
+          md+=["","## Exact LE32 command-string pointers"]
+          if prep["exact_le32_command_pointers"]:
+              for x in prep["exact_le32_command_pointers"][:50]:
+                  md.append(
+                      f"- ptr `0x{x['pointer_offset']:04X}` → "
+                      f"`0x{x['string_offset']:04X}` `{x['term']}`"
+                  )
+          else:
+              md.append("- none")
+
+          md+=["","## Relocation-base candidates"]
+          if prep["relocation_base_candidates"]:
+              for x in prep["relocation_base_candidates"][:15]:
+                  md.append(
+                      f"- base `{x['base']}` — terms: "
+                      + ", ".join(x["unique_terms"])
+                  )
+          else:
+              md.append("- no common aligned relocation base recovered")
+
+          md+=["","## Exact NDS32 immediate hits"]
+          if all_hits:
+              for x in all_hits[:80]:
+                  md.append(
+                      f"- `0x{x['instruction_address']:04X}` `{x['instruction']}` "
+                      f"→ `{x['term']}` ({x['match_kind']})"
+                  )
+          else:
+              md.append("- none")
+
+          md+=["","## SETHI + low12 candidates"]
+          if paired:
+              for x in paired[:50]:
+                  md.append(
+                      f"- `0x{x['instruction_address']:04X}` → `{x['term']}`; "
+                      f"`{x['instruction']}`"
+                  )
+          else:
+              md.append("- none")
+
+          md+=["","## Dispatcher clusters"]
+          if chosen:
+              for c in chosen:
+                  md.append(
+                      f"- `0x{c['start']:04X}–0x{c['end']:04X}` — "
+                      + ", ".join(c["unique_terms"])
+                  )
+          else:
+              md.append("- no multi-command code cluster proven")
+
+          md+=["","## Safety decision"]
+          md.append("- `chiperas` is explicitly destructive.")
+          md.append("- `codedata`, `constdat`, `cnfgdat`, `btupdat` remain write/update candidates.")
+          md.append("- `upinfo` and `cxxx` remain **candidates only**; they are not classified read-only until their handlers are isolated.")
+          md.append("- No command from this report is authorized for the production board.")
+          md.append("- USB/board contacted: **NO**")
+          md.append("- Flash read/erase/write: **NO**")
+          md.append("- `FLASH_ALLOWED=NO`")
+
+          (OUT/"DISPATCH_SUMMARY.md").write_text("\n".join(md)+"\n")
+
+          # Save cluster snippets separately to avoid overloading Job Summary.
+          for i,s in enumerate(snippets):
+              (OUT/f"DISPATCH_CLUSTER_{i:02d}_{s['start']:04X}.asm").write_text(
+                  s["text"]+"\n"
+              )
+          PYCODE
+
+      - name: Publish dispatcher summary
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat /tmp/dispatch/evidence/DISPATCH_SUMMARY.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Package evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /tmp/dispatch/evidence
+          zip -9 -r /tmp/OKN_BP1048P4_COMMAND_DISPATCH_RECOVERY_EVIDENCE.zip . >/dev/null
+          sha256sum /tmp/OKN_BP1048P4_COMMAND_DISPATCH_RECOVERY_EVIDENCE.zip \
+            > /tmp/OKN_BP1048P4_COMMAND_DISPATCH_RECOVERY_EVIDENCE.zip.sha256
+
+      - name: Upload evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: OKN-BP1048P4-COMMAND-DISPATCH-RECOVERY-EVIDENCE
+          path: |
+            /tmp/OKN_BP1048P4_COMMAND_DISPATCH_RECOVERY_EVIDENCE.zip
+            /tmp/OKN_BP1048P4_COMMAND_DISPATCH_RECOVERY_EVIDENCE.zip.sha256
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Final fail-closed gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$FLASH_ALLOWED" = "NO"
+          python3 - <<'PY'
+          import json
+          p="/tmp/dispatch/evidence/DISPATCH_PREP.json"
+          d=json.load(open(p))
+          assert d["USB_OR_BOARD_CONTACTED"] is False
+          assert d["LIVE_FLASH_AUTHORIZED"] is False
+          assert d["FLASH_ALLOWED"] is False
+          print("COMMAND_DISPATCH_FAIL_CLOSED_GATE=PASS")
+          PY
+          echo FLASH_ALLOWED=NO
