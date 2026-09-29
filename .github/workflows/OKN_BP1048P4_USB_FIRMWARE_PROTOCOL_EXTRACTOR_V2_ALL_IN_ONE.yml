@@ -1,0 +1,448 @@
+name: OKN BP1048P4 USB Firmware Protocol Extractor V2 - All In One
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: okn-bp1048p4-usb-fw-protocol-v2-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  FLASH_ALLOWED: "NO"
+
+jobs:
+  extract_protocol:
+    name: Static protocol extraction - NO USB - NO FLASH
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Safety gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$FLASH_ALLOWED" = "NO"
+          mkdir -p /tmp/okn-v2/evidence
+          cat > /tmp/okn-v2/evidence/SAFETY.txt <<'EOF'
+          MODE=PUBLIC_SDK_STATIC_PROTOCOL_EXTRACTION_ONLY
+          TARGET_CHIP=MVSilicon_BP1048P4
+          TARGET_PHONE=Samsung_S25_Plus
+          TARGET_LINK=USB_C_DIRECT
+          KNOWN_BOARD_VID=0x6324
+          KNOWN_BOARD_PID=0x1719
+          KNOWN_RUNTIME_INTERFACE=4
+          KNOWN_RUNTIME_HID_IN_BYTES=256
+          KNOWN_RUNTIME_HID_OUT_BYTES=256
+          KNOWN_RUNTIME_FEATURE_BYTES=8
+          USB_OR_BOARD_CONTACT=NO
+          VENDOR_BINARY_EXECUTED=NO
+          FLASH_READ_EXECUTED=NO
+          FLASH_ERASE_EXECUTED=NO
+          FLASH_WRITE_EXECUTED=NO
+          DISCOVERED_FRAME_LIVE_AUTHORIZED=NO
+          HARDWARE_MODIFICATION=FORBIDDEN
+          FLASH_ALLOWED=NO
+          EOF
+
+      - name: Checkout public BP1048 SDK
+        uses: actions/checkout@v4
+        with:
+          repository: leadercxn/bp1048_sdk_v0.1.12
+          ref: master
+          path: bp1048-sdk
+          fetch-depth: 1
+
+      - name: Extract update flash USB protocol candidates
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PYCODE'
+          from pathlib import Path
+          import hashlib, json, re, shutil
+
+          root = Path("bp1048-sdk")
+          out = Path("/tmp/okn-v2/evidence")
+          out.mkdir(parents=True, exist_ok=True)
+
+          commit = __import__("subprocess").check_output(
+              ["git", "-C", str(root), "rev-parse", "HEAD"], text=True
+          ).strip()
+
+          TEXT_EXTS = {
+              ".c",".h",".hpp",".cpp",".s",".S",".asm",".ld",".lds",".mk",".mak",
+              ".txt",".md",".py",".sh",".bat",".cmd",".ini",".cfg",".conf",".xml",
+              ".project",".cproject",".properties"
+          }
+
+          def read_text(p):
+              try:
+                  if p.stat().st_size > 4_000_000:
+                      return None
+                  return p.read_text(errors="replace")
+              except Exception:
+                  return None
+
+          docs = []
+          binary_images = []
+          for p in root.rglob("*"):
+              if not p.is_file() or ".git" in p.parts:
+                  continue
+              rel = str(p.relative_to(root))
+              if p.suffix.lower() in {".bin",".hex",".elf",".rom",".img",".fw",".mva"}:
+                  binary_images.append({
+                      "file": rel,
+                      "size": p.stat().st_size,
+                      "sha256": hashlib.sha256(p.read_bytes()).hexdigest()
+                  })
+              if p.suffix in TEXT_EXTS or p.name.lower() in {"makefile","readme"}:
+                  t = read_text(p)
+                  if t is not None:
+                      docs.append((rel,p,t))
+
+          # High-confidence vocabulary groups.
+          RX = {
+              "update": re.compile(
+                  r"\b(bootloader|upgrade|firmware[_\s-]*update|fw[_\s-]*update|ota|iap|dfu|"
+                  r"dual[_\s-]*bank|update[_\s-]*flag|upgrade[_\s-]*flag|boot[_\s-]*flag)\b", re.I),
+              "flash": re.compile(
+                  r"\b(spi[_\s-]*flash|nor[_\s-]*flash|flash[_\s-]*(write|erase|program|burn|read)|"
+                  r"(write|erase|program|burn)[_\s-]*flash|flashburner|burner)\b", re.I),
+              "usb": re.compile(
+                  r"\b(usb|hid|usb[_\s-]*device|vendor[_\s-]*class|control[_\s-]*transfer|"
+                  r"endpoint|bEndpointAddress|report[_\s-]*(descriptor|input|output|feature))\b", re.I),
+              "frame": re.compile(
+                  r"(0xA5|0x5A|\bA5\s+5A\b|0x16|\bufe\b|command[_\s-]*id|control[_\s-]*word)", re.I),
+              "integrity": re.compile(
+                  r"\b(crc16|crc32|checksum|md5|sha1|sha256|encrypt|decrypt|firmware[_\s-]*key|"
+                  r"unique[_\s-]*id|chip[_\s-]*id)\b", re.I),
+              "bootjump": re.compile(
+                  r"\b(jump[_\s-]*(app|boot|loader)|boot[_\s-]*(entry|mode|addr|address)|"
+                  r"soft[_\s-]*reset|system[_\s-]*reset|watchdog[_\s-]*reset|reboot|reset[_\s-]*mcu)\b", re.I),
+          }
+
+          function_def = re.compile(
+              r"(?m)^[ \t]*(?:(?:static|inline|extern|const|volatile)\s+)*"
+              r"(?:[A-Za-z_][\w\s\*\(\)]*?\s+)?"
+              r"([A-Za-z_]\w*)\s*\(([^;{}]{0,300})\)\s*\{"
+          )
+
+          candidates = []
+          contexts = []
+          exact_identity_hits = []
+          packet_literals = []
+          flash_symbols = []
+          update_symbols = []
+          usb_symbols = []
+          boot_symbols = []
+
+          for rel,p,text in docs:
+              lines = text.splitlines()
+              cats = {k: bool(rx.search(text)) for k,rx in RX.items()}
+              score = (
+                  8*cats["update"] + 7*cats["flash"] + 6*cats["usb"] +
+                  5*cats["frame"] + 3*cats["integrity"] + 5*cats["bootjump"]
+              )
+              # Extra weight where update + flash or update + USB coexist.
+              if cats["update"] and cats["flash"]:
+                  score += 15
+              if cats["update"] and cats["usb"]:
+                  score += 12
+              if cats["flash"] and cats["usb"]:
+                  score += 8
+              if cats["update"] and cats["flash"] and cats["usb"]:
+                  score += 25
+
+              if score:
+                  candidates.append({
+                      "file": rel, "score": score, "categories": cats
+                  })
+
+              # Known board identity / report-size cross-checks.
+              for i,line in enumerate(lines,1):
+                  low = line.lower()
+                  if (
+                      "0x6324" in low or "0x1719" in low or
+                      re.search(r"\b25380\b", line) or re.search(r"\b5913\b", line)
+                  ):
+                      exact_identity_hits.append({
+                          "file": rel, "line": i, "text": line.strip()[:500]
+                      })
+
+              # Packet-like lines with A5/5A/16.
+              for i,line in enumerate(lines,1):
+                  if re.search(r"0xA5|0x5A|A5\s+5A", line, re.I):
+                      lo=max(0,i-4); hi=min(len(lines),i+4)
+                      packet_literals.append({
+                          "file": rel, "line": i,
+                          "context": "\n".join(lines[lo:hi])[:2200]
+                      })
+                      if len(packet_literals) >= 300:
+                          break
+
+              # Function-level classification.
+              for m in function_def.finditer(text):
+                  name = m.group(1)
+                  start = m.start()
+                  # Small bounded body/context approximation.
+                  frag = text[start:start+5000]
+                  cats_fn = {k: bool(rx.search(frag)) for k,rx in RX.items()}
+                  fnscore = (
+                      10*cats_fn["update"] + 9*cats_fn["flash"] +
+                      8*cats_fn["usb"] + 6*cats_fn["frame"] +
+                      4*cats_fn["integrity"] + 7*cats_fn["bootjump"]
+                  )
+                  if fnscore >= 10:
+                      line_no = text.count("\n",0,start)+1
+                      item = {
+                          "file": rel, "line": line_no, "name": name,
+                          "score": fnscore, "categories": cats_fn,
+                          "preview": frag[:1800],
+                      }
+                      contexts.append(item)
+                      if cats_fn["flash"]:
+                          flash_symbols.append(item)
+                      if cats_fn["update"]:
+                          update_symbols.append(item)
+                      if cats_fn["usb"]:
+                          usb_symbols.append(item)
+                      if cats_fn["bootjump"]:
+                          boot_symbols.append(item)
+
+          candidates.sort(key=lambda x:(-x["score"],x["file"]))
+          contexts.sort(key=lambda x:(-x["score"],x["file"],x["line"]))
+
+          # Search for specific APIs/constants even if function parser misses them.
+          probes = [
+              ("flash_write", re.compile(r"\bflash\w*(?:write|program)|(?:write|program)\w*flash\b", re.I)),
+              ("flash_erase", re.compile(r"\bflash\w*erase|erase\w*flash\b", re.I)),
+              ("flash_read", re.compile(r"\bflash\w*read|read\w*flash\b", re.I)),
+              ("upgrade", re.compile(r"\b\w*(?:upgrade|bootloader|firmware_update|fw_update|ota|iap|dfu)\w*\b", re.I)),
+              ("usb_hid", re.compile(r"\b\w*(?:usb|hid)\w*\b", re.I)),
+              ("crc", re.compile(r"\b\w*crc(?:16|32)?\w*\b", re.I)),
+              ("reset", re.compile(r"\b\w*(?:reset|reboot)\w*\b", re.I)),
+          ]
+
+          symbol_lines = {k:[] for k,_ in probes}
+          for rel,p,text in docs:
+              for i,line in enumerate(text.splitlines(),1):
+                  for key,rx in probes:
+                      if rx.search(line):
+                          symbol_lines[key].append({
+                              "file":rel,"line":i,"text":line.strip()[:600]
+                          })
+
+          # Parse linker memory ranges.
+          linker = []
+          addr_rx = re.compile(r"0x[0-9A-Fa-f]{5,8}")
+          for rel,p,text in docs:
+              if p.suffix.lower() not in {".ld",".lds"}:
+                  continue
+              found = []
+              for i,line in enumerate(text.splitlines(),1):
+                  if re.search(r"ENTRY|MEMORY|SECTIONS|FLASH|ROM|EILM|DLM|spi_flash|executable_start", line, re.I):
+                      found.append({
+                          "line":i,"text":line.strip()[:600],
+                          "addresses":addr_rx.findall(line)
+                      })
+              if found:
+                  linker.append({"file":rel,"matches":found[:160]})
+
+          # Build-toolchain commands and output names.
+          build_hits=[]
+          for rel,p,text in docs:
+              if p.name.lower()=="makefile" or p.suffix.lower() in {".mk",".mak",".bat",".cmd",".sh"}:
+                  rows=[]
+                  for i,line in enumerate(text.splitlines(),1):
+                      if re.search(r"objcopy|objdump|\.bin\b|\.hex\b|\.elf\b|nds32|gcc|link|burn", line, re.I):
+                          rows.append({"line":i,"text":line.strip()[:700]})
+                  if rows:
+                      build_hits.append({"file":rel,"matches":rows[:120]})
+
+          # USB descriptor details.
+          usb_desc=[]
+          for rel,p,text in docs:
+              if not re.search(r"\bUSB\b", text, re.I):
+                  continue
+              rows=[]
+              for i,line in enumerate(text.splitlines(),1):
+                  if re.search(
+                      r"VID|PID|idVendor|idProduct|descriptor|bInterfaceClass|"
+                      r"bEndpointAddress|wMaxPacketSize|REPORT_COUNT|REPORT_SIZE|"
+                      r"HID|endpoint|EP[0-9]",
+                      line,re.I
+                  ):
+                      rows.append({"line":i,"text":line.strip()[:700]})
+              if rows:
+                  usb_desc.append({"file":rel,"matches":rows[:160]})
+
+          # Copy high-value sources into artifact.
+          source_dir=out/"candidate_sources"
+          source_dir.mkdir(exist_ok=True)
+          chosen=[]
+          for item in candidates[:35]:
+              rel=item["file"]
+              if rel not in chosen:
+                  chosen.append(rel)
+          for item in contexts[:25]:
+              rel=item["file"]
+              if rel not in chosen:
+                  chosen.append(rel)
+
+          copied=[]
+          for n,rel in enumerate(chosen[:60]):
+              src=root/rel
+              if src.exists() and src.stat().st_size <= 500000:
+                  dst=source_dir/f"{n:02d}_{src.name}"
+                  shutil.copy2(src,dst)
+                  copied.append({"source":rel,"copy":dst.name})
+
+          # Conservative evidence gates: candidate != protocol proof.
+          high_update_flash_usb = [
+              x for x in candidates
+              if x["categories"]["update"] and x["categories"]["flash"] and x["categories"]["usb"]
+          ]
+
+          decision = {
+              "revision":"SDK_PROTOCOL_EXTRACTOR_V2",
+              "sdk_repository":"leadercxn/bp1048_sdk_v0.1.12",
+              "sdk_commit":commit,
+              "known_board":{
+                  "vid_hex":"0x6324","pid_hex":"0x1719","runtime_interface":4,
+                  "hid_input_bytes":256,"hid_output_bytes":256,"feature_bytes":8,
+              },
+              "files_scanned":len(docs),
+              "top_candidates":candidates[:50],
+              "high_update_flash_usb_files":high_update_flash_usb[:40],
+              "top_function_contexts":contexts[:60],
+              "exact_6324_1719_identity_hits":exact_identity_hits[:100],
+              "a5_5a_packet_contexts":packet_literals[:100],
+              "symbol_lines":{k:v[:120] for k,v in symbol_lines.items()},
+              "linker":linker[:30],
+              "usb_descriptors":usb_desc[:40],
+              "build_hits":build_hits[:30],
+              "binary_images":binary_images[:100],
+              "copied_sources":copied,
+              "CANDIDATE_UPDATE_API_FOUND":bool(update_symbols),
+              "CANDIDATE_FLASH_API_FOUND":bool(flash_symbols),
+              "CANDIDATE_USB_API_FOUND":bool(usb_symbols),
+              "CANDIDATE_BOOT_ENTRY_API_FOUND":bool(boot_symbols),
+              "HIGH_CONFIDENCE_UPDATE_FLASH_USB_COLOCATION_FOUND":bool(high_update_flash_usb),
+              "KNOWN_BOARD_VID_PID_EXACT_MATCH_FOUND":bool(exact_identity_hits),
+              "A5_5A_LITERAL_FOUND":bool(packet_literals),
+              "PREBUILT_FIRMWARE_IMAGE_FOUND":bool(binary_images),
+              "PRODUCTION_BOOTLOADER_PROTOCOL_PROVEN":False,
+              "PRODUCTION_RECOVERY_USB_IDENTITY_PROVEN":False,
+              "SAFE_FLASH_WRITE_SEQUENCE_PROVEN":False,
+              "USB_OR_BOARD_CONTACTED":False,
+              "FLASH_ALLOWED":False,
+          }
+
+          (out/"PROTOCOL_DECISION.json").write_text(
+              json.dumps(decision,indent=2,ensure_ascii=False)+"\n"
+          )
+          (out/"CANDIDATE_SOURCE_MANIFEST.json").write_text(
+              json.dumps(copied,indent=2,ensure_ascii=False)+"\n"
+          )
+
+          # Markdown summary deliberately shows exact file+line candidates.
+          md = [
+              "# BP1048P4 USB Firmware Protocol Extractor V2",
+              "",
+              f"SDK commit: `{commit}`",
+              f"Text/source files scanned: **{len(docs)}**",
+              "",
+              "## Gates",
+              f"- candidate update API found: `{bool(update_symbols)}`",
+              f"- candidate flash API found: `{bool(flash_symbols)}`",
+              f"- candidate USB API found: `{bool(usb_symbols)}`",
+              f"- candidate boot-entry/reset API found: `{bool(boot_symbols)}`",
+              f"- same-file update+flash+USB candidate found: `{bool(high_update_flash_usb)}`",
+              f"- exact board VID/PID literal found: `{bool(exact_identity_hits)}`",
+              f"- A5/5A literal found: `{bool(packet_literals)}`",
+              f"- prebuilt firmware image found: `{bool(binary_images)}`",
+              "",
+              "## Highest-confidence update + flash + USB files",
+          ]
+          if high_update_flash_usb:
+              for x in high_update_flash_usb[:20]:
+                  md.append(f"- `{x['file']}` — score {x['score']}")
+          else:
+              md.append("- none; transport and flash code may be separated into different modules")
+
+          md += ["", "## Top function-level candidates"]
+          if contexts:
+              for x in contexts[:30]:
+                  cats=",".join(k for k,v in x["categories"].items() if v)
+                  md.append(
+                      f"- `{x['file']}:{x['line']}` — `{x['name']}()` — score {x['score']} — {cats}"
+                  )
+          else:
+              md.append("- none parsed")
+
+          md += ["", "## Exact 0x6324 / 0x1719 hits"]
+          if exact_identity_hits:
+              for x in exact_identity_hits[:20]:
+                  md.append(f"- `{x['file']}:{x['line']}` — `{x['text']}`")
+          else:
+              md.append("- no exact literal match in this public SDK")
+
+          md += ["", "## Candidate firmware image files"]
+          if binary_images:
+              for x in binary_images[:20]:
+                  md.append(f"- `{x['file']}` — {x['size']} bytes — `{x['sha256'][:20]}...`")
+          else:
+              md.append("- none committed in repository")
+
+          md += [
+              "",
+              "## Safety / decision",
+              "- Public SDK evidence is a candidate map, not proof that the production board accepts the same updater protocol.",
+              "- USB/board contacted: **NO**",
+              "- Flash read/erase/write: **NO**",
+              "- `FLASH_ALLOWED=NO`",
+          ]
+          (out/"PROTOCOL_SUMMARY.md").write_text("\n".join(md)+"\n")
+          print("\n".join(md))
+          PYCODE
+
+      - name: Publish protocol summary
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat /tmp/okn-v2/evidence/PROTOCOL_SUMMARY.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Package evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /tmp/okn-v2/evidence
+          zip -9 -r /tmp/OKN_BP1048P4_USB_FW_PROTOCOL_V2_EVIDENCE.zip . >/dev/null
+          sha256sum /tmp/OKN_BP1048P4_USB_FW_PROTOCOL_V2_EVIDENCE.zip \
+            > /tmp/OKN_BP1048P4_USB_FW_PROTOCOL_V2_EVIDENCE.zip.sha256
+
+      - name: Upload evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: OKN-BP1048P4-USB-FW-PROTOCOL-V2-EVIDENCE
+          path: |
+            /tmp/OKN_BP1048P4_USB_FW_PROTOCOL_V2_EVIDENCE.zip
+            /tmp/OKN_BP1048P4_USB_FW_PROTOCOL_V2_EVIDENCE.zip.sha256
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Final fail-closed gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$FLASH_ALLOWED" = "NO"
+          grep -F '"PRODUCTION_BOOTLOADER_PROTOCOL_PROVEN": false' \
+            /tmp/okn-v2/evidence/PROTOCOL_DECISION.json
+          grep -F '"USB_OR_BOARD_CONTACTED": false' \
+            /tmp/okn-v2/evidence/PROTOCOL_DECISION.json
+          grep -F '"FLASH_ALLOWED": false' \
+            /tmp/okn-v2/evidence/PROTOCOL_DECISION.json
+          echo PROTOCOL_EXTRACTOR_V2_COMPLETE=YES
+          echo FLASH_ALLOWED=NO
