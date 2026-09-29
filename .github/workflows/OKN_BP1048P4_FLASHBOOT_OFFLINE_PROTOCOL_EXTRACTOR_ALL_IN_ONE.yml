@@ -1,0 +1,459 @@
+name: OKN BP1048P4 Flashboot Offline Protocol Extractor - All In One
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: okn-bp1048p4-flashboot-offline-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  FLASH_ALLOWED: "NO"
+
+jobs:
+  extract_flashboot:
+    name: Flashboot static extraction - NO USB - NO FLASH
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+
+    steps:
+      - name: Safety gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$FLASH_ALLOWED" = "NO"
+          mkdir -p /tmp/flashboot/evidence
+          cat > /tmp/flashboot/evidence/SAFETY.txt <<'EOF'
+          MODE=OFFLINE_STATIC_FLASHBOOT_EXTRACTION_ONLY
+          TARGET=MVSilicon_BP1048P4
+          FINAL_GOAL=SAMSUNG_S25_PLUS_USB_C_DIRECT_FIRMWARE_UPDATE
+          USB_OR_BOARD_CONTACT=NO
+          VENDOR_BINARY_EXECUTED=NO
+          FEATURE_55_SENT=NO
+          FEATURE_AA_SENT=NO
+          FLASH_READ_EXECUTED=NO
+          FLASH_ERASE_EXECUTED=NO
+          FLASH_WRITE_EXECUTED=NO
+          DISCOVERED_FRAME_LIVE_AUTHORIZED=NO
+          HARDWARE_MODIFICATION=FORBIDDEN
+          FLASH_ALLOWED=NO
+          EOF
+
+      - name: Checkout public BP1048 SDK
+        uses: actions/checkout@v4
+        with:
+          repository: leadercxn/bp1048_sdk_v0.1.12
+          ref: master
+          path: bp1048-sdk
+          fetch-depth: 1
+
+      - name: Extract runtime upgrade entry and flashboot candidates
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PYCODE'
+          from pathlib import Path
+          import collections, hashlib, json, math, re, shutil, subprocess
+
+          ROOT = Path("bp1048-sdk")
+          OUT = Path("/tmp/flashboot/evidence")
+          OUT.mkdir(parents=True, exist_ok=True)
+
+          commit = subprocess.check_output(
+              ["git","-C",str(ROOT),"rev-parse","HEAD"], text=True
+          ).strip()
+
+          # ---------- text/source scan ----------
+          text_docs = []
+          for p in ROOT.rglob("*"):
+              if not p.is_file() or ".git" in p.parts or p.stat().st_size > 6_000_000:
+                  continue
+              try:
+                  t = p.read_text(errors="replace")
+              except Exception:
+                  continue
+              text_docs.append((str(p.relative_to(ROOT)), p, t))
+
+          key_terms = [
+              "start_up_grate", "AppResourceUsbDevice",
+              "SET_REPORT", "GET_REPORT", "HID", "Usage Page",
+              "55AA", "0x55", "0xAA", "feature", "upgrade",
+              "bootloader", "flashboot", "pc upgrade", "upgrata",
+              "chiperas", "codedata", "constdat", "cnfgdat",
+              "btupdat", "upinfo", "cxxx",
+          ]
+
+          source_hits = []
+          for rel,p,text in text_docs:
+              lines = text.splitlines()
+              for i,line in enumerate(lines,1):
+                  if any(term.lower() in line.lower() for term in key_terms):
+                      source_hits.append({
+                          "file": rel,
+                          "line": i,
+                          "text": line.strip()[:900],
+                      })
+
+          # Bounded contexts around high-value entry points.
+          contexts = []
+          context_terms = [
+              "start_up_grate", "AppResourceUsbDevice",
+              "SET_REPORT", "GET_REPORT", "0x55", "0xAA",
+          ]
+          for rel,p,text in text_docs:
+              lines = text.splitlines()
+              for i,line in enumerate(lines,1):
+                  if any(term.lower() in line.lower() for term in context_terms):
+                      lo=max(0,i-12); hi=min(len(lines),i+14)
+                      contexts.append({
+                          "file": rel,
+                          "line": i,
+                          "context": "\n".join(lines[lo:hi])[:7000],
+                      })
+
+          # ---------- binary candidate discovery ----------
+          bins = []
+          for p in ROOT.rglob("*"):
+              if not p.is_file() or ".git" in p.parts:
+                  continue
+              try:
+                  data = p.read_bytes()
+              except Exception:
+                  continue
+              rel = str(p.relative_to(ROOT))
+              name_low = p.name.lower()
+              score = 0
+              reasons = []
+
+              if len(data) == 65536:
+                  score += 30; reasons.append("exact_65536_bytes")
+              if "flashboot" in name_low or "boot" in name_low:
+                  score += 20; reasons.append("boot_name")
+              if p.suffix.lower() in {".bin",".rom",".img",".fw",".dat"}:
+                  score += 5; reasons.append("binary_extension")
+
+              low = data.lower()
+              for term in [b"chiperas",b"codedata",b"constdat",b"cnfgdat",
+                           b"btupdat",b"upinfo",b"pc upgrade",b"pc upgrata",
+                           b"flash usb",b"otp usb",b"flashid"]:
+                  if term in low:
+                      score += 25
+                      reasons.append("ascii:"+term.decode(errors="ignore"))
+
+              if score:
+                  sample=data[:min(len(data),1_000_000)]
+                  entropy=0.0
+                  if sample:
+                      cnt=collections.Counter(sample)
+                      for n in cnt.values():
+                          q=n/len(sample)
+                          entropy -= q*math.log2(q)
+
+                  bins.append({
+                      "file": rel,
+                      "size": len(data),
+                      "sha256": hashlib.sha256(data).hexdigest(),
+                      "score": score,
+                      "reasons": reasons,
+                      "entropy": round(entropy,4),
+                  })
+
+          bins.sort(key=lambda x:(-x["score"],x["file"]))
+
+          # ---------- USB descriptor scanner ----------
+          # Standard USB device descriptor: bLength=0x12, bDescriptorType=0x01.
+          # idVendor at bytes 8..9 LE, idProduct at 10..11 LE.
+          usb_desc = []
+          hid_markers = []
+          string_hits = []
+          frame_hits = []
+          binary_signatures = []
+
+          def printable_strings(data, minlen=4):
+              out=[]
+              start=None
+              for i,b in enumerate(data+b"\x00"):
+                  if 32 <= b <= 126:
+                      if start is None:
+                          start=i
+                  else:
+                      if start is not None and i-start>=minlen:
+                          out.append((start,data[start:i].decode("ascii",errors="replace")))
+                      start=None
+              return out
+
+          for cand in bins[:50]:
+              p=ROOT/cand["file"]
+              data=p.read_bytes()
+
+              # USB device descriptor candidates.
+              for off in range(0,max(0,len(data)-18)):
+                  if data[off]==0x12 and data[off+1]==0x01:
+                      bcdusb=int.from_bytes(data[off+2:off+4],"little")
+                      vid=int.from_bytes(data[off+8:off+10],"little")
+                      pid=int.from_bytes(data[off+10:off+12],"little")
+                      mps=data[off+7]
+                      if bcdusb in (0x0110,0x0200,0x0201,0x0210,0x0300,0x0310) and mps in (8,16,32,64):
+                          usb_desc.append({
+                              "file":cand["file"],"offset":off,
+                              "bcdUSB":f"0x{bcdusb:04X}",
+                              "vid":f"0x{vid:04X}",
+                              "pid":f"0x{pid:04X}",
+                              "max_packet0":mps,
+                              "raw18":data[off:off+18].hex(" "),
+                          })
+
+              # HID vendor usage page markers: 06 00 FF and Usage 55 AA style.
+              patterns = [
+                  bytes.fromhex("06 00 FF"),
+                  bytes.fromhex("09 55"),
+                  bytes.fromhex("09 AA"),
+                  bytes.fromhex("26 FF 00"),
+              ]
+              for pat in patterns:
+                  start=0
+                  while True:
+                      off=data.find(pat,start)
+                      if off<0: break
+                      hid_markers.append({
+                          "file":cand["file"],"offset":off,
+                          "pattern":pat.hex(" "),
+                          "context":data[max(0,off-24):min(len(data),off+96)].hex(" "),
+                      })
+                      start=off+1
+                      if len(hid_markers)>500: break
+
+              # A5 5A and 5A FF candidates.
+              for pat_name,pat in [
+                  ("A5_5A",b"\xA5\x5A"),
+                  ("5A_FF",b"\x5A\xFF"),
+                  ("55_AA",b"\x55\xAA"),
+              ]:
+                  start=0
+                  count=0
+                  while True:
+                      off=data.find(pat,start)
+                      if off<0: break
+                      frame_hits.append({
+                          "file":cand["file"],"offset":off,"pattern":pat_name,
+                          "context":data[max(0,off-16):min(len(data),off+80)].hex(" "),
+                      })
+                      start=off+1
+                      count+=1
+                      if count>=60: break
+
+              # ASCII strings.
+              for off,s in printable_strings(data,4):
+                  sl=s.lower()
+                  if any(x in sl for x in [
+                      "chiperas","codedata","constdat","cnfgdat","btupdat",
+                      "upinfo","upgrade","upgrata","flash","boot","otp","crc",
+                      "usb","hid","error","ok","version","id:"
+                  ]):
+                      string_hits.append({
+                          "file":cand["file"],"offset":off,"text":s[:300]
+                      })
+
+              # First/last 256 + hashes for candidate identity.
+              binary_signatures.append({
+                  "file":cand["file"],
+                  "size":len(data),
+                  "sha256":hashlib.sha256(data).hexdigest(),
+                  "first256":data[:256].hex(" "),
+                  "last256":data[-256:].hex(" ") if data else "",
+              })
+
+          # ---------- source-file arrays that may embed bootloader ----------
+          array_candidates=[]
+          array_rx=re.compile(
+              r"(?:const\s+|static\s+|unsigned\s+|signed\s+)*"
+              r"(?:char|uint8_t|uint8|u8|BYTE)\s+([A-Za-z_]\w*)"
+              r"\s*\[\s*(\d+)?\s*\]\s*=\s*\{([^{}]{100,800000})\}",
+              re.I|re.S
+          )
+          hex_rx=re.compile(r"0x([0-9A-Fa-f]{1,2})")
+          for rel,p,text in text_docs:
+              if "boot" not in text.lower() and "upgrade" not in text.lower():
+                  continue
+              for m in array_rx.finditer(text):
+                  vals=[int(x,16) for x in hex_rx.findall(m.group(3))]
+                  if len(vals)>=4096:
+                      raw=bytes(vals)
+                      array_candidates.append({
+                          "file":rel,
+                          "name":m.group(1),
+                          "declared_len":int(m.group(2)) if m.group(2) else None,
+                          "parsed_len":len(raw),
+                          "sha256":hashlib.sha256(raw).hexdigest(),
+                          "first64":raw[:64].hex(" "),
+                      })
+                      dst=OUT/f"embedded_{m.group(1)}_{len(raw)}.bin"
+                      if not dst.exists():
+                          dst.write_bytes(raw)
+
+          # ---------- copy top candidates ----------
+          copydir=OUT/"candidate_bins"
+          copydir.mkdir(exist_ok=True)
+          copied=[]
+          for idx,cand in enumerate(bins[:20]):
+              src=ROOT/cand["file"]
+              if src.stat().st_size<=2_000_000:
+                  dst=copydir/f"{idx:02d}_{src.name}"
+                  shutil.copy2(src,dst)
+                  copied.append({"source":cand["file"],"copy":dst.name})
+
+          decision={
+              "revision":"FLASHBOOT_OFFLINE_PROTOCOL_EXTRACTOR_V1",
+              "sdk_commit":commit,
+              "runtime_upgrade_source_hits":source_hits[:500],
+              "runtime_upgrade_contexts":contexts[:120],
+              "binary_candidates":bins[:100],
+              "embedded_array_candidates":array_candidates[:100],
+              "usb_device_descriptor_candidates":usb_desc[:300],
+              "hid_marker_candidates":hid_markers[:500],
+              "frame_marker_candidates":frame_hits[:500],
+              "flashboot_ascii_strings":string_hits[:1000],
+              "binary_signatures":binary_signatures[:100],
+              "copied_candidates":copied,
+              "SDK_RUNTIME_55_AA_ENTRY_EVIDENCE_FOUND":any(
+                  ("0x55" in x["text"] or "0xAA" in x["text"]) for x in source_hits
+              ),
+              "START_UP_GRATE_EVIDENCE_FOUND":any(
+                  "start_up_grate" in x["text"] for x in source_hits
+              ),
+              "EXACT_64K_CANDIDATE_FOUND":any(x["size"]==65536 for x in bins),
+              "FLASHBOOT_COMMAND_STRINGS_FOUND":any(
+                  any(term in x["text"].lower() for term in
+                      ["chiperas","codedata","constdat","cnfgdat","btupdat","upinfo"])
+                  for x in string_hits
+              ),
+              "USB_DESCRIPTOR_CANDIDATE_FOUND":bool(usb_desc),
+              "PRODUCTION_P4_FLASHBOOT_PROTOCOL_PROVEN":False,
+              "SAFE_READ_ONLY_FLASHBOOT_COMMAND_PROVEN":False,
+              "LIVE_BOOT_ENTRY_AUTHORIZED":False,
+              "LIVE_FLASH_AUTHORIZED":False,
+              "USB_OR_BOARD_CONTACTED":False,
+              "FLASH_ALLOWED":False,
+          }
+
+          (OUT/"FLASHBOOT_DECISION.json").write_text(
+              json.dumps(decision,indent=2,ensure_ascii=False)+"\n"
+          )
+
+          md=[
+              "# BP1048P4 Flashboot Offline Protocol Extractor",
+              "",
+              f"SDK commit: `{commit}`",
+              "",
+              "## Runtime upgrade entry evidence",
+              f"- `start_up_grate` found: `{decision['START_UP_GRATE_EVIDENCE_FOUND']}`",
+              f"- 0x55 / 0xAA source evidence found: `{decision['SDK_RUNTIME_55_AA_ENTRY_EVIDENCE_FOUND']}`",
+              "",
+              "## Boot/flash binary candidates",
+          ]
+          if bins:
+              for x in bins[:20]:
+                  md.append(
+                      f"- `{x['file']}` — {x['size']} bytes — score {x['score']} — "
+                      f"{', '.join(x['reasons'])} — `{x['sha256'][:20]}...`"
+                  )
+          else:
+              md.append("- none")
+
+          md += ["","## Parsed embedded byte arrays"]
+          if array_candidates:
+              for x in array_candidates[:20]:
+                  md.append(
+                      f"- `{x['file']}` `{x['name']}` — parsed {x['parsed_len']} bytes — "
+                      f"`{x['sha256'][:20]}...`"
+                  )
+          else:
+              md.append("- none")
+
+          md += ["","## USB device descriptor candidates inside boot binaries"]
+          if usb_desc:
+              for x in usb_desc[:30]:
+                  md.append(
+                      f"- `{x['file']}` @ `0x{x['offset']:X}` — "
+                      f"VID `{x['vid']}` PID `{x['pid']}` EP0 `{x['max_packet0']}`"
+                  )
+          else:
+              md.append("- none parsed")
+
+          md += ["","## High-value flashboot strings"]
+          if string_hits:
+              shown=0
+              for x in string_hits:
+                  if any(k in x["text"].lower() for k in
+                         ["chiperas","codedata","constdat","cnfgdat","btupdat",
+                          "upinfo","upgrade","upgrata","flash usb","otp usb","flashid"]):
+                      md.append(
+                          f"- `{x['file']}` @ `0x{x['offset']:X}` — `{x['text']}`"
+                      )
+                      shown+=1
+                      if shown>=40: break
+              if shown==0:
+                  md.append("- no legacy flash-command vocabulary in top candidates")
+          else:
+              md.append("- none")
+
+          md += ["","## Frame-marker diagnostics"]
+          counts=collections.Counter(x["pattern"] for x in frame_hits)
+          for k,v in sorted(counts.items()):
+              md.append(f"- {k}: {v} occurrences retained")
+
+          md += [
+              "",
+              "## Decision",
+              "- This run is static evidence only.",
+              "- A runtime 0x55/0xAA entry clue does not by itself prove the production GoloPine flashboot wire protocol.",
+              "- No packet from this report is authorized to be sent to the board.",
+              "- USB/board contacted: **NO**",
+              "- Flash read/erase/write: **NO**",
+              "- `FLASH_ALLOWED=NO`",
+          ]
+          (OUT/"FLASHBOOT_SUMMARY.md").write_text("\n".join(md)+"\n")
+          print("\n".join(md))
+          PYCODE
+
+      - name: Publish flashboot summary
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat /tmp/flashboot/evidence/FLASHBOOT_SUMMARY.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Package evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /tmp/flashboot/evidence
+          zip -9 -r /tmp/OKN_BP1048P4_FLASHBOOT_OFFLINE_EVIDENCE.zip . >/dev/null
+          sha256sum /tmp/OKN_BP1048P4_FLASHBOOT_OFFLINE_EVIDENCE.zip \
+            > /tmp/OKN_BP1048P4_FLASHBOOT_OFFLINE_EVIDENCE.zip.sha256
+
+      - name: Upload evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: OKN-BP1048P4-FLASHBOOT-OFFLINE-EVIDENCE
+          path: |
+            /tmp/OKN_BP1048P4_FLASHBOOT_OFFLINE_EVIDENCE.zip
+            /tmp/OKN_BP1048P4_FLASHBOOT_OFFLINE_EVIDENCE.zip.sha256
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Final fail-closed gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$FLASH_ALLOWED" = "NO"
+          grep -F '"USB_OR_BOARD_CONTACTED": false' \
+            /tmp/flashboot/evidence/FLASHBOOT_DECISION.json
+          grep -F '"LIVE_FLASH_AUTHORIZED": false' \
+            /tmp/flashboot/evidence/FLASHBOOT_DECISION.json
+          grep -F '"FLASH_ALLOWED": false' \
+            /tmp/flashboot/evidence/FLASHBOOT_DECISION.json
+          echo FLASHBOOT_OFFLINE_EXTRACTION_COMPLETE=YES
+          echo FLASH_ALLOWED=NO
