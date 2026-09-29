@@ -1,0 +1,545 @@
+name: OKN BP1048P4 Flashboot Handler Recovery V2 - All In One
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: okn-bp1048p4-flashboot-handler-recovery-v2-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  FLASH_ALLOWED: "NO"
+
+jobs:
+  recover_handlers:
+    name: Recover command address construction and handlers - NO USB - NO FLASH
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Safety gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$FLASH_ALLOWED" = "NO"
+          mkdir -p /tmp/hr/evidence
+          cat > /tmp/hr/evidence/SAFETY.txt <<'EOF'
+          MODE=OFFLINE_STATIC_HANDLER_RECOVERY_ONLY
+          TARGET=MVSilicon_BP1048P4
+          IMAGE=SDK_flash_data_64KiB
+          USB_OR_BOARD_CONTACT=NO
+          TARGET_FIRMWARE_EXECUTED=NO
+          FEATURE_55_SENT=NO
+          FEATURE_AA_SENT=NO
+          FLASH_READ_EXECUTED=NO
+          FLASH_ERASE_EXECUTED=NO
+          FLASH_WRITE_EXECUTED=NO
+          LIVE_BOOT_ENTRY_AUTHORIZED=NO
+          LIVE_FLASH_AUTHORIZED=NO
+          FLASH_ALLOWED=NO
+          EOF
+
+      - name: Checkout public BP1048 SDK
+        uses: actions/checkout@v4
+        with:
+          repository: leadercxn/bp1048_sdk_v0.1.12
+          ref: master
+          path: bp1048-sdk
+          fetch-depth: 1
+
+      - name: Reconstruct exact image and prepare command map
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PYCODE'
+          from pathlib import Path
+          import hashlib, json, re, struct, subprocess
+
+          ROOT=Path("bp1048-sdk")
+          OUT=Path("/tmp/hr/evidence")
+          OUT.mkdir(parents=True,exist_ok=True)
+
+          commit=subprocess.check_output(
+              ["git","-C",str(ROOT),"rev-parse","HEAD"],text=True
+          ).strip()
+
+          src=ROOT/"BT_Audio_APP/bt_audio_app_src/device/flash_boot.c"
+          text=src.read_text(errors="replace")
+
+          m=re.search(
+              r"(?:static\s+|const\s+|unsigned\s+|signed\s+)*"
+              r"(?:char|uint8_t|uint8|u8|BYTE)\s+flash_data\s*"
+              r"\[\s*(?P<n>\d+)\s*\]\s*=\s*\{(?P<body>.*?)\};",
+              text,re.I|re.S
+          )
+          assert m,"flash_data missing"
+          declared=int(m.group("n"))
+          body=re.sub(r"/\*.*?\*/","",m.group("body"),flags=re.S)
+          body=re.sub(r"//[^\r\n]*","",body)
+          vals=[int(x,16) for x in re.findall(r"0[xX]([0-9A-Fa-f]{1,2})\b",body)]
+          assert declared==65536
+          assert len(vals)==65520
+          raw=bytes(vals)+bytes(declared-len(vals))
+          assert len(raw)==65536
+
+          image=OUT/"flash_data_65536.bin"
+          image.write_bytes(raw)
+          sha=hashlib.sha256(raw).hexdigest()
+
+          # Exact strings only. This fixes the earlier "cxxx" substring collision
+          # with "cmd_cxxx :".
+          strings=[]
+          st=None
+          for i,b in enumerate(raw+b"\x00"):
+              if 32<=b<=126:
+                  if st is None:
+                      st=i
+              else:
+                  if st is not None and i-st>=4:
+                      strings.append((st,raw[st:i].decode("ascii",errors="replace")))
+                  st=None
+
+          exact_names=[
+              "chiperas","upinfo","btupdat","cnfgdat","constdat","codedata","cxxx",
+          ]
+          exact_map={}
+          for name in exact_names:
+              hits=[off for off,s in strings if s==name]
+              exact_map[name]=hits
+
+          # Also retain diagnostic strings by exact prefix/substr separately.
+          diagnostics={}
+          for key in [
+              "cmd_cxxx :","cmd_cxxx ACK",
+              "pc upgrata code","pc upgrata const","pc upgrata config",
+              "jump_to_code_addr","check_user_code",
+              "UPGRADE:Flash data command,prepare to unlock & chip erase all",
+          ]:
+              diagnostics[key]=[
+                  {"offset":off,"text":s}
+                  for off,s in strings if key.lower() in s.lower()
+              ]
+
+          # Exact LE32 pointers for command strings.
+          ptrs=[]
+          for name,hits in exact_map.items():
+              for off in hits:
+                  pat=struct.pack("<I",off)
+                  pos=0
+                  while True:
+                      p=raw.find(pat,pos)
+                      if p<0: break
+                      if p!=off:
+                          ptrs.append({
+                              "name":name,
+                              "string_offset":off,
+                              "pointer_offset":p,
+                          })
+                      pos=p+1
+
+          # Dump a wider table window around the proven pointers at E020/E024.
+          table=[]
+          for pos in range(0xDF00,0xE180,4):
+              w=int.from_bytes(raw[pos:pos+4],"little")
+              target_strings=[]
+              for off,s in strings:
+                  if w==off:
+                      target_strings.append(s)
+              table.append({
+                  "offset":pos,
+                  "word":w,
+                  "word_hex":f"0x{w:08X}",
+                  "string_targets":target_strings[:5],
+                  "looks_code_offset":0 <= w < 0xBA00 and (w%2==0),
+                  "looks_data_offset":0xBA00 <= w < 0x10000,
+              })
+
+          (OUT/"TABLE_DF00_E180.txt").write_text(
+              "\n".join(
+                  f"{x['offset']:04X}: {x['word_hex']}"
+                  + (f" -> {x['string_targets']}" if x["string_targets"] else "")
+                  for x in table
+              )+"\n"
+          )
+
+          prep={
+              "revision":"FLASHBOOT_HANDLER_RECOVERY_V2",
+              "sdk_commit":commit,
+              "image_sha256":sha,
+              "command_exact_offsets":exact_map,
+              "diagnostic_string_hits":diagnostics,
+              "exact_le32_pointers":ptrs,
+              "table_df00_e180":table,
+              "USB_OR_BOARD_CONTACTED":False,
+              "LIVE_FLASH_AUTHORIZED":False,
+              "FLASH_ALLOWED":False,
+          }
+          (OUT/"PREP.json").write_text(
+              json.dumps(prep,indent=2,ensure_ascii=False)+"\n"
+          )
+          PYCODE
+
+      - name: Build GNU NDS32 objdump
+        shell: bash
+        run: |
+          set -u
+          mkdir -p /tmp/hr/toolchain /tmp/hr/build
+          cd /tmp/hr/toolchain
+          URL="https://ftp.gnu.org/gnu/binutils/binutils-2.44.tar.xz"
+
+          if curl -fL --retry 3 --connect-timeout 20 "$URL" -o binutils-2.44.tar.xz; then
+            tar -xf binutils-2.44.tar.xz
+            cd /tmp/hr/build
+            if ../toolchain/binutils-2.44/configure \
+                --target=nds32le-elf \
+                --disable-nls \
+                --disable-werror \
+                --disable-gdb \
+                --disable-gprofng \
+                --disable-gas \
+                --disable-ld \
+                --disable-gold \
+                >/tmp/hr/evidence/NDS32_BUILD.log 2>&1 &&
+               make -j2 all-binutils >>/tmp/hr/evidence/NDS32_BUILD.log 2>&1; then
+              find /tmp/hr/build -type f -name '*objdump' -perm -111 -print \
+                > /tmp/hr/evidence/OBJDUMP_CANDIDATES.txt
+              echo BUILD_STATUS=SUCCESS > /tmp/hr/evidence/NDS32_BUILD_STATUS.txt
+            else
+              echo BUILD_STATUS=FAILED > /tmp/hr/evidence/NDS32_BUILD_STATUS.txt
+            fi
+          else
+            echo BUILD_STATUS=DOWNLOAD_FAILED > /tmp/hr/evidence/NDS32_BUILD_STATUS.txt
+          fi
+          exit 0
+
+      - name: Disassemble and recover address constructors
+        shell: bash
+        run: |
+          set -euo pipefail
+          OBJDUMP="$(find /tmp/hr/build -type f -name '*objdump' -perm -111 | head -1 || true)"
+          IMAGE="/tmp/hr/evidence/flash_data_65536.bin"
+          DIS="/tmp/hr/evidence/NDS32_DISASSEMBLY.txt"
+
+          if [ -n "$OBJDUMP" ]; then
+            "$OBJDUMP" -D -b binary -m nds32 --adjust-vma=0 "$IMAGE" \
+              > "$DIS" 2>/tmp/hr/evidence/NDS32_DISASSEMBLY.stderr.txt
+            echo DISASM_STATUS=SUCCESS > /tmp/hr/evidence/NDS32_DISASM_STATUS.txt
+          else
+            : > "$DIS"
+            echo DISASM_STATUS=NO_OBJDUMP > /tmp/hr/evidence/NDS32_DISASM_STATUS.txt
+          fi
+
+          python3 - <<'PYCODE'
+          from pathlib import Path
+          import json,re
+
+          OUT=Path("/tmp/hr/evidence")
+          prep=json.loads((OUT/"PREP.json").read_text())
+          lines=(OUT/"NDS32_DISASSEMBLY.txt").read_text(errors="replace").splitlines()
+
+          # Parse objdump instruction rows.
+          ins=[]
+          row_rx=re.compile(
+              r"^\s*([0-9A-Fa-f]+):\s+(?:[0-9A-Fa-f]{2,8}\s+)+(.+?)\s*$"
+          )
+          for line_no,line in enumerate(lines,1):
+              m=row_rx.match(line)
+              if not m:
+                  continue
+              ins.append({
+                  "line_no":line_no,
+                  "addr":int(m.group(1),16),
+                  "text":m.group(2).strip(),
+                  "raw":line,
+              })
+
+          # Extract register names and immediates from NDS32 syntax.
+          def parse_int(tok):
+              tok=tok.strip().lower()
+              tok=tok.replace("#","")
+              try:
+                  return int(tok,0)
+              except Exception:
+                  return None
+
+          # Candidate address-construction patterns:
+          #   sethi rX,#HI ; ori rX,rX,#LO
+          #   sethi rX,#HI ; addi rX,rX,#signed_LO
+          # We match same destination register within the next 8 instructions.
+          sethi_rx=re.compile(
+              r"\bsethi\s+(\$[A-Za-z0-9]+)\s*,\s*#?(-?0x[0-9a-f]+|-?\d+)",
+              re.I
+          )
+          combine_rx=re.compile(
+              r"\b(ori|addi)\s+(\$[A-Za-z0-9]+)\s*,\s*(\$[A-Za-z0-9]+)\s*,\s*#?(-?0x[0-9a-f]+|-?\d+)",
+              re.I
+          )
+
+          constructors=[]
+          for i,x in enumerate(ins):
+              sm=sethi_rx.search(x["text"])
+              if not sm:
+                  continue
+              rd=sm.group(1)
+              hi=parse_int(sm.group(2))
+              if hi is None:
+                  continue
+
+              # Interpret SETHI as imm20 << 12.
+              base=(hi & 0xFFFFF) << 12
+
+              for y in ins[i+1:i+9]:
+                  cm=combine_rx.search(y["text"])
+                  if not cm:
+                      continue
+                  op,dst,src,imm_s=cm.groups()
+                  if dst!=rd or src!=rd:
+                      continue
+                  imm=parse_int(imm_s)
+                  if imm is None:
+                      continue
+
+                  if op.lower()=="ori":
+                      addr=(base | (imm & 0xFFF)) & 0xFFFFFFFF
+                  else:
+                      # addi immediate is signed in the disassembly text when needed.
+                      addr=(base + imm) & 0xFFFFFFFF
+
+                  constructors.append({
+                      "sethi_addr":x["addr"],
+                      "combine_addr":y["addr"],
+                      "reg":rd,
+                      "op":op.lower(),
+                      "hi":hi,
+                      "imm":imm,
+                      "constructed":addr,
+                      "sethi_text":x["text"],
+                      "combine_text":y["text"],
+                  })
+                  break
+
+          # Also catch single-instruction full address/immediate loads.
+          movi_rx=re.compile(
+              r"\b(movi|li)\s+(\$[A-Za-z0-9]+)\s*,\s*#?(-?0x[0-9a-f]+|-?\d+)",
+              re.I
+          )
+          singles=[]
+          for x in ins:
+              mm=movi_rx.search(x["text"])
+              if mm:
+                  v=parse_int(mm.group(3))
+                  if v is not None:
+                      singles.append({
+                          "addr":x["addr"],
+                          "reg":mm.group(2),
+                          "value":v & 0xFFFFFFFF,
+                          "text":x["text"],
+                      })
+
+          # Map constructors to exact command strings and to the whole command
+          # cluster 0xCB80..0xCBD0. This is precise; no low-nibble fuzzy matching.
+          exact_hits=[]
+          cluster_hits=[]
+          exact_offsets={}
+          for name,hits in prep["command_exact_offsets"].items():
+              for off in hits:
+                  exact_offsets[off]=name
+
+          for c in constructors:
+              a=c["constructed"]
+              if a in exact_offsets:
+                  exact_hits.append({**c,"command":exact_offsets[a]})
+              if 0xCB80 <= a <= 0xCBD0:
+                  cluster_hits.append(c)
+
+          for s in singles:
+              a=s["value"]
+              if a in exact_offsets:
+                  exact_hits.append({**s,"command":exact_offsets[a],"single":True})
+              if 0xCB80 <= a <= 0xCBD0:
+                  cluster_hits.append({**s,"single":True})
+
+          # Find control-transfer instructions within +/- 20 instructions of each
+          # exact command address construction. Shared targets are strong candidates
+          # for strcmp/parser helpers or command handlers.
+          branch_rx=re.compile(
+              r"\b(jal|jral|jr|j|beq|bne|beqz|bnez|bgez|bltz|bgtz|blez)\b",
+              re.I
+          )
+          contexts=[]
+          for h in exact_hits:
+              anchor=h.get("combine_addr",h.get("addr",0))
+              # locate nearest instruction index by address
+              idx=min(
+                  range(len(ins)),
+                  key=lambda k: abs(ins[k]["addr"]-anchor)
+              ) if ins else 0
+              rows=ins[max(0,idx-20):min(len(ins),idx+21)]
+              controls=[
+                  {"addr":r["addr"],"text":r["text"]}
+                  for r in rows if branch_rx.search(r["text"])
+              ]
+              contexts.append({
+                  "command":h["command"],
+                  "anchor":anchor,
+                  "constructor":h,
+                  "controls":controls,
+                  "text":"\n".join(r["raw"] for r in rows),
+              })
+
+          # Search direct references to E000 table region in constructed addresses.
+          table_refs=[
+              c for c in constructors if 0xDF00 <= c["constructed"] <= 0xE180
+          ]
+          table_refs += [
+              {**s,"single":True} for s in singles
+              if 0xDF00 <= s["value"] <= 0xE180
+          ]
+
+          # Disassembly around the one prior exact-low12 observation 0x2D0C,
+          # but this time only as raw context, not as proof.
+          around_2d0c=[
+              x["raw"] for x in ins if 0x2C80 <= x["addr"] <= 0x2D80
+          ]
+          (OUT/"DISASM_AROUND_2D0C.asm").write_text(
+              "\n".join(around_2d0c)+"\n"
+          )
+
+          # Save exact command contexts separately.
+          for i,c in enumerate(contexts):
+              safe=re.sub(r"[^A-Za-z0-9_.-]+","_",c["command"])
+              (OUT/f"CMD_CONTEXT_{i:02d}_{safe}.asm").write_text(c["text"]+"\n")
+
+          result={
+              "address_constructors_total":len(constructors),
+              "single_immediate_loads_total":len(singles),
+              "exact_command_address_hits":exact_hits,
+              "command_cluster_address_hits":cluster_hits,
+              "exact_command_contexts":contexts,
+              "table_region_address_refs":table_refs,
+          }
+          (OUT/"HANDLER_RECOVERY.json").write_text(
+              json.dumps(result,indent=2,ensure_ascii=False)+"\n"
+          )
+
+          # Human summary: include the raw E000 neighborhood so the next analysis
+          # no longer depends on hidden artifact details.
+          md=[
+              "# BP1048P4 Flashboot Handler Recovery V2",
+              "",
+              f"64 KiB SHA256: `{prep['image_sha256']}`",
+              "",
+              "## Correct exact command-string offsets",
+          ]
+          for name,hits in prep["command_exact_offsets"].items():
+              md.append(
+                  f"- `{name}`: "
+                  + (", ".join(f"`0x{x:04X}`" for x in hits) if hits else "not found")
+              )
+
+          md+=["","## Exact LE32 pointers"]
+          if prep["exact_le32_pointers"]:
+              for x in prep["exact_le32_pointers"]:
+                  md.append(
+                      f"- `0x{x['pointer_offset']:04X}` → "
+                      f"`0x{x['string_offset']:04X}` `{x['name']}`"
+                  )
+          else:
+              md.append("- none")
+
+          md+=["","## Table words 0xE000–0xE060"]
+          for x in prep["table_df00_e180"]:
+              if 0xE000 <= x["offset"] <= 0xE060:
+                  suffix=""
+                  if x["string_targets"]:
+                      suffix=" → "+", ".join(x["string_targets"])
+                  md.append(f"- `0x{x['offset']:04X}` = `{x['word_hex']}`{suffix}")
+
+          md+=["","## Exact NDS32 constructed command addresses"]
+          if exact_hits:
+              for x in exact_hits[:80]:
+                  a=x.get("combine_addr",x.get("addr"))
+                  desc=x.get("combine_text",x.get("text",""))
+                  md.append(
+                      f"- `0x{a:04X}` → `{x['command']}` "
+                      f"`0x{exact_offsets.get(x.get('constructed',x.get('value',-1)),'') if False else ''}` "
+                      f"via `{desc}`"
+                  )
+          else:
+              md.append("- none recovered from exact `sethi+ori/addi` or full `movi/li`")
+
+          md+=["","## Any constructed address inside command-string cluster 0xCB80–0xCBD0"]
+          if cluster_hits:
+              for x in cluster_hits[:80]:
+                  a=x.get("combine_addr",x.get("addr"))
+                  v=x.get("constructed",x.get("value"))
+                  desc=x.get("combine_text",x.get("text",""))
+                  md.append(f"- instruction `0x{a:04X}` constructs `0x{v:04X}` via `{desc}`")
+          else:
+              md.append("- none")
+
+          md+=["","## References to table region 0xDF00–0xE180"]
+          if table_refs:
+              for x in table_refs[:80]:
+                  a=x.get("combine_addr",x.get("addr"))
+                  v=x.get("constructed",x.get("value"))
+                  desc=x.get("combine_text",x.get("text",""))
+                  md.append(f"- `0x{a:04X}` constructs `0x{v:04X}` via `{desc}`")
+          else:
+              md.append("- none recovered")
+
+          md+=["","## Interpretation"]
+          md.append("- Weird relocation bases from the previous run are not treated as evidence unless this run reconstructs an address from actual NDS32 instructions.")
+          md.append("- `chiperas` remains destructive; `codedata/constdat/cnfgdat/btupdat` remain write/update candidates.")
+          md.append("- `upinfo` or `cxxx` will only be considered read/status candidates if their exact handler path is isolated from erase/write calls.")
+          md.append("- No command is authorized for live board use.")
+          md.append("- USB/board contacted: **NO**")
+          md.append("- Flash read/erase/write: **NO**")
+          md.append("- `FLASH_ALLOWED=NO`")
+
+          (OUT/"HANDLER_RECOVERY_SUMMARY.md").write_text("\n".join(md)+"\n")
+          PYCODE
+
+      - name: Publish summary
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat /tmp/hr/evidence/HANDLER_RECOVERY_SUMMARY.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Package evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /tmp/hr/evidence
+          zip -9 -r /tmp/OKN_BP1048P4_HANDLER_RECOVERY_V2_EVIDENCE.zip . >/dev/null
+          sha256sum /tmp/OKN_BP1048P4_HANDLER_RECOVERY_V2_EVIDENCE.zip \
+            > /tmp/OKN_BP1048P4_HANDLER_RECOVERY_V2_EVIDENCE.zip.sha256
+
+      - name: Upload evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: OKN-BP1048P4-HANDLER-RECOVERY-V2-EVIDENCE
+          path: |
+            /tmp/OKN_BP1048P4_HANDLER_RECOVERY_V2_EVIDENCE.zip
+            /tmp/OKN_BP1048P4_HANDLER_RECOVERY_V2_EVIDENCE.zip.sha256
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Final fail-closed gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$FLASH_ALLOWED" = "NO"
+          python3 - <<'PY'
+          import json
+          p="/tmp/hr/evidence/PREP.json"
+          d=json.load(open(p))
+          assert d["USB_OR_BOARD_CONTACTED"] is False
+          assert d["LIVE_FLASH_AUTHORIZED"] is False
+          assert d["FLASH_ALLOWED"] is False
+          print("HANDLER_RECOVERY_V2_FAIL_CLOSED_GATE=PASS")
+          PY
+          echo FLASH_ALLOWED=NO
