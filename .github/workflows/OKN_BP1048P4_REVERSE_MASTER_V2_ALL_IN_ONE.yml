@@ -1,0 +1,552 @@
+name: OKN BP1048P4 Reverse Master V2 - All In One
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: okn-bp1048p4-reverse-master-v2-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  FLASH_ALLOWED: "NO"
+
+jobs:
+  all_in_one_static_reverse:
+    name: All-in-one offline static reverse - NO USB - NO FLASH
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+
+    steps:
+      - name: Immutable safety gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$FLASH_ALLOWED" = "NO"
+          mkdir -p /tmp/master/evidence
+          cat > /tmp/master/evidence/MASTER_SAFETY.txt <<'EOF'
+          MODE=OFFLINE_STATIC_ALL_IN_ONE_ONLY
+          FLASH_ALLOWED=NO
+          USB_OR_BOARD_CONTACT=NO
+          VENDOR_EXE_DLL_APK_EXECUTED=NO
+          AES_OR_CRYPTOSTREAM_DECRYPT_EXECUTED=NO
+          UFE_RUNTIME_TX_SENT=NO
+          AA55_SENT=NO
+          RUNTIME_0X11_OR_0XFE_SENT=NO
+          FLASHBOOT_COMMAND_SENT=NO
+          FLASH_READ_ERASE_WRITE_EXECUTED=NO
+          DISCOVERED_FRAME_LIVE_AUTHORIZED=NO
+          HARDWARE_MODIFICATION=FORBIDDEN
+          FINAL_TARGET=SAMSUNG_S25_PLUS_USB_C_DIRECT_TO_BP1048P4_USB_C
+          EOF
+
+      - name: Download pinned R157 raw IL evidence
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          artifact-ids: "10820682068"
+          path: /tmp/master/r157
+          merge-multiple: true
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          repository: Thanaporn-okn/OKN_DSP-apk
+          run-id: 36028455796
+
+      - name: Download pinned R177 corrected reconstruction evidence
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          artifact-ids: "10864507451"
+          path: /tmp/master/r177
+          merge-multiple: true
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          repository: Thanaporn-okn/OKN_DSP-apk
+          run-id: 36137304534
+
+      - name: Download pinned R180 Hashtable evidence
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          artifact-ids: "10904556426"
+          path: /tmp/master/r180
+          merge-multiple: true
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          repository: Thanaporn-okn/OKN_DSP-apk
+          run-id: 36237713587
+
+      - name: Download pinned R186 raw-dispatch replay evidence
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          artifact-ids: "10922047452"
+          path: /tmp/master/r186
+          merge-multiple: true
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          repository: Thanaporn-okn/OKN_DSP-apk
+          run-id: 36290595714
+
+      - name: Run master static audit
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PYCODE'
+          from pathlib import Path
+          import hashlib, io, json, re, zipfile
+
+          BASE = Path("/tmp/master")
+          OUT = BASE / "evidence"
+          OUT.mkdir(parents=True, exist_ok=True)
+
+          def find_one(folder, name):
+              hits = list((BASE / folder).rglob(name))
+              assert len(hits) == 1, (folder, name, [str(x) for x in hits])
+              return hits[0]
+
+          def open_inner(folder, name, expected_sha):
+              p = find_one(folder, name)
+              data = p.read_bytes()
+              got = hashlib.sha256(data).hexdigest()
+              assert got == expected_sha, (name, got, expected_sha)
+              side = p.with_name(p.name + ".sha256")
+              if side.exists():
+                  assert side.read_text().split()[0] == expected_sha
+              return zipfile.ZipFile(io.BytesIO(data))
+
+          r157 = open_inner(
+              "r157",
+              "R157_N9_LOCAL29_LOCAL81_NONNULL_LOCAL93_LOOP_BRANCH_EVIDENCE.zip",
+              "f974c64c63eea5f2b940c76101f4ab6e769803f5630a2d87d21d08679c321609",
+          )
+          r177 = open_inner(
+              "r177",
+              "R177_N9_POST_XOR_LOCAL47_CORRECTED_RECONSTRUCTION_EVIDENCE.zip",
+              "6035e432d417e9414878d83388cb366782e385f731190bf4733293072c8f4b61",
+          )
+          r180 = open_inner(
+              "r180",
+              "R180_N9_HASHTABLE_CAPACITY_CONTRADICTION_STATIC_EVIDENCE.zip",
+              "2ea23e9031649497636ab4e07b1465ffca7cb02ff4d73ff8dfaaff3abcf13228",
+          )
+          r186 = open_inner(
+              "r186",
+              "R186_N9_FIRST7_RAW_DISPATCH_REPLAY_STATIC_EVIDENCE.zip",
+              "a36362b884062e43e3a24e6a7cbeba157737c19eb9868e54898ff3483b78cb54",
+          )
+
+          d177 = json.loads(r177.read("R177_DECISION.json"))
+          d180 = json.loads(r180.read("R180_DECISION.json"))
+          d186 = json.loads(r186.read("R186_DECISION.json"))
+
+          assert d177["revision"] == "R177"
+          assert d180["revision"] == "R180"
+          assert d186["revision"] == "R186"
+          assert d177["FLASH_ALLOWED"] is False
+          assert d180["FLASH_ALLOWED"] is False
+          assert d186["FLASH_ALLOWED"] is False
+
+          prefix = (
+              "r156/r155/r154/r153/r152/r151/r150/r149/r148/r147/"
+              "r146/r145/r144/r143/"
+          )
+          raw = r157.read(prefix + "R143_N9_METHOD.il")
+          full = r157.read(prefix + "r142/r141/r140/R140_FIXED_FULL.il")
+
+          RAW_SHA = hashlib.sha256(raw).hexdigest()
+          FULL_SHA = hashlib.sha256(full).hexdigest()
+          assert RAW_SHA == "5a3964c1f4bd8db455e6882a4ce6f90667e1a9abc6e1fafd10440b31006e4a33"
+          assert FULL_SHA == "aa1d369c8be7ee8d7b358fc5b0f6b0874f46711a9249fee70f413b900d234c66"
+
+          text = raw.decode(errors="replace")
+          fulltext = full.decode(errors="replace")
+
+          state565_value = d186["STATE565_INT32_REPRODUCED"]
+          state565_capacity = state565_value + 1
+          known_contradiction = (
+              state565_value == 1921932524
+              and state565_capacity == 1921932525
+              and d180["RAWSIZE_GT_INT32_MAX"] is True
+              and d180["STATE565_CONSTRUCTOR_COMPLETES"] is False
+          )
+          assert known_contradiction
+
+          rows = []
+          for line in text.splitlines():
+              m = re.match(
+                  r"\s*(IL_[0-9a-fA-F]+):\s+(\S+)(?:\s+(.*))?$",
+                  line
+              )
+              if m:
+                  rows.append((
+                      m.group(1),
+                      m.group(2),
+                      (m.group(3) or "").split(" //", 1)[0].strip()
+                  ))
+          pos = {lab:i for i,(lab,_,_) in enumerate(rows)}
+
+          sm = re.search(r"IL_0012:\s+switch \((.*?)\)\n", text, re.S)
+          assert sm, "dispatcher switch not found"
+          targets = [x.strip() for x in sm.group(1).split(",")]
+          assert len(targets) == 689
+
+          tpos = sorted((pos[lab], st, lab) for st,lab in enumerate(targets))
+          blocks = {}
+          for i,(p0,st,lab) in enumerate(tpos):
+              p1 = tpos[i+1][0] if i+1 < len(tpos) else len(rows)
+              blocks[st] = rows[p0:p1]
+
+          def ops(st):
+              return [(op,arg) for _,op,arg in blocks[st]]
+
+          expected_labels = {
+              94:"IL_51f2", 96:"IL_658f", 110:"IL_554f", 162:"IL_129d",
+              179:"IL_4952", 206:"IL_2687", 444:"IL_44aa", 464:"IL_3d59",
+              487:"IL_3c66", 510:"IL_2955", 655:"IL_1265", 667:"IL_6710",
+          }
+          for st,lab in expected_labels.items():
+              assert targets[st] == lab, (st, targets[st], lab)
+
+          state96_alias = ops(96)[:2] == [
+              ("ldloc.s","37"),
+              ("stloc.s","29"),
+          ]
+          local81_alias = ops(510)[:3] == [
+              ("ldloc.s","29"),
+              ("dup",""),
+              ("stloc.s","81"),
+          ]
+          pointer_capture = ops(444)[:5] == [
+              ("ldloc.s","81"),
+              ("ldc.i4.0",""),
+              ("ldelema","[mscorlib]System.Byte"),
+              ("conv.u",""),
+              ("stloc.s","50"),
+          ]
+          pointer_write_prefix = ops(179)[:13] == [
+              ("ldloc.s","50"),
+              ("ldloc.s","93"),
+              ("ldc.i4.8",""),
+              ("mul",""),
+              ("add",""),
+              ("conv.u",""),
+              ("dup",""),
+              ("ldind.i8",""),
+              ("ldc.i4","939576589"),
+              ("conv.i8",""),
+              ("xor",""),
+              ("stind.i8",""),
+              ("ldc.i4","38"),
+          ]
+          assert state96_alias and local81_alias and pointer_capture and pointer_write_prefix
+
+          lm = re.search(r"\.locals\s+init\s*\((.*?)\)\s*\n", text, re.S)
+          locals_blob = lm.group(1) if lm else ""
+          local_decl_all = {}
+
+          for raw_line in locals_blob.splitlines():
+              line = raw_line.strip().rstrip(",").strip()
+              if not line:
+                  continue
+
+              # ILSpy / ildasm-like: "native int V_50"
+              m = re.search(r"(.+?)\s+V_(\d+)\s*$", line)
+              if m:
+                  local_decl_all[int(m.group(2))] = m.group(1).strip()
+                  continue
+
+              # Alternate explicit-index form: "[50] native int"
+              m = re.search(r"\[(\d+)\]\s+(.+)$", line)
+              if m:
+                  local_decl_all[int(m.group(1))] = m.group(2).strip()
+
+          local_decl = {
+              str(idx): local_decl_all.get(idx)
+              for idx in (29,37,50,81,93,114)
+          }
+          selected_parse_complete = all(
+              local_decl[str(idx)] is not None
+              for idx in (29,37,50,81,93)
+          )
+          pinned_mentions = [
+              line.strip()
+              for line in locals_blob.splitlines()
+              if re.search(r"\bpinned\b", line, re.I)
+          ]
+          local50_pinned = bool(
+              local_decl["50"] and re.search(r"\bpinned\b", local_decl["50"], re.I)
+          )
+          local81_pinned = bool(
+              local_decl["81"] and re.search(r"\bpinned\b", local_decl["81"], re.I)
+          )
+          any_pinned = bool(pinned_mentions)
+
+          (OUT / "MASTER_N9_LOCALS.txt").write_text(locals_blob + "\n")
+
+          route_states = [96,206,510,655,444,487,162,667,179,110,464,94]
+          calls = []
+          local50_stores = []
+          for st in route_states:
+              for lab,op,arg in blocks[st]:
+                  if op in ("call", "callvirt"):
+                      calls.append({"state":st,"label":lab,"op":op,"target":arg})
+                  if op in ("stloc","stloc.s") and arg == "50":
+                      local50_stores.append({"state":st,"label":lab})
+
+          call_after_write_in_state179 = any(
+              op in ("call","callvirt")
+              for _,op,_ in blocks[179][13:]
+          )
+          local50_recaptured_per_iteration = len(local50_stores) > 1
+          explicit_pinning_proven = (
+              selected_parse_complete
+              and (local50_pinned or local81_pinned)
+          )
+
+          # Fail closed: conv.u produces a native pointer value, not a managed
+          # byref tracked by the GC for this proof. A managed call appears after
+          # the lane write. Without explicit pinning or per-iteration recapture,
+          # the IL alone does not prove address stability across the whole loop.
+          pointer_survives_calls_proven = (
+              explicit_pinning_proven
+              or (not call_after_write_in_state179)
+              or local50_recaptured_per_iteration
+          )
+
+          mask_i32 = 939576589
+          mask_u64 = mask_i32 & ((1 << 64) - 1)
+          mask_hex = f"0x{mask_u64:016X}"
+          assert mask_hex == "0x000000003800CD0D"
+
+          length = 607967
+          iterations = length // 8
+          covered = iterations * 8
+          remainder = length - covered
+          assert iterations == 75995
+          assert remainder == 7
+
+          local29 = r177.read("R177_CORRECTED_LOCAL29_STATE94.bin")
+          assert len(local29) == length
+          local29_sha = hashlib.sha256(local29).hexdigest()
+          assert local29_sha == \
+              "9f8c10e6443399bebcc35d670d6185f99698d5bce51eb2af1325c9e8602acbe1"
+
+          try_depth = 0
+          handler_depth = 0
+          coverage = {}
+          for line in text.splitlines():
+              s = line.strip()
+              if s == ".try":
+                  try_depth += 1
+              if s.startswith("catch ") or s == "finally" or s.startswith("filter"):
+                  handler_depth += 1
+              m = re.match(r"(IL_[0-9a-fA-F]+):", s)
+              if m:
+                  coverage[m.group(1)] = (try_depth, handler_depth)
+              if "// end .try" in s:
+                  try_depth -= 1
+              if "// end handler" in s:
+                  handler_depth -= 1
+
+          state565_outside_eh = (
+              coverage.get("IL_5b26") == (0,0)
+              and coverage.get("IL_5b2f") == (0,0)
+          )
+
+          end_marker = "} // end of method '<Module>'::.cctor"
+          end = fulltext.find(end_marker)
+          assert end >= 0
+          start = fulltext.rfind("\n\t.method ", 0, end)
+          assert start >= 0
+          module_cctor = fulltext[start:end+len(end_marker)]
+
+          module_cctor_has_eh = (
+              ".try" in module_cctor
+              or "catch " in module_cctor
+              or "\n\t\tfinally" in module_cctor
+              or "\n\t\tfilter" in module_cctor
+          )
+          module_first_is_n9 = bool(re.search(
+              r"IL_0000:\s+call void .*::N9jju8llVi\(\)",
+              module_cctor
+          ))
+
+          pointer_model_runtime_safe = (
+              state96_alias
+              and local81_alias
+              and pointer_capture
+              and pointer_write_prefix
+              and pointer_survives_calls_proven
+          )
+
+          if pointer_model_runtime_safe:
+              pointer_result = (
+                  "Pointer route is structurally proven and explicit lifetime "
+                  "safety is not contradicted by this audit. The remaining "
+                  "state565 contradiction must be localized elsewhere."
+              )
+              next_target = (
+                  "Re-audit local37 production/state46 transform and exact "
+                  "resource-to-state94 data semantics; keep USB/flash disabled."
+              )
+          else:
+              pointer_result = (
+                  "The old R167/R177 byte model is NOT runtime-safe enough to "
+                  "treat as production truth: local50 is a native pointer derived "
+                  "from a managed byte[] element address, then reused across a "
+                  "managed call without explicit pinning or per-iteration recapture "
+                  "proven by the IL."
+              )
+              next_target = (
+                  "Retire the stale local50 byte model and resolve runtime/JIT "
+                  "pointer behavior or recover protected HID/update logic by another "
+                  "static route. Do not send discovered frames to the board."
+              )
+
+          decision = {
+              "revision": "MASTER_R188_PLUS",
+              "mode": "OFFLINE_STATIC_ALL_IN_ONE",
+              "n9_sha256": RAW_SHA,
+              "full_il_sha256": FULL_SHA,
+              "known_state565_value": state565_value,
+              "known_state565_capacity": state565_capacity,
+              "known_hashtable_overflow_contradiction": known_contradiction,
+              "state565_outside_n9_eh": state565_outside_eh,
+              "module_cctor_first_call_is_n9": module_first_is_n9,
+              "module_cctor_has_eh": module_cctor_has_eh,
+              "state96_local37_to_local29_alias_proven": state96_alias,
+              "state510_local29_to_local81_alias_proven": local81_alias,
+              "state444_ldelema_conv_u_local50_capture_proven": pointer_capture,
+              "state179_ldind_i8_xor_stind_i8_proven": pointer_write_prefix,
+              "locals": local_decl,
+              "selected_local_declarations_parse_complete": selected_parse_complete,
+              "pinned_local_declarations_found": pinned_mentions,
+              "any_pinned_local_text_seen": any_pinned,
+              "local50_explicitly_pinned": local50_pinned,
+              "local81_explicitly_pinned": local81_pinned,
+              "local50_store_sites": local50_stores,
+              "local50_recaptured_per_iteration": local50_recaptured_per_iteration,
+              "state179_has_managed_call_after_write": call_after_write_in_state179,
+              "route_calls": calls,
+              "pointer_survives_calls_proven": pointer_survives_calls_proven,
+              "xor_mask_i32": mask_i32,
+              "xor_mask_u64_hex": mask_hex,
+              "xor_lane_width_bytes": 8,
+              "xor_iteration_count": iterations,
+              "xor_bytes_covered": covered,
+              "xor_remainder_bytes": remainder,
+              "r177_local29_sha256": local29_sha,
+              "r177_local29_retained_as_production_truth": pointer_model_runtime_safe,
+              "pointer_model_runtime_safe_proven": pointer_model_runtime_safe,
+              "pointer_result": pointer_result,
+              "next_target": next_target,
+              "PRODUCTION_BOOTSTRAP_BRIDGE_PROVEN": False,
+              "PRODUCTION_RECOVERY_USB_IDENTITY_PROVEN": False,
+              "SAFE_READ_ONLY_STOCK_BACKUP_PROVEN": False,
+              "ANY_DISCOVERED_FRAME_AUTHORIZED_FOR_BOARD": False,
+              "USB_OR_BOARD_CONTACTED": False,
+              "FLASH_ALLOWED": False,
+          }
+
+          (OUT / "MASTER_DECISION.json").write_text(
+              json.dumps(decision, indent=2, ensure_ascii=False) + "\n"
+          )
+
+          critical = {
+              str(st): blocks[st]
+              for st in (94,96,110,162,179,206,444,464,487,510,655,667)
+          }
+          (OUT / "MASTER_CRITICAL_BLOCKS.json").write_text(
+              json.dumps(critical, indent=2) + "\n"
+          )
+
+          report = [
+              "# OKN BP1048P4 Reverse Master — All In One",
+              "",
+              "Offline static analysis only",
+              f"state565={state565_value}",
+              f"Hashtable capacity={state565_capacity}",
+              f"pointer model runtime-safe proven={pointer_model_runtime_safe}",
+              f"XOR mask={mask_hex}",
+              f"iterations={iterations}",
+              "",
+              pointer_result,
+              "",
+              "NEXT: " + next_target,
+              "",
+              "FLASH_ALLOWED=NO",
+          ]
+          (OUT / "MASTER_REPORT_TH.md").write_text("\n".join(report) + "\n")
+          print(json.dumps(decision, indent=2, ensure_ascii=False))
+          PYCODE
+
+      - name: Publish decision to GitHub Job Summary
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PYCODE'
+          from pathlib import Path
+          import json
+
+          d = json.loads(
+              Path("/tmp/master/evidence/MASTER_DECISION.json").read_text()
+          )
+
+          lines = [
+              "# OKN BP1048P4 Reverse Master V2",
+              "",
+              "## Result",
+              f"- known state565 contradiction: `{d['known_hashtable_overflow_contradiction']}`",
+              f"- local declarations parsed completely: `{d['selected_local_declarations_parse_complete']}`",
+              f"- local50 explicitly pinned: `{d['local50_explicitly_pinned']}`",
+              f"- local81 explicitly pinned: `{d['local81_explicitly_pinned']}`",
+              f"- managed call after lane write: `{d['state179_has_managed_call_after_write']}`",
+              f"- local50 recaptured per iteration: `{d['local50_recaptured_per_iteration']}`",
+              f"- pointer survives calls proven: `{d['pointer_survives_calls_proven']}`",
+              f"- old R177 byte model retained as production truth: `{d['r177_local29_retained_as_production_truth']}`",
+              f"- XOR mask: `{d['xor_mask_u64_hex']}`",
+              f"- iterations: `{d['xor_iteration_count']}`",
+              "",
+              "## Interpretation",
+              d["pointer_result"],
+              "",
+              "## Next",
+              d["next_target"],
+              "",
+              "**FLASH_ALLOWED=NO**",
+          ]
+
+          Path("/tmp/master/JOB_SUMMARY.md").write_text(
+              "\n".join(lines) + "\n"
+          )
+          PYCODE
+          cat /tmp/master/JOB_SUMMARY.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Package master evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /tmp/master/evidence
+          zip -9 -r /tmp/OKN_BP1048P4_REVERSE_MASTER_EVIDENCE.zip . >/dev/null
+          sha256sum /tmp/OKN_BP1048P4_REVERSE_MASTER_EVIDENCE.zip \
+            > /tmp/OKN_BP1048P4_REVERSE_MASTER_EVIDENCE.zip.sha256
+
+      - name: Upload master evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: OKN-BP1048P4-REVERSE-MASTER-EVIDENCE
+          path: |
+            /tmp/OKN_BP1048P4_REVERSE_MASTER_EVIDENCE.zip
+            /tmp/OKN_BP1048P4_REVERSE_MASTER_EVIDENCE.zip.sha256
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Final fail-closed gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$FLASH_ALLOWED" = "NO"
+          grep -F '"known_hashtable_overflow_contradiction": true' \
+            /tmp/master/evidence/MASTER_DECISION.json
+          grep -F '"USB_OR_BOARD_CONTACTED": false' \
+            /tmp/master/evidence/MASTER_DECISION.json
+          grep -F '"FLASH_ALLOWED": false' \
+            /tmp/master/evidence/MASTER_DECISION.json
+          echo MASTER_ALL_IN_ONE_COMPLETE=YES
+          echo FLASH_ALLOWED=NO
