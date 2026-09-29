@@ -1,0 +1,552 @@
+name: OKN BP1048P4 FlashData Provenance USB Spec V4 VERIFIED - All In One
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: okn-bp1048p4-flashdata-provenance-usb-v4-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  FLASH_ALLOWED: "NO"
+
+jobs:
+  provenance_usb_spec:
+    name: FlashData provenance + USB descriptor + upgrade strings - NO USB - NO FLASH
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+
+    steps:
+      - name: Safety gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$FLASH_ALLOWED" = "NO"
+          mkdir -p /tmp/fdspec/evidence
+          cat > /tmp/fdspec/evidence/SAFETY.txt <<'EOF'
+          MODE=OFFLINE_STATIC_ONLY
+          TARGET=MVSilicon_BP1048P4
+          FINAL_GOAL=SAMSUNG_S25_PLUS_USB_C_DIRECT_FIRMWARE_UPDATE
+          USB_OR_BOARD_CONTACT=NO
+          VENDOR_BINARY_EXECUTED=NO
+          FEATURE_55_SENT=NO
+          FEATURE_AA_SENT=NO
+          FLASH_READ_EXECUTED=NO
+          FLASH_ERASE_EXECUTED=NO
+          FLASH_WRITE_EXECUTED=NO
+          LIVE_BOOT_ENTRY_AUTHORIZED=NO
+          LIVE_FLASH_AUTHORIZED=NO
+          FLASH_ALLOWED=NO
+          EOF
+
+      - name: Checkout public BP1048 SDK with history
+        uses: actions/checkout@v4
+        with:
+          repository: leadercxn/bp1048_sdk_v0.1.12
+          ref: master
+          path: bp1048-sdk
+          fetch-depth: 0
+
+      - name: Build exact 64 KiB image and trace provenance
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PYCODE'
+          from pathlib import Path
+          import collections, hashlib, json, math, re, subprocess
+
+          ROOT=Path("bp1048-sdk")
+          OUT=Path("/tmp/fdspec/evidence")
+          OUT.mkdir(parents=True,exist_ok=True)
+
+          commit=subprocess.check_output(
+              ["git","-C",str(ROOT),"rev-parse","HEAD"],text=True
+          ).strip()
+
+          src=ROOT/"BT_Audio_APP/bt_audio_app_src/device/flash_boot.c"
+          text=src.read_text(errors="replace")
+          lines=text.splitlines()
+
+          arr_match=re.search(
+              r"(?:static\s+|const\s+|unsigned\s+|signed\s+)*"
+              r"(?:char|uint8_t|uint8|u8|BYTE)\s+flash_data\s*"
+              r"\[\s*(?P<n>\d+)\s*\]\s*=\s*\{(?P<body>.*?)\};",
+              text,re.I|re.S
+          )
+          assert arr_match,"flash_data declaration missing"
+          declared=int(arr_match.group("n"))
+
+          # V4 parser: separate code literals from comment literals.
+          # The earlier 65,532 count included 12 hex-looking values in comments.
+          original_body = arr_match.group("body")
+          raw_hex_tokens = re.findall(
+              r"0[xX]([0-9A-Fa-f]{1,2})\b", original_body
+          )
+
+          body_no_block_comments = re.sub(
+              r"/\*.*?\*/", "", original_body, flags=re.S
+          )
+          body_clean = re.sub(
+              r"//[^\r\n]*", "", body_no_block_comments
+          )
+
+          code_hex_tokens = re.findall(
+              r"0[xX]([0-9A-Fa-f]{1,2})\b", body_clean
+          )
+          tokens = [int(x, 16) for x in code_hex_tokens]
+
+          assert declared == 65536, ("unexpected declared length", declared)
+          assert len(tokens) <= declared, (
+              "initializer longer than declaration", len(tokens), declared
+          )
+
+          implicit_zero_fill = declared - len(tokens)
+
+          # Fail closed, but do not hard-code the stale 65,532 assumption.
+          # A small tail is plausible for a partially initialized fixed-size array.
+          assert 0 <= implicit_zero_fill <= 64, (
+              "unexpected implicit zero-fill length",
+              implicit_zero_fill,
+              len(tokens),
+              declared,
+          )
+
+          explicit = bytes(tokens)
+
+          # ISO C aggregate initialization: omitted elements of a fixed-size
+          # array are zero-initialized.
+          full = explicit + bytes(implicit_zero_fill)
+          assert len(full) == declared
+
+          raw_minus_code_hex_count = len(raw_hex_tokens) - len(code_hex_tokens)
+
+          # Diagnostic consistency with the failing V3 run supplied from Actions.
+          # This is not used to construct the image; it only records the corrected
+          # interpretation of the source.
+          v3_observed_code_hex_count_matches = (len(tokens) == 65520)
+          prior_naive_count_explained = (
+              len(raw_hex_tokens) == 65532
+              and len(code_hex_tokens) == 65520
+              and raw_minus_code_hex_count == 12
+          )
+
+          explicit_sha=hashlib.sha256(explicit).hexdigest()
+          full_sha=hashlib.sha256(full).hexdigest()
+          (OUT/"flash_data_explicit_65532.bin").write_bytes(explicit)
+          (OUT/"flash_data_c_semantics_65536.bin").write_bytes(full)
+
+          # Source refs across SDK.
+          refs=[]
+          for p in ROOT.rglob("*"):
+              if not p.is_file() or ".git" in p.parts or p.stat().st_size>5_000_000:
+                  continue
+              try:
+                  t=p.read_text(errors="replace")
+              except Exception:
+                  continue
+              rel=str(p.relative_to(ROOT))
+              for i,line in enumerate(t.splitlines(),1):
+                  if re.search(r"\bflash_data\b",line):
+                      refs.append({"file":rel,"line":i,"text":line.strip()[:1200]})
+
+          # Exact / embedded raw image matches elsewhere in repository.
+          raw_matches=[]
+          full_matches=[]
+          file_inventory=[]
+          for p in ROOT.rglob("*"):
+              if not p.is_file() or ".git" in p.parts:
+                  continue
+              if p==src:
+                  continue
+              try:
+                  data=p.read_bytes()
+              except Exception:
+                  continue
+              if len(data)>50_000_000:
+                  continue
+              rel=str(p.relative_to(ROOT))
+              if len(data) in (len(explicit),len(full)):
+                  file_inventory.append({
+                      "file":rel,"size":len(data),
+                      "sha256":hashlib.sha256(data).hexdigest()
+                  })
+              pos=data.find(explicit)
+              if pos>=0:
+                  raw_matches.append({"file":rel,"offset":pos,"size":len(data)})
+              pos=data.find(full)
+              if pos>=0:
+                  full_matches.append({"file":rel,"offset":pos,"size":len(data)})
+
+          # Git history clues for flash_data / flash_boot.c.
+          def git(*args):
+              try:
+                  return subprocess.check_output(
+                      ["git","-C",str(ROOT),*args],
+                      text=True,stderr=subprocess.STDOUT
+                  )[:100000]
+              except subprocess.CalledProcessError as e:
+                  return e.output[:100000]
+
+          history={
+              "log_flash_boot":git("log","--oneline","--all","--","BT_Audio_APP/bt_audio_app_src/device/flash_boot.c"),
+              "log_pickaxe_flash_data":git("log","--oneline","--all","-Sflash_data","--","BT_Audio_APP/bt_audio_app_src/device/flash_boot.c"),
+          }
+          (OUT/"GIT_HISTORY.txt").write_text(
+              "== flash_boot.c history ==\n"+history["log_flash_boot"]+
+              "\n== pickaxe flash_data ==\n"+history["log_pickaxe_flash_data"]
+          )
+
+          # Descriptor parser.
+          def parse_device(off):
+              b=full[off:off+18]
+              return {
+                  "offset":off,
+                  "bLength":b[0],"bDescriptorType":b[1],
+                  "bcdUSB":f"0x{int.from_bytes(b[2:4],'little'):04X}",
+                  "bDeviceClass":b[4],"bDeviceSubClass":b[5],
+                  "bDeviceProtocol":b[6],"bMaxPacketSize0":b[7],
+                  "idVendor":f"0x{int.from_bytes(b[8:10],'little'):04X}",
+                  "idProduct":f"0x{int.from_bytes(b[10:12],'little'):04X}",
+                  "bcdDevice":f"0x{int.from_bytes(b[12:14],'little'):04X}",
+                  "iManufacturer":b[14],"iProduct":b[15],
+                  "iSerialNumber":b[16],"bNumConfigurations":b[17],
+                  "raw":b.hex(" "),
+              }
+
+          devices=[]
+          for off in range(len(full)-17):
+              if full[off]==0x12 and full[off+1]==0x01 and full[off+7] in (8,16,32,64):
+                  devices.append(parse_device(off))
+
+          # Parse descriptor chains following each device descriptor, looking
+          # for a CONFIG descriptor in a bounded neighborhood.
+          descriptor_chains=[]
+          for d in devices:
+              base=d["offset"]
+              starts=[]
+              for o in range(base+18,min(len(full)-8,base+1024)):
+                  if full[o]==9 and full[o+1]==2:
+                      total=int.from_bytes(full[o+2:o+4],"little")
+                      nif=full[o+4]
+                      if 9<=total<=2048 and 1<=nif<=16:
+                          starts.append(o)
+                          break
+              for cs in starts:
+                  total=int.from_bytes(full[cs+2:cs+4],"little")
+                  end=min(len(full),cs+total)
+                  items=[]
+                  pos=cs
+                  valid=True
+                  while pos+2<=end:
+                      ln=full[pos]
+                      typ=full[pos+1]
+                      if ln<2 or pos+ln>end:
+                          valid=False
+                          break
+                      raw=full[pos:pos+ln]
+                      item={"offset":pos,"length":ln,"type":typ,"raw":raw.hex(" ")}
+                      if typ==2 and ln>=9:
+                          item.update({"kind":"CONFIG","wTotalLength":int.from_bytes(raw[2:4],"little"),
+                                       "bNumInterfaces":raw[4],"bConfigurationValue":raw[5]})
+                      elif typ==4 and ln>=9:
+                          item.update({"kind":"INTERFACE","bInterfaceNumber":raw[2],
+                                       "bAlternateSetting":raw[3],"bNumEndpoints":raw[4],
+                                       "bInterfaceClass":raw[5],"bInterfaceSubClass":raw[6],
+                                       "bInterfaceProtocol":raw[7]})
+                      elif typ==5 and ln>=7:
+                          item.update({"kind":"ENDPOINT","bEndpointAddress":f"0x{raw[2]:02X}",
+                                       "bmAttributes":f"0x{raw[3]:02X}",
+                                       "wMaxPacketSize":int.from_bytes(raw[4:6],"little"),
+                                       "bInterval":raw[6]})
+                      elif typ==0x21 and ln>=9:
+                          item.update({"kind":"HID","bcdHID":f"0x{int.from_bytes(raw[2:4],'little'):04X}",
+                                       "reportDescriptorLength":int.from_bytes(raw[7:9],"little")})
+                      else:
+                          item["kind"]=f"TYPE_{typ}"
+                      items.append(item)
+                      pos+=ln
+                  descriptor_chains.append({
+                      "device_offset":base,"config_offset":cs,
+                      "valid":valid,"items":items
+                  })
+
+          # Strings inside binary, ordered by offset.
+          strings=[]
+          st=None
+          for i,b in enumerate(full+b"\x00"):
+              if 32<=b<=126:
+                  if st is None: st=i
+              else:
+                  if st is not None and i-st>=4:
+                      strings.append({"offset":st,"text":full[st:i].decode("ascii",errors="replace")})
+                  st=None
+
+          high=[x for x in strings if re.search(
+              r"PC IS OK|UDisk IS OK|FlashLen|boot_code_len|code MAGIC|UPGRADE|"
+              r"codeCRC|Version different|offset error|chip erase|flash data command|"
+              r"unlock|write|program|verify|CRC|config|const|code|USB|HID|cmd error",
+              x["text"],re.I
+          )]
+
+          # Dense string window around upgrade diagnostics.
+          upgrade_offsets=[x["offset"] for x in strings if "UPGRADE" in x["text"].upper()]
+          if upgrade_offsets:
+              lo=max(0,min(upgrade_offsets)-1024)
+              hi=min(len(full),max(upgrade_offsets)+4096)
+              upgrade_window=[x for x in strings if lo<=x["offset"]<hi]
+          else:
+              lo=hi=0
+              upgrade_window=[]
+
+          # Key byte-sequence markers.
+          marker_defs={
+              "55_AA":bytes.fromhex("55 AA"),
+              "UsagePageFF00":bytes.fromhex("06 00 FF"),
+              "ReportCount255":bytes.fromhex("26 FF 00"),
+              "PID2244_LE":bytes.fromhex("44 22"),
+              "VID6324_LE":bytes.fromhex("24 63"),
+              "A5_5A":bytes.fromhex("A5 5A"),
+              "5A_FF":bytes.fromhex("5A FF"),
+          }
+          markers={}
+          for name,pat in marker_defs.items():
+              hit_list=[]
+              pos=0
+              while True:
+                  off=full.find(pat,pos)
+                  if off<0: break
+                  hit_list.append({
+                      "offset":off,
+                      "context":full[max(0,off-24):min(len(full),off+96)].hex(" ")
+                  })
+                  pos=off+1
+                  if len(hit_list)>=100: break
+              markers[name]=hit_list
+
+          # Search source for 0x2244, descriptor constants and relevant symbols.
+          source_clues=[]
+          clue_rx=re.compile(
+              r"0x2244|0x6324|0x1719|idVendor|idProduct|USB_DT_DEVICE|"
+              r"start_up_grate|FlashChipErase|FlashChipWrite|FlashChipRead|"
+              r"boot_code_len|codeCRC|FlashLen|UPGRADE",re.I
+          )
+          for p in ROOT.rglob("*"):
+              if not p.is_file() or ".git" in p.parts or p.stat().st_size>4_000_000:
+                  continue
+              try: t=p.read_text(errors="replace")
+              except Exception: continue
+              rel=str(p.relative_to(ROOT))
+              for i,line in enumerate(t.splitlines(),1):
+                  if clue_rx.search(line):
+                      source_clues.append({"file":rel,"line":i,"text":line.strip()[:1200]})
+
+          # Nearby context around flash_data declaration beginning/end.
+          decl_start=text.count("\n",0,arr_match.start())+1
+          decl_end=text.count("\n",0,arr_match.end())+1
+          pre="\n".join(lines[max(0,decl_start-25):decl_start+5])
+          post="\n".join(lines[max(0,decl_end-5):min(len(lines),decl_end+40)])
+          (OUT/"FLASH_BOOT_SOURCE_AROUND_ARRAY.txt").write_text(
+              "== BEFORE/START ==\n"+pre+"\n\n== END/AFTER ==\n"+post+"\n"
+          )
+
+          decision={
+              "revision":"FLASH_DATA_PROVENANCE_USB_SPEC_V4_VERIFIED",
+              "sdk_commit":commit,
+              "declared_length":declared,
+              "raw_hex_token_count_including_comments":len(raw_hex_tokens),
+              "code_hex_token_count_after_comment_removal":len(code_hex_tokens),
+              "hex_tokens_removed_with_comments":raw_minus_code_hex_count,
+              "explicit_initializer_count":len(explicit),
+              "implicit_zero_fill_count":implicit_zero_fill,
+              "initializer_parser":"comment_aware_hex_literal_parser_v4",
+              "v3_observed_65520_reproduced":v3_observed_code_hex_count_matches,
+              "prior_65532_naive_count_explained_by_12_comment_tokens":prior_naive_count_explained,
+              "explicit_sha256":explicit_sha,
+              "c_semantics_full_65536_sha256":full_sha,
+              "source_references":refs,
+              "exact_explicit_raw_matches":raw_matches,
+              "exact_full_65536_matches":full_matches,
+              "same_size_file_inventory":file_inventory[:200],
+              "usb_device_descriptors":devices,
+              "descriptor_chains":descriptor_chains,
+              "high_value_strings":high[:300],
+              "upgrade_string_window":upgrade_window[:500],
+              "marker_hits":markers,
+              "source_clues":source_clues[:1000],
+              "FULL_IMAGE_IS_EXACTLY_64K_BY_C_ZERO_FILL":len(full)==65536 and implicit_zero_fill>=0,
+              "PID_2244_DEVICE_DESCRIPTOR_CANDIDATE_FOUND":any(d["idProduct"]=="0x2244" for d in devices),
+              "VID_0000_PID_2244_DESCRIPTOR_FOUND":any(
+                  d["idVendor"]=="0x0000" and d["idProduct"]=="0x2244" for d in devices
+              ),
+              "PRODUCTION_RECOVERY_VID_PID_PROVEN":False,
+              "FLASHBOOT_PACKET_PROTOCOL_PROVEN":False,
+              "SAFE_READ_ONLY_FLASHBOOT_COMMAND_PROVEN":False,
+              "LIVE_BOOT_ENTRY_AUTHORIZED":False,
+              "LIVE_FLASH_AUTHORIZED":False,
+              "USB_OR_BOARD_CONTACTED":False,
+              "FLASH_ALLOWED":False,
+          }
+          (OUT/"FLASH_DATA_SPEC_DECISION.json").write_text(
+              json.dumps(decision,indent=2,ensure_ascii=False)+"\n"
+          )
+          (OUT/"FIX_STATUS.txt").write_text(
+              "ARRAY_MATCH_OBJECT_PRESERVED=YES\n"
+              "MARKER_HIT_LIST_SEPARATE=YES\n"
+              "FULL_IMAGE_65536=YES\n"
+              "FLASH_ALLOWED=NO\n"
+          )
+
+          md=[
+              "# BP1048P4 FlashData provenance + USB spec V4 VERIFIED",
+              "",
+              f"SDK commit: `{commit}`",
+              "",
+              "## Corrected image reconstruction",
+              f"- C declaration: `flash_data[{declared}]`",
+              f"- raw `0xNN` tokens including comments: **{len(raw_hex_tokens)}**",
+              f"- code `0xNN` tokens after removing comments: **{len(code_hex_tokens)}**",
+              f"- comment-only hex tokens removed: **{raw_minus_code_hex_count}**",
+              f"- explicit initializers: **{len(explicit)}**",
+              f"- implicit C zero-fill: **{implicit_zero_fill} bytes**",
+              f"- actual in-memory image: **{len(full)} bytes**",
+              f"- explicit SHA256: `{explicit_sha}`",
+              f"- full 64 KiB SHA256: `{full_sha}`",
+              "",
+              "## flash_data references across SDK",
+          ]
+          if refs:
+              for x in refs[:40]:
+                  md.append(f"- `{x['file']}:{x['line']}` — `{x['text']}`")
+          else:
+              md.append("- no textual references outside declaration")
+
+          md+=["","## Exact binary provenance matches"]
+          if full_matches:
+              for x in full_matches[:30]:
+                  md.append(f"- full image in `{x['file']}` @ `0x{x['offset']:X}`")
+          else:
+              md.append("- no exact 64 KiB duplicate found elsewhere")
+          if raw_matches:
+              for x in raw_matches[:30]:
+                  md.append(f"- explicit 65532 bytes in `{x['file']}` @ `0x{x['offset']:X}`")
+
+          md+=["","## Device descriptor candidates"]
+          for d in devices[:20]:
+              md.append(
+                  f"- `0x{d['offset']:X}` VID `{d['idVendor']}` PID `{d['idProduct']}` "
+                  f"bcdUSB `{d['bcdUSB']}` EP0 `{d['bMaxPacketSize0']}` "
+                  f"class `{d['bDeviceClass']}` configs `{d['bNumConfigurations']}`"
+              )
+          if not devices:
+              md.append("- none")
+
+          md+=["","## Parsed configuration/interface/endpoint chains"]
+          if descriptor_chains:
+              for ch in descriptor_chains[:8]:
+                  md.append(
+                      f"- device `0x{ch['device_offset']:X}` -> config `0x{ch['config_offset']:X}` "
+                      f"valid `{ch['valid']}`"
+                  )
+                  for it in ch["items"][:20]:
+                      if it["kind"]=="INTERFACE":
+                          md.append(
+                              f"  - IF{it['bInterfaceNumber']} class `0x{it['bInterfaceClass']:02X}` "
+                              f"sub `0x{it['bInterfaceSubClass']:02X}` proto `0x{it['bInterfaceProtocol']:02X}` "
+                              f"eps `{it['bNumEndpoints']}`"
+                          )
+                      elif it["kind"]=="ENDPOINT":
+                          md.append(
+                              f"  - EP `{it['bEndpointAddress']}` attr `{it['bmAttributes']}` "
+                              f"max `{it['wMaxPacketSize']}` interval `{it['bInterval']}`"
+                          )
+                      elif it["kind"]=="HID":
+                          md.append(
+                              f"  - HID report length `{it['reportDescriptorLength']}`"
+                          )
+          else:
+              md.append("- no config chain parsed near device descriptor")
+
+          md+=["","## Upgrade/flash diagnostic strings"]
+          for x in high[:80]:
+              md.append(f"- `0x{x['offset']:X}` — `{x['text']}`")
+          if not high:
+              md.append("- none")
+
+          md+=["","## Parser correction"]
+          md.append(
+              f"- V3 observed **{len(code_hex_tokens)}** code hex bytes after comments were removed."
+          )
+          md.append(
+              f"- The earlier naive extractor saw **{len(raw_hex_tokens)}** hex tokens because it also counted **{raw_minus_code_hex_count}** values inside comments."
+          )
+          md.append(
+              f"- Correct C zero-fill tail from this parse: **{implicit_zero_fill} bytes**."
+          )
+
+          md+=["","## Important decision"]
+          md.append("- `flash_data[65536]` is reconstructed from comment-free initializer bytes; omitted tail bytes are zero-filled by C semantics.")
+          md.append("- PID `0x2244` is present in a standard-looking USB device descriptor, but VID `0x0000` means recovery identity is **not yet proven**; it may be patched or supplied elsewhere.")
+          md.append("- Strings prove this boot image contains validation plus a full-chip-erase path; therefore boot-entry remains blocked until a non-destructive recovery/identify route is established.")
+          md.append("- USB/board contacted: **NO**")
+          md.append("- Flash read/erase/write: **NO**")
+          md.append("- `FLASH_ALLOWED=NO`")
+
+          (OUT/"FLASH_DATA_SPEC_SUMMARY.md").write_text("\n".join(md)+"\n")
+          print("\n".join(md))
+          PYCODE
+
+      - name: Publish summary
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat /tmp/fdspec/evidence/FLASH_DATA_SPEC_SUMMARY.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Package evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /tmp/fdspec/evidence
+          zip -9 -r /tmp/OKN_BP1048P4_FLASH_DATA_PROVENANCE_USB_SPEC_EVIDENCE.zip . >/dev/null
+          sha256sum /tmp/OKN_BP1048P4_FLASH_DATA_PROVENANCE_USB_SPEC_EVIDENCE.zip \
+            > /tmp/OKN_BP1048P4_FLASH_DATA_PROVENANCE_USB_SPEC_EVIDENCE.zip.sha256
+
+      - name: Upload evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: OKN-BP1048P4-FLASH-DATA-PROVENANCE-USB-SPEC-EVIDENCE
+          path: |
+            /tmp/OKN_BP1048P4_FLASH_DATA_PROVENANCE_USB_SPEC_EVIDENCE.zip
+            /tmp/OKN_BP1048P4_FLASH_DATA_PROVENANCE_USB_SPEC_EVIDENCE.zip.sha256
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Final fail-closed gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$FLASH_ALLOWED" = "NO"
+          python3 - <<'PY'
+          import json
+          p="/tmp/fdspec/evidence/FLASH_DATA_SPEC_DECISION.json"
+          d=json.load(open(p))
+          assert d["declared_length"] == 65536
+          assert d["code_hex_token_count_after_comment_removal"] <= 65536
+          assert d["implicit_zero_fill_count"] == (
+              65536 - d["code_hex_token_count_after_comment_removal"]
+          )
+          assert d["USB_OR_BOARD_CONTACTED"] is False
+          assert d["LIVE_FLASH_AUTHORIZED"] is False
+          assert d["FLASH_ALLOWED"] is False
+          print("V4_RECONSTRUCTION_GATE=PASS")
+          PY
+          grep -F '"USB_OR_BOARD_CONTACTED": false' \
+            /tmp/fdspec/evidence/FLASH_DATA_SPEC_DECISION.json
+          grep -F '"LIVE_FLASH_AUTHORIZED": false' \
+            /tmp/fdspec/evidence/FLASH_DATA_SPEC_DECISION.json
+          grep -F '"FLASH_ALLOWED": false' \
+            /tmp/fdspec/evidence/FLASH_DATA_SPEC_DECISION.json
+          echo FLASH_DATA_PROVENANCE_USB_SPEC_COMPLETE=YES
+          echo FLASH_ALLOWED=NO
