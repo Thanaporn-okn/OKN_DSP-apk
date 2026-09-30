@@ -1,0 +1,775 @@
+name: OKN BP1048P4 Flashboot String Helper Proof V9 - All In One
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: okn-bp1048p4-string-helper-proof-v9-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  FLASH_ALLOWED: "NO"
+
+jobs:
+  helper_proof:
+    name: Prove string helpers + actual command uses - NO USB - NO FLASH
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Safety gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$FLASH_ALLOWED" = "NO"
+          mkdir -p /tmp/v9/evidence
+          cat > /tmp/v9/evidence/SAFETY.txt <<'EOF'
+          MODE=OFFLINE_STATIC_STRING_HELPER_PROOF_ONLY
+          TARGET=MVSilicon_BP1048P4
+          USB_OR_BOARD_CONTACT=NO
+          TARGET_FIRMWARE_EXECUTED=NO
+          FEATURE_55_SENT=NO
+          FEATURE_AA_SENT=NO
+          FLASH_READ_EXECUTED=NO
+          FLASH_ERASE_EXECUTED=NO
+          FLASH_WRITE_EXECUTED=NO
+          LIVE_BOOT_ENTRY_AUTHORIZED=NO
+          LIVE_FLASH_AUTHORIZED=NO
+          FLASH_ALLOWED=NO
+          EOF
+
+      - name: Checkout public BP1048 SDK
+        uses: actions/checkout@v4
+        with:
+          repository: leadercxn/bp1048_sdk_v0.1.12
+          ref: master
+          path: bp1048-sdk
+          fetch-depth: 1
+
+      - name: Reconstruct exact image
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PYCODE'
+          from pathlib import Path
+          import hashlib,json,re,subprocess
+
+          ROOT=Path("bp1048-sdk")
+          OUT=Path("/tmp/v9/evidence")
+          src=ROOT/"BT_Audio_APP/bt_audio_app_src/device/flash_boot.c"
+          text=src.read_text(errors="replace")
+
+          m=re.search(
+              r"(?:static\s+|const\s+|unsigned\s+|signed\s+)*"
+              r"(?:char|uint8_t|uint8|u8|BYTE)\s+flash_data\s*"
+              r"\[\s*(?P<n>\d+)\s*\]\s*=\s*\{(?P<body>.*?)\};",
+              text,re.I|re.S
+          )
+          assert m, "flash_data not found"
+
+          body=re.sub(r"/\*.*?\*/","",m.group("body"),flags=re.S)
+          body=re.sub(r"//[^\r\n]*","",body)
+          vals=[int(x,16) for x in re.findall(
+              r"0[xX]([0-9A-Fa-f]{1,2})\b", body
+          )]
+
+          assert int(m.group("n")) == 65536
+          assert len(vals) == 65520
+
+          raw=bytes(vals)+bytes(65536-len(vals))
+          (OUT/"flash_data_65536.bin").write_bytes(raw)
+
+          meta={
+              "sdk_commit":subprocess.check_output(
+                  ["git","-C",str(ROOT),"rev-parse","HEAD"],text=True
+              ).strip(),
+              "sha256":hashlib.sha256(raw).hexdigest(),
+              "runtime_gp":0x20026CB0,
+              "runtime_base":0x2001A9A8,
+              "USB_OR_BOARD_CONTACTED":False,
+              "LIVE_FLASH_AUTHORIZED":False,
+              "FLASH_ALLOWED":False
+          }
+          (OUT/"META.json").write_text(json.dumps(meta,indent=2)+"\n")
+          PYCODE
+
+      - name: Build GNU NDS32 objdump
+        shell: bash
+        run: |
+          set -u
+          mkdir -p /tmp/v9/toolchain /tmp/v9/build
+          cd /tmp/v9/toolchain
+          URL="https://ftp.gnu.org/gnu/binutils/binutils-2.44.tar.xz"
+
+          if curl -fL --retry 3 --connect-timeout 20 "$URL" -o binutils-2.44.tar.xz; then
+            tar -xf binutils-2.44.tar.xz
+            cd /tmp/v9/build
+            if ../toolchain/binutils-2.44/configure \
+                --target=nds32le-elf \
+                --disable-nls --disable-werror --disable-gdb \
+                --disable-gprofng --disable-gas --disable-ld --disable-gold \
+                >/tmp/v9/evidence/NDS32_BUILD.log 2>&1 &&
+               make -j2 all-binutils >>/tmp/v9/evidence/NDS32_BUILD.log 2>&1; then
+              find /tmp/v9/build -type f -name '*objdump' -perm -111 -print \
+                > /tmp/v9/evidence/OBJDUMP_CANDIDATES.txt
+              echo BUILD_STATUS=SUCCESS > /tmp/v9/evidence/NDS32_BUILD_STATUS.txt
+            else
+              echo BUILD_STATUS=FAILED > /tmp/v9/evidence/NDS32_BUILD_STATUS.txt
+            fi
+          else
+            echo BUILD_STATUS=DOWNLOAD_FAILED > /tmp/v9/evidence/NDS32_BUILD_STATUS.txt
+          fi
+          exit 0
+
+      - name: Disassemble exact image
+        shell: bash
+        run: |
+          set -euo pipefail
+          OBJDUMP="$(find /tmp/v9/build -type f -name '*objdump' -perm -111 | head -1 || true)"
+          test -n "$OBJDUMP"
+
+          "$OBJDUMP" -D -b binary -m nds32 --adjust-vma=0 \
+            /tmp/v9/evidence/flash_data_65536.bin \
+            > /tmp/v9/evidence/NDS32_DISASSEMBLY.txt \
+            2>/tmp/v9/evidence/NDS32_DISASSEMBLY.stderr.txt
+
+      - name: Prove helper structure and trace actual command use
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PYCODE'
+          from pathlib import Path
+          import collections,json,re
+
+          OUT=Path("/tmp/v9/evidence")
+          raw=(OUT/"flash_data_65536.bin").read_bytes()
+          meta=json.loads((OUT/"META.json").read_text())
+          GP=meta["runtime_gp"]
+          BASE=meta["runtime_base"]
+
+          dlines=(OUT/"NDS32_DISASSEMBLY.txt").read_text(errors="replace").splitlines()
+
+          row_rx=re.compile(
+              r"^\s*([0-9A-Fa-f]+):\s+(?:[0-9A-Fa-f]{2,8}\s+)+(.+?)\s*$"
+          )
+          ins=[]
+          for line_no,line in enumerate(dlines,1):
+              m=row_rx.match(line)
+              if m:
+                  ins.append({
+                      "line":line_no,
+                      "addr":int(m.group(1),16),
+                      "text":m.group(2).strip(),
+                      "raw":line,
+                  })
+          by_addr={x["addr"]:i for i,x in enumerate(ins)}
+
+          def pint(s):
+              try:
+                  return int(s.strip().replace("#",""),0)
+              except Exception:
+                  return None
+
+          # Printable strings.
+          strings={}
+          st=None
+          for i,b in enumerate(raw+b"\x00"):
+              if 32<=b<=126:
+                  if st is None:
+                      st=i
+              else:
+                  if st is not None and i-st>=3:
+                      strings[st]=raw[st:i].decode("ascii",errors="replace")
+                  st=None
+
+          command_names=[
+              "chiperas","upinfo","btupdat","cnfgdat","constdat","codedata","cxxx"
+          ]
+          command_by_off={}
+          for name in command_names:
+              hits=[off for off,s in strings.items() if s==name]
+              assert len(hits)==1,(name,hits)
+              command_by_off[hits[0]]=name
+
+          # Core instruction regexes.
+          addigp_rx=re.compile(
+              r"\baddi\.gp\s+(\$[A-Za-z0-9]+)\s*,\s*#?"
+              r"(-?0x[0-9A-Fa-f]+|-?\d+)",re.I
+          )
+          movi_rx=re.compile(
+              r"\bmovi(?:55)?\s+(\$[A-Za-z0-9]+)\s*,\s*#?"
+              r"(-?0x[0-9A-Fa-f]+|-?\d+)",re.I
+          )
+          mov_rx=re.compile(
+              r"\b(?:mov55|mov|movi55)\s+"
+              r"(\$[A-Za-z0-9]+)\s*,\s*(\$[A-Za-z0-9]+)\b",re.I
+          )
+          addi_rx=re.compile(
+              r"\baddi\s+(\$[A-Za-z0-9]+)\s*,\s*(\$[A-Za-z0-9]+)\s*,\s*#?"
+              r"(-?0x[0-9A-Fa-f]+|-?\d+)",re.I
+          )
+          sethi_rx=re.compile(
+              r"\bsethi\s+(\$[A-Za-z0-9]+)\s*,\s*#?"
+              r"(-?0x[0-9A-Fa-f]+|-?\d+)",re.I
+          )
+          ori_rx=re.compile(
+              r"\bori\s+(\$[A-Za-z0-9]+)\s*,\s*(\$[A-Za-z0-9]+)\s*,\s*#?"
+              r"(-?0x[0-9A-Fa-f]+|-?\d+)",re.I
+          )
+          jal_rx=re.compile(r"\bjal\s+(?:0x)?([0-9A-Fa-f]+)\b",re.I)
+          ret_rx=re.compile(r"\b(ret|ret5|jr\s+\$lp|pop25)\b",re.I)
+
+          mem_rx=re.compile(
+              r"\b(?P<op>lbi|lbsi|lhi|lhsi|lwi|sbi|shi|swi)"
+              r"(?:\.[A-Za-z0-9]+)?\s+"
+              r"(?P<rt>\$[A-Za-z0-9]+)\s*,\s*"
+              r"\[(?P<base>\$[A-Za-z0-9]+)"
+              r"(?:\s*\+\s*#?(?P<off>-?0x[0-9A-Fa-f]+|-?\d+))?\]",
+              re.I
+          )
+          branch_target_rx=re.compile(
+              r"\b(beq|bne|beqz|bnez|bgez|bltz|bgtz|blez|j)\b.*?"
+              r"(?:0x)?([0-9A-Fa-f]+)\s*$",re.I
+          )
+          compare_rx=re.compile(
+              r"\b(?:sub|subri|slt|slts|seq|sne|beq|bne|beqz|bnez)\b",re.I
+          )
+
+          # Exact command refs.
+          refs=[]
+          for idx,x in enumerate(ins):
+              m=addigp_rx.search(x["text"])
+              if not m:
+                  continue
+              reg,imm_s=m.groups()
+              imm=pint(imm_s)
+              if imm is None:
+                  continue
+              runtime=(GP+imm)&0xffffffff
+              off=(runtime-BASE)&0xffffffff
+              cmd=command_by_off.get(off)
+              if cmd:
+                  refs.append({
+                      "idx":idx,"addr":x["addr"],"reg":reg,
+                      "runtime":runtime,"file_offset":off,
+                      "command":cmd,"text":x["text"]
+                  })
+
+          # Helper bodies including nested helpers used by 0x0DFE.
+          helper_targets=[
+              0x01D2,0x04EE,0x0DFE,0x0FC0,0xABEC,0xAC50
+          ]
+
+          helper_analysis=[]
+          for target in helper_targets:
+              idx=by_addr.get(target)
+              if idx is None:
+                  helper_analysis.append({"target":target,"found":False})
+                  continue
+
+              # First return-like instruction, capped to avoid accidental huge body.
+              end=min(len(ins)-1,idx+260)
+              ret_candidates=[
+                  j for j in range(idx+1,min(len(ins),idx+260))
+                  if ret_rx.search(ins[j]["text"])
+              ]
+              if ret_candidates:
+                  end=ret_candidates[0]
+
+              rows=ins[idx:end+1]
+              loads=collections.Counter()
+              byte_loads=collections.Counter()
+              stores=collections.Counter()
+              increments=collections.Counter()
+              direct_calls=[]
+              backward_branches=[]
+              comparisons=[]
+
+              for x in rows:
+                  mm=mem_rx.search(x["text"])
+                  if mm:
+                      op=mm.group("op").lower()
+                      base=mm.group("base")
+                      if op.startswith("l"):
+                          loads[base]+=1
+                          if op in ("lbi","lbsi"):
+                              byte_loads[base]+=1
+                      else:
+                          stores[base]+=1
+
+                  am=addi_rx.search(x["text"])
+                  if am:
+                      rd,ra,imm_s=am.groups()
+                      imm=pint(imm_s)
+                      if rd==ra and imm is not None and abs(imm)<=4:
+                          increments[rd]+=1
+
+                  jm=jal_rx.search(x["text"])
+                  if jm:
+                      direct_calls.append({
+                          "addr":x["addr"],
+                          "target":int(jm.group(1),16),
+                          "text":x["text"]
+                      })
+
+                  bm=branch_target_rx.search(x["text"])
+                  if bm:
+                      target_b=int(bm.group(2),16)
+                      if target_b < x["addr"]:
+                          backward_branches.append({
+                              "addr":x["addr"],
+                              "target":target_b,
+                              "text":x["text"]
+                          })
+
+                  if compare_rx.search(x["text"]):
+                      comparisons.append({
+                          "addr":x["addr"],"text":x["text"]
+                      })
+
+              # Structural candidates only.
+              one_pointer_byte_walk=(
+                  len([r for r,c in byte_loads.items() if c>0])==1
+                  and bool(backward_branches)
+              )
+              two_pointer_byte_walk=(
+                  byte_loads.get("$r0",0)>0
+                  and byte_loads.get("$r1",0)>0
+                  and bool(comparisons)
+              )
+              no_calls=(len(direct_calls)==0)
+
+              semantic_candidates=[]
+              if one_pointer_byte_walk and no_calls:
+                  semantic_candidates.append("strlen-like / byte-scan-like")
+              if two_pointer_byte_walk and no_calls and backward_branches:
+                  semantic_candidates.append("strcmp/memcmp-like")
+              if target==0x0DFE and direct_calls:
+                  semantic_candidates.append("compound string-search/parser helper candidate")
+
+              helper={
+                  "target":target,
+                  "found":True,
+                  "start":rows[0]["addr"],
+                  "end":rows[-1]["addr"],
+                  "instruction_count":len(rows),
+                  "load_bases":dict(loads),
+                  "byte_load_bases":dict(byte_loads),
+                  "store_bases":dict(stores),
+                  "small_self_increments":dict(increments),
+                  "direct_calls":direct_calls,
+                  "backward_branches":backward_branches,
+                  "comparison_instructions":comparisons,
+                  "semantic_candidates":semantic_candidates,
+                  "raw_body":"\n".join(x["raw"] for x in rows),
+              }
+              helper_analysis.append(helper)
+              (OUT/f"HELPER_{target:04X}.asm").write_text(
+                  helper["raw_body"]+"\n"
+              )
+
+          # Build quick lookup of structural helper traits.
+          helper_by_target={
+              h["target"]:h for h in helper_analysis if h.get("found")
+          }
+
+          # Stronger compound inference for 0x0DFE:
+          # whether it calls one-pointer scan helper and two-pointer compare helper.
+          compound_0dfe=None
+          h0=helper_by_target.get(0x0DFE)
+          if h0:
+              callees=[x["target"] for x in h0["direct_calls"]]
+              nested=[]
+              for c in callees:
+                  hh=helper_by_target.get(c)
+                  if hh:
+                      nested.append({
+                          "target":c,
+                          "semantic_candidates":hh["semantic_candidates"],
+                          "byte_load_bases":hh["byte_load_bases"],
+                          "backward_branch_count":len(hh["backward_branches"])
+                      })
+              compound_0dfe={
+                  "callees":callees,
+                  "known_nested_helpers":nested,
+                  "strstr_like_candidate":(
+                      any(c==0x04EE for c in callees)
+                      and any(c==0x01D2 for c in callees)
+                  )
+              }
+
+          # Register evaluator for call sites to helper targets.
+          def classify_runtime(v):
+              off=(v-BASE)&0xffffffff
+              if off in strings:
+                  return {
+                      "runtime":v,
+                      "file_offset":off,
+                      "string":strings[off],
+                      "command":command_by_off.get(off)
+                  }
+              return None
+
+          all_calls=[]
+          for idx,x in enumerate(ins):
+              jm=jal_rx.search(x["text"])
+              if not jm:
+                  continue
+              target=int(jm.group(1),16)
+              if target not in helper_targets:
+                  continue
+
+              # Reconstruct constants/strings in preceding 40 instructions.
+              regs={}
+              for y in ins[max(0,idx-40):idx]:
+                  t=y["text"]
+
+                  m=addigp_rx.search(t)
+                  if m:
+                      rd,imm_s=m.groups()
+                      imm=pint(imm_s)
+                      if imm is not None:
+                          regs[rd]=(GP+imm)&0xffffffff
+                      continue
+
+                  m=movi_rx.search(t)
+                  if m:
+                      rd,imm_s=m.groups()
+                      imm=pint(imm_s)
+                      if imm is not None:
+                          regs[rd]=imm&0xffffffff
+                      continue
+
+                  m=sethi_rx.search(t)
+                  if m:
+                      rd,imm_s=m.groups()
+                      imm=pint(imm_s)
+                      if imm is not None:
+                          regs[rd]=((imm&0xfffff)<<12)&0xffffffff
+                      continue
+
+                  m=ori_rx.search(t)
+                  if m:
+                      rd,ra,imm_s=m.groups()
+                      imm=pint(imm_s)
+                      if ra in regs and imm is not None:
+                          regs[rd]=(regs[ra]|(imm&0x7fff))&0xffffffff
+                      else:
+                          regs.pop(rd,None)
+                      continue
+
+                  m=addi_rx.search(t)
+                  if m:
+                      rd,ra,imm_s=m.groups()
+                      imm=pint(imm_s)
+                      if ra in regs and imm is not None:
+                          regs[rd]=(regs[ra]+imm)&0xffffffff
+                      else:
+                          regs.pop(rd,None)
+                      continue
+
+                  m=mov_rx.search(t)
+                  if m:
+                      rd,ra=m.groups()
+                      if ra in regs:
+                          regs[rd]=regs[ra]
+                      else:
+                          regs.pop(rd,None)
+                      continue
+
+              string_regs={}
+              for reg,v in regs.items():
+                  c=classify_runtime(v)
+                  if c:
+                      string_regs[reg]=c
+
+              all_calls.append({
+                  "addr":x["addr"],
+                  "target":target,
+                  "register_strings":string_regs,
+                  "known_register_values":{
+                      k:f"0x{v:08X}" for k,v in sorted(regs.items())
+                  },
+                  "text":x["text"]
+              })
+
+          # Actual-use trace: unlike V7/V8, do not treat mere liveness across a
+          # call as command use. Record only instructions that explicitly read/
+          # copy/store/dereference the command register or an alias.
+          actual_use_traces=[]
+          for r in refs:
+              aliases={r["reg"]}
+              events=[]
+
+              for y in ins[r["idx"]+1:min(len(ins),r["idx"]+90)]:
+                  t=y["text"]
+
+                  # Stop at the next exact command construction into same register.
+                  gm=addigp_rx.search(t)
+                  if gm:
+                      dst,imm_s=gm.groups()
+                      if dst in aliases:
+                          events.append({
+                              "kind":"overwrite","addr":y["addr"],
+                              "reg":dst,"text":t
+                          })
+                          aliases.discard(dst)
+                          if not aliases:
+                              break
+                          continue
+
+                  # Explicit copy source.
+                  mm=mov_rx.search(t)
+                  if mm:
+                      dst,src=mm.groups()
+                      if src in aliases:
+                          aliases.add(dst)
+                          events.append({
+                              "kind":"copy","addr":y["addr"],
+                              "src":src,"dst":dst,"text":t
+                          })
+                          continue
+                      if dst in aliases and src not in aliases:
+                          events.append({
+                              "kind":"overwrite","addr":y["addr"],
+                              "reg":dst,"text":t
+                          })
+                          aliases.discard(dst)
+                          if not aliases:
+                              break
+                          continue
+
+                  # Memory use: alias as base means string/data dereference;
+                  # alias as store source means pointer/data stored.
+                  mem=mem_rx.search(t)
+                  if mem:
+                      base=mem.group("base")
+                      rt=mem.group("rt")
+                      op=mem.group("op").lower()
+                      if base in aliases:
+                          events.append({
+                              "kind":"memory_dereference",
+                              "addr":y["addr"],"reg":base,
+                              "op":op,"text":t
+                          })
+                      if op.startswith("s") and rt in aliases:
+                          events.append({
+                              "kind":"store_pointer",
+                              "addr":y["addr"],"reg":rt,
+                              "op":op,"text":t
+                          })
+
+                  # Any explicit source mention in arithmetic/compare.
+                  mentioned=[
+                      a for a in aliases
+                      if re.search(rf"(?<![A-Za-z0-9]){re.escape(a)}(?![A-Za-z0-9])",t)
+                  ]
+                  if mentioned and not (
+                      mem and (mem.group("base") in aliases or
+                               (mem.group("op").lower().startswith("s") and mem.group("rt") in aliases))
+                  ):
+                      # Avoid counting an instruction that simply writes the alias
+                      # as destination when it never reads it.
+                      first_reg=re.search(
+                          r"^[A-Za-z0-9_.]+\s+(\$[A-Za-z0-9]+)",t
+                      )
+                      dst=first_reg.group(1) if first_reg else None
+                      src_mentions=[a for a in mentioned if a!=dst]
+                      if src_mentions or compare_rx.search(t):
+                          events.append({
+                              "kind":"explicit_register_use",
+                              "addr":y["addr"],
+                              "regs":mentioned,"text":t
+                          })
+
+                  # Direct call only counts as command use when an alias is in
+                  # ABI argument registers at that moment.
+                  jm=jal_rx.search(t)
+                  if jm:
+                      arg_aliases=sorted(
+                          a for a in aliases
+                          if a in {"$r0","$r1","$r2","$r3","$r4","$r5"}
+                      )
+                      if arg_aliases:
+                          events.append({
+                              "kind":"call_with_command_in_arg_register",
+                              "addr":y["addr"],
+                              "target":int(jm.group(1),16),
+                              "arg_aliases":arg_aliases,
+                              "text":t
+                          })
+
+              actual_use_traces.append({
+                  "command":r["command"],
+                  "ref_addr":r["addr"],
+                  "initial_reg":r["reg"],
+                  "events":events
+              })
+
+          # Focus exact helper callsites for chiperas/upinfo.
+          focus_calls=[
+              c for c in all_calls
+              if 0x5500 <= c["addr"] <= 0x5800
+          ]
+
+          result={
+              "revision":"STRING_HELPER_PROOF_V9",
+              "runtime_gp":GP,
+              "runtime_base":BASE,
+              "command_refs":refs,
+              "helper_analysis":helper_analysis,
+              "compound_0dfe":compound_0dfe,
+              "helper_calls":all_calls,
+              "focus_calls":focus_calls,
+              "actual_command_use_traces":actual_use_traces,
+              "USB_OR_BOARD_CONTACTED":False,
+              "LIVE_FLASH_AUTHORIZED":False,
+              "FLASH_ALLOWED":False
+          }
+          (OUT/"STRING_HELPER_PROOF.json").write_text(
+              json.dumps(result,indent=2,ensure_ascii=False)+"\n"
+          )
+
+          md=[
+              "# BP1048P4 String Helper Proof V9",
+              "",
+              f"64 KiB SHA256: `{meta['sha256']}`",
+              f"runtime `$gp`: `0x{GP:08X}`",
+              f"runtime image base: `0x{BASE:08X}`",
+              "",
+              "## Structural helper classification",
+          ]
+
+          for h in helper_analysis:
+              if not h.get("found"):
+                  md.append(f"- `0x{h['target']:04X}`: not found")
+                  continue
+              calls=", ".join(
+                  f"0x{x['addr']:04X}→0x{x['target']:04X}"
+                  for x in h["direct_calls"]
+              ) or "none"
+              cands=", ".join(h["semantic_candidates"]) or "unclassified"
+              md.append(
+                  f"- `0x{h['target']:04X}` `0x{h['start']:04X}–0x{h['end']:04X}`; "
+                  f"byte loads `{h['byte_load_bases']}`; increments `{h['small_self_increments']}`; "
+                  f"backward branches `{len(h['backward_branches'])}`; calls {calls}; "
+                  f"candidate **{cands}**"
+              )
+
+          md+=["","## 0x0DFE nested-helper evidence"]
+          if compound_0dfe:
+              md.append(
+                  f"- direct callees: "
+                  + ", ".join(f"`0x{x:04X}`" for x in compound_0dfe["callees"])
+              )
+              md.append(
+                  f"- calls both `0x04EE` and `0x01D2`: "
+                  f"**{compound_0dfe['strstr_like_candidate']}**"
+              )
+              for x in compound_0dfe["known_nested_helpers"]:
+                  md.append(
+                      f"- nested `0x{x['target']:04X}`: "
+                      f"{', '.join(x['semantic_candidates']) or 'unclassified'}; "
+                      f"byte loads `{x['byte_load_bases']}`; "
+                      f"backward branches `{x['backward_branch_count']}`"
+                  )
+
+          md+=["","## Exact command-bearing helper calls near upinfo/chiperas"]
+          for c in focus_calls:
+              values=[]
+              for reg,v in sorted(c["register_strings"].items()):
+                  suffix=f" COMMAND={v['command']}" if v.get("command") else ""
+                  values.append(f"{reg}→{v['string']}{suffix}")
+              md.append(
+                  f"- `0x{c['addr']:04X} → 0x{c['target']:04X}`: "
+                  f"`{', '.join(values) if values else 'no static string register reconstructed'}`"
+              )
+
+          md+=["","## Actual command-register uses (not mere liveness)"]
+          for tr in actual_use_traces:
+              md.append(
+                  f"- **{tr['command']}** ref `0x{tr['ref_addr']:04X}` in `{tr['initial_reg']}`"
+              )
+              if not tr["events"]:
+                  md.append("  - no explicit use recovered before trace end/overwrite")
+              else:
+                  for e in tr["events"][:30]:
+                      if e["kind"]=="call_with_command_in_arg_register":
+                          md.append(
+                              f"  - `0x{e['addr']:04X}` call `0x{e['target']:04X}` "
+                              f"with command in `{', '.join(e['arg_aliases'])}`"
+                          )
+                      else:
+                          md.append(
+                              f"  - `0x{e['addr']:04X}` {e['kind']}: `{e['text']}`"
+                          )
+
+          md+=["","## Exact helper instruction bodies"]
+          for target in [0x01D2,0x04EE,0xABEC]:
+              h=helper_by_target.get(target)
+              if not h:
+                  continue
+              md+=["",f"### Helper `0x{target:04X}`"]
+              # Keep summary bounded; full body remains in artifact.
+              body_lines=h["raw_body"].splitlines()
+              for line in body_lines[:80]:
+                  md.append(f"    {line}")
+              if len(body_lines)>80:
+                  md.append(f"    ... {len(body_lines)-80} more instructions in artifact")
+
+          md+=["","## Decision"]
+          md.append("- `0xABEC` may now be labeled compare-like only if its exact body shows two-pointer byte reads, comparisons, and loop/return behavior; the artifact preserves the full body.")
+          md.append("- `0x0DFE` is not labeled `strstr` solely from call targets; the nested helper structures must support that interpretation.")
+          md.append("- For `upinfo`, only explicit reads/copies/dereferences of its `$r9` pointer count as evidence; simply surviving across a call no longer counts.")
+          md.append("- No command is authorized for live board use yet.")
+          md.append("- USB/board contacted: **NO**")
+          md.append("- Flash read/erase/write: **NO**")
+          md.append("- `FLASH_ALLOWED=NO`")
+
+          (OUT/"STRING_HELPER_PROOF_SUMMARY.md").write_text("\n".join(md)+"\n")
+          PYCODE
+
+      - name: Publish summary
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat /tmp/v9/evidence/STRING_HELPER_PROOF_SUMMARY.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Package evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /tmp/v9/evidence
+          zip -9 -r /tmp/OKN_BP1048P4_STRING_HELPER_PROOF_V9_EVIDENCE.zip . >/dev/null
+          sha256sum /tmp/OKN_BP1048P4_STRING_HELPER_PROOF_V9_EVIDENCE.zip \
+            > /tmp/OKN_BP1048P4_STRING_HELPER_PROOF_V9_EVIDENCE.zip.sha256
+
+      - name: Upload evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: OKN-BP1048P4-STRING-HELPER-PROOF-V9-EVIDENCE
+          path: |
+            /tmp/OKN_BP1048P4_STRING_HELPER_PROOF_V9_EVIDENCE.zip
+            /tmp/OKN_BP1048P4_STRING_HELPER_PROOF_V9_EVIDENCE.zip.sha256
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Final fail-closed gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$FLASH_ALLOWED" = "NO"
+          python3 - <<'PY'
+          import json
+          d=json.load(open("/tmp/v9/evidence/STRING_HELPER_PROOF.json"))
+          assert d["runtime_gp"] == 0x20026CB0
+          assert d["runtime_base"] == 0x2001A9A8
+          assert d["USB_OR_BOARD_CONTACTED"] is False
+          assert d["LIVE_FLASH_AUTHORIZED"] is False
+          assert d["FLASH_ALLOWED"] is False
+          print("STRING_HELPER_PROOF_V9_GATE=PASS")
+          PY
+          echo FLASH_ALLOWED=NO
