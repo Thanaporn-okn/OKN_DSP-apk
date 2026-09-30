@@ -1,0 +1,447 @@
+name: OKN BP1048P4 Flashboot Memcmp Dispatcher V10 - All In One
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: okn-bp1048p4-memcmp-dispatcher-v10-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  FLASH_ALLOWED: "NO"
+
+jobs:
+  memcmp_dispatch:
+    name: Recover memcmp command checks + branch handlers - NO USB - NO FLASH
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Safety gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$FLASH_ALLOWED" = "NO"
+          mkdir -p /tmp/v10/evidence
+          printf '%s\n' \
+            MODE=OFFLINE_STATIC_MEMCMP_DISPATCH_ONLY \
+            USB_OR_BOARD_CONTACT=NO \
+            FLASH_READ_EXECUTED=NO \
+            FLASH_ERASE_EXECUTED=NO \
+            FLASH_WRITE_EXECUTED=NO \
+            LIVE_BOOT_ENTRY_AUTHORIZED=NO \
+            LIVE_FLASH_AUTHORIZED=NO \
+            FLASH_ALLOWED=NO \
+            > /tmp/v10/evidence/SAFETY.txt
+
+      - name: Checkout public BP1048 SDK
+        uses: actions/checkout@v4
+        with:
+          repository: leadercxn/bp1048_sdk_v0.1.12
+          ref: master
+          path: bp1048-sdk
+          fetch-depth: 1
+
+      - name: Reconstruct exact image
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PYCODE'
+          from pathlib import Path
+          import hashlib,json,re,subprocess
+          ROOT=Path("bp1048-sdk")
+          OUT=Path("/tmp/v10/evidence")
+          text=(ROOT/"BT_Audio_APP/bt_audio_app_src/device/flash_boot.c").read_text(errors="replace")
+          m=re.search(
+              r"(?:static\s+|const\s+|unsigned\s+|signed\s+)*"
+              r"(?:char|uint8_t|uint8|u8|BYTE)\s+flash_data\s*"
+              r"\[\s*(?P<n>\d+)\s*\]\s*=\s*\{(?P<body>.*?)\};",
+              text,re.I|re.S
+          )
+          assert m
+          body=re.sub(r"/\*.*?\*/","",m.group("body"),flags=re.S)
+          body=re.sub(r"//[^\r\n]*","",body)
+          vals=[int(x,16) for x in re.findall(r"0[xX]([0-9A-Fa-f]{1,2})\b",body)]
+          assert int(m.group("n"))==65536 and len(vals)==65520
+          raw=bytes(vals)+bytes(65536-len(vals))
+          (OUT/"flash_data_65536.bin").write_bytes(raw)
+          meta={
+            "sdk_commit":subprocess.check_output(
+                ["git","-C",str(ROOT),"rev-parse","HEAD"],text=True
+            ).strip(),
+            "sha256":hashlib.sha256(raw).hexdigest(),
+            "runtime_gp":0x20026CB0,
+            "runtime_base":0x2001A9A8,
+            "memcmp_like":0xABEC,
+            "USB_OR_BOARD_CONTACTED":False,
+            "LIVE_FLASH_AUTHORIZED":False,
+            "FLASH_ALLOWED":False
+          }
+          (OUT/"META.json").write_text(json.dumps(meta,indent=2)+"\n")
+          PYCODE
+
+      - name: Build GNU NDS32 objdump
+        shell: bash
+        run: |
+          set -u
+          mkdir -p /tmp/v10/toolchain /tmp/v10/build
+          cd /tmp/v10/toolchain
+          curl -fL --retry 3 --connect-timeout 20 \
+            https://ftp.gnu.org/gnu/binutils/binutils-2.44.tar.xz \
+            -o binutils-2.44.tar.xz
+          tar -xf binutils-2.44.tar.xz
+          cd /tmp/v10/build
+          ../toolchain/binutils-2.44/configure \
+            --target=nds32le-elf \
+            --disable-nls --disable-werror --disable-gdb \
+            --disable-gprofng --disable-gas --disable-ld --disable-gold \
+            >/tmp/v10/evidence/NDS32_BUILD.log 2>&1
+          make -j2 all-binutils >>/tmp/v10/evidence/NDS32_BUILD.log 2>&1
+          find /tmp/v10/build -type f -name '*objdump' -perm -111 -print \
+            > /tmp/v10/evidence/OBJDUMP_CANDIDATES.txt
+
+      - name: Disassemble
+        shell: bash
+        run: |
+          set -euo pipefail
+          OBJDUMP="$(find /tmp/v10/build -type f -name '*objdump' -perm -111 | head -1)"
+          "$OBJDUMP" -D -b binary -m nds32 --adjust-vma=0 \
+            /tmp/v10/evidence/flash_data_65536.bin \
+            > /tmp/v10/evidence/NDS32_DISASSEMBLY.txt \
+            2>/tmp/v10/evidence/NDS32_DISASSEMBLY.stderr.txt
+
+      - name: Recover every memcmp command check and branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PYCODE'
+          from pathlib import Path
+          import json,re
+
+          OUT=Path("/tmp/v10/evidence")
+          raw=(OUT/"flash_data_65536.bin").read_bytes()
+          meta=json.loads((OUT/"META.json").read_text())
+          GP=meta["runtime_gp"]
+          BASE=meta["runtime_base"]
+          MEMCMP=meta["memcmp_like"]
+
+          lines=(OUT/"NDS32_DISASSEMBLY.txt").read_text(errors="replace").splitlines()
+          rr=re.compile(r"^\s*([0-9A-Fa-f]+):\s+(?:[0-9A-Fa-f]{2,8}\s+)+(.+?)\s*$")
+          ins=[]
+          for ln,line in enumerate(lines,1):
+              m=rr.match(line)
+              if m:
+                  ins.append({"line":ln,"addr":int(m.group(1),16),"text":m.group(2).strip(),"raw":line})
+
+          def pint(s):
+              try: return int(s.strip().replace("#",""),0)
+              except: return None
+
+          # strings
+          strings={}
+          st=None
+          for i,b in enumerate(raw+b"\x00"):
+              if 32<=b<=126:
+                  if st is None: st=i
+              else:
+                  if st is not None and i-st>=3:
+                      strings[st]=raw[st:i].decode("ascii",errors="replace")
+                  st=None
+
+          command_names=["chiperas","upinfo","btupdat","cnfgdat","constdat","codedata","cxxx"]
+          command_by_off={}
+          for n in command_names:
+              h=[o for o,s in strings.items() if s==n]
+              assert len(h)==1,(n,h)
+              command_by_off[h[0]]=n
+
+          addigp=re.compile(r"\baddi\.gp\s+(\$[A-Za-z0-9]+)\s*,\s*#?(-?0x[0-9A-Fa-f]+|-?\d+)",re.I)
+          movi=re.compile(r"\bmovi(?:55)?\s+(\$[A-Za-z0-9]+)\s*,\s*#?(-?0x[0-9A-Fa-f]+|-?\d+)",re.I)
+          mov=re.compile(r"\b(?:mov55|mov|movi55|or33)\s+(\$[A-Za-z0-9]+)\s*,\s*(\$[A-Za-z0-9]+)\b",re.I)
+          addi=re.compile(r"\baddi\s+(\$[A-Za-z0-9]+)\s*,\s*(\$[A-Za-z0-9]+)\s*,\s*#?(-?0x[0-9A-Fa-f]+|-?\d+)",re.I)
+          sethi=re.compile(r"\bsethi\s+(\$[A-Za-z0-9]+)\s*,\s*#?(-?0x[0-9A-Fa-f]+|-?\d+)",re.I)
+          ori=re.compile(r"\bori\s+(\$[A-Za-z0-9]+)\s*,\s*(\$[A-Za-z0-9]+)\s*,\s*#?(-?0x[0-9A-Fa-f]+|-?\d+)",re.I)
+          jal=re.compile(r"\bjal\s+(?:0x)?([0-9A-Fa-f]+)\b",re.I)
+          branch=re.compile(r"\b(beq|bne|beqz|bnez|bgez|bltz|bgtz|blez)\b.*?(?:0x)?([0-9A-Fa-f]+)\s*$",re.I)
+          load=re.compile(r"\b(lwi|lhi|lhsi|lbi|lbsi)(?:\.[A-Za-z0-9]+)?\s+(\$[A-Za-z0-9]+)\s*,\s*\[(\$[A-Za-z0-9]+)",re.I)
+
+          def classify(v):
+              if not isinstance(v,int): return None
+              off=(v-BASE)&0xffffffff
+              if off in strings:
+                  return {
+                      "runtime":v,"file_offset":off,"string":strings[off],
+                      "command":command_by_off.get(off)
+                  }
+              return None
+
+          # calls to 0xABEC
+          sites=[]
+          for idx,x in enumerate(ins):
+              jm=jal.search(x["text"])
+              if not jm or int(jm.group(1),16)!=MEMCMP:
+                  continue
+
+              regs={}
+              origins={}
+              for y in ins[max(0,idx-50):idx]:
+                  t=y["text"]
+
+                  m=addigp.search(t)
+                  if m:
+                      rd,im=m.groups(); iv=pint(im)
+                      if iv is not None:
+                          regs[rd]=(GP+iv)&0xffffffff
+                          origins[rd]=f"{y['addr']:04X} {t}"
+                      continue
+
+                  m=movi.search(t)
+                  if m:
+                      rd,im=m.groups(); iv=pint(im)
+                      if iv is not None:
+                          regs[rd]=iv&0xffffffff
+                          origins[rd]=f"{y['addr']:04X} {t}"
+                      continue
+
+                  m=sethi.search(t)
+                  if m:
+                      rd,im=m.groups(); iv=pint(im)
+                      if iv is not None:
+                          regs[rd]=((iv&0xfffff)<<12)&0xffffffff
+                          origins[rd]=f"{y['addr']:04X} {t}"
+                      continue
+
+                  m=ori.search(t)
+                  if m:
+                      rd,ra,im=m.groups(); iv=pint(im)
+                      if ra in regs and iv is not None:
+                          regs[rd]=(regs[ra]|(iv&0x7fff))&0xffffffff
+                          origins[rd]=f"{y['addr']:04X} {t} <= {origins.get(ra,'')}"
+                      else:
+                          regs.pop(rd,None); origins.pop(rd,None)
+                      continue
+
+                  m=addi.search(t)
+                  if m:
+                      rd,ra,im=m.groups(); iv=pint(im)
+                      if ra in regs and iv is not None:
+                          regs[rd]=(regs[ra]+iv)&0xffffffff
+                          origins[rd]=f"{y['addr']:04X} {t} <= {origins.get(ra,'')}"
+                      else:
+                          regs.pop(rd,None); origins.pop(rd,None)
+                      continue
+
+                  m=mov.search(t)
+                  if m:
+                      rd,ra=m.groups()
+                      if ra in regs:
+                          regs[rd]=regs[ra]
+                          origins[rd]=f"{y['addr']:04X} {t} <= {origins.get(ra,'')}"
+                      else:
+                          regs.pop(rd,None); origins.pop(rd,None)
+                      continue
+
+                  # Unknown memory load kills a static constant value in dest.
+                  lm=load.search(t)
+                  if lm:
+                      rd=lm.group(2)
+                      regs.pop(rd,None); origins.pop(rd,None)
+
+              args={}
+              for r in ["$r0","$r1","$r2"]:
+                  v=regs.get(r)
+                  args[r]={
+                      "known":v is not None,
+                      "value":f"0x{v:08X}" if v is not None else None,
+                      "origin":origins.get(r),
+                      "string":classify(v) if v is not None else None
+                  }
+
+              # first branch using compare return in next 8 instructions
+              after=ins[idx+1:min(len(ins),idx+9)]
+              br=None
+              for y in after:
+                  bm=branch.search(y["text"])
+                  if bm:
+                      br={"addr":y["addr"],"kind":bm.group(1).lower(),
+                          "target":int(bm.group(2),16),"text":y["text"]}
+                      break
+
+              rows=ins[max(0,idx-18):min(len(ins),idx+22)]
+              sites.append({
+                  "call_addr":x["addr"],"args":args,"branch":br,
+                  "context":"\n".join(z["raw"] for z in rows)
+              })
+
+          # command-labelled memcmp checks
+          labelled=[]
+          for s in sites:
+              labels=[]
+              for r,a in s["args"].items():
+                  if a["string"] and a["string"].get("command"):
+                      labels.append({"reg":r,"command":a["string"]["command"],
+                                     "string":a["string"]["string"]})
+              if labels:
+                  labelled.append({**s,"command_args":labels})
+
+          # Save each labelled context.
+          for i,s in enumerate(labelled):
+              nm="_".join(sorted(set(x["command"] for x in s["command_args"])))
+              (OUT/f"MEMCMP_{i:02d}_{nm}_{s['call_addr']:04X}.asm").write_text(s["context"]+"\n")
+
+          # Exact bodies for helpers that still matter.
+          helper_targets=[0x0DFE,0x0FC0,0xAC50,0xABEC]
+          by_addr={x["addr"]:i for i,x in enumerate(ins)}
+          ret=re.compile(r"\b(ret|ret5|jr\s+\$lp|pop25)\b",re.I)
+          helper_bodies={}
+          for target in helper_targets:
+              idx=by_addr.get(target)
+              if idx is None: continue
+              end=min(len(ins)-1,idx+260)
+              rs=[j for j in range(idx+1,min(len(ins),idx+260)) if ret.search(ins[j]["text"])]
+              if rs: end=rs[0]
+              body="\n".join(x["raw"] for x in ins[idx:end+1])
+              helper_bodies[f"0x{target:04X}"]=body
+              (OUT/f"HELPER_{target:04X}.asm").write_text(body+"\n")
+
+          result={
+              "revision":"MEMCMP_DISPATCHER_V10",
+              "runtime_gp":GP,
+              "runtime_base":BASE,
+              "memcmp_helper":MEMCMP,
+              "memcmp_sites":sites,
+              "labelled_command_memcmp_sites":labelled,
+              "helper_bodies":helper_bodies,
+              "USB_OR_BOARD_CONTACTED":False,
+              "LIVE_FLASH_AUTHORIZED":False,
+              "FLASH_ALLOWED":False
+          }
+          (OUT/"MEMCMP_DISPATCHER.json").write_text(
+              json.dumps(result,indent=2,ensure_ascii=False)+"\n"
+          )
+
+          md=[
+              "# BP1048P4 Memcmp Dispatcher V10",
+              "",
+              f"64 KiB SHA256: `{meta['sha256']}`",
+              f"runtime `$gp`: `0x{GP:08X}`",
+              f"runtime image base: `0x{BASE:08X}`",
+              "",
+              "## Proven helper identity",
+              "- `0xABEC` is treated as **length-bounded memcmp-like**: it consumes `$r0/$r1` plus length `$r2`, compares words then tail bytes, and returns ordering.",
+              "- `0x01D2/0x04EE` are hardware/MMIO helpers, not string-length helpers.",
+              "",
+              "## Command-labelled calls to 0xABEC",
+          ]
+
+          if labelled:
+              for s in labelled:
+                  labels=", ".join(
+                      f"{x['reg']}={x['command']}" for x in s["command_args"]
+                  )
+                  a2=s["args"]["$r2"]
+                  br=s["branch"]
+                  brtxt=(f"`0x{br['addr']:04X}` `{br['text']}` → `0x{br['target']:04X}`"
+                         if br else "no immediate branch recovered")
+                  md.append(
+                      f"- call `0x{s['call_addr']:04X}`: **{labels}**; "
+                      f"`$r2`={a2['value'] or 'unknown'} "
+                      f"(origin `{a2['origin'] or 'unknown'}`); branch {brtxt}"
+                  )
+                  for reg in ["$r0","$r1"]:
+                      a=s["args"][reg]
+                      if a["known"]:
+                          sval=a["string"]["string"] if a["string"] else "-"
+                          md.append(
+                              f"  - `{reg}`={a['value']} string `{sval}`; "
+                              f"origin `{a['origin'] or 'unknown'}`"
+                          )
+                      else:
+                          md.append(f"  - `{reg}` unknown statically")
+          else:
+              md.append("- none")
+
+          md+=["","## All 0xABEC call sites"]
+          for s in sites:
+              vals=[]
+              for reg in ["$r0","$r1","$r2"]:
+                  a=s["args"][reg]
+                  if a["known"]:
+                      sv=(a["string"]["string"] if a["string"] else a["value"])
+                      vals.append(f"{reg}={sv}")
+                  else:
+                      vals.append(f"{reg}=?")
+              b=s["branch"]
+              bs=(f"{b['kind']}→0x{b['target']:04X}" if b else "no branch")
+              md.append(f"- `0x{s['call_addr']:04X}`: `{', '.join(vals)}`; `{bs}`")
+
+          md+=["","## Exact 0x0DFE body"]
+          body=helper_bodies.get("0x0DFE","").splitlines()
+          for line in body[:120]:
+              md.append(f"    {line}")
+          if len(body)>120:
+              md.append(f"    ... {len(body)-120} more lines in artifact")
+
+          md+=["","## Exact 0x0FC0 body"]
+          body=helper_bodies.get("0x0FC0","").splitlines()
+          for line in body[:120]:
+              md.append(f"    {line}")
+          if len(body)>120:
+              md.append(f"    ... {len(body)-120} more lines in artifact")
+
+          md+=["","## Decision"]
+          md.append("- A command/handler association is accepted only when the exact command literal reaches the memcmp-like helper and the compare result controls a nearby branch.")
+          md.append("- `upinfo` is still not authorized live until its matched branch target and reply path are classified as non-destructive.")
+          md.append("- `chiperas` remains destructive and blocked.")
+          md.append("- USB/board contacted: **NO**")
+          md.append("- Flash read/erase/write: **NO**")
+          md.append("- `FLASH_ALLOWED=NO`")
+
+          (OUT/"MEMCMP_DISPATCHER_SUMMARY.md").write_text("\n".join(md)+"\n")
+          PYCODE
+
+      - name: Publish summary
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat /tmp/v10/evidence/MEMCMP_DISPATCHER_SUMMARY.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Package evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /tmp/v10/evidence
+          zip -9 -r /tmp/OKN_BP1048P4_MEMCMP_DISPATCHER_V10_EVIDENCE.zip . >/dev/null
+          sha256sum /tmp/OKN_BP1048P4_MEMCMP_DISPATCHER_V10_EVIDENCE.zip \
+            > /tmp/OKN_BP1048P4_MEMCMP_DISPATCHER_V10_EVIDENCE.zip.sha256
+
+      - name: Upload evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: OKN-BP1048P4-MEMCMP-DISPATCHER-V10-EVIDENCE
+          path: |
+            /tmp/OKN_BP1048P4_MEMCMP_DISPATCHER_V10_EVIDENCE.zip
+            /tmp/OKN_BP1048P4_MEMCMP_DISPATCHER_V10_EVIDENCE.zip.sha256
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Final fail-closed gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$FLASH_ALLOWED" = "NO"
+          python3 - <<'PY'
+          import json
+          d=json.load(open("/tmp/v10/evidence/MEMCMP_DISPATCHER.json"))
+          assert d["runtime_gp"] == 0x20026CB0
+          assert d["runtime_base"] == 0x2001A9A8
+          assert d["memcmp_helper"] == 0xABEC
+          assert d["USB_OR_BOARD_CONTACTED"] is False
+          assert d["LIVE_FLASH_AUTHORIZED"] is False
+          assert d["FLASH_ALLOWED"] is False
+          print("MEMCMP_DISPATCHER_V10_GATE=PASS")
+          PY
+          echo FLASH_ALLOWED=NO
