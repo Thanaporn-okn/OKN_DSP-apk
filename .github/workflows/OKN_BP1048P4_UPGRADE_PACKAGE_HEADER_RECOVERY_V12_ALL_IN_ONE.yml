@@ -1,0 +1,467 @@
+name: OKN BP1048P4 Upgrade Package Header Recovery V12 - All In One
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: okn-bp1048p4-upgrade-package-header-v12-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  FLASH_ALLOWED: "NO"
+
+jobs:
+  package_header:
+    name: Recover upgrade-package header schema - NO USB - NO FLASH
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Safety gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$FLASH_ALLOWED" = "NO"
+          mkdir -p /tmp/v12/evidence
+          cat > /tmp/v12/evidence/SAFETY.txt <<'EOF'
+          MODE=OFFLINE_STATIC_UPGRADE_PACKAGE_HEADER_RECOVERY_ONLY
+          TARGET=MVSilicon_BP1048P4
+          USB_OR_BOARD_CONTACT=NO
+          TARGET_FIRMWARE_EXECUTED=NO
+          FEATURE_55_SENT=NO
+          FEATURE_AA_SENT=NO
+          FLASH_READ_EXECUTED=NO
+          FLASH_ERASE_EXECUTED=NO
+          FLASH_WRITE_EXECUTED=NO
+          LIVE_BOOT_ENTRY_AUTHORIZED=NO
+          LIVE_FLASH_AUTHORIZED=NO
+          FLASH_ALLOWED=NO
+          EOF
+
+      - name: Checkout public BP1048 SDK
+        uses: actions/checkout@v4
+        with:
+          repository: leadercxn/bp1048_sdk_v0.1.12
+          ref: master
+          path: bp1048-sdk
+          fetch-depth: 1
+
+      - name: Reconstruct exact image and search source tree
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PYCODE'
+          from pathlib import Path
+          import hashlib,json,re,subprocess
+
+          ROOT=Path("bp1048-sdk")
+          OUT=Path("/tmp/v12/evidence")
+          text=(ROOT/"BT_Audio_APP/bt_audio_app_src/device/flash_boot.c").read_text(errors="replace")
+
+          m=re.search(
+              r"(?:static\s+|const\s+|unsigned\s+|signed\s+)*"
+              r"(?:char|uint8_t|uint8|u8|BYTE)\s+flash_data\s*"
+              r"\[\s*(?P<n>\d+)\s*\]\s*=\s*\{(?P<body>.*?)\};",
+              text,re.I|re.S
+          )
+          assert m
+          body=re.sub(r"/\*.*?\*/","",m.group("body"),flags=re.S)
+          body=re.sub(r"//[^\r\n]*","",body)
+          vals=[int(x,16) for x in re.findall(r"0[xX]([0-9A-Fa-f]{1,2})\b",body)]
+          assert int(m.group("n"))==65536 and len(vals)==65520
+          raw=bytes(vals)+bytes(65536-len(vals))
+          (OUT/"flash_data_65536.bin").write_bytes(raw)
+
+          # Search source for exact package tags and likely flash/MMIO APIs.
+          needles=[
+              "chiperas","upinfo","btupdat","cnfgdat","constdat",
+              "codedata","bootdat","cxxx","check_user_code",
+              "0x40007","0x40030","spi_flash","FlashRead","flash_read",
+              "flash read","FlashWrite","flash_write"
+          ]
+          hits=[]
+          for p in ROOT.rglob("*"):
+              if not p.is_file() or ".git" in p.parts:
+                  continue
+              try:
+                  if p.stat().st_size > 2_000_000:
+                      continue
+                  t=p.read_text(errors="replace")
+              except Exception:
+                  continue
+              rel=str(p.relative_to(ROOT))
+              for ln,line in enumerate(t.splitlines(),1):
+                  low=line.lower()
+                  for needle in needles:
+                      if needle.lower() in low:
+                          hits.append({
+                              "needle":needle,"file":rel,"line":ln,
+                              "text":line.strip()[:1000]
+                          })
+
+          meta={
+              "sdk_commit":subprocess.check_output(
+                  ["git","-C",str(ROOT),"rev-parse","HEAD"],text=True
+              ).strip(),
+              "sha256":hashlib.sha256(raw).hexdigest(),
+              "runtime_gp":0x20026CB0,
+              "runtime_base":0x2001A9A8,
+              "package_template_start":0xCB88,
+              "compare_template_start":0xCB94,
+              "compare_length":0x5C,
+              "source_hits":hits[:3000],
+              "USB_OR_BOARD_CONTACTED":False,
+              "LIVE_FLASH_AUTHORIZED":False,
+              "FLASH_ALLOWED":False
+          }
+          (OUT/"META.json").write_text(json.dumps(meta,indent=2,ensure_ascii=False)+"\n")
+          (OUT/"SOURCE_HITS.txt").write_text(
+              "\n".join(
+                  f"{x['needle']} | {x['file']}:{x['line']} | {x['text']}"
+                  for x in hits
+              )+"\n"
+          )
+          PYCODE
+
+      - name: Build GNU NDS32 objdump
+        shell: bash
+        run: |
+          set -u
+          mkdir -p /tmp/v12/toolchain /tmp/v12/build
+          cd /tmp/v12/toolchain
+          curl -fL --retry 3 --connect-timeout 20 \
+            https://ftp.gnu.org/gnu/binutils/binutils-2.44.tar.xz \
+            -o binutils-2.44.tar.xz
+          tar -xf binutils-2.44.tar.xz
+          cd /tmp/v12/build
+          ../toolchain/binutils-2.44/configure \
+            --target=nds32le-elf \
+            --disable-nls --disable-werror --disable-gdb \
+            --disable-gprofng --disable-gas --disable-ld --disable-gold \
+            >/tmp/v12/evidence/NDS32_BUILD.log 2>&1
+          make -j2 all-binutils >>/tmp/v12/evidence/NDS32_BUILD.log 2>&1
+          find /tmp/v12/build -type f -name '*objdump' -perm -111 -print \
+            > /tmp/v12/evidence/OBJDUMP_CANDIDATES.txt
+
+      - name: Disassemble
+        shell: bash
+        run: |
+          set -euo pipefail
+          OBJDUMP="$(find /tmp/v12/build -type f -name '*objdump' -perm -111 | head -1)"
+          "$OBJDUMP" -D -b binary -m nds32 --adjust-vma=0 \
+            /tmp/v12/evidence/flash_data_65536.bin \
+            > /tmp/v12/evidence/NDS32_DISASSEMBLY.txt \
+            2>/tmp/v12/evidence/NDS32_DISASSEMBLY.stderr.txt
+
+      - name: Recover package-template schema and parser
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PYCODE'
+          from pathlib import Path
+          import json,re,struct
+
+          OUT=Path("/tmp/v12/evidence")
+          raw=(OUT/"flash_data_65536.bin").read_bytes()
+          meta=json.loads((OUT/"META.json").read_text())
+          GP=meta["runtime_gp"]
+          BASE=meta["runtime_base"]
+
+          lines=(OUT/"NDS32_DISASSEMBLY.txt").read_text(errors="replace").splitlines()
+          rr=re.compile(r"^\s*([0-9A-Fa-f]+):\s+(?:[0-9A-Fa-f]{2,8}\s+)+(.+?)\s*$")
+          ins=[]
+          for ln,line in enumerate(lines,1):
+              m=rr.match(line)
+              if m:
+                  ins.append({
+                      "line":ln,"addr":int(m.group(1),16),
+                      "text":m.group(2).strip(),"raw":line
+                  })
+          by_addr={x["addr"]:i for i,x in enumerate(ins)}
+
+          def pint(s):
+              try: return int(s.strip().replace("#",""),0)
+              except: return None
+
+          # Template region from chiperas through several following diagnostics.
+          LO=0xCB80
+          HI=0xCC40
+
+          # Printable strings in template region.
+          strings=[]
+          i=LO
+          while i<HI:
+              if 32<=raw[i]<=126:
+                  j=i
+                  while j<HI and 32<=raw[j]<=126:
+                      j+=1
+                  if j-i>=3:
+                      strings.append({
+                          "offset":i,
+                          "relative":i-LO,
+                          "text":raw[i:j].decode("ascii",errors="replace")
+                      })
+                  i=j+1
+              else:
+                  i+=1
+
+          # 32-bit aligned fields in the region.
+          words=[]
+          for pos in range(LO,HI,4):
+              if pos+4>len(raw):
+                  break
+              w=int.from_bytes(raw[pos:pos+4],"little")
+              printable="".join(chr(b) if 32<=b<=126 else "." for b in raw[pos:pos+4])
+              words.append({
+                  "offset":pos,"relative":pos-LO,
+                  "u32":w,"hex":f"0x{w:08X}",
+                  "ascii":printable
+              })
+
+          addigp=re.compile(
+              r"\baddi\.gp\s+(\$[A-Za-z0-9]+)\s*,\s*#?"
+              r"(-?0x[0-9A-Fa-f]+|-?\d+)",re.I
+          )
+          lbigp=re.compile(
+              r"\blbi\.gp\s+(\$[A-Za-z0-9]+)\s*,\s*"
+              r"\[\s*\+\s*#?(-?0x[0-9A-Fa-f]+|-?\d+)\s*\]",re.I
+          )
+          lwigp=re.compile(
+              r"\blwi\.gp\s+(\$[A-Za-z0-9]+)\s*,\s*"
+              r"\[\s*\+\s*#?(-?0x[0-9A-Fa-f]+|-?\d+)\s*\]",re.I
+          )
+
+          refs=[]
+          for x in ins:
+              for kind,rx in [("addi.gp",addigp),("lbi.gp",lbigp),("lwi.gp",lwigp)]:
+                  m=rx.search(x["text"])
+                  if not m:
+                      continue
+                  reg,imm_s=m.groups()
+                  imm=pint(imm_s)
+                  if imm is None:
+                      continue
+                  runtime=(GP+imm)&0xffffffff
+                  off=(runtime-BASE)&0xffffffff
+                  if LO<=off<HI:
+                      refs.append({
+                          "kind":kind,"addr":x["addr"],"reg":reg,
+                          "imm":imm,"runtime":runtime,"file_offset":off,
+                          "relative":off-LO,"text":x["text"]
+                      })
+
+          # Recover the exact parser path around 0x55xx.
+          parser_rows=[x for x in ins if 0x54A0<=x["addr"]<=0x56A0]
+          (OUT/"PARSER_54A0_56A0.asm").write_text(
+              "\n".join(x["raw"] for x in parser_rows)+"\n"
+          )
+
+          # Trace r6 origin at 55d6 and the 4-byte source address assembled from
+          # r6+8..+11 before the 0x1000 read.
+          # We retain exact surrounding instructions rather than over-emulating.
+          source_addr_rows=[
+              x for x in ins if 0x55A0<=x["addr"]<=0x55FA
+          ]
+
+          # Extract all immediate calls in parser window.
+          jal=re.compile(r"\bjal\s+(?:0x)?([0-9A-Fa-f]+)\b",re.I)
+          branches=re.compile(
+              r"\b(beq|bne|beqz|bnez|bgez|bltz|bgtz|blez|j)\b.*?"
+              r"(?:0x)?([0-9A-Fa-f]+)\s*$",re.I
+          )
+          parser_cf=[]
+          for x in parser_rows:
+              jm=jal.search(x["text"])
+              bm=branches.search(x["text"])
+              if jm:
+                  parser_cf.append({
+                      "addr":x["addr"],"kind":"jal",
+                      "target":int(jm.group(1),16),"text":x["text"]
+                  })
+              elif bm:
+                  parser_cf.append({
+                      "addr":x["addr"],"kind":bm.group(1).lower(),
+                      "target":int(bm.group(2),16),"text":x["text"]
+                  })
+
+          # Exact helper bodies for semantics around parser.
+          helper_targets=[0xAC50,0xACBC,0xAD0C,0x4AC0]
+          ret=re.compile(r"\b(ret|ret5|jr\s+\$lp|pop25)\b",re.I)
+          helpers={}
+          for target in helper_targets:
+              idx=by_addr.get(target)
+              if idx is None:
+                  continue
+              end=min(len(ins)-1,idx+220)
+              rs=[j for j in range(idx+1,min(len(ins),idx+220)) if ret.search(ins[j]["text"])]
+              if rs:
+                  end=rs[0]
+              rows=ins[idx:end+1]
+              body="\n".join(x["raw"] for x in rows)
+              helpers[f"0x{target:04X}"]=body
+              (OUT/f"HELPER_{target:04X}.asm").write_text(body+"\n")
+
+          # Build schema candidates based on 8/12-byte tag spacing.
+          known_tags=[
+              "chiperas","upinfo","btupdat","cnfgdat","constdat",
+              "codedata","bootdat","cxxx","check_user_code"
+          ]
+          tag_hits=[]
+          for tag in known_tags:
+              b=tag.encode()
+              p=raw.find(b,LO,HI)
+              if p>=0:
+                  tag_hits.append({
+                      "tag":tag,"offset":p,"relative":p-LO,
+                      "runtime":BASE+p
+                  })
+
+          result={
+              "revision":"UPGRADE_PACKAGE_HEADER_RECOVERY_V12",
+              "template_region":[LO,HI],
+              "template_strings":strings,
+              "template_words":words,
+              "tag_hits":tag_hits,
+              "template_gp_refs":refs,
+              "parser_control_flow":parser_cf,
+              "helpers":helpers,
+              "source_search_hits":meta["source_hits"],
+              "USB_OR_BOARD_CONTACTED":False,
+              "LIVE_FLASH_AUTHORIZED":False,
+              "FLASH_ALLOWED":False
+          }
+          (OUT/"UPGRADE_PACKAGE_HEADER.json").write_text(
+              json.dumps(result,indent=2,ensure_ascii=False)+"\n"
+          )
+
+          def hd(start,end,width=16):
+              out=[]
+              for p in range(start,end,width):
+                  c=raw[p:min(end,p+width)]
+                  hx=" ".join(f"{b:02X}" for b in c)
+                  asc="".join(chr(b) if 32<=b<=126 else "." for b in c)
+                  out.append(f"{p:04X}: {hx:<47}  {asc}")
+              return out
+
+          md=[
+              "# BP1048P4 Upgrade Package Header Recovery V12",
+              "",
+              f"64 KiB SHA256: `{meta['sha256']}`",
+              f"runtime `$gp`: `0x{GP:08X}`",
+              f"runtime image base: `0x{BASE:08X}`",
+              "",
+              "## Corrected V11 interpretation",
+              "- The static bytes at runtime address `0x20028534` are **not** treated as the contents compared at `0x5602`, because `0x55F6 → 0x0DFE` fills that destination with `0x1000` bytes immediately before the compare.",
+              "- Therefore V11's `4/92 equal bytes` result describes initial image bytes only; it does **not** describe the runtime comparison.",
+              "- The block beginning at `upinfo` is now analyzed as an upgrade/package template or tag table candidate, not as a set of live USB commands.",
+              "",
+              "## Tag/template candidates",
+          ]
+
+          for t in tag_hits:
+              md.append(
+                  f"- `+0x{t['relative']:02X}` file `0x{t['offset']:04X}` "
+                  f"runtime `0x{t['runtime']:08X}`: `{t['tag']}`"
+              )
+
+          md+=["","## Template strings 0xCB80–0xCC40"]
+          for s in strings:
+              md.append(
+                  f"- `0x{s['offset']:04X}` (+`0x{s['relative']:02X}`): `{s['text']}`"
+              )
+
+          md+=["","## Template hexdump 0xCB80–0xCC40"]
+          md.extend("    "+x for x in hd(LO,HI))
+
+          md+=["","## Code references into template/tag region"]
+          for r in refs:
+              md.append(
+                  f"- code `0x{r['addr']:04X}` `{r['text']}` → "
+                  f"file `0x{r['file_offset']:04X}` (+`0x{r['relative']:02X}`)"
+              )
+          if not refs:
+              md.append("- none")
+
+          md+=["","## Parser control flow 0x54A0–0x56A0"]
+          for c in parser_cf:
+              md.append(
+                  f"- `0x{c['addr']:04X}` {c['kind']} → `0x{c['target']:04X}` "
+                  f"`{c['text']}`"
+              )
+
+          md+=["","## Exact source-address construction before 0x1000-byte read"]
+          for x in source_addr_rows:
+              md.append("    "+x["raw"])
+
+          md+=["","## Source-tree hits for package tags / flash APIs"]
+          hits=meta["source_hits"]
+          if hits:
+              for h in hits[:120]:
+                  md.append(
+                      f"- `{h['needle']}` — `{h['file']}:{h['line']}` — `{h['text']}`"
+                  )
+          else:
+              md.append("- none")
+
+          md+=["","## Helper bodies used after package/header checks"]
+          for target in ["0xAC50","0xACBC","0xAD0C","0x4AC0"]:
+              body=helpers.get(target,"").splitlines()
+              md+=["",f"### `{target}`"]
+              for line in body[:80]:
+                  md.append("    "+line)
+              if len(body)>80:
+                  md.append(f"    ... {len(body)-80} more lines in artifact")
+
+          md+=["","## Decision"]
+          md.append("- `0x0DFE` remains hardware-to-memory/read-like; the `0x1000` bytes at the compare destination are runtime data, not the static bytes stored at the same image-relative address.")
+          md.append("- `upinfo/btupdat/cnfgdat/constdat/codedata/bootdat/cxxx` are provisionally treated as package/header tags until a live command parser is separately proven.")
+          md.append("- No USB command framing is authorized from these strings alone.")
+          md.append("- USB/board contacted: **NO**")
+          md.append("- Flash read/erase/write: **NO**")
+          md.append("- `FLASH_ALLOWED=NO`")
+
+          (OUT/"UPGRADE_PACKAGE_HEADER_SUMMARY.md").write_text("\n".join(md)+"\n")
+          PYCODE
+
+      - name: Publish summary
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat /tmp/v12/evidence/UPGRADE_PACKAGE_HEADER_SUMMARY.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Package evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /tmp/v12/evidence
+          zip -9 -r /tmp/OKN_BP1048P4_UPGRADE_PACKAGE_HEADER_V12_EVIDENCE.zip . >/dev/null
+          sha256sum /tmp/OKN_BP1048P4_UPGRADE_PACKAGE_HEADER_V12_EVIDENCE.zip \
+            > /tmp/OKN_BP1048P4_UPGRADE_PACKAGE_HEADER_V12_EVIDENCE.zip.sha256
+
+      - name: Upload evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: OKN-BP1048P4-UPGRADE-PACKAGE-HEADER-V12-EVIDENCE
+          path: |
+            /tmp/OKN_BP1048P4_UPGRADE_PACKAGE_HEADER_V12_EVIDENCE.zip
+            /tmp/OKN_BP1048P4_UPGRADE_PACKAGE_HEADER_V12_EVIDENCE.zip.sha256
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Final fail-closed gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$FLASH_ALLOWED" = "NO"
+          python3 - <<'PY'
+          import json
+          d=json.load(open("/tmp/v12/evidence/UPGRADE_PACKAGE_HEADER.json"))
+          assert d["USB_OR_BOARD_CONTACTED"] is False
+          assert d["LIVE_FLASH_AUTHORIZED"] is False
+          assert d["FLASH_ALLOWED"] is False
+          print("UPGRADE_PACKAGE_HEADER_V12_GATE=PASS")
+          PY
+          echo FLASH_ALLOWED=NO
