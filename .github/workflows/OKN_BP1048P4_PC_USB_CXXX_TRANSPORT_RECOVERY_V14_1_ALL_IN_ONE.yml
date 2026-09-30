@@ -1,0 +1,687 @@
+name: OKN BP1048P4 PC USB CXXX Transport Recovery V14.1 - All In One
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: okn-bp1048p4-pc-usb-cxxx-v14-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  FLASH_ALLOWED: "NO"
+
+jobs:
+  cxxx_transport:
+    name: Recover PC/CXXX framing and transport - NO USB - NO FLASH
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Safety gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$FLASH_ALLOWED" = "NO"
+          mkdir -p /tmp/v14/evidence
+          cat > /tmp/v14/evidence/SAFETY.txt <<'EOF'
+          MODE=OFFLINE_STATIC_PC_USB_TRANSPORT_RECOVERY_ONLY
+          TARGET=MVSilicon_BP1048P4
+          USB_OR_BOARD_CONTACT=NO
+          TARGET_FIRMWARE_EXECUTED=NO
+          FEATURE_55_SENT=NO
+          FEATURE_AA_SENT=NO
+          FLASH_READ_EXECUTED=NO
+          FLASH_ERASE_EXECUTED=NO
+          FLASH_WRITE_EXECUTED=NO
+          LIVE_BOOT_ENTRY_AUTHORIZED=NO
+          LIVE_FLASH_AUTHORIZED=NO
+          FLASH_ALLOWED=NO
+          EOF
+
+      - name: Checkout public BP1048 SDK
+        uses: actions/checkout@v4
+        with:
+          repository: leadercxn/bp1048_sdk_v0.1.12
+          ref: master
+          path: bp1048-sdk
+          fetch-depth: 1
+
+      - name: Reconstruct exact image and collect USB source clues
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PYCODE'
+          from pathlib import Path
+          import hashlib,json,re,subprocess
+
+          ROOT=Path("bp1048-sdk")
+          OUT=Path("/tmp/v14/evidence")
+          src=ROOT/"BT_Audio_APP/bt_audio_app_src/device/flash_boot.c"
+          text=src.read_text(errors="replace")
+          m=re.search(
+              r"(?:static\s+|const\s+|unsigned\s+|signed\s+)*"
+              r"(?:char|uint8_t|uint8|u8|BYTE)\s+flash_data\s*"
+              r"\[\s*(?P<n>\d+)\s*\]\s*=\s*\{(?P<body>.*?)\};",
+              text,re.I|re.S
+          )
+          assert m
+          body=re.sub(r"/\*.*?\*/","",m.group("body"),flags=re.S)
+          body=re.sub(r"//[^\r\n]*","",body)
+          vals=[int(x,16) for x in re.findall(r"0[xX]([0-9A-Fa-f]{1,2})\b",body)]
+          assert int(m.group("n"))==65536 and len(vals)==65520
+          raw=bytes(vals)+bytes(65536-len(vals))
+          (OUT/"flash_data_65536.bin").write_bytes(raw)
+
+          usb_terms=[
+              "UsbDevice","USB_DEVICE","DEV_ID_USB","UsbHost",
+              "UsbDeviceSend","UsbDeviceRecv","UsbDeviceReceive",
+              "USB_DT_","HID","endpoint","EP0","PC IS OK",
+              "UDisk IS OK","cmd_cxxx","cxxx"
+          ]
+          hits=[]
+          for p in ROOT.rglob("*"):
+              if not p.is_file() or ".git" in p.parts:
+                  continue
+              try:
+                  if p.stat().st_size>2_000_000:
+                      continue
+                  t=p.read_text(errors="replace")
+              except Exception:
+                  continue
+              rel=str(p.relative_to(ROOT))
+              for ln,line in enumerate(t.splitlines(),1):
+                  ll=line.lower()
+                  matched=[q for q in usb_terms if q.lower() in ll]
+                  if matched:
+                      hits.append({
+                          "file":rel,"line":ln,"matched":matched,
+                          "text":line.strip()[:1200]
+                      })
+
+          meta={
+              "revision":"PC_USB_CXXX_TRANSPORT_V14",
+              "sdk_commit":subprocess.check_output(
+                  ["git","-C",str(ROOT),"rev-parse","HEAD"],text=True
+              ).strip(),
+              "sha256":hashlib.sha256(raw).hexdigest(),
+              "runtime_gp":0x20026CB0,
+              "runtime_base":0x2001A9A8,
+              "known_print_wrapper":0xACBC,
+              "cxxx_candidate":0xB960,
+              "alt_output_candidate":0x77FE,
+              "source_usb_hits":hits[:2500],
+              "USB_OR_BOARD_CONTACTED":False,
+              "LIVE_FLASH_AUTHORIZED":False,
+              "FLASH_ALLOWED":False
+          }
+          (OUT/"META.json").write_text(
+              json.dumps(meta,indent=2,ensure_ascii=False)+"\n"
+          )
+          (OUT/"USB_SOURCE_HITS.txt").write_text(
+              "\n".join(
+                  f"{x['file']}:{x['line']} | {','.join(x['matched'])} | {x['text']}"
+                  for x in hits
+              )+"\n"
+          )
+          PYCODE
+
+      - name: Build GNU NDS32 objdump
+        shell: bash
+        run: |
+          set -u
+          mkdir -p /tmp/v14/toolchain /tmp/v14/build
+          cd /tmp/v14/toolchain
+          curl -fL --retry 3 --connect-timeout 20 \
+            https://ftp.gnu.org/gnu/binutils/binutils-2.44.tar.xz \
+            -o binutils-2.44.tar.xz
+          tar -xf binutils-2.44.tar.xz
+          cd /tmp/v14/build
+          ../toolchain/binutils-2.44/configure \
+            --target=nds32le-elf \
+            --disable-nls --disable-werror --disable-gdb \
+            --disable-gprofng --disable-gas --disable-ld --disable-gold \
+            >/tmp/v14/evidence/NDS32_BUILD.log 2>&1
+          make -j2 all-binutils >>/tmp/v14/evidence/NDS32_BUILD.log 2>&1
+          find /tmp/v14/build -type f -name '*objdump' -perm -111 -print \
+            > /tmp/v14/evidence/OBJDUMP_CANDIDATES.txt
+
+      - name: Disassemble
+        shell: bash
+        run: |
+          set -euo pipefail
+          OBJDUMP="$(find /tmp/v14/build -type f -name '*objdump' -perm -111 | head -1)"
+          "$OBJDUMP" -D -b binary -m nds32 --adjust-vma=0 \
+            /tmp/v14/evidence/flash_data_65536.bin \
+            > /tmp/v14/evidence/NDS32_DISASSEMBLY.txt \
+            2>/tmp/v14/evidence/NDS32_DISASSEMBLY.stderr.txt
+
+          # NDS32 mixes 16/32-bit encodings.  A linear sweep from file offset 0
+          # can legally step across a valid call target.  Re-disassemble the
+          # 0xB960 entry from its exact target address instead of assuming that
+          # address exists in the global linear-sweep instruction map.
+          "$OBJDUMP" -D -b binary -m nds32 --adjust-vma=0 \
+            --start-address=0xB960 --stop-address=0xBB00 \
+            /tmp/v14/evidence/flash_data_65536.bin \
+            > /tmp/v14/evidence/TARGET_B960_DISASSEMBLY.txt \
+            2>/tmp/v14/evidence/TARGET_B960_DISASSEMBLY.stderr.txt
+
+      - name: Recover CXXX string xrefs framing and transport callees
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PYCODE'
+          from pathlib import Path
+          import collections,json,re
+
+          OUT=Path("/tmp/v14/evidence")
+          raw=(OUT/"flash_data_65536.bin").read_bytes()
+          meta=json.loads((OUT/"META.json").read_text())
+          GP=meta["runtime_gp"]
+          BASE=meta["runtime_base"]
+          CXXX=meta["cxxx_candidate"]
+          ALT=meta["alt_output_candidate"]
+
+          lines=(OUT/"NDS32_DISASSEMBLY.txt").read_text(errors="replace").splitlines()
+          rr=re.compile(
+              r"^\s*([0-9A-Fa-f]+):\s+(?:[0-9A-Fa-f]{2,8}\s+)+(.+?)\s*$"
+          )
+          ins=[]
+          for ln,line in enumerate(lines,1):
+              m=rr.match(line)
+              if m:
+                  ins.append({
+                      "line":ln,"addr":int(m.group(1),16),
+                      "text":m.group(2).strip(),"raw":line
+                  })
+          by_addr={x["addr"]:i for i,x in enumerate(ins)}
+
+          # Exact-target disassembly for 0xB960.  This fixes the V14 failure:
+          # decimal KeyError 47456 == 0xB960, meaning the global linear sweep
+          # did not emit an instruction boundary at the direct-call target.
+          target_b960_lines=(OUT/"TARGET_B960_DISASSEMBLY.txt").read_text(
+              errors="replace"
+          ).splitlines()
+          target_b960_ins=[]
+          for ln,line in enumerate(target_b960_lines,1):
+              m=rr.match(line)
+              if m:
+                  target_b960_ins.append({
+                      "line":ln,"addr":int(m.group(1),16),
+                      "text":m.group(2).strip(),"raw":line
+                  })
+
+          def pint(s):
+              try: return int(s.strip().replace("#",""),0)
+              except: return None
+
+          # All printable strings.
+          strings={}
+          st=None
+          for i,b in enumerate(raw+b"\x00"):
+              if 32<=b<=126:
+                  if st is None: st=i
+              else:
+                  if st is not None and i-st>=3:
+                      strings[st]=raw[st:i].decode("ascii",errors="replace")
+                  st=None
+
+          high_terms=[
+              "cmd_cxxx :",
+              "cmd_cxxx ACK",
+              "PC IS OK",
+              "UDisk IS OK",
+              "cmd error",
+              "pc upgrata code",
+              "pc recive code data fail",
+              "pc write code data fail",
+              "pc upgrata const",
+              "pc recive const data fail",
+              "pc write const data fail",
+              "pc upgrata config",
+              "pc recive config data fail",
+              "pc write config data fail",
+              "DEV_ID_USB fs init error",
+              "jump_to_code_addr",
+              "check_user_code",
+              "FlashId:",
+              "UPGRADE:Flash data command"
+          ]
+
+          wanted={}
+          for off,s in strings.items():
+              for term in high_terms:
+                  if term.lower() in s.lower():
+                      wanted[off]=s
+                      break
+
+          addigp=re.compile(
+              r"\baddi\.gp\s+(\$[A-Za-z0-9]+)\s*,\s*#?"
+              r"(-?0x[0-9A-Fa-f]+|-?\d+)",re.I
+          )
+          lbigp=re.compile(
+              r"\blbi\.gp\s+(\$[A-Za-z0-9]+)\s*,\s*"
+              r"\[\s*\+\s*#?(-?0x[0-9A-Fa-f]+|-?\d+)\s*\]",re.I
+          )
+          lwigp=re.compile(
+              r"\blwi\.gp\s+(\$[A-Za-z0-9]+)\s*,\s*"
+              r"\[\s*\+\s*#?(-?0x[0-9A-Fa-f]+|-?\d+)\s*\]",re.I
+          )
+          jal=re.compile(r"\bjal\s+(?:0x)?([0-9A-Fa-f]+)\b",re.I)
+          branch=re.compile(
+              r"\b(beq|bne|beqz|bnez|bgez|bltz|bgtz|blez|beqc|bnec|j)\b.*?"
+              r"(?:0x)?([0-9A-Fa-f]+)\s*$",re.I
+          )
+          ret=re.compile(r"\b(ret|ret5|jr\s+\$lp|pop25)\b",re.I)
+          push=re.compile(r"\b(push25|smw\.adm)\b",re.I)
+
+          # Exact GP-relative refs to high-value strings.
+          refs=[]
+          for idx,x in enumerate(ins):
+              for kind,rx in [("addi.gp",addigp),("lbi.gp",lbigp),("lwi.gp",lwigp)]:
+                  m=rx.search(x["text"])
+                  if not m:
+                      continue
+                  reg,imm_s=m.groups()
+                  imm=pint(imm_s)
+                  if imm is None:
+                      continue
+                  runtime=(GP+imm)&0xffffffff
+                  off=(runtime-BASE)&0xffffffff
+                  if off in wanted:
+                      refs.append({
+                          "idx":idx,"addr":x["addr"],"kind":kind,"reg":reg,
+                          "runtime":runtime,"file_offset":off,
+                          "string":wanted[off],"text":x["text"]
+                      })
+
+          # Function bounds: nearest prologue before ref and return after.
+          def function_window(addr,back=220,fwd=420):
+              idx=by_addr.get(addr)
+              if idx is None:
+                  return []
+              starts=[
+                  j for j in range(max(0,idx-back),idx+1)
+                  if push.search(ins[j]["text"])
+              ]
+              si=starts[-1] if starts else max(0,idx-80)
+              ends=[
+                  j for j in range(idx,min(len(ins),idx+fwd))
+                  if ret.search(ins[j]["text"])
+              ]
+              ei=ends[0] if ends else min(len(ins)-1,idx+160)
+              return ins[si:ei+1]
+
+          ref_functions=[]
+          for n,r in enumerate(refs):
+              rows=function_window(r["addr"])
+              calls=[]
+              branches=[]
+              immediates=[]
+              for x in rows:
+                  jm=jal.search(x["text"])
+                  if jm:
+                      calls.append({
+                          "addr":x["addr"],"target":int(jm.group(1),16),
+                          "text":x["text"]
+                      })
+                  bm=branch.search(x["text"])
+                  if bm:
+                      branches.append({
+                          "addr":x["addr"],"kind":bm.group(1).lower(),
+                          "target":int(bm.group(2),16),"text":x["text"]
+                      })
+                  for im in re.findall(r"#?(0x[0-9A-Fa-f]+|\b\d+\b)",x["text"]):
+                      try:
+                          v=int(im,0)
+                          if v in (
+                              0xC0,0xC1,0xC2,0xC3,0xA4,0x55,0xAA,
+                              0x100,0xFF,0x200,0x400,0x1000
+                          ):
+                              immediates.append({
+                                  "addr":x["addr"],"value":v,"text":x["text"]
+                              })
+                      except Exception:
+                          pass
+
+              start=rows[0]["addr"] if rows else r["addr"]
+              end=rows[-1]["addr"] if rows else r["addr"]
+              ref_functions.append({
+                  "ref":r,"start":start,"end":end,
+                  "calls":calls,"branches":branches,
+                  "interesting_immediates":immediates
+              })
+              safe=re.sub(r"[^A-Za-z0-9]+","_",r["string"])[:40]
+              (OUT/f"XREF_{n:02d}_{safe}_{r['addr']:04X}.asm").write_text(
+                  "\n".join(x["raw"] for x in rows)+"\n"
+              )
+
+          # Exact B960 and ALT bodies.
+          def helper_body(target,max_ins=420):
+              # Prefer the exact-target re-disassembly for 0xB960.  Do not
+              # silently substitute a nearby instruction: on variable-width
+              # NDS32 that could decode the wrong instruction stream.
+              if target == CXXX:
+                  rows=[x for x in target_b960_ins if x["addr"] >= target]
+                  if not rows or rows[0]["addr"] != target:
+                      raise RuntimeError(
+                          f"Exact-target disassembly still did not begin at 0x{target:04X}"
+                      )
+                  ends=[
+                      j for j in range(1,min(len(rows),max_ins))
+                      if ret.search(rows[j]["text"])
+                  ]
+                  ei=ends[0] if ends else min(len(rows)-1,max_ins-1)
+                  return rows[:ei+1]
+
+              idx=by_addr.get(target)
+              if idx is None:
+                  raise RuntimeError(
+                      f"Direct-call target 0x{target:04X} missing from linear disassembly"
+                  )
+              ends=[
+                  j for j in range(idx+1,min(len(ins),idx+max_ins))
+                  if ret.search(ins[j]["text"])
+              ]
+              ei=ends[0] if ends else min(len(ins)-1,idx+max_ins-1)
+              return ins[idx:ei+1]
+
+          bodies={}
+          for target in [CXXX,ALT,0xACBC]:
+              rows=helper_body(target)
+              calls=[]
+              refs_local=[]
+              stores=[]
+              for x in rows:
+                  jm=jal.search(x["text"])
+                  if jm:
+                      calls.append({
+                          "addr":x["addr"],"target":int(jm.group(1),16),
+                          "text":x["text"]
+                      })
+                  m=addigp.search(x["text"])
+                  if m:
+                      reg,imm_s=m.groups()
+                      imm=pint(imm_s)
+                      if imm is not None:
+                          runtime=(GP+imm)&0xffffffff
+                          off=(runtime-BASE)&0xffffffff
+                          if off in strings:
+                              refs_local.append({
+                                  "addr":x["addr"],"reg":reg,
+                                  "file_offset":off,"string":strings[off],
+                                  "text":x["text"]
+                              })
+                  if re.search(r"\b(sbi|shi|swi)(?:[0-9.]+)?\b",x["text"],re.I):
+                      stores.append({
+                          "addr":x["addr"],"text":x["text"]
+                      })
+
+              bodies[f"0x{target:04X}"]={
+                  "start":rows[0]["addr"],"end":rows[-1]["addr"],
+                  "calls":calls,"string_refs":refs_local,"stores":stores,
+                  "body":"\n".join(x["raw"] for x in rows)
+              }
+              (OUT/f"FUNCTION_{target:04X}.asm").write_text(
+                  bodies[f"0x{target:04X}"]["body"]+"\n"
+              )
+
+          # All direct callers of B960 and ALT.
+          callers={CXXX:[],ALT:[],0xACBC:[]}
+          for x in ins:
+              jm=jal.search(x["text"])
+              if jm:
+                  t=int(jm.group(1),16)
+                  if t in callers:
+                      callers[t].append({
+                          "addr":x["addr"],"text":x["text"]
+                      })
+
+          # Candidate transport callees called from B960: dump exact bodies.
+          cxxx_callees=sorted(set(
+              x["target"] for x in bodies[f"0x{CXXX:04X}"]["calls"]
+          ))
+          callee_bodies={}
+          unresolved_callees=[]
+          for target in cxxx_callees[:20]:
+              if target not in by_addr:
+                  unresolved_callees.append(target)
+                  continue
+              rows=helper_body(target,260)
+              callee_bodies[f"0x{target:04X}"]="\n".join(x["raw"] for x in rows)
+              (OUT/f"CXXX_CALLEE_{target:04X}.asm").write_text(
+                  callee_bodies[f"0x{target:04X}"]+"\n"
+              )
+
+          # Search for immediate C0-C3/A4 checks globally, retain those near
+          # cxxx-related xref functions or B960.
+          global_cmd_checks=[]
+          for x in ins:
+              t=x["text"].lower()
+              if not any(k in t for k in (
+                  "#0xc0","#0xc1","#0xc2","#0xc3","#0xa4"
+              )):
+                  continue
+              near=(
+                  abs(x["addr"]-CXXX)<=0x600
+                  or any(f["start"]-0x100<=x["addr"]<=f["end"]+0x100 for f in ref_functions)
+              )
+              if near:
+                  global_cmd_checks.append({
+                      "addr":x["addr"],"text":x["text"]
+                  })
+
+          result={
+              "revision":"PC_USB_CXXX_TRANSPORT_V14",
+              "runtime_gp":GP,
+              "runtime_base":BASE,
+              "high_value_strings":[
+                  {"offset":o,"runtime":BASE+o,"string":s}
+                  for o,s in sorted(wanted.items())
+              ],
+              "exact_string_refs":refs,
+              "xref_functions":ref_functions,
+              "function_bodies":bodies,
+              "callers":{f"0x{k:04X}":v for k,v in callers.items()},
+              "cxxx_callees":[f"0x{x:04X}" for x in cxxx_callees],
+              "cxxx_unresolved_linear_sweep_callees":[
+                  f"0x{x:04X}" for x in unresolved_callees
+              ],
+              "cxxx_callee_bodies":callee_bodies,
+              "nearby_command_immediate_checks":global_cmd_checks,
+              "source_usb_hits":meta["source_usb_hits"],
+              "USB_OR_BOARD_CONTACTED":False,
+              "LIVE_FLASH_AUTHORIZED":False,
+              "FLASH_ALLOWED":False
+          }
+          (OUT/"PC_USB_CXXX_TRANSPORT.json").write_text(
+              json.dumps(result,indent=2,ensure_ascii=False)+"\n"
+          )
+
+          md=[
+              "# BP1048P4 PC / CXXX Transport Recovery V14",
+              "",
+              f"64 KiB SHA256: `{meta['sha256']}`",
+              f"runtime `$gp`: `0x{GP:08X}`",
+              f"runtime image base: `0x{BASE:08X}`",
+              "",
+              "## V13 correction",
+              "- The V13 `0x0FC0: 0 matching payload loads` count is discarded: the parser did not include compact opcodes such as `lbi333`. Earlier exact assembly shows `0x0FC0` reading bytes from saved buffer register `$r6`.",
+              "- The flash backend and PC/USB transport are analyzed separately from this point.",
+              "",
+              "## High-value PC/USB strings",
+          ]
+          for o,s in sorted(wanted.items()):
+              md.append(
+                  f"- file `0x{o:04X}` runtime `0x{BASE+o:08X}`: `{s}`"
+              )
+
+          md+=["","## Exact GP-relative xrefs to those strings"]
+          if refs:
+              for r in refs:
+                  md.append(
+                      f"- code `0x{r['addr']:04X}` `{r['text']}` → "
+                      f"`0x{r['file_offset']:04X}` `{r['string']}`"
+                  )
+          else:
+              md.append("- none")
+
+          md+=["","## Functions containing high-value string xrefs"]
+          for f in ref_functions:
+              r=f["ref"]
+              calls=", ".join(
+                  f"0x{x['addr']:04X}→0x{x['target']:04X}"
+                  for x in f["calls"][:30]
+              ) or "none"
+              md.append(
+                  f"- `{r['string']}` xref `0x{r['addr']:04X}`; "
+                  f"region `0x{f['start']:04X}–0x{f['end']:04X}`; calls {calls}"
+              )
+              for im in f["interesting_immediates"][:20]:
+                  md.append(
+                      f"  - immediate `0x{im['value']:X}` at `0x{im['addr']:04X}` "
+                      f"`{im['text']}`"
+                  )
+
+          md+=["",f"## Exact candidate CXXX transport body 0x{CXXX:04X}"]
+          body=bodies[f"0x{CXXX:04X}"]
+          md.append("### String refs inside")
+          if body["string_refs"]:
+              for r in body["string_refs"]:
+                  md.append(
+                      f"- `0x{r['addr']:04X}` → `{r['string']}`"
+                  )
+          else:
+              md.append("- none")
+          md.append("### Direct calls")
+          if body["calls"]:
+              for c in body["calls"]:
+                  md.append(
+                      f"- `0x{c['addr']:04X} → 0x{c['target']:04X}` `{c['text']}`"
+                  )
+          else:
+              md.append("- none")
+          md.append("### Assembly")
+          for line in body["body"].splitlines()[:180]:
+              md.append("    "+line)
+          if len(body["body"].splitlines())>180:
+              md.append("    ... full body in artifact")
+
+          md+=["",f"## Direct callers of 0x{CXXX:04X}"]
+          if callers[CXXX]:
+              for c in callers[CXXX]:
+                  md.append(
+                      f"- `0x{c['addr']:04X}` `{c['text']}`"
+                  )
+          else:
+              md.append("- none")
+
+          md+=["",f"## Direct callers of alternative output candidate 0x{ALT:04X}"]
+          if callers[ALT]:
+              for c in callers[ALT][:100]:
+                  md.append(
+                      f"- `0x{c['addr']:04X}` `{c['text']}`"
+                  )
+          else:
+              md.append("- none")
+
+          md+=["","## C0-C3 / A4 immediate checks near PC/CXXX code"]
+          if global_cmd_checks:
+              for x in global_cmd_checks:
+                  md.append(
+                      f"- `0x{x['addr']:04X}` `{x['text']}`"
+                  )
+          else:
+              md.append("- none")
+
+          md+=["","## CXXX direct callee bodies"]
+          for target,bodytxt in callee_bodies.items():
+              md+=["",f"### `{target}`"]
+              ls=bodytxt.splitlines()
+              for line in ls[:100]:
+                  md.append("    "+line)
+              if len(ls)>100:
+                  md.append(f"    ... {len(ls)-100} more lines in artifact")
+
+          md+=["","## Public SDK USB-source clues"]
+          hits=meta["source_usb_hits"]
+          if hits:
+              shown=0
+              for h in hits:
+                  md.append(
+                      f"- `{h['file']}:{h['line']}` "
+                      f"[{', '.join(h['matched'])}] `{h['text']}`"
+                  )
+                  shown+=1
+                  if shown>=100:
+                      break
+          else:
+              md.append("- none")
+
+          md+=["","## Linear-sweep gaps"]
+          md.append(
+              "- `0xB960` was re-disassembled from the exact direct-call target "
+              "to avoid variable-width NDS32 linear-sweep desynchronization."
+          )
+          if unresolved_callees:
+              md.append(
+                  "- additional direct-call targets absent from the global sweep: "
+                  + ", ".join(f"`0x{x:04X}`" for x in unresolved_callees)
+              )
+          else:
+              md.append("- no additional unresolved direct-call targets")
+
+          md+=["","## Decision"]
+          md.append("- No `cxxx`/PC string is treated as a live USB opcode unless its handler and byte-level frame construction are proven from code.")
+          md.append("- `0xB960` is only a transport candidate until its exact body/callees show packet construction or USB endpoint I/O.")
+          md.append("- Internal SPI flash read/write behavior is not used as evidence for host-side USB framing.")
+          md.append("- USB/board contacted: **NO**")
+          md.append("- Flash read/erase/write executed: **NO**")
+          md.append("- `FLASH_ALLOWED=NO`")
+
+          (OUT/"PC_USB_CXXX_TRANSPORT_SUMMARY.md").write_text(
+              "\n".join(md)+"\n"
+          )
+          PYCODE
+
+      - name: Publish summary
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat /tmp/v14/evidence/PC_USB_CXXX_TRANSPORT_SUMMARY.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Package evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /tmp/v14/evidence
+          zip -9 -r /tmp/OKN_BP1048P4_PC_USB_CXXX_TRANSPORT_V14_1_EVIDENCE.zip . >/dev/null
+          sha256sum /tmp/OKN_BP1048P4_PC_USB_CXXX_TRANSPORT_V14_1_EVIDENCE.zip \
+            > /tmp/OKN_BP1048P4_PC_USB_CXXX_TRANSPORT_V14_1_EVIDENCE.zip.sha256
+
+      - name: Upload evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: OKN-BP1048P4-PC-USB-CXXX-TRANSPORT-V14-1-EVIDENCE
+          path: |
+            /tmp/OKN_BP1048P4_PC_USB_CXXX_TRANSPORT_V14_1_EVIDENCE.zip
+            /tmp/OKN_BP1048P4_PC_USB_CXXX_TRANSPORT_V14_1_EVIDENCE.zip.sha256
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Final fail-closed gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$FLASH_ALLOWED" = "NO"
+          python3 - <<'PY'
+          import json
+          d=json.load(open("/tmp/v14/evidence/PC_USB_CXXX_TRANSPORT.json"))
+          assert d["USB_OR_BOARD_CONTACTED"] is False
+          assert d["LIVE_FLASH_AUTHORIZED"] is False
+          assert d["FLASH_ALLOWED"] is False
+          print("PC_USB_CXXX_TRANSPORT_V14_1_GATE=PASS")
+          PY
+          echo FLASH_ALLOWED=NO
