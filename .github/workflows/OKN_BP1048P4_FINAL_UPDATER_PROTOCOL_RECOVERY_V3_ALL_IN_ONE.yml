@@ -1,0 +1,473 @@
+name: OKN BP1048P4 FINAL Updater Protocol Recovery V3
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: okn-bp1048p4-final-updater-v3-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  FLASH_ALLOWED: "NO"
+
+jobs:
+  recover_updater:
+    name: Recover exact production boot/recovery/write protocol - OFFLINE ONLY
+    runs-on: ubuntu-latest
+    timeout-minutes: 55
+
+    steps:
+      - name: Safety gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$FLASH_ALLOWED" = "NO"
+          mkdir -p /tmp/v3/evidence /tmp/v3/pkg /tmp/v3/decompiled/windows /tmp/v3/decompiled/android
+          cat > /tmp/v3/evidence/SAFETY.txt <<'EOF'
+          MODE=OFFLINE_STATIC_ONLY
+          USB_OR_BOARD_CONTACT=NO
+          FEATURE_55_SENT=NO
+          FEATURE_AA_SENT=NO
+          BOOT_ENTRY_EXECUTED=NO
+          FLASH_READ_EXECUTED=NO
+          FLASH_ERASE_EXECUTED=NO
+          FLASH_WRITE_EXECUTED=NO
+          FLASH_ALLOWED=NO
+          EOF
+
+      - name: Checkout public BP1048 SDK
+        uses: actions/checkout@v4
+        with:
+          repository: leadercxn/bp1048_sdk_v0.1.12
+          ref: master
+          path: bp1048-sdk
+          fetch-depth: 1
+
+      - name: Install reverse-engineering tools
+        shell: bash
+        run: |
+          set -u
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq unzip p7zip-full file binutils jq default-jre-headless mono-utils >/dev/null
+
+          mkdir -p /tmp/v3/tools/ilspy
+          if command -v dotnet >/dev/null 2>&1; then
+            dotnet tool install ilspycmd --tool-path /tmp/v3/tools/ilspy               >/tmp/v3/evidence/ILSPY_INSTALL.log 2>&1 || true
+          fi
+
+          JADX_URL="$(
+            curl -fsSL --retry 3 https://api.github.com/repos/skylot/jadx/releases/latest 2>/dev/null |
+            jq -r '.assets[]?.browser_download_url' |
+            grep -E '/jadx-[0-9.]+\.zip$' | head -1
+          )"
+          if [ -n "${JADX_URL:-}" ]; then
+            curl -fL --retry 3 "$JADX_URL" -o /tmp/v3/tools/jadx.zip || true
+            if [ -s /tmp/v3/tools/jadx.zip ]; then
+              mkdir -p /tmp/v3/tools/jadx
+              unzip -q -o /tmp/v3/tools/jadx.zip -d /tmp/v3/tools/jadx || true
+            fi
+          fi
+
+          {
+            echo "ilspy=$(test -x /tmp/v3/tools/ilspy/ilspycmd && echo yes || echo no)"
+            echo "jadx=$(test -x /tmp/v3/tools/jadx/bin/jadx && echo yes || echo no)"
+            echo "monodis=$(command -v monodis || true)"
+          } > /tmp/v3/evidence/TOOLS.txt
+
+      - name: Download official GoloPine production clients
+        shell: bash
+        run: |
+          set -euo pipefail
+          WIN_URL="https://golodsp.com/wp-content/uploads/2026/05/golopine_audio_turning_release_2026-04-08.exe_.zip"
+          APK_URL="https://golodsp.com/wp-content/uploads/2026/05/golopine_audio_turning_release_2026-04-01.apk_.zip"
+
+          curl -fL --retry 4 --connect-timeout 20 "$WIN_URL" -o /tmp/v3/pkg/windows.zip
+          curl -fL --retry 4 --connect-timeout 20 "$APK_URL" -o /tmp/v3/pkg/android.zip
+
+          sha256sum /tmp/v3/pkg/windows.zip /tmp/v3/pkg/android.zip             > /tmp/v3/evidence/OFFICIAL_DOWNLOAD_SHA256.txt
+
+          mkdir -p /tmp/v3/pkg/windows /tmp/v3/pkg/android
+          unzip -q -o /tmp/v3/pkg/windows.zip -d /tmp/v3/pkg/windows
+          unzip -q -o /tmp/v3/pkg/android.zip -d /tmp/v3/pkg/android
+
+          find /tmp/v3/pkg/windows /tmp/v3/pkg/android -type f -printf '%p\n'             > /tmp/v3/evidence/OFFICIAL_FILE_LIST.txt
+
+      - name: Deep decompile Windows client
+        shell: bash
+        run: |
+          set -u
+          OUT=/tmp/v3/decompiled/windows
+          mkdir -p "$OUT"
+
+          mapfile -t PE < <(
+            find /tmp/v3/pkg/windows -type f \( -iname '*.exe' -o -iname '*.dll' \) |
+            sort | head -100
+          )
+
+          for f in "${PE[@]:-}"; do
+            [ -f "$f" ] || continue
+            b="$(basename "$f" | tr ' /' '__')"
+            sha256sum "$f" >> "$OUT/SHA256SUMS.txt"
+            file "$f" >> "$OUT/FILE_TYPES.txt" || true
+
+            strings -a -n 3 "$f" > "$OUT/${b}.ascii.txt" || true
+            strings -a -el -n 3 "$f" > "$OUT/${b}.utf16.txt" || true
+
+            if [ -x /tmp/v3/tools/ilspy/ilspycmd ]; then
+              mkdir -p "$OUT/${b}.src"
+              /tmp/v3/tools/ilspy/ilspycmd -p -o "$OUT/${b}.src" "$f"                 >"$OUT/${b}.ilspy.log" 2>&1 || true
+              /tmp/v3/tools/ilspy/ilspycmd -il "$f"                 >"$OUT/${b}.il.txt" 2>"$OUT/${b}.il.err" || true
+            fi
+
+            if command -v monodis >/dev/null 2>&1; then
+              monodis "$f" > "$OUT/${b}.monodis.txt" 2>/dev/null || true
+            fi
+          done
+
+      - name: Deep decompile Android production APK
+        shell: bash
+        run: |
+          set -u
+          OUT=/tmp/v3/decompiled/android
+          mkdir -p "$OUT"
+
+          mapfile -t APKS < <(find /tmp/v3/pkg/android -type f -iname '*.apk' | sort)
+          for apk in "${APKS[@]:-}"; do
+            [ -f "$apk" ] || continue
+            b="$(basename "$apk" | tr ' /' '__')"
+            sha256sum "$apk" >> "$OUT/SHA256SUMS.txt"
+
+            if [ -x /tmp/v3/tools/jadx/bin/jadx ]; then
+              mkdir -p "$OUT/${b}.jadx"
+              /tmp/v3/tools/jadx/bin/jadx                 --show-bad-code --no-res                 -d "$OUT/${b}.jadx" "$apk"                 >"$OUT/${b}.jadx.log" 2>&1 || true
+            fi
+
+            mkdir -p "$OUT/${b}.raw"
+            unzip -q -o "$apk" -d "$OUT/${b}.raw" || true
+
+            find "$OUT/${b}.raw" -type f               \( -name 'classes*.dex' -o -name '*.so' -o -name '*.xml' \)               -print0 | while IFS= read -r -d '' f; do
+                echo "===== $f ====="
+                strings -a -n 3 "$f" 2>/dev/null || true
+              done > "$OUT/${b}.raw_strings.txt"
+          done
+
+      - name: Extract exact updater protocol candidates
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import json, re
+
+          roots=[
+              Path("/tmp/v3/decompiled/windows"),
+              Path("/tmp/v3/decompiled/android"),
+          ]
+          out=Path("/tmp/v3/evidence")
+
+          text_files=[]
+          for root in roots:
+              for p in root.rglob("*"):
+                  if not p.is_file():
+                      continue
+                  try:
+                      if p.stat().st_size > 8_000_000:
+                          continue
+                  except OSError:
+                      continue
+                  if (
+                      p.suffix.lower() in {".cs",".java",".kt",".txt",".xml",".smali",".json",".config",".ini",".log"}
+                      or p.name.endswith((".il.txt",".monodis.txt",".raw_strings.txt"))
+                  ):
+                      text_files.append(p)
+
+          groups={
+              "usb_ids":[
+                  r"6324",r"1719",r"25380",r"5913",
+                  r"0x6324",r"0x1719",r"2244",r"8772",r"0x2244"
+              ],
+              "hid_api":[
+                  r"controlTransfer",r"SetFeature",r"GetFeature",
+                  r"WriteFeature",r"ReadFeature",r"WriteReport",r"ReadReport",
+                  r"HidDevice",r"HidStream",r"HidLibrary",r"HidSharp",
+                  r"SET_REPORT",r"GET_REPORT"
+              ],
+              "feature":[
+                  r"0x55",r"0xAA",r"\b85\b",r"\b170\b",
+                  r"0x21",r"0xA1",r"0x09",r"0x01",
+                  r"\b33\b",r"\b161\b"
+              ],
+              "upgrade":[
+                  r"upgrade",r"firmware",r"FlashId",r"Flash usb connected",
+                  r"Otp usb connected",r"actual_boot_lenth",r"flash boot",
+                  r"bootloader",r"chip erase",r"erase all"
+              ],
+              "tags":[
+                  r"chiperas",r"upinfo",r"btupdat",r"cnfgdat",
+                  r"constdat",r"codedata",r"bootdat",r"cxxx"
+              ],
+          }
+
+          hits=[]
+          texts={}
+          for p in text_files:
+              try:
+                  txt=p.read_text(errors="replace")
+              except Exception:
+                  continue
+              texts[p]=txt
+              lines=txt.splitlines()
+              for i,line in enumerate(lines):
+                  matched=[
+                      g for g,pats in groups.items()
+                      if any(re.search(rx,line,re.I) for rx in pats)
+                  ]
+                  if not matched:
+                      continue
+                  lo=max(0,i-10); hi=min(len(lines),i+13)
+                  hits.append({
+                      "file":str(p),
+                      "line":i+1,
+                      "groups":matched,
+                      "context":"\n".join(
+                          f"{j+1:6d}: {lines[j]}" for j in range(lo,hi)
+                      )
+                  })
+
+          call_rx=re.compile(
+              r"(?P<name>controlTransfer|SetFeature|GetFeature|WriteFeature|ReadFeature|"
+              r"WriteReport|ReadReport|Write|Read)\s*\((?P<args>.{0,1800}?)\)",
+              re.I|re.S
+          )
+          calls=[]
+          for p,txt in texts.items():
+              for m in call_rx.finditer(txt):
+                  snippet=" ".join(m.group(0).split())
+                  if re.search(
+                      r"0x55|0xAA|\b85\b|\b170\b|0x21|0xA1|6324|1719|2244|"
+                      r"flash|upgrade|hid",
+                      snippet,re.I
+                  ):
+                      calls.append({
+                          "file":str(p),
+                          "line":txt[:m.start()].count("\n")+1,
+                          "api":m.group("name"),
+                          "call":snippet[:1800]
+                      })
+
+          # Rank likely updater files.
+          scores={}
+          fgroups={}
+          for h in hits:
+              f=h["file"]
+              fgroups.setdefault(f,set()).update(h["groups"])
+              scores[f]=scores.get(f,0)+len(h["groups"])
+          ranked=[]
+          for f,score in scores.items():
+              gs=fgroups[f]
+              score += 15 if "hid_api" in gs else 0
+              score += 12 if "feature" in gs else 0
+              score += 12 if "upgrade" in gs else 0
+              score += 10 if "usb_ids" in gs else 0
+              score += 10 if "tags" in gs else 0
+              ranked.append({"file":f,"score":score,"groups":sorted(gs)})
+          ranked.sort(key=lambda x:(-x["score"],x["file"]))
+
+          (out/"ALL_RELEVANT_CONTEXTS.txt").write_text(
+              "\n\n".join(
+                  f"### {h['file']}:{h['line']} [{','.join(h['groups'])}]\n{h['context']}"
+                  for h in hits
+              )+"\n"
+          )
+          (out/"HID_API_CALL_CANDIDATES.txt").write_text(
+              "\n".join(
+                  f"{x['file']}:{x['line']} | {x['api']} | {x['call']}"
+                  for x in calls
+              )+"\n"
+          )
+          (out/"RANKED_UPDATER_FILES.json").write_text(
+              json.dumps(ranked[:150],indent=2,ensure_ascii=False)+"\n"
+          )
+
+          # Preserve larger windows for the best files only.
+          chunks=[]
+          for item in ranked[:35]:
+              p=Path(item["file"])
+              txt=texts.get(p,"")
+              lines=txt.splitlines()
+              idx=[]
+              for i,line in enumerate(lines):
+                  if re.search(
+                      r"controlTransfer|SetFeature|GetFeature|WriteFeature|ReadFeature|"
+                      r"WriteReport|ReadReport|6324|1719|2244|0x55|0xAA|\b85\b|\b170\b|"
+                      r"FlashId|upgrade|firmware|bootloader|chiperas|upinfo|"
+                      r"codedata|constdat|cnfgdat|bootdat|cxxx|chip erase",
+                      line,re.I
+                  ):
+                      idx.append(i)
+              ranges=[]
+              for i in idx:
+                  lo=max(0,i-35); hi=min(len(lines),i+55)
+                  if ranges and lo <= ranges[-1][1]+12:
+                      ranges[-1]=(ranges[-1][0],max(ranges[-1][1],hi))
+                  else:
+                      ranges.append((lo,hi))
+              chunks.append(
+                  f"===== FILE {p} score={item['score']} groups={item['groups']} ====="
+              )
+              for lo,hi in ranges[:20]:
+                  chunks.append(
+                      "\n".join(f"{j+1:6d}: {lines[j]}" for j in range(lo,hi))
+                  )
+                  chunks.append("---")
+
+          (out/"TOP_UPDATER_SOURCE_WINDOWS.txt").write_text("\n".join(chunks)+"\n")
+
+          data={
+              "scanned_text_files":len(text_files),
+              "context_hits":len(hits),
+              "api_call_candidates":len(calls),
+              "ranked_files":ranked[:100],
+              "calls":calls[:600]
+          }
+          (out/"UPDATER_EXTRACTION.json").write_text(
+              json.dumps(data,indent=2,ensure_ascii=False)+"\n"
+          )
+          PY
+
+      - name: Build final updater report
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import json, re
+
+          out=Path("/tmp/v3/evidence")
+          ctx=(out/"ALL_RELEVANT_CONTEXTS.txt").read_text(errors="replace")
+          calls=(out/"HID_API_CALL_CANDIDATES.txt").read_text(errors="replace")
+          top=(out/"TOP_UPDATER_SOURCE_WINDOWS.txt").read_text(errors="replace")
+          corpus=(ctx+"\n"+calls+"\n"+top).lower()
+
+          def has(*terms):
+              return any(t.lower() in corpus for t in terms)
+
+          evidence={
+              "runtime_vid_pid_present":has("6324","1719","25380","5913"),
+              "recovery_pid_2244_present":has("2244","8772","0x2244"),
+              "hid_feature_api_present":has("setfeature","getfeature","writefeature","readfeature"),
+              "android_control_transfer_present":has("controltransfer"),
+              "feature_55_present":has("0x55"," 85 ","=85",",85"),
+              "feature_aa_present":has("0xaa"," 170 ","=170",",170"),
+              "upgrade_words_present":has("upgrade","firmware","flash boot","bootloader"),
+              "flash_id_present":has("flashid"),
+              "package_tags_present":all(x in corpus for x in ("codedata","constdat","cnfgdat")),
+              "chip_erase_word_present":has("chip erase","erase all","chiperas"),
+          }
+
+          status={
+              "known_runtime_protocol":{
+                  "frame":"A5 5A CONTROL LEN PAYLOAD 16",
+                  "transport":"256-byte HID control report on EP0",
+                  "safe_query":"A5 5A 00 00 16",
+                  "runtime_vid_pid":"6324:1719",
+                  "interface":4
+              },
+              "production_updater_evidence":evidence,
+              "decision":{
+                  "runtime_protocol_ready":True,
+                  "boot_entry_ready":False,
+                  "recovery_identity_ready":False,
+                  "flash_write_ready":False,
+                  "FLASH_ALLOWED":"NO"
+              }
+          }
+          (out/"FINAL_UPDATER_STATUS.json").write_text(
+              json.dumps(status,indent=2)+"\n"
+          )
+
+          selected=[]
+          for line in (calls+"\n"+top).splitlines():
+              if re.search(
+                  r"SetFeature|GetFeature|WriteFeature|ReadFeature|controlTransfer|"
+                  r"0x55|0xAA|6324|1719|2244|FlashId|upgrade|firmware|"
+                  r"codedata|constdat|cnfgdat|chip erase",
+                  line,re.I
+              ):
+                  selected.append(line[:360])
+                  if len(selected)>=180:
+                      break
+
+          md=[
+              "# BP1048P4 Final Updater Protocol Recovery V3",
+              "",
+              "## Runtime side already proven",
+              "- frame: `A5 5A CONTROL LEN PAYLOAD 16`",
+              "- transport: 256-byte HID control reports on EP0",
+              "- production runtime: `6324:1719`, interface `4`",
+              "- non-destructive version query: `A5 5A 00 00 16`",
+              "",
+              "## Production updater evidence",
+          ]
+          md += [f"- {k}: **{v}**" for k,v in evidence.items()]
+          md += ["","## Highest-signal recovered lines"]
+          md += [f"- `{x.replace('`','')}`" for x in selected]
+          md += [
+              "",
+              "## Gate",
+              "- runtime Android protocol: **READY**",
+              "- live boot entry: **BLOCKED**",
+              "- recovery identity: **BLOCKED**",
+              "- firmware writer: **BLOCKED**",
+              "- `FLASH_ALLOWED=NO`",
+              "",
+              "The artifact contains the top decompiled source windows for direct final correlation."
+          ]
+          (out/"FINAL_UPDATER_REPORT.md").write_text("\n".join(md)+"\n")
+          PY
+
+      - name: Package evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /tmp/v3/evidence
+          zip -9 -r /tmp/OKN_BP1048P4_FINAL_UPDATER_PROTOCOL_V3_EVIDENCE.zip . >/dev/null
+          sha256sum /tmp/OKN_BP1048P4_FINAL_UPDATER_PROTOCOL_V3_EVIDENCE.zip             > /tmp/OKN_BP1048P4_FINAL_UPDATER_PROTOCOL_V3_EVIDENCE.zip.sha256
+
+      - name: Publish compact report
+        shell: bash
+        run: |
+          set -euo pipefail
+          head -c 220000 /tmp/v3/evidence/FINAL_UPDATER_REPORT.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload final updater evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: OKN-BP1048P4-FINAL-UPDATER-PROTOCOL-V3-EVIDENCE
+          path: |
+            /tmp/OKN_BP1048P4_FINAL_UPDATER_PROTOCOL_V3_EVIDENCE.zip
+            /tmp/OKN_BP1048P4_FINAL_UPDATER_PROTOCOL_V3_EVIDENCE.zip.sha256
+            /tmp/v3/evidence/FINAL_UPDATER_REPORT.md
+            /tmp/v3/evidence/FINAL_UPDATER_STATUS.json
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Final fail-closed gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$FLASH_ALLOWED" = "NO"
+          python3 - <<'PY'
+          import json
+          d=json.load(open("/tmp/v3/evidence/FINAL_UPDATER_STATUS.json"))
+          assert d["decision"]["runtime_protocol_ready"] is True
+          assert d["decision"]["boot_entry_ready"] is False
+          assert d["decision"]["recovery_identity_ready"] is False
+          assert d["decision"]["flash_write_ready"] is False
+          assert d["decision"]["FLASH_ALLOWED"] == "NO"
+          print("FINAL_UPDATER_PROTOCOL_V3_GATE=PASS")
+          print("FLASH_ALLOWED=NO")
+          PY
