@@ -1,0 +1,421 @@
+name: OKN BP1048P4 Reactor Runtime Body Capture V6
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  FLASH_ALLOWED: "NO"
+  EXPECTED_CLIENT_ZIP_SHA256: "f14b0c4baad70a8b0d5dc3b2783819cc2ef6e1a9c6ec2adcf17f1557059edd2a"
+
+jobs:
+  runtime_body_capture:
+    name: Capture protected HID/updater bodies - OFFLINE - NO USB - NO FLASH
+    runs-on: windows-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Safety gate
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          if ($env:FLASH_ALLOWED -ne "NO") { throw "FLASH_ALLOWED must remain NO" }
+
+          New-Item -ItemType Directory -Force -Path `
+            C:\v6\client, `
+            C:\v6\tools, `
+            C:\v6\krypton, `
+            C:\v6\evidence | Out-Null
+
+          @"
+          TARGET=official GoloPine Windows client 08-Apr-2026
+          MODE=SANDBOXED_RUNTIME_BODY_CAPTURE
+          PHYSICAL_USB_BOARD_PRESENT=NO
+          USB_COMMAND_SENT=NO
+          FEATURE_REPORT_SENT=NO
+          BOOT_ENTRY_EXECUTED=NO
+          FLASH_READ_EXECUTED=NO
+          FLASH_ERASE_EXECUTED=NO
+          FLASH_WRITE_EXECUTED=NO
+          FLASH_ALLOWED=NO
+          "@ | Set-Content C:\v6\evidence\SAFETY.txt
+
+      - name: Setup .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Download pinned official Windows client
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $url = "https://golodsp.com/wp-content/uploads/2026/05/golopine_audio_turning_release_2026-04-08.exe_.zip"
+          Invoke-WebRequest -Uri $url -OutFile C:\v6\client\client.zip
+
+          $actual = (Get-FileHash C:\v6\client\client.zip -Algorithm SHA256).Hash.ToLower()
+          "expected=$env:EXPECTED_CLIENT_ZIP_SHA256" | Set-Content C:\v6\evidence\CLIENT_PIN.txt
+          "actual=$actual" | Add-Content C:\v6\evidence\CLIENT_PIN.txt
+          if ($actual -ne $env:EXPECTED_CLIENT_ZIP_SHA256) {
+            throw "Official client ZIP hash changed"
+          }
+
+          Expand-Archive -Force C:\v6\client\client.zip C:\v6\client\extracted
+          $exe = Get-ChildItem C:\v6\client\extracted -Recurse -File -Filter *.exe |
+            Where-Object { $_.FullName -notmatch "__MACOSX" } |
+            Select-Object -First 1
+          if (-not $exe) { throw "Client EXE not found" }
+
+          Copy-Item $exe.FullName C:\v6\client\original.exe
+          (Get-FileHash C:\v6\client\original.exe -Algorithm SHA256).Hash |
+            Set-Content C:\v6\evidence\ORIGINAL_EXE_SHA256.txt
+
+      - name: Install ILSpy
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          dotnet tool install ilspycmd --tool-path C:\v6\tools\ilspy |
+            Tee-Object -FilePath C:\v6\evidence\ILSPY_INSTALL.log
+
+      - name: Clone and build current Krypton runner
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          git clone --depth 1 https://github.com/dawwinci/krypton-devirtualizer.git C:\v6\krypton\src
+
+          Push-Location C:\v6\krypton\src
+          git rev-parse HEAD | Set-Content C:\v6\evidence\KRYPTON_COMMIT.txt
+          git log -1 --pretty=fuller | Set-Content C:\v6\evidence\KRYPTON_COMMIT_DETAIL.txt
+
+          dotnet build .\Krypton.Runner\Krypton.Runner.csproj -c Release |
+            Tee-Object -FilePath C:\v6\evidence\RUNNER_BUILD.log
+          Pop-Location
+
+          $runner = Get-ChildItem C:\v6\krypton\src\Krypton.Runner\bin\Release -Recurse -File -Filter Krypton.Runner.exe |
+            Select-Object -First 1
+          if (-not $runner) { throw "Krypton.Runner.exe not found" }
+          $runner.FullName | Set-Content C:\v6\evidence\RUNNER_PATH.txt
+
+      - name: Baseline HID metadata and exact method tokens
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Continue"
+
+          # Baseline IL is useful evidence, but a non-zero ILSpy exit must not
+          # prevent the runtime body-capture stages from running.
+          & C:\v6\tools\ilspy\ilspycmd.exe -il C:\v6\client\original.exe `
+            *> C:\v6\evidence\ORIGINAL.il.txt
+          "ilspy_il_exit=$LASTEXITCODE" | Set-Content C:\v6\evidence\BASELINE_EXIT_CODES.txt
+
+          & C:\v6\tools\ilspy\ilspycmd.exe -t DSTech_AudioDSP_Client.Hid C:\v6\client\original.exe `
+            *> C:\v6\evidence\HID_CLASS.cs
+          "ilspy_type_exit=$LASTEXITCODE" | Add-Content C:\v6\evidence\BASELINE_EXIT_CODES.txt
+
+          # Avoid ReflectionOnlyLoadFrom/GetTypes here. The protected client may
+          # have unresolved dependencies and can make reflection enumeration fail.
+          # dnfile reads .NET metadata directly without executing/loading the app.
+          python -m pip install --disable-pip-version-check --quiet dnfile
+          "pip_dnfile_exit=$LASTEXITCODE" | Add-Content C:\v6\evidence\BASELINE_EXIT_CODES.txt
+
+          @'
+          from pathlib import Path
+          import re
+
+          exe = r"C:\v6\client\original.exe"
+          out = Path(r"C:\v6\evidence\METHOD_TOKENS.txt")
+          lines = []
+
+          try:
+              import dnfile
+              pe = dnfile.dnPE(exe)
+              rows = getattr(getattr(pe, "net", None), "mdtables", None)
+              method_table = getattr(rows, "MethodDef", None) if rows else None
+
+              if method_table and method_table.rows:
+                  for idx, row in enumerate(method_table.rows, 1):
+                      try:
+                          name = str(row.Name)
+                      except Exception:
+                          name = ""
+                      if re.search(r"feature|send|write|read|flash|upgrade|firmware|hid|connect", name, re.I):
+                          token = 0x06000000 | idx
+                          lines.append(f"METHOD token=0x{token:08X} dec={token} name={name}")
+              else:
+                  lines.append("dnfile: MethodDef table unavailable")
+          except Exception as ex:
+              lines.append("dnfile error: " + repr(ex))
+
+          # Also preserve exact P/Invoke declaration neighborhoods from ILSpy.
+          ilp = Path(r"C:\v6\evidence\ORIGINAL.il.txt")
+          if ilp.exists():
+              il = ilp.read_text(errors="replace").splitlines()
+              pats = (
+                  "HidD_SetFeature",
+                  "HidD_GetFeature",
+                  "HidD_SetOutputReport",
+                  "HidD_GetInputReport",
+                  "WriteFile",
+                  "ReadFile",
+                  "getFeature",
+              )
+              for i, line in enumerate(il):
+                  if any(p.lower() in line.lower() for p in pats):
+                      lo=max(0,i-6); hi=min(len(il),i+10)
+                      lines.append(
+                          f"\nIL_CONTEXT line={i+1}\n" +
+                          "\n".join(f"{j+1:6d}: {il[j]}" for j in range(lo,hi))
+                      )
+
+          out.write_text("\n".join(lines) + "\n", errors="replace")
+          '@ | Set-Content C:\v6\metadata_tokens.py
+
+          python C:\v6\metadata_tokens.py *> C:\v6\evidence\METADATA_TOKEN_EXTRACT.log
+          "metadata_extract_exit=$LASTEXITCODE" | Add-Content C:\v6\evidence\BASELINE_EXIT_CODES.txt
+
+          # This stage is intentionally best-effort. The decisive V6 work is the
+          # NecroBit body dump / standalone runner, which must still execute.
+          $global:LASTEXITCODE = 0
+          exit 0
+
+      - name: Run NecroBit body dump all
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Continue"
+          $runner = Get-Content C:\v6\evidence\RUNNER_PATH.txt | Select-Object -First 1
+
+          & $runner --necrobit-body-dump-all C:\v6\client\original.exe C:\v6\evidence\NECROBIT_ALL.json `
+            *> C:\v6\evidence\NECROBIT_RUN.log
+          "exit_code=$LASTEXITCODE" | Set-Content C:\v6\evidence\NECROBIT_EXIT.txt
+
+          $global:LASTEXITCODE = 0
+          exit 0
+
+      - name: Run standalone protected-assembly check
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Continue"
+          $runner = Get-Content C:\v6\evidence\RUNNER_PATH.txt | Select-Object -First 1
+
+          & $runner --standalone-check C:\v6\client\original.exe `
+            *> C:\v6\evidence\STANDALONE_CHECK.log
+          "exit_code=$LASTEXITCODE" | Set-Content C:\v6\evidence\STANDALONE_EXIT.txt
+
+          $global:LASTEXITCODE = 0
+          exit 0
+
+      - name: Correlate captured bodies to HID updater methods
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Continue"
+
+          @'
+          from pathlib import Path
+          import json, re, hashlib
+
+          E = Path(r"C:\v6\evidence")
+          p = E / "NECROBIT_ALL.json"
+
+          report = []
+          status = {
+              "necrobit_json_present": p.exists(),
+              "necrobit_json_valid": False,
+              "top_level_kind": None,
+              "candidate_records": 0,
+              "hid_named_records": 0,
+              "setfeature_text_hits": 0,
+              "setoutput_text_hits": 0,
+              "writefile_text_hits": 0,
+              "pid1719_text_hits": 0,
+              "pid2244_text_hits": 0,
+              "flash_update_text_hits": 0,
+              "FLASH_ALLOWED": "NO",
+          }
+
+          tokens_text = (E/"METHOD_TOKENS.txt").read_text(errors="replace") if (E/"METHOD_TOKENS.txt").exists() else ""
+          token_hex = sorted(set(re.findall(r"0x06[0-9A-Fa-f]{6}", tokens_text)))
+          token_dec = []
+          for h in token_hex:
+              try: token_dec.append(str(int(h,16)))
+              except: pass
+
+          def walk(x, path="$"):
+              if isinstance(x, dict):
+                  yield path, x
+                  for k,v in x.items():
+                      yield from walk(v, f"{path}.{k}")
+              elif isinstance(x, list):
+                  for i,v in enumerate(x):
+                      yield from walk(v, f"{path}[{i}]")
+
+          if p.exists():
+              raw = p.read_text(errors="replace")
+              (E/"NECROBIT_RAW_SHA256.txt").write_text(hashlib.sha256(raw.encode("utf-8",errors="replace")).hexdigest()+"\n")
+              try:
+                  obj = json.loads(raw)
+                  status["necrobit_json_valid"] = True
+                  status["top_level_kind"] = type(obj).__name__
+              except Exception as ex:
+                  obj = None
+                  report.append("JSON parse error: "+repr(ex))
+
+              low = raw.lower()
+              status["setfeature_text_hits"] = low.count("setfeature")
+              status["setoutput_text_hits"] = low.count("setoutput")
+              status["writefile_text_hits"] = low.count("writefile")
+              status["pid1719_text_hits"] = low.count("1719")
+              status["pid2244_text_hits"] = low.count("2244")
+              status["flash_update_text_hits"] = len(re.findall(r"flash|upgrade|firmware|boot", low))
+
+              candidates = []
+              if obj is not None:
+                  for path,rec in walk(obj):
+                      s = json.dumps(rec, ensure_ascii=False)
+                      sl = s.lower()
+                      score = 0
+                      why = []
+                      for term,w in [
+                          ("hid",4),("getfeature",8),("setfeature",10),
+                          ("setoutputreport",10),("getinputreport",8),
+                          ("writefile",8),("readfile",6),
+                          ("flash",5),("upgrade",5),("firmware",5),
+                          ("1719",7),("2244",7)
+                      ]:
+                          if term in sl:
+                              score += w; why.append(term)
+                      for tok in token_hex + token_dec:
+                          if tok.lower() in sl:
+                              score += 12; why.append("method-token:"+tok)
+                      if score:
+                          candidates.append((score,path,why,s[:40000]))
+
+              # Deduplicate nested records by keeping highest-signal representations.
+              candidates.sort(key=lambda x:(-x[0], len(x[3])))
+              seen=set()
+              out=[]
+              for score,path,why,s in candidates:
+                  key=s[:1000]
+                  if key in seen: continue
+                  seen.add(key)
+                  out.append((score,path,why,s))
+                  if len(out)>=120: break
+
+              status["candidate_records"] = len(out)
+              status["hid_named_records"] = sum(1 for _,_,why,_ in out if "hid" in why or "getfeature" in why or "setfeature" in why)
+
+              parts=[]
+              for score,path,why,s in out:
+                  parts.append(f"===== score={score} path={path} why={','.join(why)} =====\n{s}")
+              (E/"NECROBIT_HID_UPDATER_CANDIDATES.txt").write_text("\n\n".join(parts)+"\n", errors="replace")
+
+          (E/"V6_STATUS.json").write_text(json.dumps(status, indent=2)+"\n")
+
+          md = [
+              "# BP1048P4 Runtime Body Capture V6",
+              "",
+              "## Core result",
+              f"- NecroBit JSON present: **{status['necrobit_json_present']}**",
+              f"- NecroBit JSON valid: **{status['necrobit_json_valid']}**",
+              f"- candidate captured records: **{status['candidate_records']}**",
+              f"- HID-named/token-linked records: **{status['hid_named_records']}**",
+              f"- SetFeature text hits inside runtime dump: **{status['setfeature_text_hits']}**",
+              f"- SetOutputReport text hits: **{status['setoutput_text_hits']}**",
+              f"- WriteFile text hits: **{status['writefile_text_hits']}**",
+              f"- PID 1719 hits: **{status['pid1719_text_hits']}**",
+              f"- PID 2244 hits: **{status['pid2244_text_hits']}**",
+              "",
+              "## V5 correction",
+              "- V5's reported `real_hid_api_calls=1` was a scanner false positive: the shown context contained P/Invoke declarations plus a four-byte `getFeature` stub returning true, not a recovered HID API call.",
+              "- V6 bypasses Krypton's failing VM MethodDisassembling stage and asks the sandbox runner to materialize protected stub bodies directly.",
+              "",
+              "## Gate",
+              "- physical board contacted: **NO**",
+              "- boot/feature command sent: **NO**",
+              "- flash operation executed: **NO**",
+              "- `FLASH_ALLOWED=NO`",
+          ]
+          (E/"V6_REPORT.md").write_text("\n".join(md)+"\n")
+          '@ | Set-Content C:\v6\analyze.py
+
+          python C:\v6\analyze.py
+
+      - name: Publish decisive summary
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Continue"
+
+          Get-Content C:\v6\evidence\V6_REPORT.md | Add-Content $env:GITHUB_STEP_SUMMARY
+
+          "## Baseline metadata diagnostics" | Add-Content $env:GITHUB_STEP_SUMMARY
+          '```text' | Add-Content $env:GITHUB_STEP_SUMMARY
+          if (Test-Path C:\v6\evidence\BASELINE_EXIT_CODES.txt) {
+            Get-Content C:\v6\evidence\BASELINE_EXIT_CODES.txt | Add-Content $env:GITHUB_STEP_SUMMARY
+          }
+          if (Test-Path C:\v6\evidence\METADATA_TOKEN_EXTRACT.log) {
+            Get-Content C:\v6\evidence\METADATA_TOKEN_EXTRACT.log -Tail 60 |
+              ForEach-Object { $_ -replace '```','` ` `' } |
+              Add-Content $env:GITHUB_STEP_SUMMARY
+          }
+          '```' | Add-Content $env:GITHUB_STEP_SUMMARY
+
+          "## NecroBit runner exit" | Add-Content $env:GITHUB_STEP_SUMMARY
+          '```text' | Add-Content $env:GITHUB_STEP_SUMMARY
+          Get-Content C:\v6\evidence\NECROBIT_EXIT.txt | Add-Content $env:GITHUB_STEP_SUMMARY
+          Get-Content C:\v6\evidence\NECROBIT_RUN.log -Tail 180 |
+            ForEach-Object { $_ -replace '```','` ` `' } |
+            Add-Content $env:GITHUB_STEP_SUMMARY
+          '```' | Add-Content $env:GITHUB_STEP_SUMMARY
+
+          "## Exact HID/updater method tokens" | Add-Content $env:GITHUB_STEP_SUMMARY
+          '```text' | Add-Content $env:GITHUB_STEP_SUMMARY
+          Get-Content C:\v6\evidence\METHOD_TOKENS.txt -TotalCount 220 |
+            ForEach-Object { $_ -replace '```','` ` `' } |
+            Add-Content $env:GITHUB_STEP_SUMMARY
+          '```' | Add-Content $env:GITHUB_STEP_SUMMARY
+
+          "## Highest-signal captured body records" | Add-Content $env:GITHUB_STEP_SUMMARY
+          '```text' | Add-Content $env:GITHUB_STEP_SUMMARY
+          if (Test-Path C:\v6\evidence\NECROBIT_HID_UPDATER_CANDIDATES.txt) {
+            Get-Content C:\v6\evidence\NECROBIT_HID_UPDATER_CANDIDATES.txt -TotalCount 500 |
+              ForEach-Object { $_ -replace '```','` ` `' } |
+              Add-Content $env:GITHUB_STEP_SUMMARY
+          }
+          '```' | Add-Content $env:GITHUB_STEP_SUMMARY
+
+      - name: Package evidence
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          Compress-Archive -Force -CompressionLevel Optimal `
+            -Path C:\v6\evidence\* `
+            -DestinationPath C:\v6\OKN_BP1048P4_RUNTIME_BODY_CAPTURE_V6_EVIDENCE.zip
+
+          (Get-FileHash C:\v6\OKN_BP1048P4_RUNTIME_BODY_CAPTURE_V6_EVIDENCE.zip -Algorithm SHA256).Hash |
+            Set-Content C:\v6\OKN_BP1048P4_RUNTIME_BODY_CAPTURE_V6_EVIDENCE.zip.sha256
+
+      - name: Upload evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: OKN-BP1048P4-RUNTIME-BODY-CAPTURE-V6-EVIDENCE
+          path: |
+            C:\v6\OKN_BP1048P4_RUNTIME_BODY_CAPTURE_V6_EVIDENCE.zip
+            C:\v6\OKN_BP1048P4_RUNTIME_BODY_CAPTURE_V6_EVIDENCE.zip.sha256
+            C:\v6\evidence\V6_REPORT.md
+            C:\v6\evidence\V6_STATUS.json
+            C:\v6\evidence\NECROBIT_HID_UPDATER_CANDIDATES.txt
+            C:\v6\evidence\METHOD_TOKENS.txt
+            C:\v6\evidence\NECROBIT_EXIT.txt
+            C:\v6\evidence\STANDALONE_EXIT.txt
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Final fail-closed gate
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          if ($env:FLASH_ALLOWED -ne "NO") { throw "FLASH_ALLOWED changed" }
+          $d = Get-Content C:\v6\evidence\V6_STATUS.json | ConvertFrom-Json
+          if ($d.FLASH_ALLOWED -ne "NO") { throw "V6 status gate failed" }
+
+          "V6_RUNTIME_BODY_CAPTURE_COMPLETE=YES"
+          "FLASH_ALLOWED=NO"
