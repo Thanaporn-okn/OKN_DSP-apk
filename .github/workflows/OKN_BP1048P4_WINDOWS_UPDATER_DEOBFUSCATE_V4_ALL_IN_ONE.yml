@@ -1,0 +1,450 @@
+name: OKN BP1048P4 Windows Updater Deobfuscate V4
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  FLASH_ALLOWED: "NO"
+  EXPECTED_CLIENT_ZIP_SHA256: "f14b0c4baad70a8b0d5dc3b2783819cc2ef6e1a9c6ec2adcf17f1557059edd2a"
+  REACTOR_SLAYER_SHA256: "3aed0f45bc6dd4e65dbf239eaf6af6255b8408b9cc281de22846bfa931822493"
+
+jobs:
+  deobfuscate:
+    name: Decrypt protected Windows updater methods - OFFLINE - NO USB
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+
+    steps:
+      - name: Safety gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$FLASH_ALLOWED" = "NO"
+          mkdir -p /tmp/v4/{client,tools,work,evidence,decompiled}
+          cat > /tmp/v4/evidence/SAFETY.txt <<'EOF'
+          TARGET=official GoloPine Windows client 08-Apr-2026
+          MODE=STATIC_DEOBFUSCATION_ONLY
+          BOARD_CONNECTED=NO
+          USB_COMMANDS_SENT=NO
+          FEATURE_REPORT_SENT=NO
+          FLASH_READ_EXECUTED=NO
+          FLASH_ERASE_EXECUTED=NO
+          FLASH_WRITE_EXECUTED=NO
+          FLASH_ALLOWED=NO
+          EOF
+
+      - name: Download pinned official Windows client
+        shell: bash
+        run: |
+          set -euo pipefail
+          URL="https://golodsp.com/wp-content/uploads/2026/05/golopine_audio_turning_release_2026-04-08.exe_.zip"
+          curl -fL --retry 5 --connect-timeout 20 "$URL" -o /tmp/v4/client/client.zip
+
+          ACTUAL="$(sha256sum /tmp/v4/client/client.zip | awk '{print $1}')"
+          echo "expected=$EXPECTED_CLIENT_ZIP_SHA256" | tee /tmp/v4/evidence/CLIENT_PIN.txt
+          echo "actual=$ACTUAL" | tee -a /tmp/v4/evidence/CLIENT_PIN.txt
+          test "$ACTUAL" = "$EXPECTED_CLIENT_ZIP_SHA256"
+
+          unzip -q -o /tmp/v4/client/client.zip -d /tmp/v4/client/extracted
+          EXE="$(find /tmp/v4/client/extracted -type f -iname '*.exe' ! -path '*/__MACOSX/*' | head -1)"
+          test -n "$EXE"
+          cp "$EXE" /tmp/v4/work/original.exe
+
+          sha256sum /tmp/v4/work/original.exe > /tmp/v4/evidence/ORIGINAL_EXE_SHA256.txt
+          file /tmp/v4/work/original.exe > /tmp/v4/evidence/ORIGINAL_EXE_FILETYPE.txt
+
+      - name: Install ILSpy
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/v4/tools/ilspy
+          dotnet tool install ilspycmd --tool-path /tmp/v4/tools/ilspy \
+            > /tmp/v4/evidence/ILSPY_INSTALL.log 2>&1
+
+      - name: Download pinned NETReactorSlayer CLI
+        shell: bash
+        run: |
+          set -euo pipefail
+          URL="https://github.com/SychicBoy/NETReactorSlayer/releases/download/v6.4.0.0/NETReactorSlayer.CLI-net6.0-linux64.zip"
+          curl -fL --retry 5 "$URL" -o /tmp/v4/tools/reactor.zip
+
+          ACTUAL="$(sha256sum /tmp/v4/tools/reactor.zip | awk '{print $1}')"
+          {
+            echo "expected=$REACTOR_SLAYER_SHA256"
+            echo "actual=$ACTUAL"
+          } > /tmp/v4/evidence/REACTOR_SLAYER_PIN.txt
+          test "$ACTUAL" = "$REACTOR_SLAYER_SHA256"
+
+          mkdir -p /tmp/v4/tools/reactor
+          unzip -q -o /tmp/v4/tools/reactor.zip -d /tmp/v4/tools/reactor
+          find /tmp/v4/tools/reactor -maxdepth 3 -type f -printf '%p\n' \
+            > /tmp/v4/evidence/REACTOR_SLAYER_FILES.txt
+
+      - name: Baseline original protected methods
+        shell: bash
+        run: |
+          set -u
+          mkdir -p /tmp/v4/decompiled/original
+          /tmp/v4/tools/ilspy/ilspycmd -p -o /tmp/v4/decompiled/original /tmp/v4/work/original.exe \
+            > /tmp/v4/evidence/ORIGINAL_ILSPY.log 2>&1 || true
+          /tmp/v4/tools/ilspy/ilspycmd -il /tmp/v4/work/original.exe \
+            > /tmp/v4/evidence/ORIGINAL.il.txt 2>/tmp/v4/evidence/ORIGINAL.il.err || true
+
+          grep -RniE \
+            'HidD_SetFeature|HidD_SetOutputReport|HidD_GetInputReport|getFeature|bool Send\(|FlashId|flash boot|upgrade|firmware|actual_boot_lenth|Otp usb connected|Flash usb connected' \
+            /tmp/v4/decompiled/original \
+            > /tmp/v4/evidence/ORIGINAL_HID_UPGRADE_HITS.txt || true
+
+      - name: Run NETReactorSlayer with fallback invocation forms
+        shell: bash
+        run: |
+          set -u
+          cp /tmp/v4/work/original.exe /tmp/v4/work/target.exe
+
+          CLI_EXE="$(find /tmp/v4/tools/reactor -type f -perm -u+x \
+            \( -iname '*CLI*' -o -iname 'NETReactorSlayer' \) | head -1)"
+          CLI_DLL="$(find /tmp/v4/tools/reactor -type f -iname '*CLI*.dll' | head -1)"
+
+          {
+            echo "CLI_EXE=$CLI_EXE"
+            echo "CLI_DLL=$CLI_DLL"
+          } > /tmp/v4/evidence/REACTOR_CLI_SELECTED.txt
+
+          run_try() {
+            local label="$1"; shift
+            echo "===== $label =====" >> /tmp/v4/evidence/REACTOR_RUN.log
+            "$@" >> /tmp/v4/evidence/REACTOR_RUN.log 2>&1
+            return $?
+          }
+
+          SUCCESS=0
+          if [ -n "$CLI_EXE" ]; then
+            chmod +x "$CLI_EXE" || true
+            run_try exe_flags "$CLI_EXE" /tmp/v4/work/target.exe --no-pause --verbose && SUCCESS=1 || true
+          fi
+
+          if [ "$SUCCESS" -eq 0 ] && [ -n "$CLI_DLL" ]; then
+            run_try dll_flags dotnet "$CLI_DLL" /tmp/v4/work/target.exe --no-pause --verbose && SUCCESS=1 || true
+          fi
+
+          if [ "$SUCCESS" -eq 0 ] && [ -n "$CLI_EXE" ]; then
+            run_try exe_plain "$CLI_EXE" /tmp/v4/work/target.exe && SUCCESS=1 || true
+          fi
+
+          if [ "$SUCCESS" -eq 0 ] && [ -n "$CLI_DLL" ]; then
+            run_try dll_plain dotnet "$CLI_DLL" /tmp/v4/work/target.exe && SUCCESS=1 || true
+          fi
+
+          echo "reactor_invocation_success=$SUCCESS" > /tmp/v4/evidence/REACTOR_RESULT.txt
+
+          find /tmp/v4/work /tmp/v4/tools/reactor \
+            -type f -iname '*.exe' -printf '%T@ %s %p\n' |
+            sort -nr > /tmp/v4/evidence/EXE_CANDIDATES.txt
+
+      - name: Select and decompile all changed assembly candidates
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import hashlib, shutil
+
+          original=Path("/tmp/v4/work/original.exe")
+          oh=hashlib.sha256(original.read_bytes()).hexdigest()
+          roots=[Path("/tmp/v4/work"),Path("/tmp/v4/tools/reactor")]
+          dst=Path("/tmp/v4/work/candidates")
+          dst.mkdir(exist_ok=True)
+
+          rows=[]
+          n=0
+          seen=set()
+          for root in roots:
+              for p in root.rglob("*.exe"):
+                  try:
+                      data=p.read_bytes()
+                  except Exception:
+                      continue
+                  h=hashlib.sha256(data).hexdigest()
+                  if h==oh or h in seen or len(data)<100_000:
+                      continue
+                  seen.add(h)
+                  n+=1
+                  q=dst/f"candidate_{n:02d}.exe"
+                  shutil.copy2(p,q)
+                  rows.append((q,p,len(data),h))
+
+          Path("/tmp/v4/evidence/DEOBFUSCATED_CANDIDATES.tsv").write_text(
+              "\n".join(f"{q}\t{src}\t{size}\t{h}" for q,src,size,h in rows)+"\n"
+          )
+          PY
+
+          mkdir -p /tmp/v4/decompiled/candidates
+          for exe in /tmp/v4/work/candidates/*.exe; do
+            [ -f "$exe" ] || continue
+            b="$(basename "$exe" .exe)"
+            mkdir -p "/tmp/v4/decompiled/candidates/$b"
+            /tmp/v4/tools/ilspy/ilspycmd -p \
+              -o "/tmp/v4/decompiled/candidates/$b" "$exe" \
+              >"/tmp/v4/evidence/${b}_ilspy.log" 2>&1 || true
+            /tmp/v4/tools/ilspy/ilspycmd -il "$exe" \
+              >"/tmp/v4/evidence/${b}.il.txt" 2>"/tmp/v4/evidence/${b}.il.err" || true
+          done
+
+      - name: Prove real SetFeature/GetFeature call sites and eliminate false positives
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import json,re
+
+          E=Path("/tmp/v4/evidence")
+          roots=[Path("/tmp/v4/decompiled/original"),Path("/tmp/v4/decompiled/candidates")]
+
+          def iter_text(root):
+              for p in root.rglob("*"):
+                  if p.is_file() and p.suffix.lower() in {".cs",".txt",".il",".java"}:
+                      try:
+                          if p.stat().st_size < 12_000_000:
+                              yield p,p.read_text(errors="replace")
+                      except Exception:
+                          pass
+
+          allfiles=[]
+          for root in roots:
+              allfiles.extend(iter_text(root))
+
+          # Exact declarations alone do not count.
+          pinvoke_names={}
+          declaration_hits=[]
+          for p,txt in allfiles:
+              for m in re.finditer(
+                  r'EntryPoint\s*=\s*"(?P<ep>HidD_(?:SetFeature|GetFeature|SetOutputReport|GetInputReport))"'
+                  r'.{0,250}?(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*\(',
+                  txt,re.I|re.S
+              ):
+                  ep=m.group("ep")
+                  name=m.group("name")
+                  pinvoke_names.setdefault(name,set()).add(ep)
+                  declaration_hits.append((str(p),txt[:m.start()].count("\n")+1,ep,name))
+
+          # ILSpy C# may put method name before attribute; mine simpler extern declarations too.
+          for p,txt in allfiles:
+              lines=txt.splitlines()
+              for i,line in enumerate(lines):
+                  if "HidD_SetFeature" in line or "HidD_GetFeature" in line or \
+                     "HidD_SetOutputReport" in line or "HidD_GetInputReport" in line:
+                      block="\n".join(lines[i:i+8])
+                      mm=re.search(r'extern\s+\w+\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(',block)
+                      epm=re.search(r'HidD_(SetFeature|GetFeature|SetOutputReport|GetInputReport)',block)
+                      if mm and epm:
+                          pinvoke_names.setdefault(mm.group(1),set()).add("HidD_"+epm.group(1))
+
+          callsites=[]
+          feature_payload_candidates=[]
+          for p,txt in allfiles:
+              lines=txt.splitlines()
+              for name,eps in pinvoke_names.items():
+                  for i,line in enumerate(lines):
+                      # skip declaration lines
+                      if "extern " in line or "pinvokeimpl" in line:
+                          continue
+                      if not re.search(rf'\b{re.escape(name)}\s*\(',line):
+                          continue
+                      lo=max(0,i-45); hi=min(len(lines),i+50)
+                      context="\n".join(f"{j+1:6d}: {lines[j]}" for j in range(lo,hi))
+                      callsites.append({
+                          "file":str(p),
+                          "line":i+1,
+                          "name":name,
+                          "api":sorted(eps),
+                          "context":context
+                      })
+
+                      # Strong feature candidate only when a single-byte 0x55/0xAA or
+                      # decimal 85/170 assignment is close to a real SetFeature call.
+                      if any("SetFeature" in x for x in eps):
+                          nearby="\n".join(lines[max(0,i-35):min(len(lines),i+10)])
+                          vals=[]
+                          if re.search(r'(?<![0-9A-Fa-f])0x55(?![0-9A-Fa-f])',nearby,re.I): vals.append("0x55")
+                          if re.search(r'(?<![0-9A-Fa-f])0xAA(?![0-9A-Fa-f])',nearby,re.I): vals.append("0xAA")
+                          if re.search(r'(?:\[[^\]]+\]\s*=|Add\()\s*85(?:\D|$)',nearby): vals.append("85")
+                          if re.search(r'(?:\[[^\]]+\]\s*=|Add\()\s*170(?:\D|$)',nearby): vals.append("170")
+                          if vals:
+                              feature_payload_candidates.append({
+                                  "file":str(p),"line":i+1,"values":vals,"context":context
+                              })
+
+          # Find real/non-stub HIDInterface.Send and Hid.getFeature bodies.
+          method_proofs=[]
+          method_rx=re.compile(
+              r'(?:public|private|protected|internal)[^{;\n]*\b(?P<name>Send|getFeature|Connect|HidDataReceived)\s*'
+              r'\([^)]*\)\s*\{(?P<body>.*?)\n\s*\}',
+              re.S
+          )
+          for p,txt in allfiles:
+              for m in method_rx.finditer(txt):
+                  body=m.group("body")
+                  nontrivial=(
+                      len(body.strip())>80 and
+                      not re.fullmatch(r'\s*(?:return\s+(?:true|false|null);)?\s*',body,re.S)
+                  )
+                  if nontrivial:
+                      method_proofs.append({
+                          "file":str(p),
+                          "name":m.group("name"),
+                          "line":txt[:m.start()].count("\n")+1,
+                          "body":m.group(0)[:8000]
+                      })
+
+          # Strict recovery PID evidence: only compare/assignment involving fields named VID/PID,
+          # not RVA/IL labels.
+          recovery=[]
+          for p,txt in allfiles:
+              lines=txt.splitlines()
+              for i,line in enumerate(lines):
+                  if not re.search(r'\b(?:pID|pid|productId|ProductID|ProductId)\b',line,re.I):
+                      continue
+                  if re.search(r'(?:0x2244|\b8772\b)',line,re.I):
+                      recovery.append({
+                          "file":str(p),"line":i+1,
+                          "context":"\n".join(lines[max(0,i-12):min(len(lines),i+15)])
+                      })
+
+          # Updater/writer contexts from deobfuscated output.
+          writer=[]
+          for p,txt in allfiles:
+              lines=txt.splitlines()
+              for i,line in enumerate(lines):
+                  if re.search(
+                      r'FlashId|Flash usb connected|Otp usb connected|actual_boot_lenth|'
+                      r'exist flash boot|firmware|upgrade|erase|WriteFile|codedata|constdat|cnfgdat',
+                      line,re.I
+                  ):
+                      lo=max(0,i-20); hi=min(len(lines),i+30)
+                      block="\n".join(lines[lo:hi])
+                      # Keep only blocks with an I/O/API/byte-buffer clue.
+                      if re.search(
+                          r'HidD_|WriteFile|ReadFile|byte\[|byte\s*\[\]|Buffer|Send\(|Write\(',
+                          block,re.I
+                      ):
+                          writer.append({
+                              "file":str(p),"line":i+1,
+                              "context":"\n".join(f"{j+1:6d}: {lines[j]}" for j in range(lo,hi))
+                          })
+
+          status={
+              "pinvoke_names":{k:sorted(v) for k,v in pinvoke_names.items()},
+              "real_hid_api_calls":len(callsites),
+              "strong_setfeature_payload_candidates":len(feature_payload_candidates),
+              "nonstub_hid_methods":len(method_proofs),
+              "strict_recovery_pid_2244_refs":len(recovery),
+              "writer_contexts":len(writer),
+              "boot_entry_proven":bool(feature_payload_candidates),
+              "recovery_pid_2244_proven":bool(recovery),
+              "flash_writer_proven":False,
+              "FLASH_ALLOWED":"NO"
+          }
+
+          (E/"V4_STATUS.json").write_text(json.dumps(status,indent=2)+"\n")
+          (E/"REAL_HID_API_CALLS.txt").write_text(
+              "\n\n".join(
+                  f"### {x['file']}:{x['line']} {x['api']} {x['name']}\n{x['context']}"
+                  for x in callsites
+              )+"\n"
+          )
+          (E/"STRONG_SETFEATURE_CANDIDATES.txt").write_text(
+              "\n\n".join(
+                  f"### {x['file']}:{x['line']} values={x['values']}\n{x['context']}"
+                  for x in feature_payload_candidates
+              )+"\n"
+          )
+          (E/"NONSTUB_HID_METHODS.txt").write_text(
+              "\n\n".join(
+                  f"### {x['file']}:{x['line']} {x['name']}\n{x['body']}"
+                  for x in method_proofs
+              )+"\n"
+          )
+          (E/"STRICT_RECOVERY_PID_2244.txt").write_text(
+              "\n\n".join(
+                  f"### {x['file']}:{x['line']}\n{x['context']}" for x in recovery
+              )+"\n"
+          )
+          (E/"WRITER_CONTEXTS.txt").write_text(
+              "\n\n".join(
+                  f"### {x['file']}:{x['line']}\n{x['context']}" for x in writer[:250]
+              )+"\n"
+          )
+
+          md=[
+              "# BP1048P4 Windows Updater Deobfuscation V4",
+              "",
+              "## Why V3 positives were not accepted",
+              "- `2244` is accepted only when tied to a PID/ProductID field or comparison.",
+              "- `0x55/0xAA` are accepted only when near a real recovered `HidD_SetFeature` call.",
+              "- declarations/imports alone are not treated as calls.",
+              "",
+              "## V4 strict results",
+          ]
+          for k,v in status.items():
+              if k!="pinvoke_names":
+                  md.append(f"- {k}: **{v}**")
+          md += [
+              "",
+              "## Gate",
+              "- If `strong_setfeature_payload_candidates > 0`, inspect `STRONG_SETFEATURE_CANDIDATES.txt`.",
+              "- If `strict_recovery_pid_2244_refs > 0`, inspect `STRICT_RECOVERY_PID_2244.txt`.",
+              "- If both remain 0, the remaining blocker is method virtualization/runtime protection, not protocol string discovery.",
+              "- `FLASH_ALLOWED=NO`",
+          ]
+          (E/"V4_REPORT.md").write_text("\n".join(md)+"\n")
+          PY
+
+      - name: Package evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /tmp/v4/evidence
+          zip -9 -r /tmp/OKN_BP1048P4_WINDOWS_UPDATER_DEOBFUSCATE_V4_EVIDENCE.zip . >/dev/null
+          sha256sum /tmp/OKN_BP1048P4_WINDOWS_UPDATER_DEOBFUSCATE_V4_EVIDENCE.zip \
+            > /tmp/OKN_BP1048P4_WINDOWS_UPDATER_DEOBFUSCATE_V4_EVIDENCE.zip.sha256
+
+      - name: Publish summary
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat /tmp/v4/evidence/V4_REPORT.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: OKN-BP1048P4-WINDOWS-UPDATER-DEOBFUSCATE-V4-EVIDENCE
+          path: |
+            /tmp/OKN_BP1048P4_WINDOWS_UPDATER_DEOBFUSCATE_V4_EVIDENCE.zip
+            /tmp/OKN_BP1048P4_WINDOWS_UPDATER_DEOBFUSCATE_V4_EVIDENCE.zip.sha256
+            /tmp/v4/evidence/V4_REPORT.md
+            /tmp/v4/evidence/V4_STATUS.json
+            /tmp/v4/evidence/STRONG_SETFEATURE_CANDIDATES.txt
+            /tmp/v4/evidence/STRICT_RECOVERY_PID_2244.txt
+            /tmp/v4/evidence/REAL_HID_API_CALLS.txt
+            /tmp/v4/evidence/NONSTUB_HID_METHODS.txt
+            /tmp/v4/evidence/WRITER_CONTEXTS.txt
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Final fail-closed gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$FLASH_ALLOWED" = "NO"
+          python3 - <<'PY'
+          import json
+          d=json.load(open("/tmp/v4/evidence/V4_STATUS.json"))
+          assert d["FLASH_ALLOWED"] == "NO"
+          assert d["flash_writer_proven"] is False
+          print("V4_STATIC_DEOBFUSCATION_COMPLETE=YES")
+          print("FLASH_ALLOWED=NO")
+          PY
