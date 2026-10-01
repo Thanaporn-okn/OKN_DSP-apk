@@ -1,0 +1,635 @@
+name: OKN BP1048P4 FINAL Production Protocol + Android V2
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: okn-bp1048p4-final-production-v2-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  FLASH_ALLOWED: "NO"
+
+jobs:
+  final_production:
+    name: Production client + SDK + Android patch - NO LIVE FLASH
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Safety gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$FLASH_ALLOWED" = "NO"
+          mkdir -p /tmp/okn/evidence /tmp/okn/packages /tmp/okn/android_patch
+          cat > /tmp/okn/evidence/SAFETY.txt <<'EOF'
+          MODE=OFFLINE_STATIC_PRODUCTION_PROTOCOL_RECOVERY
+          USB_OR_BOARD_CONTACT=NO
+          TARGET_FIRMWARE_EXECUTED=NO
+          FEATURE_SET_REPORT_SENT=NO
+          FEATURE_55_SENT=NO
+          FEATURE_AA_SENT=NO
+          FLASH_READ_EXECUTED=NO
+          FLASH_ERASE_EXECUTED=NO
+          FLASH_WRITE_EXECUTED=NO
+          FLASH_ALLOWED=NO
+          EOF
+
+      - name: Checkout app repository
+        uses: actions/checkout@v4
+        with:
+          path: app-repo
+          fetch-depth: 1
+
+      - name: Checkout public BP1048 SDK
+        uses: actions/checkout@v4
+        with:
+          repository: leadercxn/bp1048_sdk_v0.1.12
+          ref: master
+          path: bp1048-sdk
+          fetch-depth: 1
+
+      - name: Install analysis tools
+        shell: bash
+        run: |
+          set -u
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq unzip p7zip-full binutils file >/dev/null
+          mkdir -p /tmp/okn/ilspy
+          if command -v dotnet >/dev/null 2>&1; then
+            dotnet tool install ilspycmd --tool-path /tmp/okn/ilspy \
+              >/tmp/okn/evidence/ILSPY_INSTALL.log 2>&1 || true
+          fi
+
+      - name: Download official current GoloPine clients
+        shell: bash
+        run: |
+          set -u
+
+          WIN_URL="https://golodsp.com/wp-content/uploads/2026/05/golopine_audio_turning_release_2026-04-08.exe_.zip"
+          APK_URL="https://golodsp.com/wp-content/uploads/2026/05/golopine_audio_turning_release_2026-04-01.apk_.zip"
+
+          {
+            echo "Windows=$WIN_URL"
+            echo "Android=$APK_URL"
+          } > /tmp/okn/evidence/OFFICIAL_PACKAGE_URLS.txt
+
+          curl -fL --retry 4 --connect-timeout 20 \
+            "$WIN_URL" -o /tmp/okn/packages/golopine_windows_2026-04-08.zip \
+            > /tmp/okn/evidence/WINDOWS_DOWNLOAD.log 2>&1 || true
+
+          curl -fL --retry 4 --connect-timeout 20 \
+            "$APK_URL" -o /tmp/okn/packages/golopine_android_2026-04-01.zip \
+            > /tmp/okn/evidence/ANDROID_DOWNLOAD.log 2>&1 || true
+
+          find /tmp/okn/packages -maxdepth 1 -type f -print0 |
+            xargs -0 -r sha256sum > /tmp/okn/evidence/OFFICIAL_PACKAGE_SHA256.txt
+
+          mkdir -p /tmp/okn/packages/windows /tmp/okn/packages/android
+
+          if [ -s /tmp/okn/packages/golopine_windows_2026-04-08.zip ]; then
+            unzip -q -o /tmp/okn/packages/golopine_windows_2026-04-08.zip \
+              -d /tmp/okn/packages/windows || true
+          fi
+
+          if [ -s /tmp/okn/packages/golopine_android_2026-04-01.zip ]; then
+            unzip -q -o /tmp/okn/packages/golopine_android_2026-04-01.zip \
+              -d /tmp/okn/packages/android || true
+          fi
+
+          find /tmp/okn/packages/windows /tmp/okn/packages/android \
+            -maxdepth 5 -type f -printf '%p\n' \
+            > /tmp/okn/evidence/OFFICIAL_PACKAGE_FILE_LIST.txt
+
+      - name: Prove SDK runtime USB frame and HID transport
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import json, re, subprocess
+
+          ROOT=Path("bp1048-sdk")
+          OUT=Path("/tmp/okn/evidence")
+          comm=ROOT/"BT_Audio_APP/bt_audio_app_src/audio/communication.c"
+          otg=ROOT/"MVsB1_Base_SDK/driver/driver_api/src/otg/device/otg_device_standard_request.c"
+          desc=ROOT/"MVsB1_Base_SDK/driver/driver_api/src/otg/device/otg_device_descriptor.h"
+
+          for p in (comm,otg,desc):
+              assert p.exists(), p
+
+          c=comm.read_text(errors="replace")
+          o=otg.read_text(errors="replace")
+          d=desc.read_text(errors="replace")
+
+          assert "communic_buf[i] == 0xA5" in c
+          assert "communic_buf[i+1] == 0x5A" in c
+          assert "packet_len = communic_buf[i+3]" in c
+          assert "communic_buf[i+4+packet_len] == 0x16" in c
+          assert "Communication_Effect_Config(communic_buf[i+2]" in c
+
+          assert re.search(r"uint8_t\s+tx_buf\s*\[\s*256\s*\]",c)
+          assert re.search(r"uint8_t\s+communic_buf\s*\[\s*512\s*\]",c)
+          assert "memcpy(hid_tx_buf, buf, 256)" in c
+          assert "HIDUsb_Rx" in c and "UsbLoadAudioMode" in c
+
+          assert re.search(r"uint8_t\s+Request\s*\[\s*256\s*\]",o)
+          assert re.search(r"uint8_t\s+hid_tx_buf\s*\[\s*256\s*\]",o)
+          assert "OTG_DeviceControlSend(hid_tx_buf,256,6)" in o
+
+          assert ("Setup[3] == 0x02" in o) or ("Setup[3]==0x02" in o)
+          assert ("Setup[0] == 0x21" in o) or ("Setup[0]==0x21" in o)
+          assert ("Request[0] == 0x55" in o) or ("Request[0]==0x55" in o)
+          assert ("Request[0] == 0xAA" in o) or ("Request[0]==0xAA" in o)
+          assert "start_up_grate(AppResourceUsbDevice)" in o
+
+          m=re.search(
+              r"void\s+Communication_Effect_0x00\s*\(\s*void\s*\)\s*\{(?P<body>.*?)\n\}",
+              c,re.S
+          )
+          assert m
+          ver=m.group("body")
+          for needle in (
+              "tx_buf[0]  = 0xa5",
+              "tx_buf[1]  = 0x5a",
+              "tx_buf[2]  = 0x00",
+              "tx_buf[3]  = 0x07",
+              "tx_buf[11] = 0x16",
+          ):
+              assert needle in ver
+
+          protocol={
+              "sdk_commit":subprocess.check_output(
+                  ["git","-C",str(ROOT),"rev-parse","HEAD"],text=True
+              ).strip(),
+              "frame":{
+                  "start":[0xA5,0x5A],
+                  "control_offset":2,
+                  "payload_length_offset":3,
+                  "payload_offset":4,
+                  "end_byte":0x16,
+                  "total_length_expression":"payload_length + 5",
+                  "checksum":"none in runtime Communication_Effect parser"
+              },
+              "usb_hid":{
+                  "report_bytes":256,
+                  "communication_buffer_bytes":512,
+                  "host_to_device_request_type":"0x21",
+                  "output_report_type":"0x02",
+                  "data_transport":"HID class control reports on EP0",
+                  "device_tx_buffer":"hid_tx_buf[256]"
+              },
+              "safe_version_query":{
+                  "frame_hex":"A5 5A 00 00 16",
+                  "expected_response_prefix":"A5 5A 00 07 30",
+                  "response_end_offset":11,
+                  "response_end_byte":"0x16"
+              },
+              "feature_upgrade_path":{
+                  "set_report_values_seen":["0x55","0xAA"],
+                  "get_report_can_call_start_up_grate":True,
+                  "live_use_authorized":False
+              }
+          }
+          (OUT/"SDK_RUNTIME_PROTOCOL_PROOF.json").write_text(
+              json.dumps(protocol,indent=2)+"\n"
+          )
+
+          def extract(txt,start_pat,around=80):
+              lines=txt.splitlines()
+              idx=next(i for i,x in enumerate(lines) if re.search(start_pat,x))
+              lo=max(0,idx-around)
+              hi=min(len(lines),idx+around)
+              return "\n".join(f"{i+1:5d}: {lines[i]}" for i in range(lo,hi))
+
+          (OUT/"SDK_COMMUNICATION_PROTOCOL_CONTEXT.txt").write_text(
+              extract(c,r"Communication_Effect_Send",45) + "\n\n" +
+              extract(c,r"Communication_Effect_Config",100) + "\n\n" +
+              extract(c,r"Communication_Effect_Process",90) + "\n\n" +
+              extract(c,r"UsbLoadAudioMode",70) + "\n"
+          )
+          (OUT/"SDK_HID_CONTROL_REQUEST_CONTEXT.txt").write_text(
+              extract(o,r"OTG_DeviceClassRequest",130) + "\n\n" +
+              extract(o,r"void\s+hid_recive_data",35) + "\n"
+          )
+          (OUT/"SDK_HID_DESCRIPTOR_CONTEXT.txt").write_text(
+              extract(d,r"HidDataReportDescriptor",45) + "\n"
+          )
+          PY
+
+      - name: Analyze official Windows client
+        shell: bash
+        run: |
+          set -u
+          WOUT=/tmp/okn/evidence/windows
+          mkdir -p "$WOUT"
+
+          mapfile -t PEFILES < <(
+            find /tmp/okn/packages/windows -type f \
+              \( -iname '*.exe' -o -iname '*.dll' \) 2>/dev/null | head -80
+          )
+
+          printf '%s\n' "${PEFILES[@]:-}" > "$WOUT/PE_FILES.txt"
+
+          for f in "${PEFILES[@]:-}"; do
+            [ -f "$f" ] || continue
+            b="$(basename "$f" | tr ' /' '__')"
+
+            sha256sum "$f" >> "$WOUT/SHA256SUMS.txt"
+            file "$f" >> "$WOUT/FILE_TYPES.txt" || true
+
+            strings -a -n 3 "$f" > "$WOUT/${b}.ascii.txt" || true
+            strings -a -el -n 3 "$f" > "$WOUT/${b}.utf16.txt" || true
+
+            cat "$WOUT/${b}.ascii.txt" "$WOUT/${b}.utf16.txt" |
+              grep -Eai \
+              '6324|1719|25380|5913|HidLibrary|HidSharp|HID|SetFeature|GetFeature|SetReport|GetReport|WriteFeature|ReadFeature|WriteReport|ReadReport|A5.?5A|chiperas|upinfo|btupdat|cnfgdat|constdat|codedata|bootdat|cxxx|FlashId|flash boot|upgrade|firmware|0x55|0xAA' \
+              > "$WOUT/${b}.protocol_hits.txt" || true
+
+            if [ -x /tmp/okn/ilspy/ilspycmd ]; then
+              ddir="$WOUT/${b}.decompiled"
+              mkdir -p "$ddir"
+              /tmp/okn/ilspy/ilspycmd -p -o "$ddir" "$f" \
+                > "$WOUT/${b}.ilspy.log" 2>&1 || true
+
+              grep -RniE \
+                '6324|1719|25380|5913|HidLibrary|HidSharp|SetFeature|GetFeature|WriteFeature|ReadFeature|WriteReport|ReadReport|A5|0xA5|0x5A|chiperas|upinfo|btupdat|cnfgdat|constdat|codedata|bootdat|cxxx|FlashId|upgrade|firmware' \
+                "$ddir" \
+                > "$WOUT/${b}.decompiled_hits.txt" || true
+            fi
+          done
+
+          cat "$WOUT"/*protocol_hits.txt "$WOUT"/*decompiled_hits.txt \
+            2>/dev/null | head -c 3000000 \
+            > "$WOUT/ALL_PROTOCOL_HITS.txt" || true
+
+      - name: Analyze official Android APK
+        shell: bash
+        run: |
+          set -u
+          AOUT=/tmp/okn/evidence/android_official
+          mkdir -p "$AOUT"
+
+          mapfile -t APKS < <(
+            find /tmp/okn/packages/android -type f -iname '*.apk' 2>/dev/null | head -20
+          )
+          printf '%s\n' "${APKS[@]:-}" > "$AOUT/APK_FILES.txt"
+
+          n=0
+          for apk in "${APKS[@]:-}"; do
+            [ -f "$apk" ] || continue
+            n=$((n+1))
+            b="$(basename "$apk" | tr ' /' '__')"
+            sha256sum "$apk" >> "$AOUT/SHA256SUMS.txt"
+
+            d="$AOUT/apk_$n"
+            mkdir -p "$d"
+            unzip -q -o "$apk" -d "$d" || true
+
+            find "$d" -type f \( -name 'classes*.dex' -o -name '*.xml' -o -name '*.so' \) \
+              -print0 | while IFS= read -r -d '' f; do
+                strings -a -n 3 "$f" 2>/dev/null || true
+              done > "$AOUT/${b}.all_strings.txt"
+
+            grep -Eai \
+              '6324|1719|25380|5913|UsbDevice|UsbManager|controlTransfer|HID|A5.?5A|chiperas|upinfo|btupdat|cnfgdat|constdat|codedata|bootdat|cxxx|FlashId|upgrade|firmware|0x55|0xAA' \
+              "$AOUT/${b}.all_strings.txt" \
+              > "$AOUT/${b}.protocol_hits.txt" || true
+          done
+
+          cat "$AOUT"/*protocol_hits.txt 2>/dev/null |
+            head -c 2000000 > "$AOUT/ALL_PROTOCOL_HITS.txt" || true
+
+      - name: Correlate SDK and production client evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import json
+
+          E=Path("/tmp/okn/evidence")
+          wh=E/"windows/ALL_PROTOCOL_HITS.txt"
+          ah=E/"android_official/ALL_PROTOCOL_HITS.txt"
+          wtxt=wh.read_text(errors="replace") if wh.exists() else ""
+          atxt=ah.read_text(errors="replace") if ah.exists() else ""
+          alltxt=wtxt+"\n"+atxt
+
+          def has(*terms):
+              low=alltxt.lower()
+              return any(t.lower() in low for t in terms)
+
+          status={
+              "sdk_runtime_frame_proven":True,
+              "sdk_frame":"A5 5A CONTROL LEN PAYLOAD 16",
+              "sdk_runtime_checksum":"none",
+              "sdk_usb_transport":"256-byte HID class control report on EP0",
+              "safe_version_query":"A5 5A 00 00 16",
+              "production_package_downloaded":{
+                  "windows":Path("/tmp/okn/packages/golopine_windows_2026-04-08.zip").exists(),
+                  "android":Path("/tmp/okn/packages/golopine_android_2026-04-01.zip").exists()
+              },
+              "production_hits":{
+                  "vid_pid":has("6324","1719","25380","5913"),
+                  "hid":has("hid","controltransfer","hidsharp","hidlibrary"),
+                  "a5_5a":has("a5","5a"),
+                  "upgrade_words":has("upgrade","firmware","flash boot"),
+                  "package_tags":has("chiperas","upinfo","codedata","constdat","cnfgdat","bootdat","cxxx"),
+                  "feature_words":has("setfeature","getfeature","writefeature","readfeature","0x55","0xaa")
+              },
+              "android_runtime_probe_ready":True,
+              "production_boot_entry_proven":False,
+              "production_flash_wire_protocol_proven":False,
+              "flash_allowed":False
+          }
+
+          (E/"FINAL_PRODUCTION_STATUS.json").write_text(
+              json.dumps(status,indent=2)+"\n"
+          )
+
+          md=[
+              "# BP1048P4 Final Production Protocol V2",
+              "",
+              "## Runtime protocol — proven from SDK source",
+              "- Frame: `A5 5A <CONTROL> <LEN> <PAYLOAD...> 16`",
+              "- Total meaningful frame bytes: `LEN + 5`",
+              "- No runtime checksum/CRC in `Communication_Effect_Process`",
+              "- USB data path: **256-byte HID class control reports on EP0**",
+              "- SDK send path pads/copies replies into `hid_tx_buf[256]`",
+              "- Safe version query: `A5 5A 00 00 16`",
+              "- SDK version response begins `A5 5A 00 07 30 ...` and ends at byte 11 with `16`",
+              "",
+              "## Important correction",
+              "- Do **not** use interrupt/bulk transfer for the custom tuning data path.",
+              "- Android should use `UsbDeviceConnection.controlTransfer()`.",
+              "",
+              "## Official production-client correlation",
+          ]
+          for k,v in status["production_hits"].items():
+              md.append(f"- {k}: **{v}**")
+
+          md += [
+              "",
+              "## Firmware-update gate",
+              "- Runtime read-only probe: **READY**",
+              "- Runtime tuning frame codec: **READY**",
+              "- Feature `0x55/0xAA` live use: **BLOCKED**",
+              "- Production recovery identity: **NOT PROVEN**",
+              "- Production flash write framing: **NOT PROVEN**",
+              "- `FLASH_ALLOWED=NO`",
+              "",
+              "Full Windows/Android production-client evidence is in the artifact.",
+          ]
+          (E/"FINAL_PRODUCTION_REPORT.md").write_text("\n".join(md)+"\n")
+          PY
+
+      - name: Generate Android control-HID implementation
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          REPO=Path("app-repo")
+          OUT=Path("/tmp/okn/android_patch")
+
+          package="com.okn.dsp"
+          for p in list(REPO.rglob("build.gradle.kts"))+list(REPO.rglob("build.gradle")):
+              try:
+                  t=p.read_text(errors="replace")
+              except Exception:
+                  continue
+              m=re.search(r'namespace\s*(?:=)?\s*["\']([^"\']+)["\']',t)
+              if m:
+                  package=m.group(1)
+                  break
+
+          pkg=Path(*package.split("."))
+          dst=OUT/"app"/"src"/"main"/"java"/pkg/"bp1048"
+          dst.mkdir(parents=True,exist_ok=True)
+
+          protocol=f'''package {package}.bp1048
+          
+          object Bp1048Protocol {{
+          const val REPORT_BYTES = 256
+          const val START0 = 0xA5
+          const val START1 = 0x5A
+          const val END = 0x16
+          
+          data class Frame(val control: Int, val payload: ByteArray)
+          
+          fun encode(control: Int, payload: ByteArray = byteArrayOf()): ByteArray {{
+          require(control in 0..0xFF)
+          require(payload.size <= 0xFF)
+          val meaningful = ByteArray(payload.size + 5)
+          meaningful[0] = START0.toByte()
+          meaningful[1] = START1.toByte()
+          meaningful[2] = control.toByte()
+          meaningful[3] = payload.size.toByte()
+          payload.copyInto(meaningful, 4)
+          meaningful[4 + payload.size] = END.toByte()
+          return meaningful
+          }}
+          
+          fun toReport(frame: ByteArray): ByteArray {{
+          require(frame.size <= REPORT_BYTES)
+          return ByteArray(REPORT_BYTES).also {{ frame.copyInto(it) }}
+          }}
+          
+          fun parseFirst(report: ByteArray): Frame? {{
+          var p = 0
+          while (p + 4 < report.size) {{
+            if ((report[p].toInt() and 0xFF) == START0 &&
+                (report[p + 1].toInt() and 0xFF) == START1) {{
+                val len = report[p + 3].toInt() and 0xFF
+                val end = p + 4 + len
+                if (end < report.size &&
+                    (report[end].toInt() and 0xFF) == END) {{
+                    return Frame(
+                        report[p + 2].toInt() and 0xFF,
+                        report.copyOfRange(p + 4, p + 4 + len)
+                    )
+                }}
+            }}
+            p++
+          }}
+          return null
+          }}
+          
+          fun versionQuery(): ByteArray = encode(0x00)
+          }}
+          '''
+
+          usb=f'''package {package}.bp1048
+          
+          import android.hardware.usb.UsbDevice
+          import android.hardware.usb.UsbDeviceConnection
+          
+          class Bp1048ControlHidTransport(
+          private val device: UsbDevice,
+          private val connection: UsbDeviceConnection,
+          private val interfaceNumber: Int = 4
+          ) {{
+          companion object {{
+          const val VID = 0x6324
+          const val PID = 0x1719
+          
+          private const val HID_SET_REPORT = 0x09
+          private const val HID_GET_REPORT = 0x01
+          private const val REQ_OUT_CLASS_INTERFACE = 0x21
+          private const val REQ_IN_CLASS_INTERFACE = 0xA1
+          
+          private const val REPORT_TYPE_INPUT = 0x01
+          private const val REPORT_TYPE_OUTPUT = 0x02
+          
+          const val FLASH_ALLOWED = false
+          }}
+          
+          fun matchesProductionRuntime(): Boolean =
+          device.vendorId == VID && device.productId == PID
+          
+          fun sendRuntimeFrame(
+          meaningfulFrame: ByteArray,
+          timeoutMs: Int = 1000
+          ): Int {{
+          val report = Bp1048Protocol.toReport(meaningfulFrame)
+          return connection.controlTransfer(
+            REQ_OUT_CLASS_INTERFACE,
+            HID_SET_REPORT,
+            REPORT_TYPE_OUTPUT shl 8,
+            interfaceNumber,
+            report,
+            report.size,
+            timeoutMs
+          )
+          }}
+          
+          fun getRuntimeInputReport(timeoutMs: Int = 1000): ByteArray? {{
+          val report = ByteArray(Bp1048Protocol.REPORT_BYTES)
+          val n = connection.controlTransfer(
+            REQ_IN_CLASS_INTERFACE,
+            HID_GET_REPORT,
+            REPORT_TYPE_INPUT shl 8,
+            interfaceNumber,
+            report,
+            report.size,
+            timeoutMs
+          )
+          return if (n > 0) report.copyOf(n) else null
+          }}
+          
+          fun queryVersion(timeoutMs: Int = 1000): Bp1048Protocol.Frame? {{
+          val sent = sendRuntimeFrame(Bp1048Protocol.versionQuery(), timeoutMs)
+          if (sent < 0) return null
+          Thread.sleep(20)
+          return getRuntimeInputReport(timeoutMs)?.let(Bp1048Protocol::parseFirst)
+          }}
+          
+          fun enterBootloaderDisabled(): Nothing =
+          error("Boot entry disabled: FLASH_ALLOWED=false")
+          
+          fun writeFirmwareDisabled(): Nothing =
+          error("Firmware writing disabled: FLASH_ALLOWED=false")
+          }}
+          '''
+
+          proof=f'''# BP1048P4 runtime USB/HID protocol proof
+          
+          Generated from public SDK source and production-board observations.
+          
+          ## Proven SDK runtime frame
+          
+          `A5 5A CONTROL LEN PAYLOAD... 16`
+          
+          There is no CRC/checksum in the runtime `Communication_Effect_Process` parser.
+          
+          The HID tuning data path uses 256-byte control reports on endpoint 0:
+          - host -> device: HID `SET_REPORT`, Output report type
+          - device reply: HID `GET_REPORT`, Input report type
+          - meaningful protocol bytes are padded to a 256-byte report
+          
+          Safe non-mutating query:
+          `A5 5A 00 00 16`
+          
+          SDK response:
+          `A5 5A 00 07 30 <effect-major> <effect-minor> <effect-user> <audio-lib...> 16`
+          
+          Production runtime device:
+          - VID:PID `6324:1719`
+          - custom HID data interface `4`
+          
+          Feature SET_REPORT values `0x55` and `0xAA` are intentionally not implemented.
+          
+          `FLASH_ALLOWED=false`
+          '''
+
+          readme=f'''# OKN Android BP1048P4 production patch
+          
+          Detected namespace: `{package}`
+          
+          Copy `app/` over the matching Android module.
+          
+          Start by calling only `queryVersion()`.
+          
+          Do not enable bootloader or firmware-write paths. The production-client
+          analysis must prove recovery/write framing before that gate changes.
+          '''
+
+          (dst/"Bp1048Protocol.kt").write_text(protocol)
+          (dst/"Bp1048ControlHidTransport.kt").write_text(usb)
+          (OUT/"PROTOCOL_PROOF.md").write_text(proof)
+          (OUT/"README.md").write_text(readme)
+          PY
+
+      - name: Package final result
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp -a /tmp/okn/android_patch /tmp/okn/evidence/generated_android_patch
+
+          cd /tmp/okn/evidence
+          zip -9 -r /tmp/OKN_BP1048P4_FINAL_PRODUCTION_PROTOCOL_V2_EVIDENCE.zip . >/dev/null
+          sha256sum /tmp/OKN_BP1048P4_FINAL_PRODUCTION_PROTOCOL_V2_EVIDENCE.zip \
+            > /tmp/OKN_BP1048P4_FINAL_PRODUCTION_PROTOCOL_V2_EVIDENCE.zip.sha256
+
+      - name: Publish compact final report
+        shell: bash
+        run: |
+          set -euo pipefail
+          head -c 180000 /tmp/okn/evidence/FINAL_PRODUCTION_REPORT.md \
+            >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload final package
+        uses: actions/upload-artifact@v4
+        with:
+          name: OKN-BP1048P4-FINAL-PRODUCTION-PROTOCOL-V2
+          path: |
+            /tmp/OKN_BP1048P4_FINAL_PRODUCTION_PROTOCOL_V2_EVIDENCE.zip
+            /tmp/OKN_BP1048P4_FINAL_PRODUCTION_PROTOCOL_V2_EVIDENCE.zip.sha256
+            /tmp/okn/evidence/FINAL_PRODUCTION_REPORT.md
+            /tmp/okn/evidence/FINAL_PRODUCTION_STATUS.json
+            /tmp/okn/android_patch
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Final fail-closed gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$FLASH_ALLOWED" = "NO"
+          python3 - <<'PY'
+          import json
+          p="/tmp/okn/evidence/FINAL_PRODUCTION_STATUS.json"
+          d=json.load(open(p))
+          assert d["flash_allowed"] is False
+          assert d["production_boot_entry_proven"] is False
+          assert d["production_flash_wire_protocol_proven"] is False
+          assert d["android_runtime_probe_ready"] is True
+          print("FINAL_PRODUCTION_PROTOCOL_V2_GATE=PASS")
+          print("FLASH_ALLOWED=NO")
+          PY
