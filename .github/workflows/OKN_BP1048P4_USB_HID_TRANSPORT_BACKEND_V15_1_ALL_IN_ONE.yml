@@ -1,0 +1,636 @@
+name: OKN BP1048P4 USB HID Transport Backend V15.1 - All In One
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: okn-bp1048p4-usb-hid-transport-v15-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  FLASH_ALLOWED: "NO"
+
+jobs:
+  transport_backend:
+    name: Recover 0x77FE + custom USB HID backend - NO USB - NO FLASH
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Safety gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$FLASH_ALLOWED" = "NO"
+          mkdir -p /tmp/v15/evidence
+          cat > /tmp/v15/evidence/SAFETY.txt <<'EOF'
+          MODE=OFFLINE_STATIC_USB_HID_TRANSPORT_BACKEND_RECOVERY
+          TARGET=MVSilicon_BP1048P4
+          USB_OR_BOARD_CONTACT=NO
+          TARGET_FIRMWARE_EXECUTED=NO
+          FEATURE_55_SENT=NO
+          FEATURE_AA_SENT=NO
+          FLASH_READ_EXECUTED=NO
+          FLASH_ERASE_EXECUTED=NO
+          FLASH_WRITE_EXECUTED=NO
+          LIVE_BOOT_ENTRY_AUTHORIZED=NO
+          LIVE_FLASH_AUTHORIZED=NO
+          FLASH_ALLOWED=NO
+          EOF
+
+      - name: Checkout public BP1048 SDK
+        uses: actions/checkout@v4
+        with:
+          repository: leadercxn/bp1048_sdk_v0.1.12
+          ref: master
+          path: bp1048-sdk
+          fetch-depth: 1
+
+      - name: Reconstruct exact image + mine communication source
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PYCODE'
+          from pathlib import Path
+          import hashlib,json,re,subprocess
+
+          ROOT=Path("bp1048-sdk")
+          OUT=Path("/tmp/v15/evidence")
+
+          text=(ROOT/"BT_Audio_APP/bt_audio_app_src/device/flash_boot.c").read_text(errors="replace")
+          m=re.search(
+              r"(?:static\s+|const\s+|unsigned\s+|signed\s+)*"
+              r"(?:char|uint8_t|uint8|u8|BYTE)\s+flash_data\s*"
+              r"\[\s*(?P<n>\d+)\s*\]\s*=\s*\{(?P<body>.*?)\};",
+              text,re.I|re.S
+          )
+          assert m
+          body=re.sub(r"/\*.*?\*/","",m.group("body"),flags=re.S)
+          body=re.sub(r"//[^\r\n]*","",body)
+          vals=[int(x,16) for x in re.findall(r"0[xX]([0-9A-Fa-f]{1,2})\b",body)]
+          assert int(m.group("n"))==65536 and len(vals)==65520
+          raw=bytes(vals)+bytes(65536-len(vals))
+          (OUT/"flash_data_65536.bin").write_bytes(raw)
+
+          terms=[
+              "CFG_COMMUNICATION_METHID",
+              "CFG_COMMUNICATION_METHOD",
+              "USB HID",
+              "HID",
+              "512Byte",
+              "512 Byte",
+              "[512]",
+              "0x200",
+              "UsbDevice",
+              "USB_DEVICE",
+              "UsbHid",
+              "USBHID",
+              "HidSend",
+              "HidRecv",
+              "HidReceive",
+              "HidWrite",
+              "HidRead",
+              "OTG_DeviceModeSel",
+              "USBPID",
+              "USB_VID",
+              "SendData",
+              "ReceiveData",
+              "RecvData",
+              "PC tool",
+              "pctool",
+          ]
+
+          hits=[]
+          contexts=[]
+          for p in ROOT.rglob("*"):
+              if not p.is_file() or ".git" in p.parts:
+                  continue
+              try:
+                  if p.stat().st_size > 2_000_000:
+                      continue
+                  lines=p.read_text(errors="replace").splitlines()
+              except Exception:
+                  continue
+
+              rel=str(p.relative_to(ROOT))
+              for i,line in enumerate(lines):
+                  low=line.lower()
+                  matched=[t for t in terms if t.lower() in low]
+                  if not matched:
+                      continue
+                  hits.append({
+                      "file":rel,"line":i+1,
+                      "matched":matched,
+                      "text":line.strip()[:1600]
+                  })
+
+                  # Save broader context only for strongest communication clues.
+                  if any(t in matched for t in (
+                      "CFG_COMMUNICATION_METHID",
+                      "CFG_COMMUNICATION_METHOD",
+                      "512Byte","512 Byte","[512]",
+                      "UsbHid","USBHID","HidSend","HidRecv",
+                      "HidReceive","HidWrite","HidRead",
+                      "OTG_DeviceModeSel","PC tool","pctool"
+                  )):
+                      lo=max(0,i-12)
+                      hi=min(len(lines),i+13)
+                      contexts.append({
+                          "file":rel,"line":i+1,
+                          "matched":matched,
+                          "context":"\n".join(
+                              f"{j+1:5d}: {lines[j]}" for j in range(lo,hi)
+                          )
+                      })
+
+          meta={
+              "revision":"USB_HID_TRANSPORT_BACKEND_V15_1",
+              "sdk_commit":subprocess.check_output(
+                  ["git","-C",str(ROOT),"rev-parse","HEAD"],text=True
+              ).strip(),
+              "sha256":hashlib.sha256(raw).hexdigest(),
+              "runtime_gp":0x20026CB0,
+              "runtime_base":0x2001A9A8,
+              "candidate_backend":0x77FE,
+              "trap_backend":0xB960,
+              "print_wrapper":0xACBC,
+              "communication_hits":hits[:3500],
+              "communication_contexts":contexts[:700],
+              "USB_OR_BOARD_CONTACTED":False,
+              "LIVE_FLASH_AUTHORIZED":False,
+              "FLASH_ALLOWED":False
+          }
+          (OUT/"META.json").write_text(
+              json.dumps(meta,indent=2,ensure_ascii=False)+"\n"
+          )
+          (OUT/"COMMUNICATION_SOURCE_HITS.txt").write_text(
+              "\n".join(
+                  f"{x['file']}:{x['line']} | {','.join(x['matched'])} | {x['text']}"
+                  for x in hits
+              )+"\n"
+          )
+          (OUT/"COMMUNICATION_SOURCE_CONTEXTS.txt").write_text(
+              "\n\n".join(
+                  f"### {x['file']}:{x['line']} [{', '.join(x['matched'])}]\n{x['context']}"
+                  for x in contexts
+              )+"\n"
+          )
+          PYCODE
+
+      - name: Build GNU NDS32 objdump
+        shell: bash
+        run: |
+          set -u
+          mkdir -p /tmp/v15/toolchain /tmp/v15/build
+          cd /tmp/v15/toolchain
+          curl -fL --retry 3 --connect-timeout 20 \
+            https://ftp.gnu.org/gnu/binutils/binutils-2.44.tar.xz \
+            -o binutils-2.44.tar.xz
+          tar -xf binutils-2.44.tar.xz
+          cd /tmp/v15/build
+          ../toolchain/binutils-2.44/configure \
+            --target=nds32le-elf \
+            --disable-nls --disable-werror --disable-gdb \
+            --disable-gprofng --disable-gas --disable-ld --disable-gold \
+            >/tmp/v15/evidence/NDS32_BUILD.log 2>&1
+          make -j2 all-binutils >>/tmp/v15/evidence/NDS32_BUILD.log 2>&1
+          find /tmp/v15/build -type f -name '*objdump' -perm -111 -print \
+            > /tmp/v15/evidence/OBJDUMP_CANDIDATES.txt
+
+      - name: Disassemble global + exact targets
+        shell: bash
+        run: |
+          set -euo pipefail
+          OBJDUMP="$(find /tmp/v15/build -type f -name '*objdump' -perm -111 | head -1)"
+
+          "$OBJDUMP" -D -b binary -m nds32 --adjust-vma=0 \
+            /tmp/v15/evidence/flash_data_65536.bin \
+            > /tmp/v15/evidence/NDS32_DISASSEMBLY.txt \
+            2>/tmp/v15/evidence/NDS32_DISASSEMBLY.stderr.txt
+
+          # NDS32 mixes 16/32-bit encodings. Start objdump exactly at each
+          # known direct-call target so instruction boundaries cannot drift.
+          for spec in \
+            "77FE 77FE 7A80" \
+            "B960 B960 BB00" \
+            "ACBC ACBC ADB0"; do
+            set -- $spec
+            NAME="$1"; START="$2"; STOP="$3"
+            "$OBJDUMP" -D -b binary -m nds32 --adjust-vma=0 \
+              --start-address="0x$START" --stop-address="0x$STOP" \
+              /tmp/v15/evidence/flash_data_65536.bin \
+              > "/tmp/v15/evidence/TARGET_${NAME}_DISASSEMBLY.txt" \
+              2>"/tmp/v15/evidence/TARGET_${NAME}_DISASSEMBLY.stderr.txt"
+          done
+
+      - name: Analyze backend, callers and PC/USB string references
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PYCODE'
+          from pathlib import Path
+          import collections,json,re
+
+          OUT=Path("/tmp/v15/evidence")
+          raw=(OUT/"flash_data_65536.bin").read_bytes()
+          meta=json.loads((OUT/"META.json").read_text())
+          GP=meta["runtime_gp"]
+          BASE=meta["runtime_base"]
+          BACKEND=meta["candidate_backend"]
+          TRAP=meta["trap_backend"]
+          WRAP=meta["print_wrapper"]
+
+          row_rx=re.compile(
+              r"^\s*([0-9A-Fa-f]+):\s+(?:[0-9A-Fa-f]{2,8}\s+)+(.+?)\s*$"
+          )
+
+          def parse_lines(path):
+              out=[]
+              for ln,line in enumerate(path.read_text(errors="replace").splitlines(),1):
+                  m=row_rx.match(line)
+                  if m:
+                      out.append({
+                          "line":ln,
+                          "addr":int(m.group(1),16),
+                          "text":m.group(2).strip(),
+                          "raw":line
+                      })
+              return out
+
+          ins=parse_lines(OUT/"NDS32_DISASSEMBLY.txt")
+          by_addr={x["addr"]:i for i,x in enumerate(ins)}
+          tgt77=parse_lines(OUT/"TARGET_77FE_DISASSEMBLY.txt")
+          tgtb9=parse_lines(OUT/"TARGET_B960_DISASSEMBLY.txt")
+          tgtac=parse_lines(OUT/"TARGET_ACBC_DISASSEMBLY.txt")
+
+          jal=re.compile(r"\bjal\s+(?:0x)?([0-9A-Fa-f]+)\b",re.I)
+          ret=re.compile(r"\b(ret|ret5|jr\s+\$lp|pop25)\b",re.I)
+          addigp=re.compile(
+              r"\baddi\.gp\s+(\$[A-Za-z0-9]+)\s*,\s*#?"
+              r"(-?0x[0-9A-Fa-f]+|-?\d+)",re.I
+          )
+          lbigp=re.compile(
+              r"\blbi\.gp\s+(\$[A-Za-z0-9]+)\s*,\s*"
+              r"\[\s*\+\s*#?(-?0x[0-9A-Fa-f]+|-?\d+)\s*\]",re.I
+          )
+          lwigp=re.compile(
+              r"\blwi\.gp\s+(\$[A-Za-z0-9]+)\s*,\s*"
+              r"\[\s*\+\s*#?(-?0x[0-9A-Fa-f]+|-?\d+)\s*\]",re.I
+          )
+
+          def pint(s):
+              try: return int(s.strip().replace("#",""),0)
+              except: return None
+
+          # strings
+          strings={}
+          st=None
+          for i,b in enumerate(raw+b"\x00"):
+              if 32<=b<=126:
+                  if st is None: st=i
+              else:
+                  if st is not None and i-st>=3:
+                      strings[st]=raw[st:i].decode("ascii",errors="replace")
+                  st=None
+
+          pc_terms=[
+              "PC IS OK","UDisk IS OK","cmd_cxxx","cmd error",
+              "DEV_ID_USB","usb","USB","HID","FlashId"
+          ]
+          pc_strings={
+              off:s for off,s in strings.items()
+              if any(t.lower() in s.lower() for t in pc_terms)
+          }
+
+          # GP refs to PC/USB strings.
+          pc_refs=[]
+          for x in ins:
+              for kind,rx in (("addi.gp",addigp),("lbi.gp",lbigp),("lwi.gp",lwigp)):
+                  m=rx.search(x["text"])
+                  if not m: continue
+                  reg,imm_s=m.groups()
+                  imm=pint(imm_s)
+                  if imm is None: continue
+                  runtime=(GP+imm)&0xffffffff
+                  off=(runtime-BASE)&0xffffffff
+                  if off in pc_strings:
+                      pc_refs.append({
+                          "addr":x["addr"],"kind":kind,"reg":reg,
+                          "file_offset":off,"runtime":runtime,
+                          "string":pc_strings[off],"text":x["text"]
+                      })
+
+          # Exact-target function extraction.
+          def exact_body(rows,target,max_ins=500):
+              start_idx=None
+              for i,x in enumerate(rows):
+                  if x["addr"]==target:
+                      start_idx=i
+                      break
+              if start_idx is None:
+                  raise RuntimeError(f"Exact target 0x{target:04X} not decoded")
+              subset=rows[start_idx:start_idx+max_ins]
+              for j in range(1,len(subset)):
+                  if ret.search(subset[j]["text"]):
+                      return subset[:j+1]
+              return subset
+
+          decoded_starts={
+              "77FE": tgt77[0]["addr"] if tgt77 else None,
+              "B960": tgtb9[0]["addr"] if tgtb9 else None,
+              "ACBC": tgtac[0]["addr"] if tgtac else None,
+          }
+          (OUT/"EXACT_TARGET_STARTS.json").write_text(
+              json.dumps(decoded_starts,indent=2)+"\n"
+          )
+
+          body77=exact_body(tgt77,BACKEND)
+          bodyb9=exact_body(tgtb9,TRAP)
+          bodyac=exact_body(tgtac,WRAP)
+
+          def summarize_body(rows):
+              calls=[]
+              breaks=[]
+              mmio=[]
+              constants=[]
+              for x in rows:
+                  jm=jal.search(x["text"])
+                  if jm:
+                      calls.append({
+                          "addr":x["addr"],"target":int(jm.group(1),16),
+                          "text":x["text"]
+                      })
+                  if re.search(r"\bbreak\b",x["text"],re.I):
+                      breaks.append({"addr":x["addr"],"text":x["text"]})
+                  if "0x4000" in x["text"].lower():
+                      mmio.append({"addr":x["addr"],"text":x["text"]})
+                  for s in re.findall(r"#?(0x[0-9A-Fa-f]+|\b\d+\b)",x["text"]):
+                      try:
+                          v=int(s,0)
+                      except Exception:
+                          continue
+                      if v in (0x40,0x80,0x100,0x200,0x400,0x1000,64,128,256,512):
+                          constants.append({
+                              "addr":x["addr"],"value":v,"text":x["text"]
+                          })
+              return {
+                  "start":rows[0]["addr"],"end":rows[-1]["addr"],
+                  "calls":calls,"breaks":breaks,
+                  "mmio":mmio,"interesting_constants":constants,
+                  "body":"\n".join(x["raw"] for x in rows)
+              }
+
+          rep77=summarize_body(body77)
+          repb9=summarize_body(bodyb9)
+          repac=summarize_body(bodyac)
+
+          (OUT/"FUNCTION_77FE.asm").write_text(rep77["body"]+"\n")
+          (OUT/"FUNCTION_B960.asm").write_text(repb9["body"]+"\n")
+          (OUT/"FUNCTION_ACBC.asm").write_text(repac["body"]+"\n")
+
+          # All direct callers and caller contexts.
+          callers={BACKEND:[],TRAP:[],WRAP:[]}
+          for idx,x in enumerate(ins):
+              jm=jal.search(x["text"])
+              if not jm:
+                  continue
+              target=int(jm.group(1),16)
+              if target in callers:
+                  ctx=ins[max(0,idx-16):min(len(ins),idx+12)]
+                  callers[target].append({
+                      "addr":x["addr"],
+                      "context":"\n".join(z["raw"] for z in ctx)
+                  })
+
+          for target,arr in callers.items():
+              for i,c in enumerate(arr[:80]):
+                  (OUT/f"CALLER_{target:04X}_{i:02d}_{c['addr']:04X}.asm").write_text(
+                      c["context"]+"\n"
+                  )
+
+          # Callee bodies of 0x77FE.
+          callee_targets=sorted(set(c["target"] for c in rep77["calls"]))
+          callee_reports={}
+          for target in callee_targets[:30]:
+              idx=by_addr.get(target)
+              if idx is None:
+                  callee_reports[f"0x{target:04X}"]={"resolved":False}
+                  continue
+              rows=ins[idx:min(len(ins),idx+300)]
+              end=len(rows)
+              for j in range(1,len(rows)):
+                  if ret.search(rows[j]["text"]):
+                      end=j+1
+                      break
+              rr2=rows[:end]
+              report=summarize_body(rr2)
+              report["resolved"]=True
+              callee_reports[f"0x{target:04X}"]=report
+              (OUT/f"BACKEND_CALLEE_{target:04X}.asm").write_text(
+                  report["body"]+"\n"
+              )
+
+          # Absolute runtime-address pointer references for PC IS OK / UDisk IS OK.
+          absolute_ptr_hits=[]
+          for off,s in pc_strings.items():
+              if s not in ("PC IS OK","UDisk IS OK"):
+                  continue
+              runtime=BASE+off
+              needle=runtime.to_bytes(4,"little")
+              start=0
+              while True:
+                  p=raw.find(needle,start)
+                  if p<0: break
+                  absolute_ptr_hits.append({
+                      "pointer_file_offset":p,
+                      "target_file_offset":off,
+                      "target_runtime":runtime,
+                      "string":s
+                  })
+                  start=p+1
+
+          # Communication source contexts, grouped by likely custom wire path.
+          source_contexts=meta["communication_contexts"]
+          strongest=[]
+          for x in source_contexts:
+              low=x["context"].lower()
+              score=0
+              for term in (
+                  "cfg_communication_methid","usb hid","512byte",
+                  "512 byte","[512]","usbpid","otg_devicemodesel",
+                  "hidrecv","hidsend","hidreceive","hidwrite","hidread"
+              ):
+                  if term in low: score+=1
+              if score:
+                  strongest.append({**x,"score":score})
+          strongest.sort(key=lambda x:(-x["score"],x["file"],x["line"]))
+
+          result={
+              "revision":"USB_HID_TRANSPORT_BACKEND_V15_1",
+              "backend_77fe":rep77,
+              "trap_b960":repb9,
+              "wrapper_acbc":repac,
+              "callers":{f"0x{k:04X}":v for k,v in callers.items()},
+              "backend_callees":callee_reports,
+              "pc_usb_strings":[
+                  {"offset":o,"runtime":BASE+o,"string":s}
+                  for o,s in sorted(pc_strings.items())
+              ],
+              "pc_usb_gp_refs":pc_refs,
+              "absolute_pointer_hits":absolute_ptr_hits,
+              "strong_source_contexts":strongest[:160],
+              "USB_OR_BOARD_CONTACTED":False,
+              "LIVE_FLASH_AUTHORIZED":False,
+              "FLASH_ALLOWED":False
+          }
+          (OUT/"USB_HID_TRANSPORT_BACKEND.json").write_text(
+              json.dumps(result,indent=2,ensure_ascii=False)+"\n"
+          )
+
+          md=[
+              "# BP1048P4 USB HID Transport Backend V15",
+              "",
+              f"64 KiB SHA256: `{meta['sha256']}`",
+              "",
+              "## V14.1 interpretation",
+              f"- `0x{TRAP:04X}` has **{len(repb9['breaks'])} BREAK instruction(s)** "
+              "and no evidence here of USB endpoint I/O; it is treated as a trap/debug backend candidate.",
+              f"- `0x{BACKEND:04X}` is analyzed independently as the alternate backend used by the same output wrapper.",
+              "",
+              f"## Exact backend 0x{BACKEND:04X}",
+              f"- region `0x{rep77['start']:04X}–0x{rep77['end']:04X}`",
+              f"- BREAK instructions: **{len(rep77['breaks'])}**",
+              f"- direct calls: **{len(rep77['calls'])}**",
+              f"- MMIO-looking instructions: **{len(rep77['mmio'])}**",
+          ]
+          for c in rep77["calls"]:
+              md.append(
+                  f"- call `0x{c['addr']:04X} → 0x{c['target']:04X}` `{c['text']}`"
+              )
+          for x in rep77["interesting_constants"]:
+              md.append(
+                  f"- size-like constant `{x['value']}` at `0x{x['addr']:04X}` `{x['text']}`"
+              )
+
+          md+=["",f"### Assembly 0x{BACKEND:04X}"]
+          for line in rep77["body"].splitlines()[:220]:
+              md.append("    "+line)
+          if len(rep77["body"].splitlines())>220:
+              md.append("    ... full body in artifact")
+
+          md+=["",f"## Exact trap/debug candidate 0x{TRAP:04X}"]
+          for line in repb9["body"].splitlines():
+              md.append("    "+line)
+
+          md+=["",f"## Exact shared wrapper 0x{WRAP:04X}"]
+          for line in repac["body"].splitlines()[:180]:
+              md.append("    "+line)
+
+          md+=["","## Direct callers of 0x77FE vs 0xB960"]
+          for target in (BACKEND,TRAP):
+              md.append(f"### `0x{target:04X}`")
+              arr=callers[target]
+              if not arr:
+                  md.append("- none")
+              else:
+                  for c in arr[:60]:
+                      md.append(f"- call site `0x{c['addr']:04X}`")
+
+          md+=["","## 0x77FE direct callee summaries"]
+          if callee_reports:
+              for target,r in callee_reports.items():
+                  if not r.get("resolved"):
+                      md.append(f"- `{target}` unresolved in linear sweep")
+                      continue
+                  md.append(
+                      f"- `{target}` region `0x{r['start']:04X}–0x{r['end']:04X}`; "
+                      f"calls `{len(r['calls'])}`; BREAK `{len(r['breaks'])}`; "
+                      f"MMIO-like `{len(r['mmio'])}`"
+                  )
+          else:
+              md.append("- 0x77FE has no direct callees")
+
+          md+=["","## PC/USB strings and exact GP xrefs"]
+          for x in sorted(pc_refs,key=lambda z:z["addr"]):
+              md.append(
+                  f"- code `0x{x['addr']:04X}` `{x['text']}` → `{x['string']}`"
+              )
+          if not pc_refs:
+              md.append("- no exact GP refs")
+
+          md+=["","## Absolute pointer references to PC/UDisk status strings"]
+          if absolute_ptr_hits:
+              for x in absolute_ptr_hits:
+                  md.append(
+                      f"- pointer at file `0x{x['pointer_file_offset']:04X}` → "
+                      f"`{x['string']}` runtime `0x{x['target_runtime']:08X}`"
+                  )
+          else:
+              md.append("- none")
+
+          md+=["","## Strong public-SDK custom communication/HID contexts"]
+          if strongest:
+              for x in strongest[:60]:
+                  md.append(
+                      f"### `{x['file']}:{x['line']}` score {x['score']}"
+                  )
+                  for line in x["context"].splitlines():
+                      md.append("    "+line)
+          else:
+              md.append("- none")
+
+          md+=["","## Decision"]
+          md.append("- `0xB960` is no longer the primary USB-transport candidate unless later evidence links its BREAK traps to USB I/O.")
+          md.append("- `0x77FE` is the higher-priority alternate backend because the shared wrapper routes the same byte/string output through it.")
+          md.append("- A production USB frame is not accepted until a source/binary path proves buffer layout, length, endpoint/report path, and reply handling.")
+          md.append("- USB/board contacted: **NO**")
+          md.append("- Flash read/erase/write executed: **NO**")
+          md.append("- `FLASH_ALLOWED=NO`")
+
+          (OUT/"USB_HID_TRANSPORT_BACKEND_SUMMARY.md").write_text(
+              "\n".join(md)+"\n"
+          )
+          PYCODE
+
+      - name: Publish summary
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat /tmp/v15/evidence/USB_HID_TRANSPORT_BACKEND_SUMMARY.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Package evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /tmp/v15/evidence
+          zip -9 -r /tmp/OKN_BP1048P4_USB_HID_TRANSPORT_BACKEND_V15_1_EVIDENCE.zip . >/dev/null
+          sha256sum /tmp/OKN_BP1048P4_USB_HID_TRANSPORT_BACKEND_V15_1_EVIDENCE.zip \
+            > /tmp/OKN_BP1048P4_USB_HID_TRANSPORT_BACKEND_V15_1_EVIDENCE.zip.sha256
+
+      - name: Upload evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: OKN-BP1048P4-USB-HID-TRANSPORT-BACKEND-V15-1-EVIDENCE
+          path: |
+            /tmp/OKN_BP1048P4_USB_HID_TRANSPORT_BACKEND_V15_1_EVIDENCE.zip
+            /tmp/OKN_BP1048P4_USB_HID_TRANSPORT_BACKEND_V15_1_EVIDENCE.zip.sha256
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Final fail-closed gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$FLASH_ALLOWED" = "NO"
+          python3 - <<'PY'
+          import json
+          d=json.load(open("/tmp/v15/evidence/USB_HID_TRANSPORT_BACKEND.json"))
+          assert d["USB_OR_BOARD_CONTACTED"] is False
+          assert d["LIVE_FLASH_AUTHORIZED"] is False
+          assert d["FLASH_ALLOWED"] is False
+          print("USB_HID_TRANSPORT_BACKEND_V15_1_GATE=PASS")
+          PY
+          echo FLASH_ALLOWED=NO
