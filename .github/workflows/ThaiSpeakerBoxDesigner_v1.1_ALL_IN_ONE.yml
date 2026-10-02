@@ -1,0 +1,1886 @@
+name: Build Thai Speaker Box Designer - v1.1 POLISHED ALL IN ONE
+
+'on':
+  workflow_dispatch:
+  push:
+    branches: [ "main" ]
+    paths:
+      - '.github/workflows/ThaiSpeakerBoxDesigner_v1.1_ALL_IN_ONE.yml'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: thai-speaker-box-full-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-android:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v4
+        with:
+          accept-android-sdk-licenses: 'true'
+          log-accepted-android-sdk-licenses: 'false'
+          packages: 'platform-tools platforms;android-35 build-tools;35.0.0'
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.10.2'
+
+      - name: Generate full Android project
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf app settings.gradle.kts build.gradle.kts gradle.properties
+          mkdir -p app/src/main/java/com/okn/speakerbox app/src/main/res/values app/src/main/res/xml app/src/test/java/com/okn/speakerbox
+
+          cat > settings.gradle.kts <<'EOF_SETTINGS'
+          pluginManagement {
+              repositories { google(); mavenCentral(); gradlePluginPortal() }
+          }
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories { google(); mavenCentral() }
+          }
+          rootProject.name = "ThaiSpeakerBoxDesigner"
+          include(":app")
+          EOF_SETTINGS
+
+          cat > build.gradle.kts <<'EOF_ROOT'
+          plugins {
+              id("com.android.application") version "8.7.3" apply false
+              id("org.jetbrains.kotlin.android") version "2.0.21" apply false
+              id("org.jetbrains.kotlin.plugin.compose") version "2.0.21" apply false
+          }
+          EOF_ROOT
+
+          cat > gradle.properties <<'EOF_PROPS'
+          org.gradle.jvmargs=-Xmx4g -Dfile.encoding=UTF-8
+          android.useAndroidX=true
+          kotlin.code.style=official
+          android.nonTransitiveRClass=true
+          EOF_PROPS
+
+          cat > app/build.gradle.kts <<'EOF_APP'
+          plugins {
+              id("com.android.application")
+              id("org.jetbrains.kotlin.android")
+              id("org.jetbrains.kotlin.plugin.compose")
+          }
+
+          android {
+              namespace = "com.okn.speakerbox"
+              compileSdk = 35
+
+              defaultConfig {
+                  applicationId = "com.okn.speakerbox"
+                  minSdk = 26
+                  targetSdk = 35
+                  versionCode = 11
+                  versionName = "1.1.0-polished"
+                  testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+              }
+
+              compileOptions {
+                  sourceCompatibility = JavaVersion.VERSION_17
+                  targetCompatibility = JavaVersion.VERSION_17
+              }
+              kotlinOptions { jvmTarget = "17" }
+              buildFeatures { compose = true }
+              packaging { resources { excludes += "/META-INF/{AL2.0,LGPL2.1}" } }
+          }
+
+          dependencies {
+              implementation(platform("androidx.compose:compose-bom:2024.12.01"))
+              implementation("androidx.activity:activity-compose:1.10.0")
+              implementation("androidx.core:core-ktx:1.15.0")
+              implementation("androidx.compose.ui:ui")
+              implementation("androidx.compose.ui:ui-tooling-preview")
+              implementation("androidx.compose.foundation:foundation")
+              implementation("androidx.compose.material3:material3")
+              implementation("androidx.compose.material:material-icons-extended")
+              implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
+              implementation("org.jsoup:jsoup:1.18.3")
+              implementation("io.coil-kt:coil-compose:2.7.0")
+              debugImplementation("androidx.compose.ui:ui-tooling")
+              testImplementation("junit:junit:4.13.2")
+          }
+          EOF_APP
+
+          cat > app/src/main/AndroidManifest.xml <<'EOF_MANIFEST'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <uses-permission android:name="android.permission.INTERNET" />
+              <application
+                  android:allowBackup="true"
+                  android:label="Speaker Box Designer TH"
+                  android:supportsRtl="true"
+                  android:usesCleartextTraffic="false"
+                  android:theme="@style/Theme.SpeakerBox">
+                  <activity android:name=".MainActivity" android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+                  <provider
+                      android:name="androidx.core.content.FileProvider"
+                      android:authorities="${applicationId}.fileprovider"
+                      android:exported="false"
+                      android:grantUriPermissions="true">
+                      <meta-data android:name="android.support.FILE_PROVIDER_PATHS" android:resource="@xml/file_paths" />
+                  </provider>
+              </application>
+          </manifest>
+          EOF_MANIFEST
+
+          cat > app/src/main/res/values/themes.xml <<'EOF_THEME'
+          <?xml version="1.0" encoding="utf-8"?>
+          <resources>
+              <style name="Theme.SpeakerBox" parent="android:style/Theme.Material.NoActionBar">
+                  <item name="android:fontFamily">sans</item>
+                  <item name="android:windowLightStatusBar">false</item>
+                  <item name="android:statusBarColor">#05080D</item>
+                  <item name="android:navigationBarColor">#05080D</item>
+                  <item name="android:windowActionModeOverlay">true</item>
+              </style>
+          </resources>
+          EOF_THEME
+
+          cat > app/src/main/res/xml/file_paths.xml <<'EOF_PATHS'
+          <?xml version="1.0" encoding="utf-8"?>
+          <paths xmlns:android="http://schemas.android.com/apk/res/android">
+              <cache-path name="exports" path="exports/" />
+          </paths>
+          EOF_PATHS
+
+          cat > app/src/main/java/com/okn/speakerbox/Models.kt <<'EOF_Models_kt'
+          package com.okn.speakerbox
+          
+          data class Driver(
+              val id: String,
+              val brand: String,
+              val model: String,
+              val sizeInch: Int,
+              val ohm: Double,
+              val rmsW: Int,
+              val programW: Int,
+              val fs: Double,
+              val qts: Double,
+              val qes: Double,
+              val qms: Double,
+              val vasL: Double,
+              val sdCm2: Double,
+              val xmaxMm: Double,
+              val re: Double,
+              val leMh: Double,
+              val sensitivityDb: Double,
+              val freqMinHz: Double,
+              val freqMaxHz: Double,
+              val cutoutMm: Double,
+              val depthMm: Double,
+              val use: String,
+              val sourceUrl: String,
+              val verified: Boolean = true,
+              val custom: Boolean = false,
+              val imageUrl: String = ""
+          ) {
+              val displayName: String get() = "$brand $model"
+              val ebp: Double get() = if (qes > 0.0) fs / qes else 0.0
+          }
+          
+          enum class EnclosureKind { SEALED, VENTED, BANDPASS4, BANDPASS6, HORN_PRESET }
+          
+          data class EnclosurePreset(
+              val id: String,
+              val nameTh: String,
+              val subtitle: String,
+              val kind: EnclosureKind,
+              val standard: Boolean,
+              val volumeFactor: Double = 1.0,
+              val tuningFactor: Double = 1.0,
+              val note: String
+          )
+          
+          data class DesignInput(
+              val driver: Driver,
+              val enclosure: EnclosurePreset,
+              val count: Int,
+              val targetHz: Double,
+              val thicknessMm: Int,
+              val wiring: String,
+              val qtc: Double = 0.707
+          )
+          
+          data class CutItem(
+              val part: String,
+              val widthMm: Int,
+              val heightMm: Int,
+              val qty: Int,
+              val note: String = ""
+          ) {
+              val sizeText: String get() = if (widthMm > 0 && heightMm > 0) "$widthMm × $heightMm mm" else note
+          }
+          
+          data class DesignResult(
+              val netL: Double,
+              val grossL: Double,
+              val fbHz: Double,
+              val f3Hz: Double,
+              val fcHz: Double,
+              val qtc: Double,
+              val splDb: Double,
+              val impedanceOhm: Double,
+              val widthMm: Int,
+              val heightMm: Int,
+              val depthMm: Int,
+              val innerWidthMm: Int,
+              val innerHeightMm: Int,
+              val innerDepthMm: Int,
+              val portAreaCm2: Double,
+              val portLengthMm: Int,
+              val portWidthMm: Int,
+              val portHeightMm: Int,
+              val driverDisplacementL: Double,
+              val portDisplacementL: Double,
+              val braceDisplacementL: Double,
+              val sheetCount: Int,
+              val cutList: List<CutItem>,
+              val warnings: List<String>,
+              val method: String
+          )
+          
+          data class CurvePoint(val hz: Double, val value: Double)
+          
+          data class PanelPlacement(
+              val sheet: Int,
+              val x: Int,
+              val y: Int,
+              val width: Int,
+              val height: Int,
+              val label: String
+          )
+          
+          data class SavedProject(
+              val id: String,
+              val name: String,
+              val createdAt: Long,
+              val driverId: String,
+              val driverName: String,
+              val enclosureId: String,
+              val enclosureName: String,
+              val count: Int,
+              val targetHz: Double,
+              val thicknessMm: Int,
+              val wiring: String,
+              val result: DesignResult
+          )
+          
+          object Enclosures {
+              val all = listOf(
+                  EnclosurePreset(
+                      "sealed", "ตู้ปิด", "Sealed • Qtc", EnclosureKind.SEALED, true,
+                      note = "คำนวณด้วย Thiele/Small closed-box 2nd-order; Qtc เริ่มต้น 0.707"
+                  ),
+                  EnclosurePreset(
+                      "vented", "ตู้เปิด", "Bass Reflex • B4/QB3 start", EnclosureKind.VENTED, true,
+                      note = "Vb เริ่มต้นด้วย Keele/Thiele-Small alignment และคำนวณ response ด้วย Small 4th-order model"
+                  ),
+                  EnclosurePreset(
+                      "bp4", "แบนพาส 4", "4th-order band-pass", EnclosureKind.BANDPASS4, true,
+                      note = "ห้องหลัง sealed + ห้องหน้า vented; เป็นจุดเริ่มต้นที่ต้องตรวจด้วย simulation/วัดจริง"
+                  ),
+                  EnclosurePreset(
+                      "bp6", "ออร์เดอร์ 6", "6th-order band-pass", EnclosureKind.BANDPASS6, false, 1.35, 1.0,
+                      "preset geometry สำหรับตั้งต้น ไม่ใช่ alignment เดียวตายตัว; ควรตรวจ port velocity และ response เพิ่ม"
+                  ),
+                  EnclosurePreset(
+                      "thai-hit", "ตู้ฟาด", "Thai market preset", EnclosureKind.HORN_PRESET, false, 0.82, 1.08,
+                      "ชื่อสูตรตลาดไทย; แอปใช้ geometry preset เพื่อประมาณขนาด ไม่อ้างว่าเป็นมาตรฐาน Thiele/Small"
+                  ),
+                  EnclosurePreset(
+                      "bunker", "บังเกอร์", "Thai market preset", EnclosureKind.HORN_PRESET, false, 0.95, 0.98,
+                      "preset ตลาดไทยสำหรับเบสกระแทก; ผลจริงขึ้นกับทางเดิน/ช่องลมของแบบช่าง"
+                  ),
+                  EnclosurePreset(
+                      "jbin", "เจบิน", "J-bin preset", EnclosureKind.HORN_PRESET, false, 1.15, 0.92,
+                      "folded/hybrid horn preset; ขนาดนี้เป็น starting geometry และต้องจำลอง horn path ก่อนผลิตจริง"
+                  ),
+                  EnclosurePreset(
+                      "turbo", "เทอร์โบ", "Turbo preset", EnclosureKind.HORN_PRESET, false, 1.25, 0.88,
+                      "preset ตลาด PA ไทย; ใช้คำนวณปริมาตร/ไม้เบื้องต้น ไม่แทน Hornresp/ABEC"
+                  ),
+                  EnclosurePreset(
+                      "wbin", "W-bin", "Folded horn preset", EnclosureKind.HORN_PRESET, false, 1.45, 0.84,
+                      "W-bin geometry preset; response จริงขึ้นกับ path length, throat/mouth area และจำนวนตู้"
+                  ),
+                  EnclosurePreset(
+                      "scoop", "Scoop", "Rear-loaded horn preset", EnclosureKind.HORN_PRESET, false, 1.55, 0.80,
+                      "rear-loaded horn preset; ใช้เป็นแบบตั้งต้นเท่านั้น"
+                  )
+              )
+          
+              fun byId(id: String): EnclosurePreset = all.firstOrNull { it.id == id } ?: all[1]
+          }
+          
+          object SeedCatalog {
+              // Verified seed data from P.Audio public product pages. Runtime sync/custom import can extend this list.
+              val drivers = listOf(
+                  Driver("pa-c18-650el-v4", "P.Audio", "C18-650EL V4", 18, 8.0, 1200, 2400, 35.0, 0.676, 0.706, 15.784, 127.044, 1195.0, 7.0, 6.1, 0.96, 96.0, 35.0, 1000.0, 427.0, 220.0, "PA Sub/LF", "https://paudiothailand.com/products/lf-driver/ferrite-lf-driver/c18-650el-v4/"),
+                  Driver("pa-c18-650el-v3", "P.Audio", "C18-650EL V3", 18, 8.0, 1000, 2000, 41.0, 0.52, 0.55, 12.26, 179.10, 1225.0, 5.25, 5.6, 0.83, 96.0, 35.0, 1000.0, 426.1, 206.8, "PA Sub/LF", "https://paudiothailand.com/products/lf-driver/ferrite-lf-driver/c18-650el-v3/"),
+                  Driver("pa-c15-600el-v3", "P.Audio", "C15-600EL V3", 15, 8.0, 1200, 2400, 45.0, 0.40, 0.43, 7.96, 94.6, 855.0, 5.25, 5.5, 0.67, 96.0, 45.0, 2000.0, 350.0, 164.0, "PA LF/Midbass", "https://paudiothailand.com/products/lf-driver/ferrite-lf-driver/c15-600el-v3/"),
+                  Driver("pa-p180-2243", "P.Audio", "P180/2243", 18, 8.0, 1200, 2400, 35.0, 0.59, 0.65, 6.51, 159.06, 1288.0, 8.5, 5.2, 1.30, 97.0, 35.0, 1000.0, 426.1, 217.4, "PA Sub/LF", "https://paudiothailand.com/products/lf-driver/ferrite-lf-driver/p180-2243/"),
+                  Driver("pa-18ft-100sw", "P.Audio", "18FT-100SW", 18, 8.0, 1300, 2600, 35.0, 0.47, 0.50, 9.73, 222.9, 1231.6, 7.5, 5.6, 1.28, 97.0, 35.0, 1000.0, 426.0, 220.0, "PA Sub/LF", "https://paudiothailand.com/products/lf-driver/ferrite-lf-driver/18ft-100sw/"),
+                  Driver("pa-18ft-100xb", "P.Audio", "18FT-100XB", 18, 8.0, 1200, 2400, 35.0, 0.53, 0.56, 12.0, 122.1, 1225.0, 6.0, 5.2, 1.12, 97.0, 35.0, 1000.0, 425.0, 214.0, "PA Sub/LF", "https://paudiothailand.com/products/lf-driver/ferrite-lf-driver/18ft-100xb/"),
+                  Driver("pa-18nt-100xb", "P.Audio", "18NT-100XB", 18, 8.0, 1200, 2400, 35.0, 0.41, 0.43, 10.51, 171.30, 1225.0, 7.0, 5.1, 0.87, 97.0, 35.0, 1000.0, 426.0, 222.0, "PA Sub/LF", "https://paudiothailand.com/products/lf-driver/neodymium-lf-driver/18nt-100xb/"),
+                  Driver("pa-18nt-100sw", "P.Audio", "18NT-100SW", 18, 8.0, 1300, 2600, 35.0, 0.48, 0.50, 11.67, 144.63, 1225.0, 9.0, 5.8, 1.05, 97.0, 35.0, 1000.0, 426.0, 222.0, "PA Sub/LF", "https://paudiothailand.com/products/lf-driver/neodymium-lf-driver/18nt-100sw/"),
+                  Driver("pa-gst-181500-v3", "P.Audio", "GST-181500 V3", 18, 8.0, 1500, 3000, 40.0, 0.60, 0.63, 11.95, 92.248, 1225.0, 9.0, 5.6, 1.26, 96.0, 40.0, 800.0, 425.3, 232.0, "PA Sub/LF", "https://paudiothailand.com/products/lf-driver/ferrite-lf-driver/gst-181500-v3/"),
+                  Driver("pa-p150-2226-v3", "P.Audio", "P150/2226 V3", 15, 8.0, 800, 1600, 54.0, 0.50, 0.53, 9.14, 72.45, 907.9, 5.5, 5.0, 0.64, 96.0, 40.0, 2000.0, 356.1, 136.0, "PA LF/Midbass", "https://paudiothailand.com/products/lf-driver/ferrite-lf-driver/p150-2226-v3/"),
+                  Driver("pa-10nt-65mb", "P.Audio", "10NT-65MB", 10, 8.0, 650, 1300, 70.0, 0.56, 0.62, 7.12, 18.5, 352.9, 3.5, 6.5, 0.42, 96.0, 60.0, 4000.0, 230.0, 127.8, "PA Midbass", "https://paudiothailand.com/products/lf-driver/neodymium-lf-driver/10nt-65mb/")
+              )
+          }
+          EOF_Models_kt
+          cat > app/src/main/java/com/okn/speakerbox/Calculators.kt <<'EOF_Calculators_kt'
+          package com.okn.speakerbox
+          
+          import kotlin.math.*
+          
+          private data class C(val re: Double, val im: Double) {
+              operator fun plus(o: C) = C(re + o.re, im + o.im)
+              operator fun minus(o: C) = C(re - o.re, im - o.im)
+              operator fun times(o: C) = C(re * o.re - im * o.im, re * o.im + im * o.re)
+              operator fun times(k: Double) = C(re * k, im * k)
+              operator fun div(o: C): C {
+                  val d = o.re * o.re + o.im * o.im
+                  return C((re * o.re + im * o.im) / d, (im * o.re - re * o.im) / d)
+              }
+              fun abs() = hypot(re, im)
+              fun pow(n: Int): C {
+                  var r = C(1.0, 0.0)
+                  repeat(n) { r = r * this }
+                  return r
+              }
+          }
+          
+          object SpeakerMath {
+              private fun r1(v: Double) = round(v * 10.0) / 10.0
+          
+              fun impedanceForWiring(ohm: Double, count: Int, mode: String): Double {
+                  if (count <= 1) return ohm
+                  return when (mode) {
+                      "อนุกรม" -> ohm * count
+                      "อนุกรม-ขนาน" -> {
+                          when {
+                              count == 4 -> ohm
+                              count % 2 == 0 -> (ohm * 2.0) / (count / 2.0)
+                              else -> ohm / count
+                          }
+                      }
+                      else -> ohm / count
+                  }.coerceAtLeast(0.5)
+              }
+          
+              fun wiringOptions(driver: Driver, count: Int): List<Pair<String, Double>> {
+                  val modes = mutableListOf("ขนาน", "อนุกรม")
+                  if (count >= 4 && count % 2 == 0) modes.add("อนุกรม-ขนาน")
+                  return modes.map { it to impedanceForWiring(driver.ohm, count, it) }
+              }
+          
+              private fun sealedF3(fc: Double, qtc: Double): Double {
+                  val a = 2.0 - 1.0 / (qtc * qtc)
+                  val y = (-a + sqrt(a * a + 4.0)) / 2.0
+                  return fc * sqrt(y.coerceAtLeast(0.0001))
+              }
+          
+              private fun sealedVolume(totalVas: Double, qts: Double, requestedQtc: Double): Pair<Double, Double> {
+                  val qtc = max(requestedQtc, qts * 1.08 + 0.01)
+                  val denom = (qtc / qts).pow(2.0) - 1.0
+                  val vb = if (denom > 0.01) totalVas / denom else totalVas * 1.4
+                  return vb.coerceAtLeast(totalVas * 0.12) to qtc
+              }
+          
+              private fun keeleVentedVolume(totalVas: Double, qts: Double): Double =
+                  (15.0 * totalVas * qts.pow(2.87)).coerceAtLeast(totalVas * 0.20)
+          
+              private fun keeleFb(fs: Double, qts: Double): Double = 0.42 * fs * qts.pow(-0.9)
+          
+              private fun driverDisplacementL(d: Driver, count: Int): Double {
+                  val radius = max(d.cutoutMm, d.sizeInch * 22.0) / 2.0
+                  val depth = max(d.depthMm, d.sizeInch * 8.0)
+                  val cylinderL = Math.PI * radius * radius * depth / 1_000_000.0
+                  return cylinderL * 0.30 * count
+              }
+          
+              private fun portLengthMm(areaCm2: Double, fb: Double, netL: Double): Pair<Int, Int> {
+                  if (areaCm2 <= 0.0 || fb <= 0.0 || netL <= 0.0) return 0 to 0
+                  val eqDiameterMm = 2.0 * sqrt(areaCm2 * 100.0 / Math.PI)
+                  val lv = 2350.0 * eqDiameterMm.pow(2.0) / (netL * fb.pow(2.0)) - 0.73 * eqDiameterMm
+                  return lv.roundToInt().coerceIn(50, 1400) to eqDiameterMm.roundToInt()
+              }
+          
+              fun calculate(input: DesignInput): DesignResult {
+                  val d = input.driver
+                  val n = input.count.coerceIn(1, 8)
+                  val totalVas = d.vasL * n
+                  val warnings = mutableListOf<String>()
+                  val sealed = sealedVolume(totalVas, d.qts, input.qtc)
+                  val sealedVb = sealed.first
+                  val actualQtc = sealed.second
+                  val fc = d.fs * (actualQtc / d.qts)
+                  val target = input.targetHz.coerceIn(20.0, 120.0)
+          
+                  var net = 0.0
+                  var fb = 0.0
+                  var method = ""
+                  when (input.enclosure.kind) {
+                      EnclosureKind.SEALED -> {
+                          net = sealedVb
+                          method = "Thiele/Small closed-box 2nd-order (Qtc ${r1(actualQtc)})"
+                      }
+                      EnclosureKind.VENTED -> {
+                          val suggestedFb = keeleFb(d.fs, d.qts)
+                          net = keeleVentedVolume(totalVas, d.qts)
+                          fb = if (input.targetHz > 0) target else suggestedFb
+                          method = "Keele starting alignment + Small vented-box 4th-order transfer model"
+                          if (d.qts !in 0.25..0.45) warnings += "Qts ${d.qts} อยู่นอกช่วงที่ Keele B4 approximation เหมาะที่สุด (ประมาณ 0.25–0.45); ใช้เป็นจุดเริ่มต้นและตรวจกราฟ"
+                      }
+                      EnclosureKind.BANDPASS4 -> {
+                          val front = keeleVentedVolume(totalVas, d.qts) * 0.55
+                          net = sealedVb * 0.80 + front
+                          fb = target
+                          method = "4th-order band-pass starting alignment: sealed rear + vented front"
+                          warnings += "Band-pass ควรตรวจ response/port velocity ด้วย simulator ก่อนตัดไม้จริง"
+                      }
+                      EnclosureKind.BANDPASS6 -> {
+                          net = keeleVentedVolume(totalVas, d.qts) * input.enclosure.volumeFactor
+                          fb = target
+                          method = "6th-order market preset; two tuned chambers approximated for cabinet sizing"
+                          warnings += "6th-order มีสองความถี่จูนจริง แอปแสดงค่ากลางสำหรับตั้งต้น ไม่แทนการจำลองเต็มรูปแบบ"
+                      }
+                      EnclosureKind.HORN_PRESET -> {
+                          net = max(keeleVentedVolume(totalVas, d.qts) * input.enclosure.volumeFactor, 45.0 * n)
+                          fb = target * input.enclosure.tuningFactor
+                          method = "Thai/PA geometry preset (${input.enclosure.nameTh}); volume/cut sizing only"
+                          warnings += "${input.enclosure.nameTh} เป็น geometry preset: ต้องตรวจ throat, mouth, path length และ response ด้วย Hornresp/ABEC หรือแบบช่างต้นฉบับก่อนผลิต"
+                      }
+                  }
+                  net = net.coerceIn(8.0 * n, 550.0 * n)
+          
+                  val portArea = if (input.enclosure.kind == EnclosureKind.SEALED) 0.0 else {
+                      val bySd = d.sdCm2 * n * if (d.rmsW >= 1000) 0.24 else 0.18
+                      max(bySd, 65.0 * n)
+                  }
+                  val port = portLengthMm(portArea, if (fb > 0) fb else target, net)
+                  val portLength = port.first
+                  val driverDisp = driverDisplacementL(d, n)
+                  val portDisp = portArea * (portLength / 10.0) / 1000.0
+                  val braceDisp = max(1.2, net * 0.035)
+                  val gross = net + driverDisp + portDisp + braceDisp
+          
+                  val t = input.thicknessMm.coerceIn(12, 30)
+                  val cutout = max(d.cutoutMm, d.sizeInch * 22.0)
+                  val cols = if (n == 1) 1 else min(2, n)
+                  val rows = ceil(n / cols.toDouble()).toInt()
+                  val gap = 35.0
+                  val minInnerW = cols * cutout + (cols - 1) * gap + 45.0
+                  val minInnerH = rows * cutout + (rows - 1) * gap + 50.0
+                  val idealBase = (gross * 1_000_000.0).pow(1.0 / 3.0)
+                  var iw = max(minInnerW, idealBase * 1.15)
+                  var ih = max(minInnerH, idealBase * 0.92)
+                  var id = gross * 1_000_000.0 / (iw * ih)
+                  val minDepth = max(d.depthMm + 100.0, 280.0)
+                  if (id < minDepth) {
+                      id = minDepth
+                      val needArea = gross * 1_000_000.0 / id
+                      val scale = sqrt(needArea / (iw * ih))
+                      iw *= scale
+                      ih *= scale
+                  }
+                  iw = iw.coerceAtMost(1120.0)
+                  ih = ih.coerceAtMost(2300.0)
+                  id = gross * 1_000_000.0 / (iw * ih)
+                  if (id > 1120.0) {
+                      warnings += "มิติด้านลึกเกิน 1120 mm; ควรแบ่งห้อง/ปรับสัดส่วนก่อนตัดจากแผ่น 1220×2440"
+                      id = 1120.0
+                  }
+                  val innerW = iw.roundToInt()
+                  val innerH = ih.roundToInt()
+                  val innerD = id.roundToInt()
+                  val outerW = innerW + 2 * t
+                  val outerH = innerH + 2 * t
+                  val outerD = innerD + 2 * t
+          
+                  var slotWidth = 0
+                  var slotHeight = 0
+                  if (portArea > 0.0) {
+                      slotWidth = (innerW * 0.88).roundToInt().coerceAtLeast(100)
+                      slotHeight = (portArea * 100.0 / slotWidth).roundToInt().coerceAtLeast(25)
+                      if (slotHeight > 220) {
+                          slotHeight = 220
+                          slotWidth = (portArea * 100.0 / slotHeight).roundToInt()
+                      }
+                  }
+          
+                  val cuts = mutableListOf(
+                      CutItem("บน", outerW, outerD, 1),
+                      CutItem("ล่าง", outerW, outerD, 1),
+                      CutItem("ซ้าย", outerH - 2 * t, outerD, 1),
+                      CutItem("ขวา", outerH - 2 * t, outerD, 1),
+                      CutItem("หน้า", outerW - 2 * t, outerH - 2 * t, 1, "เจาะดอกตาม cutout ${r1(cutout)} mm"),
+                      CutItem("หลัง", outerW - 2 * t, outerH - 2 * t, 1)
+                  )
+                  if (portArea > 0.0) {
+                      cuts += CutItem("พื้นพอร์ต", slotWidth.coerceAtMost(innerW), portLength, 1)
+                      if (slotHeight > 80) cuts += CutItem("ผนังพอร์ต", slotHeight, portLength, 1)
+                  }
+                  cuts += CutItem("ค้ำตู้", min(innerW, 500), 80, max(2, n), "ตัดช่องกลางให้โปร่ง")
+          
+                  val placements = nestPanels(cuts)
+                  val sheetCount = max(1, (placements.maxOfOrNull { it.sheet } ?: 0) + 1)
+                  if (cuts.any { it.widthMm > 1220 && it.heightMm > 1220 }) warnings += "มีชิ้นไม้ที่อาจไม่พอดีกับความกว้างแผ่น 1220 mm; ตรวจ layout ก่อนตัด"
+          
+                  val f3 = findF3(input, net, fb, actualQtc, fc)
+                  val spl = d.sensitivityDb + 10.0 * log10((d.rmsW * n).toDouble().coerceAtLeast(1.0))
+                  val z = impedanceForWiring(d.ohm, n, input.wiring)
+          
+                  return DesignResult(
+                      netL = r1(net), grossL = r1(gross), fbHz = r1(fb), f3Hz = r1(f3), fcHz = r1(fc), qtc = r1(actualQtc),
+                      splDb = r1(spl), impedanceOhm = r1(z), widthMm = outerW, heightMm = outerH, depthMm = outerD,
+                      innerWidthMm = innerW, innerHeightMm = innerH, innerDepthMm = innerD,
+                      portAreaCm2 = r1(portArea), portLengthMm = portLength, portWidthMm = slotWidth, portHeightMm = slotHeight,
+                      driverDisplacementL = r1(driverDisp), portDisplacementL = r1(portDisp), braceDisplacementL = r1(braceDisp),
+                      sheetCount = sheetCount, cutList = cuts, warnings = warnings, method = method
+                  )
+              }
+          
+              fun responseCurve(input: DesignInput, result: DesignResult): List<CurvePoint> = frequencies().map { f ->
+                  val mag = responseMagnitude(input, result, f).coerceAtLeast(1e-6)
+                  CurvePoint(f, 20.0 * log10(mag))
+              }
+          
+              private fun responseMagnitude(input: DesignInput, result: DesignResult, f: Double): Double {
+                  val d = input.driver
+                  return when (input.enclosure.kind) {
+                      EnclosureKind.SEALED -> sealedMagnitude(f, result.fcHz, result.qtc)
+                      EnclosureKind.VENTED -> ventedMagnitude(f, d.fs, d.qts, d.vasL * input.count / result.netL, result.fbHz, 7.0)
+                      EnclosureKind.BANDPASS4 -> {
+                          val hp = ventedMagnitude(f, d.fs, d.qts, d.vasL * input.count / (result.netL * 0.55), result.fbHz, 7.0)
+                          val lp = lowPass2(f, min(220.0, max(90.0, result.fbHz * 3.1)), 0.707)
+                          hp * lp
+                      }
+                      EnclosureKind.BANDPASS6 -> {
+                          val hp = ventedMagnitude(f, d.fs, d.qts, d.vasL * input.count / result.netL, result.fbHz * 0.82, 7.0)
+                          val lp = lowPass2(f, min(240.0, result.fbHz * 3.4), 0.85)
+                          hp * lp
+                      }
+                      EnclosureKind.HORN_PRESET -> {
+                          val hp = sealedMagnitude(f, max(20.0, result.fbHz * 0.90), 0.85)
+                          val peak = 1.0 + 0.10 * exp(-((f - result.fbHz * 1.6) / max(15.0, result.fbHz * 0.45)).pow(2.0))
+                          hp * peak
+                      }
+                  }
+              }
+          
+              private fun sealedMagnitude(f: Double, fc: Double, q: Double): Double {
+                  val x = f / max(fc, 1.0)
+                  val s = C(0.0, x)
+                  val num = s.pow(2)
+                  val den = s.pow(2) + s * (1.0 / max(q, 0.1)) + C(1.0, 0.0)
+                  return (num / den).abs()
+              }
+          
+              private fun lowPass2(f: Double, fc: Double, q: Double): Double {
+                  val x = f / max(fc, 1.0)
+                  val s = C(0.0, x)
+                  val den = s.pow(2) + s * (1.0 / max(q, 0.1)) + C(1.0, 0.0)
+                  return (C(1.0, 0.0) / den).abs()
+              }
+          
+              // Small (1973) fourth-order vented-box normalized pressure transfer model.
+              private fun ventedMagnitude(f: Double, fs: Double, qts: Double, alpha: Double, fb: Double, ql: Double): Double {
+                  if (fb <= 0.0) return 0.0
+                  val h = fb / fs
+                  val sh = sqrt(max(h, 1e-6))
+                  val a1 = 1.0 / (ql * sh) + sh / qts
+                  val a2 = (alpha + 1.0) / h + h + 1.0 / (ql * qts)
+                  val a3 = 1.0 / (qts * sh) + sh / ql
+                  val f0 = sqrt(fs * fb)
+                  val s = C(0.0, f / f0)
+                  val num = s.pow(4)
+                  val den = s.pow(4) + s.pow(3) * a3 + s.pow(2) * a2 + s * a1 + C(1.0, 0.0)
+                  return (num / den).abs()
+              }
+          
+              fun impedanceCurve(input: DesignInput, result: DesignResult): List<CurvePoint> {
+                  val d = input.driver
+                  val n = input.count
+                  val single = frequencies().map { f ->
+                      val z = when (input.enclosure.kind) {
+                          EnclosureKind.VENTED, EnclosureKind.BANDPASS4, EnclosureKind.BANDPASS6 -> ventedImpedance(d, result, f)
+                          else -> sealedImpedance(d, result, f)
+                      }
+                      CurvePoint(f, z)
+                  }
+                  val factor = impedanceForWiring(d.ohm, n, input.wiring) / d.ohm
+                  return single.map { CurvePoint(it.hz, it.value * factor) }
+              }
+          
+              private fun sealedImpedance(d: Driver, result: DesignResult, f: Double): Double {
+                  val res = d.qms * d.re / max(d.qes, 0.05)
+                  val r = f / max(result.fcHz, 1.0)
+                  val mot = C(res, 0.0) / C(1.0, d.qms * (r - 1.0 / max(r, 1e-5)))
+                  val le = C(0.0, 2.0 * Math.PI * f * d.leMh / 1000.0)
+                  return (C(d.re, 0.0) + le + mot).abs()
+              }
+          
+              private fun ventedImpedance(d: Driver, result: DesignResult, f: Double): Double {
+                  val fs = d.fs
+                  val fb = max(result.fbHz, 1.0)
+                  val ql = 7.0
+                  val alpha = d.vasL / max(result.netL, 1.0)
+                  val h = fb / fs
+                  val sh = sqrt(h)
+                  val b1 = 1.0 / (ql * sh) + sh / max(d.qms, 0.1)
+                  val b2 = (alpha + 1.0) / h + h + 1.0 / (ql * max(d.qms, 0.1))
+                  val b3 = 1.0 / (max(d.qms, 0.1) * sh) + sh / ql
+                  val f0 = sqrt(fs * fb)
+                  val s0 = C(0.0, f / f0)
+                  val sb = C(0.0, f / fb)
+                  val ss = C(0.0, f / fs)
+                  val den = s0.pow(4) + s0.pow(3) * b3 + s0.pow(2) * b2 + s0 * b1 + C(1.0, 0.0)
+                  val ventTerm = sb.pow(2) + sb * (1.0 / ql) + C(1.0, 0.0)
+                  val res = d.qms * d.re / max(d.qes, 0.05)
+                  val mot = (ss * (1.0 / max(d.qms, 0.1)) * ventTerm / den) * res
+                  val le = C(0.0, 2.0 * Math.PI * f * d.leMh / 1000.0)
+                  return (C(d.re, 0.0) + le + mot).abs()
+              }
+          
+              fun excursionCurve(input: DesignInput, result: DesignResult): List<CurvePoint> {
+                  val resp = responseCurve(input, result)
+                  val d = input.driver
+                  return resp.map { p ->
+                      val lowBoost = (max(d.fs, 25.0) / max(p.hz, 15.0)).pow(2.0)
+                      val tuningRelief = if (result.fbHz > 0) {
+                          val x = (p.hz - result.fbHz) / max(6.0, result.fbHz * 0.18)
+                          1.0 - 0.78 * exp(-(x * x))
+                      } else 1.0
+                      val normalized = (lowBoost * tuningRelief * 0.34).coerceIn(0.03, 1.8)
+                      CurvePoint(p.hz, d.xmaxMm * normalized)
+                  }
+              }
+          
+              private fun findF3(input: DesignInput, net: Double, fb: Double, qtc: Double, fc: Double): Double {
+                  if (input.enclosure.kind == EnclosureKind.SEALED) return sealedF3(fc, qtc)
+                  val fake = DesignResult(net, net, fb, 0.0, fc, qtc, 0.0, 0.0, 0,0,0,0,0,0,0.0,0,0,0,0.0,0.0,0.0,1,emptyList(),emptyList(),"")
+                  val pts = frequencies(12.0, 350.0, 180).map { it to responseMagnitude(input, fake, it) }
+                  val maxMag = pts.maxOfOrNull { it.second }?.coerceAtLeast(1e-6) ?: 1.0
+                  val threshold = maxMag / sqrt(2.0)
+                  return pts.firstOrNull { it.second >= threshold }?.first ?: fb
+              }
+          
+              private fun frequencies(minHz: Double = 15.0, maxHz: Double = 400.0, count: Int = 120): List<Double> {
+                  val a = ln(minHz)
+                  val b = ln(maxHz)
+                  return (0 until count).map { i -> exp(a + (b - a) * i / (count - 1).toDouble()) }
+              }
+          
+              fun nestPanels(cuts: List<CutItem>, sheetW: Int = 1220, sheetH: Int = 2440, gap: Int = 6): List<PanelPlacement> {
+                  val pieces = cuts.flatMap { c -> List(c.qty.coerceAtLeast(1)) { c } }
+                      .filter { it.widthMm > 0 && it.heightMm > 0 }
+                      .sortedByDescending { max(it.widthMm, it.heightMm) }
+                  val out = mutableListOf<PanelPlacement>()
+                  var sheet = 0
+                  var x = 0
+                  var y = 0
+                  var rowH = 0
+                  for (p in pieces) {
+                      var w = p.widthMm
+                      var h = p.heightMm
+                      if (w > sheetW && h <= sheetW) { val tmp = w; w = h; h = tmp }
+                      if (x + w > sheetW) { x = 0; y += rowH + gap; rowH = 0 }
+                      if (y + h > sheetH) { sheet++; x = 0; y = 0; rowH = 0 }
+                      if (w > sheetW || h > sheetH) {
+                          out += PanelPlacement(sheet, 0, 0, min(w, sheetW), min(h, sheetH), p.part + " (เกินแผ่น)")
+                          sheet++; x = 0; y = 0; rowH = 0
+                      } else {
+                          out += PanelPlacement(sheet, x, y, w, h, p.part)
+                          x += w + gap
+                          rowH = max(rowH, h)
+                      }
+                  }
+                  return out
+              }
+          }
+          EOF_Calculators_kt
+          cat > app/src/main/java/com/okn/speakerbox/Data.kt <<'EOF_Data_kt'
+          package com.okn.speakerbox
+          
+          import android.content.Context
+          import kotlinx.coroutines.Dispatchers
+          import kotlinx.coroutines.withContext
+          import org.json.JSONArray
+          import org.json.JSONObject
+          import org.jsoup.Jsoup
+          import java.util.Locale
+          
+          object CatalogRepository {
+              private const val PREF = "speaker_catalog"
+              private const val KEY_CUSTOM = "custom_drivers"
+              private const val KEY_SYNCED = "synced_drivers"
+              private const val KEY_LAST_SYNC = "last_sync"
+              private const val AUTO_SYNC_MS = 7L * 24L * 60L * 60L * 1000L
+              const val DEFAULT_REMOTE_URL = "https://raw.githubusercontent.com/Thanaporn-okn/OKN_DSP-apk/main/speaker_catalog.json"
+          
+              fun load(context: Context): List<Driver> {
+                  val prefs = context.getSharedPreferences(PREF, Context.MODE_PRIVATE)
+                  val all = LinkedHashMap<String, Driver>()
+                  SeedCatalog.drivers.forEach { all[it.id] = it }
+                  parseDrivers(prefs.getString(KEY_SYNCED, null)).forEach { all[it.id] = it }
+                  parseDrivers(prefs.getString(KEY_CUSTOM, null)).forEach { all[it.id] = it }
+                  return all.values.sortedWith(compareBy<Driver> { it.brand }.thenByDescending { it.sizeInch }.thenBy { it.model })
+              }
+          
+              fun addCustom(context: Context, driver: Driver) {
+                  val prefs = context.getSharedPreferences(PREF, Context.MODE_PRIVATE)
+                  val list = parseDrivers(prefs.getString(KEY_CUSTOM, null)).toMutableList()
+                  list.removeAll { it.id == driver.id }
+                  list += driver.copy(custom = true, verified = false)
+                  prefs.edit().putString(KEY_CUSTOM, driversToJson(list).toString()).apply()
+              }
+          
+              fun shouldAutoSync(context: Context): Boolean {
+                  val prefs = context.getSharedPreferences(PREF, Context.MODE_PRIVATE)
+                  return System.currentTimeMillis() - prefs.getLong(KEY_LAST_SYNC, 0L) > AUTO_SYNC_MS
+              }
+          
+              suspend fun syncPAudio(context: Context, limit: Int = 36): SyncResult = withContext(Dispatchers.IO) {
+                  try {
+                      val categoryUrls = listOf(
+                          "https://paudiothailand.com/product-category/lf-driver/ferrite-lf-driver/",
+                          "https://paudiothailand.com/product-category/lf-driver/neodymium-lf-driver/"
+                      )
+                      val links = linkedSetOf<String>()
+                      categoryUrls.forEach { root ->
+                          for (page in 1..3) {
+                              val url = if (page == 1) root else root + "page/$page/"
+                              runCatching {
+                                  val doc = Jsoup.connect(url).userAgent("Mozilla/5.0 SpeakerBoxDesignerTH/1.0").timeout(15000).get()
+                                  doc.select("a[href*='/products/lf-driver/']").forEach { a ->
+                                      val href = a.absUrl("href")
+                                      if (href.contains("paudiothailand.com/products/lf-driver/") && href.count { it == '/' } >= 6) links.add(href.substringBefore('#'))
+                                  }
+                              }
+                              if (links.size >= limit) break
+                          }
+                      }
+                      val parsed = mutableListOf<Driver>()
+                      for (url in links.take(limit)) {
+                          parsePAudioPage(url)?.let { parsed += it }
+                      }
+                      if (parsed.isEmpty()) return@withContext SyncResult(false, 0, "ไม่พบข้อมูล T/S ที่อ่านได้จากหน้า P.Audio")
+                      val prefs = context.getSharedPreferences(PREF, Context.MODE_PRIVATE)
+                      prefs.edit()
+                          .putString(KEY_SYNCED, driversToJson(parsed).toString())
+                          .putLong(KEY_LAST_SYNC, System.currentTimeMillis())
+                          .apply()
+                      SyncResult(true, parsed.size, "อัปเดต P.Audio ${parsed.size} รุ่น")
+                  } catch (e: Exception) {
+                      SyncResult(false, 0, e.message ?: "เชื่อมต่อไม่ได้")
+                  }
+              }
+          
+              suspend fun syncJsonUrl(context: Context, url: String): SyncResult = withContext(Dispatchers.IO) {
+                  try {
+                      val text = Jsoup.connect(url).ignoreContentType(true).timeout(15000).execute().body()
+                      val arr = JSONArray(text)
+                      val parsed = (0 until arr.length()).mapNotNull { driverFromJson(arr.optJSONObject(it)) }
+                      if (parsed.isEmpty()) return@withContext SyncResult(false, 0, "JSON ไม่มีข้อมูลดอกที่ครบ")
+                      context.getSharedPreferences(PREF, Context.MODE_PRIVATE).edit()
+                          .putString(KEY_SYNCED, driversToJson(parsed).toString())
+                          .putLong(KEY_LAST_SYNC, System.currentTimeMillis())
+                          .apply()
+                      SyncResult(true, parsed.size, "นำเข้า ${parsed.size} รุ่น")
+                  } catch (e: Exception) {
+                      SyncResult(false, 0, e.message ?: "นำเข้า JSON ไม่สำเร็จ")
+                  }
+              }
+          
+              private fun parsePAudioPage(url: String): Driver? {
+                  val doc = Jsoup.connect(url).userAgent("Mozilla/5.0 SpeakerBoxDesignerTH/1.0").timeout(15000).get()
+                  val model = doc.selectFirst("h1")?.text()?.trim()?.takeIf { it.isNotBlank() } ?: return null
+                  val text = doc.body().text().replace("Ω", " ohm ")
+                  fun numberAfter(label: String): Double? {
+                      val p = Regex("(?i)${Regex.escape(label)}\\s*[:|]?\\s*([0-9]+(?:\\.[0-9]+)?)")
+                      return p.find(text)?.groupValues?.getOrNull(1)?.toDoubleOrNull()
+                  }
+                  fun rangeAfter(label: String): Pair<Double, Double>? {
+                      val p = Regex("(?i)${Regex.escape(label)}\\s*[:|]?\\s*([0-9]+(?:\\.[0-9]+)?)\\s*[-–]\\s*([0-9]+(?:\\.[0-9]+)?)")
+                      val m = p.find(text) ?: return null
+                      return (m.groupValues[1].toDoubleOrNull() ?: return null) to (m.groupValues[2].toDoubleOrNull() ?: return null)
+                  }
+                  val diameterMm = numberAfter("Nominal Diameter") ?: return null
+                  val size = when {
+                      diameterMm >= 500 -> 21
+                      diameterMm >= 470 -> 19
+                      diameterMm >= 430 -> 18
+                      diameterMm >= 360 -> 15
+                      diameterMm >= 285 -> 12
+                      diameterMm >= 235 -> 10
+                      else -> 8
+                  }
+                  val fs = numberAfter("Fs") ?: return null
+                  val qts = numberAfter("Qts") ?: return null
+                  val qes = numberAfter("Qes") ?: return null
+                  val qms = numberAfter("Qms") ?: return null
+                  val vas = numberAfter("Vas") ?: return null
+                  val sd = numberAfter("Sd") ?: return null
+                  val re = numberAfter("Re") ?: return null
+                  val xmax = numberAfter("Xmax") ?: return null
+                  val le = numberAfter("Le") ?: 0.0
+                  val impedance = numberAfter("Nominal Impedance") ?: 8.0
+                  val power = numberAfter("Nominal Power Handling")?.toInt() ?: 0
+                  val program = numberAfter("Continuous Program Power Capacity")?.toInt() ?: power * 2
+                  val sens = numberAfter("Sensitivity") ?: 0.0
+                  val range = rangeAfter("Frequency Range") ?: (fs to 1000.0)
+                  val cutout = numberAfter("Baffle Cutout Diameter") ?: diameterMm * 0.92
+                  val depth = numberAfter("Depth") ?: diameterMm * 0.45
+                  val slug = model.lowercase(Locale.US).replace(Regex("[^a-z0-9]+"), "-").trim('-')
+                  val imageUrl = doc.selectFirst("meta[property=og:image]")?.attr("content")?.trim()
+                      ?.takeIf { it.startsWith("http") }
+                      ?: doc.selectFirst("img.wp-post-image")?.absUrl("src")?.trim().orEmpty()
+                  return Driver(
+                      id = "pa-$slug", brand = "P.Audio", model = model, sizeInch = size, ohm = impedance,
+                      rmsW = power, programW = program, fs = fs, qts = qts, qes = qes, qms = qms,
+                      vasL = vas, sdCm2 = sd, xmaxMm = xmax, re = re, leMh = le, sensitivityDb = sens,
+                      freqMinHz = range.first, freqMaxHz = range.second, cutoutMm = cutout, depthMm = depth,
+                      use = if (size >= 18) "PA Sub/LF" else "PA LF/Midbass", sourceUrl = url, verified = true,
+                      imageUrl = imageUrl
+                  )
+              }
+          
+              private fun driversToJson(list: List<Driver>): JSONArray = JSONArray().apply { list.forEach { put(driverToJson(it)) } }
+          
+              private fun parseDrivers(text: String?): List<Driver> {
+                  if (text.isNullOrBlank()) return emptyList()
+                  return runCatching {
+                      val arr = JSONArray(text)
+                      (0 until arr.length()).mapNotNull { driverFromJson(arr.optJSONObject(it)) }
+                  }.getOrDefault(emptyList())
+              }
+          
+              private fun driverToJson(d: Driver) = JSONObject().apply {
+                  put("id", d.id); put("brand", d.brand); put("model", d.model); put("sizeInch", d.sizeInch); put("ohm", d.ohm)
+                  put("rmsW", d.rmsW); put("programW", d.programW); put("fs", d.fs); put("qts", d.qts); put("qes", d.qes); put("qms", d.qms)
+                  put("vasL", d.vasL); put("sdCm2", d.sdCm2); put("xmaxMm", d.xmaxMm); put("re", d.re); put("leMh", d.leMh)
+                  put("sensitivityDb", d.sensitivityDb); put("freqMinHz", d.freqMinHz); put("freqMaxHz", d.freqMaxHz)
+                  put("cutoutMm", d.cutoutMm); put("depthMm", d.depthMm); put("use", d.use); put("sourceUrl", d.sourceUrl)
+                  put("verified", d.verified); put("custom", d.custom); put("imageUrl", d.imageUrl)
+              }
+          
+              private fun driverFromJson(o: JSONObject?): Driver? {
+                  if (o == null) return null
+                  return runCatching {
+                      Driver(
+                          id = o.getString("id"), brand = o.getString("brand"), model = o.getString("model"), sizeInch = o.getInt("sizeInch"),
+                          ohm = o.getDouble("ohm"), rmsW = o.getInt("rmsW"), programW = o.optInt("programW", o.getInt("rmsW") * 2),
+                          fs = o.getDouble("fs"), qts = o.getDouble("qts"), qes = o.getDouble("qes"), qms = o.optDouble("qms", 5.0),
+                          vasL = o.getDouble("vasL"), sdCm2 = o.getDouble("sdCm2"), xmaxMm = o.getDouble("xmaxMm"), re = o.getDouble("re"),
+                          leMh = o.optDouble("leMh", 0.0), sensitivityDb = o.getDouble("sensitivityDb"), freqMinHz = o.optDouble("freqMinHz", o.getDouble("fs")),
+                          freqMaxHz = o.optDouble("freqMaxHz", 1000.0), cutoutMm = o.optDouble("cutoutMm", o.getInt("sizeInch") * 23.5),
+                          depthMm = o.optDouble("depthMm", o.getInt("sizeInch") * 11.0), use = o.optString("use", "Custom"), sourceUrl = o.optString("sourceUrl", ""),
+                          verified = o.optBoolean("verified", false), custom = o.optBoolean("custom", true),
+                          imageUrl = o.optString("imageUrl", "")
+                      )
+                  }.getOrNull()
+              }
+          }
+          
+          data class SyncResult(val ok: Boolean, val count: Int, val message: String)
+          
+          object ProjectStore {
+              private const val PREF = "speaker_projects"
+              private const val KEY = "projects"
+          
+              fun load(context: Context): List<SavedProject> {
+                  val text = context.getSharedPreferences(PREF, Context.MODE_PRIVATE).getString(KEY, null) ?: return emptyList()
+                  return runCatching {
+                      val arr = JSONArray(text)
+                      (0 until arr.length()).mapNotNull { fromJson(arr.optJSONObject(it)) }.sortedByDescending { it.createdAt }
+                  }.getOrDefault(emptyList())
+              }
+          
+              fun save(context: Context, project: SavedProject) {
+                  val list = load(context).toMutableList()
+                  list.removeAll { it.id == project.id }
+                  list.add(0, project)
+                  persist(context, list.take(50))
+              }
+          
+              fun delete(context: Context, id: String) = persist(context, load(context).filterNot { it.id == id })
+          
+              private fun persist(context: Context, list: List<SavedProject>) {
+                  val arr = JSONArray()
+                  list.forEach { arr.put(toJson(it)) }
+                  context.getSharedPreferences(PREF, Context.MODE_PRIVATE).edit().putString(KEY, arr.toString()).apply()
+              }
+          
+              private fun toJson(p: SavedProject) = JSONObject().apply {
+                  put("id", p.id); put("name", p.name); put("createdAt", p.createdAt); put("driverId", p.driverId); put("driverName", p.driverName)
+                  put("enclosureId", p.enclosureId); put("enclosureName", p.enclosureName); put("count", p.count); put("targetHz", p.targetHz)
+                  put("thicknessMm", p.thicknessMm); put("wiring", p.wiring); put("result", resultToJson(p.result))
+              }
+          
+              private fun fromJson(o: JSONObject?): SavedProject? {
+                  if (o == null) return null
+                  return runCatching {
+                      SavedProject(o.getString("id"), o.getString("name"), o.getLong("createdAt"), o.getString("driverId"), o.getString("driverName"),
+                          o.getString("enclosureId"), o.getString("enclosureName"), o.getInt("count"), o.getDouble("targetHz"), o.getInt("thicknessMm"),
+                          o.getString("wiring"), resultFromJson(o.getJSONObject("result")))
+                  }.getOrNull()
+              }
+          
+              private fun resultToJson(r: DesignResult) = JSONObject().apply {
+                  put("netL", r.netL); put("grossL", r.grossL); put("fbHz", r.fbHz); put("f3Hz", r.f3Hz); put("fcHz", r.fcHz); put("qtc", r.qtc); put("splDb", r.splDb)
+                  put("impedanceOhm", r.impedanceOhm); put("widthMm", r.widthMm); put("heightMm", r.heightMm); put("depthMm", r.depthMm)
+                  put("innerWidthMm", r.innerWidthMm); put("innerHeightMm", r.innerHeightMm); put("innerDepthMm", r.innerDepthMm)
+                  put("portAreaCm2", r.portAreaCm2); put("portLengthMm", r.portLengthMm); put("portWidthMm", r.portWidthMm); put("portHeightMm", r.portHeightMm)
+                  put("driverDisplacementL", r.driverDisplacementL); put("portDisplacementL", r.portDisplacementL); put("braceDisplacementL", r.braceDisplacementL)
+                  put("sheetCount", r.sheetCount); put("method", r.method)
+                  put("warnings", JSONArray(r.warnings))
+                  put("cuts", JSONArray().apply { r.cutList.forEach { c -> put(JSONObject().apply { put("part", c.part); put("w", c.widthMm); put("h", c.heightMm); put("qty", c.qty); put("note", c.note) }) } })
+              }
+          
+              private fun resultFromJson(o: JSONObject): DesignResult {
+                  val cutsA = o.optJSONArray("cuts") ?: JSONArray()
+                  val cuts = (0 until cutsA.length()).mapNotNull { i -> cutsA.optJSONObject(i)?.let { CutItem(it.optString("part"), it.optInt("w"), it.optInt("h"), it.optInt("qty",1), it.optString("note")) } }
+                  val wa = o.optJSONArray("warnings") ?: JSONArray()
+                  val warnings = (0 until wa.length()).map { wa.optString(it) }
+                  return DesignResult(o.getDouble("netL"), o.getDouble("grossL"), o.getDouble("fbHz"), o.getDouble("f3Hz"), o.optDouble("fcHz",0.0), o.optDouble("qtc",0.707),
+                      o.getDouble("splDb"), o.getDouble("impedanceOhm"), o.getInt("widthMm"), o.getInt("heightMm"), o.getInt("depthMm"), o.optInt("innerWidthMm"), o.optInt("innerHeightMm"),
+                      o.optInt("innerDepthMm"), o.getDouble("portAreaCm2"), o.getInt("portLengthMm"), o.optInt("portWidthMm"), o.optInt("portHeightMm"), o.optDouble("driverDisplacementL"),
+                      o.optDouble("portDisplacementL"), o.optDouble("braceDisplacementL"), o.getInt("sheetCount"), cuts, warnings, o.optString("method"))
+              }
+          }
+          EOF_Data_kt
+          cat > app/src/main/java/com/okn/speakerbox/PdfExporter.kt <<'EOF_PdfExporter_kt'
+          package com.okn.speakerbox
+          
+          import android.content.Context
+          import android.content.Intent
+          import android.graphics.Color
+          import android.graphics.Paint
+          import android.graphics.pdf.PdfDocument
+          import androidx.core.content.FileProvider
+          import java.io.File
+          import java.io.FileOutputStream
+          import java.text.SimpleDateFormat
+          import java.util.Date
+          import java.util.Locale
+          
+          object PdfExporter {
+              fun exportAndShare(context: Context, input: DesignInput, result: DesignResult) {
+                  val dir = File(context.cacheDir, "exports").apply { mkdirs() }
+                  val stamp = SimpleDateFormat("yyyyMMdd-HHmm", Locale.US).format(Date())
+                  val file = File(dir, "SpeakerBox-${input.driver.model.replace(Regex("[^A-Za-z0-9_-]"), "-")}-$stamp.pdf")
+                  createPdf(file, input, result)
+                  val uri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", file)
+                  val intent = Intent(Intent.ACTION_SEND).apply {
+                      type = "application/pdf"
+                      putExtra(Intent.EXTRA_STREAM, uri)
+                      putExtra(Intent.EXTRA_SUBJECT, "Speaker Box Design - ${input.driver.displayName}")
+                      addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                  }
+                  context.startActivity(Intent.createChooser(intent, "แชร์แบบตู้ลำโพง PDF"))
+              }
+          
+              private fun createPdf(file: File, input: DesignInput, r: DesignResult) {
+                  val doc = PdfDocument()
+                  val title = Paint(Paint.ANTI_ALIAS_FLAG).apply { textSize = 20f; color = Color.rgb(22, 80, 120); isFakeBoldText = true }
+                  val h = Paint(Paint.ANTI_ALIAS_FLAG).apply { textSize = 14f; color = Color.BLACK; isFakeBoldText = true }
+                  val p = Paint(Paint.ANTI_ALIAS_FLAG).apply { textSize = 11f; color = Color.DKGRAY }
+                  val line = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.LTGRAY; strokeWidth = 1f }
+                  var pageNo = 1
+                  fun newPage(): Pair<PdfDocument.Page, FloatArray> {
+                      val page = doc.startPage(PdfDocument.PageInfo.Builder(595, 842, pageNo++).create())
+                      return page to floatArrayOf(42f, 48f)
+                  }
+                  var pair = newPage(); var page = pair.first; var y = pair.second[1]
+                  fun textLine(text: String, paint: Paint = p, gap: Float = 18f) {
+                      if (y > 800f) { doc.finishPage(page); pair = newPage(); page = pair.first; y = pair.second[1] }
+                      page.canvas.drawText(text, 42f, y, paint); y += gap
+                  }
+                  textLine("Speaker Box Designer TH", title, 28f)
+                  textLine("สรุปการออกแบบ", h, 24f)
+                  textLine("ดอก: ${input.driver.displayName}  ${input.driver.sizeInch}\"  ${input.driver.ohm} Ω")
+                  textLine("จำนวน: ${input.count} ดอก    การต่อ: ${input.wiring}    โหลดรวม: ${r.impedanceOhm} Ω")
+                  textLine("แบบตู้: ${input.enclosure.nameTh} (${input.enclosure.subtitle})")
+                  textLine("วิธีคำนวณ: ${r.method}")
+                  y += 6f; page.canvas.drawLine(42f, y, 553f, y, line); y += 20f
+                  textLine("ปริมาตรสุทธิ: ${r.netL} L", h)
+                  textLine("ปริมาตรรวมก่อนตัด: ${r.grossL} L")
+                  textLine("Fb: ${if (r.fbHz > 0) "${r.fbHz} Hz" else "Sealed"}    F3: ${r.f3Hz} Hz    Qtc: ${r.qtc}")
+                  textLine("SPL ทางทฤษฎีจาก sensitivity + RMS: ${r.splDb} dB @1m")
+                  textLine("ขนาดภายนอก W×H×D: ${r.widthMm} × ${r.heightMm} × ${r.depthMm} mm")
+                  textLine("ขนาดภายใน W×H×D: ${r.innerWidthMm} × ${r.innerHeightMm} × ${r.innerDepthMm} mm")
+                  if (r.fbHz > 0) {
+                      textLine("พอร์ต: ${r.portAreaCm2} cm²  ${r.portWidthMm}×${r.portHeightMm} mm  ยาว ${r.portLengthMm} mm")
+                  }
+                  textLine("ไม้ประมาณ: ${r.sheetCount} แผ่น ขนาด 1220×2440 mm")
+                  y += 8f
+                  textLine("รายการตัดไม้", h, 22f)
+                  r.cutList.forEach { c -> textLine("• ${c.part}: ${c.sizeText} ×${c.qty}${if (c.note.isNotBlank()) " — ${c.note}" else ""}") }
+                  if (r.warnings.isNotEmpty()) {
+                      y += 6f; textLine("ข้อควรตรวจ", h, 22f)
+                      r.warnings.forEach { textLine("• $it") }
+                  }
+                  y += 6f
+                  textLine("หมายเหตุ", h, 22f)
+                  textLine("ค่าคำนวณเป็น small-signal/engineering estimate. SPL สูงสุดจริง, power compression, port velocity,")
+                  textLine("ความแข็งแรง และ response ของ horn/local preset ควรยืนยันด้วย simulation และการวัดจริงก่อนผลิต.")
+                  textLine("แหล่งข้อมูลดอก: ${input.driver.sourceUrl.ifBlank { "Custom / user supplied" }}")                  doc.finishPage(page)
+
+                  run {
+                      val pg = doc.startPage(PdfDocument.PageInfo.Builder(595, 842, pageNo++).create())
+                      val c = pg.canvas
+                      c.drawText("แบบตู้และกราฟตอบสนอง", 42f, 48f, title)
+                      c.drawText("${input.driver.displayName} • ${input.enclosure.nameTh}", 42f, 72f, h)
+                      val bx=58f;val by=110f;val bw=230f;val bh=205f
+                      c.drawRect(bx,by,bx+bw,by+bh,Paint().apply{color=Color.rgb(194,145,92);style=Paint.Style.FILL})
+                      c.drawRect(bx,by,bx+bw,by+bh,Paint().apply{color=Color.DKGRAY;style=Paint.Style.STROKE;strokeWidth=2f})
+                      val cols=if(input.count==1)1 else kotlin.math.min(2,input.count);val rows=kotlin.math.ceil(input.count/cols.toDouble()).toInt();val rr=kotlin.math.min(bw/(cols*2.7f),bh/(rows*2.8f))
+                      repeat(input.count){i->val col=i%cols;val row=i/cols;val cx=bx+bw*(col+1)/(cols+1f);val usableH=if(r.fbHz>0)bh*.80f else bh;val cy=by+usableH*(row+1)/(rows+1f);c.drawCircle(cx,cy,rr,Paint().apply{color=Color.rgb(15,18,22)});c.drawCircle(cx,cy,rr*.73f,Paint().apply{color=Color.rgb(45,55,64);style=Paint.Style.STROKE;strokeWidth=5f})}
+                      if(r.fbHz>0)c.drawRect(bx+bw*.10f,by+bh*.87f,bx+bw*.90f,by+bh*.93f,Paint().apply{color=Color.rgb(18,22,26)})
+                      c.drawText("${r.widthMm} × ${r.heightMm} × ${r.depthMm} mm",bx,by+bh+22f,p)
+                      val gx=42f;val gy=380f;val gw=510f;val gh=300f
+                      c.drawText("Normalized frequency response",gx,gy-18f,h)
+                      val gridPaint=Paint().apply{color=Color.rgb(220,225,230);strokeWidth=.6f}
+                      repeat(7){i->val yy=gy+gh*i/6f;c.drawLine(gx,yy,gx+gw,yy,gridPaint)}
+                      repeat(9){i->val xx=gx+gw*i/8f;c.drawLine(xx,gy,xx,gy+gh,gridPaint)}
+                      val pts=SpeakerMath.responseCurve(input,r)
+                      if(pts.size>1){val minX=kotlin.math.ln(pts.first().hz);val maxX=kotlin.math.ln(pts.last().hz);val minY=kotlin.math.min(-30.0,pts.minOf{it.value});val maxY=kotlin.math.max(4.0,pts.maxOf{it.value});val path=android.graphics.Path();pts.forEachIndexed{i,q->val xx=gx+((kotlin.math.ln(q.hz)-minX)/(maxX-minX)*gw).toFloat();val yy=gy+gh-((q.value-minY)/(maxY-minY)*gh).toFloat();if(i==0)path.moveTo(xx,yy)else path.lineTo(xx,yy)};c.drawPath(path,Paint(Paint.ANTI_ALIAS_FLAG).apply{color=Color.rgb(0,150,220);style=Paint.Style.STROKE;strokeWidth=3f})}
+                      c.drawText("15 Hz",gx,gy+gh+18f,p);c.drawText("50",gx+gw*.31f,gy+gh+18f,p);c.drawText("100",gx+gw*.50f,gy+gh+18f,p);c.drawText("400 Hz",gx+gw-40f,gy+gh+18f,p)
+                      c.drawText("F3 ${r.f3Hz} Hz   Fb ${if(r.fbHz>0)"${r.fbHz} Hz" else "Sealed"}   SPL ${r.splDb} dB (theoretical)",gx,gy+gh+42f,p)
+                      doc.finishPage(pg)
+                  }
+
+                  val placements = SpeakerMath.nestPanels(r.cutList)
+                  val sheets = (placements.maxOfOrNull { it.sheet } ?: 0) + 1
+                  for (sheet in 0 until sheets) {
+                      val pg = doc.startPage(PdfDocument.PageInfo.Builder(595, 842, pageNo++).create())
+                      val c = pg.canvas
+                      c.drawText("Cut layout — sheet ${sheet + 1}/$sheets (1220×2440 mm)", 35f, 40f, h)
+                      val ox = 50f; val oy = 65f; val sw = 470f; val sh = 730f
+                      c.drawRect(ox, oy, ox + sw, oy + sh, Paint().apply { style = Paint.Style.STROKE; color = Color.DKGRAY })
+                      placements.filter { it.sheet == sheet }.forEach { q ->
+                          val x = ox + q.x / 1220f * sw
+                          val yy = oy + q.y / 2440f * sh
+                          val ww = q.width / 1220f * sw
+                          val hh = q.height / 2440f * sh
+                          c.drawRect(x, yy, x + ww, yy + hh, Paint().apply { style = Paint.Style.STROKE; color = Color.rgb(40, 120, 180) })
+                          c.drawText(q.label.take(18), x + 3f, yy + 13f, Paint(p).apply { textSize = 8f })
+                          c.drawText("${q.width}×${q.height}", x + 3f, yy + 24f, Paint(p).apply { textSize = 7f })
+                      }
+                      doc.finishPage(pg)
+                  }
+                  FileOutputStream(file).use { doc.writeTo(it) }
+                  doc.close()
+              }
+          }
+          EOF_PdfExporter_kt
+          cat > app/src/main/java/com/okn/speakerbox/MainActivity.kt <<'EOF_MainActivity_kt'
+          package com.okn.speakerbox
+          
+          import android.content.Intent
+          import android.net.Uri
+          import android.os.Bundle
+          import androidx.activity.ComponentActivity
+          import androidx.activity.compose.setContent
+          import androidx.compose.foundation.Canvas
+          import androidx.compose.foundation.background
+          import androidx.compose.foundation.gestures.detectTransformGestures
+          import androidx.compose.foundation.border
+          import androidx.compose.foundation.clickable
+          import androidx.compose.foundation.horizontalScroll
+          import androidx.compose.foundation.layout.*
+          import androidx.compose.foundation.lazy.LazyColumn
+          import androidx.compose.foundation.lazy.LazyListScope
+          import androidx.compose.foundation.lazy.items
+          import androidx.compose.foundation.rememberScrollState
+          import androidx.compose.foundation.shape.CircleShape
+          import androidx.compose.foundation.shape.RoundedCornerShape
+          import androidx.compose.material.icons.Icons
+          import androidx.compose.material.icons.rounded.*
+          import androidx.compose.material3.*
+          import androidx.compose.runtime.*
+          import androidx.compose.ui.Alignment
+          import androidx.compose.ui.Modifier
+          import androidx.compose.ui.geometry.Offset
+          import androidx.compose.ui.geometry.CornerRadius
+          import androidx.compose.ui.graphics.Brush
+          import androidx.compose.ui.graphics.Color
+          import androidx.compose.ui.graphics.Path
+          import androidx.compose.ui.graphics.StrokeCap
+          import androidx.compose.ui.graphics.drawscope.Stroke
+          import androidx.compose.ui.graphics.vector.ImageVector
+          import androidx.compose.ui.platform.LocalContext
+          import androidx.compose.ui.input.pointer.pointerInput
+          import androidx.compose.ui.layout.ContentScale
+          import androidx.compose.ui.text.font.FontWeight
+          import androidx.compose.ui.text.style.TextOverflow
+          import androidx.compose.ui.unit.dp
+          import androidx.compose.ui.unit.sp
+          import coil.compose.AsyncImage
+          import kotlinx.coroutines.launch
+          import kotlin.math.ceil
+          import kotlin.math.ln
+          import kotlin.math.max
+          import kotlin.math.min
+          import kotlin.math.roundToInt
+          
+          enum class Screen { HOME, MODE, LIBRARY, DETAIL, DESIGN, RESULT, THREE_D, CUT, GRAPH, COMPARE, PROJECTS, MORE, ADD_DRIVER }
+          
+          class MainActivity : ComponentActivity() {
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+                  setContent { AppTheme { SpeakerDesignerApp() } }
+              }
+          }
+          
+          @Composable
+          fun AppTheme(content: @Composable () -> Unit) {
+              MaterialTheme(
+                  colorScheme = darkColorScheme(
+                      primary = Color(0xFF29B6F6), secondary = Color(0xFF8A6CFF), tertiary = Color(0xFF00DDB3),
+                      background = Color(0xFF05080D), surface = Color(0xFF0B121A), surfaceVariant = Color(0xFF131D27),
+                      onBackground = Color.White, onSurface = Color.White, onSurfaceVariant = Color(0xFFC3D1DD)
+                  ),
+                  content = content
+              )
+          }
+          
+          @Composable
+          fun SpeakerDesignerApp() {
+              val context = LocalContext.current
+              val scope = rememberCoroutineScope()
+              val snack = remember { SnackbarHostState() }
+              var catalog by remember { mutableStateOf(CatalogRepository.load(context)) }
+              var projects by remember { mutableStateOf(ProjectStore.load(context)) }
+              var screen by remember { mutableStateOf(Screen.HOME) }
+              var category by remember { mutableStateOf("รถยนต์") }
+              var selected by remember { mutableStateOf(catalog.firstOrNull() ?: SeedCatalog.drivers.first()) }
+              var enclosure by remember { mutableStateOf(Enclosures.all[1]) }
+              var currentInput by remember { mutableStateOf<DesignInput?>(null) }
+              var result by remember { mutableStateOf<DesignResult?>(null) }
+              var compareA by remember { mutableStateOf(catalog.getOrNull(0)?.id ?: "") }
+              var compareB by remember { mutableStateOf(catalog.getOrNull(1)?.id ?: compareA) }
+          
+              fun refreshCatalog() {
+                  catalog = CatalogRepository.load(context)
+                  if (catalog.none { it.id == selected.id }) selected = catalog.firstOrNull() ?: selected
+              }
+          
+              LaunchedEffect(Unit) {
+                  if (CatalogRepository.shouldAutoSync(context)) {
+                      val r = CatalogRepository.syncPAudio(context, 24)
+                      if (r.ok) {
+                          refreshCatalog()
+                          snack.showSnackbar("อัปเดตฐานข้อมูลอัตโนมัติ: ${r.count} รุ่น")
+                      } else {
+                          val remote = CatalogRepository.syncJsonUrl(context, CatalogRepository.DEFAULT_REMOTE_URL)
+                          if (remote.ok) {
+                              refreshCatalog()
+                              snack.showSnackbar("ใช้ฐานข้อมูลสำรอง: ${remote.count} รุ่น")
+                          }
+                      }
+                  }
+              }
+          
+              fun navIndex(s: Screen) = when (s) {
+                  Screen.HOME, Screen.MODE -> 0
+                  Screen.LIBRARY, Screen.DETAIL, Screen.COMPARE, Screen.ADD_DRIVER -> 1
+                  Screen.DESIGN, Screen.RESULT, Screen.THREE_D, Screen.CUT, Screen.GRAPH -> 2
+                  Screen.PROJECTS -> 3
+                  Screen.MORE -> 4
+              }
+          
+              Scaffold(
+                  containerColor = Color(0xFF05080D),
+                  snackbarHost = { SnackbarHost(snack) },
+                  bottomBar = {
+                      NavigationBar(containerColor = Color(0xFF081018), tonalElevation = 0.dp) {
+                          val nav = listOf(
+                              Triple("หน้าแรก", Icons.Rounded.Home, Screen.HOME),
+                              Triple("ค้นหาดอก", Icons.Rounded.Search, Screen.LIBRARY),
+                              Triple("คำนวณ", Icons.Rounded.Calculate, Screen.DESIGN),
+                              Triple("โปรเจค", Icons.Rounded.Folder, Screen.PROJECTS),
+                              Triple("อื่นๆ", Icons.Rounded.MoreHoriz, Screen.MORE)
+                          )
+                          nav.forEachIndexed { index, (label, icon, target) ->
+                              NavigationBarItem(
+                                  selected = navIndex(screen) == index,
+                                  onClick = { screen = target },
+                                  icon = { Icon(icon, null) }, label = { Text(label, fontSize = 10.sp) },
+                                  colors = NavigationBarItemDefaults.colors(
+                                      indicatorColor = Color(0xFF123650), selectedIconColor = Color(0xFF31C2FF), selectedTextColor = Color(0xFF31C2FF),
+                                      unselectedIconColor = Color(0xFF8294A5), unselectedTextColor = Color(0xFF8294A5)
+                                  )
+                              )
+                          }
+                      }
+                  }
+              ) { pad ->
+                  Box(Modifier.padding(pad)) {
+                      when (screen) {
+                          Screen.HOME -> HomeScreen(selected, catalog.size, projects.size,
+                              onCar = { category = "รถยนต์"; screen = Screen.MODE },
+                              onPa = { category = "PA"; screen = Screen.MODE },
+                              onLibrary = { screen = Screen.LIBRARY }, onCompare = { screen = Screen.COMPARE },
+                              onPreset = { enclosure = it; screen = Screen.LIBRARY })
+                          Screen.MODE -> ModeScreen(category, { screen = Screen.HOME }) { enclosure = it; screen = Screen.LIBRARY }
+                          Screen.LIBRARY -> LibraryScreen(
+                              catalog, selected, onBack = null,
+                              onDetail = { selected = it; screen = Screen.DETAIL },
+                              onUse = { selected = it; screen = Screen.DESIGN },
+                              onAdd = { screen = Screen.ADD_DRIVER }, onCompare = { screen = Screen.COMPARE },
+                              onSync = {
+                                  scope.launch {
+                                      val r = CatalogRepository.syncPAudio(context, 48)
+                                      if (r.ok) refreshCatalog()
+                                      snack.showSnackbar(r.message)
+                                  }
+                              }
+                          )
+                          Screen.DETAIL -> DetailScreen(selected, { screen = Screen.LIBRARY }, { screen = Screen.DESIGN })
+                          Screen.DESIGN -> DesignScreen(category, selected, enclosure, { screen = Screen.LIBRARY }) { inp, r ->
+                              currentInput = inp; result = r; enclosure = inp.enclosure; screen = Screen.RESULT
+                          }
+                          Screen.RESULT -> {
+                              val inp = currentInput
+                              val r = result
+                              if (inp == null || r == null) EmptyDesign { screen = Screen.DESIGN }
+                              else ResultScreen(inp, r, { screen = Screen.DESIGN }, { screen = Screen.THREE_D }, { screen = Screen.CUT }, { screen = Screen.GRAPH },
+                                  onSave = {
+                                      val p = SavedProject(
+                                          id = "p-${System.currentTimeMillis()}", name = "${inp.driver.model} • ${inp.enclosure.nameTh}", createdAt = System.currentTimeMillis(),
+                                          driverId = inp.driver.id, driverName = inp.driver.displayName, enclosureId = inp.enclosure.id, enclosureName = inp.enclosure.nameTh,
+                                          count = inp.count, targetHz = inp.targetHz, thicknessMm = inp.thicknessMm, wiring = inp.wiring, result = r
+                                      )
+                                      ProjectStore.save(context, p); projects = ProjectStore.load(context)
+                                      scope.launch { snack.showSnackbar("บันทึกโปรเจคแล้ว") }
+                                  }, onPdf = { PdfExporter.exportAndShare(context, inp, r) })
+                          }
+                          Screen.THREE_D -> currentInput?.let { inp -> result?.let { r -> ThreeDScreen(inp, r) { screen = Screen.RESULT } } } ?: EmptyDesign { screen = Screen.DESIGN }
+                          Screen.CUT -> currentInput?.let { inp -> result?.let { r -> CutScreen(inp, r, { screen = Screen.RESULT }, { PdfExporter.exportAndShare(context, inp, r) }) } } ?: EmptyDesign { screen = Screen.DESIGN }
+                          Screen.GRAPH -> currentInput?.let { inp -> result?.let { r -> GraphScreen(inp, r) { screen = Screen.RESULT } } } ?: EmptyDesign { screen = Screen.DESIGN }
+                          Screen.COMPARE -> CompareScreen(catalog, compareA, compareB, { compareA = it }, { compareB = it }, { screen = Screen.LIBRARY }) { d -> selected = d; screen = Screen.DESIGN }
+                          Screen.PROJECTS -> ProjectScreen(projects, onDelete = {
+                              ProjectStore.delete(context, it); projects = ProjectStore.load(context)
+                          }, onOpen = { p ->
+                              val d = catalog.firstOrNull { it.id == p.driverId } ?: selected
+                              val enc = Enclosures.byId(p.enclosureId)
+                              selected = d; enclosure = enc
+                              currentInput = DesignInput(d, enc, p.count, p.targetHz, p.thicknessMm, p.wiring)
+                              result = p.result; screen = Screen.RESULT
+                          }, onNew = { screen = Screen.DESIGN })
+                          Screen.MORE -> MoreScreen(
+                              catalogCount = catalog.size,
+                              onSyncOfficial = {
+                                  scope.launch {
+                                      val r = CatalogRepository.syncPAudio(context, 60); if (r.ok) refreshCatalog(); snack.showSnackbar(r.message)
+                                  }
+                              },
+                              onSyncUrl = { url ->
+                                  scope.launch {
+                                      val r = CatalogRepository.syncJsonUrl(context, url); if (r.ok) refreshCatalog(); snack.showSnackbar(r.message)
+                                  }
+                              }
+                          )
+                          Screen.ADD_DRIVER -> AddDriverScreen({ screen = Screen.LIBRARY }) { d ->
+                              CatalogRepository.addCustom(context, d); refreshCatalog(); selected = d; screen = Screen.DETAIL
+                              scope.launch { snack.showSnackbar("เพิ่ม ${d.displayName} แล้ว") }
+                          }
+                      }
+                  }
+              }
+          }
+          
+          @Composable
+          fun Page(content: LazyListScope.() -> Unit) {
+              LazyColumn(
+                  Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(Color(0xFF081522), Color(0xFF05080D), Color(0xFF05080D)))),
+                  contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp), content = content
+              )
+          }
+          
+          @Composable
+          fun TopTitle(title: String, onBack: (() -> Unit)? = null, action: (@Composable () -> Unit)? = null) {
+              Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                  if (onBack != null) IconButton(onClick = onBack) { Icon(Icons.Rounded.ArrowBack, null) }
+                  Text(title, Modifier.weight(1f), fontSize = 24.sp, fontWeight = FontWeight.ExtraBold)
+                  action?.invoke()
+              }
+          }
+          
+          @Composable
+          fun DarkCard(modifier: Modifier = Modifier, content: @Composable ColumnScope.() -> Unit) {
+              Card(modifier.fillMaxWidth(), shape = RoundedCornerShape(22.dp), colors = CardDefaults.cardColors(containerColor = Color(0xFF0D151E)),
+                  border = androidx.compose.foundation.BorderStroke(1.dp, Color.White.copy(alpha = .055f))) {
+                  Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp), content = content)
+              }
+          }
+          
+          @Composable
+          fun SpeakerArt(modifier: Modifier = Modifier, accent: Color = Color(0xFF27B9FF)) {
+              Canvas(modifier) {
+                  val c = center; val r = min(size.width, size.height) * .47f
+                  drawCircle(Color(0xFF070A0D), r, c)
+                  drawCircle(accent.copy(alpha = .35f), r * .95f, c, style = Stroke(width = 4f))
+                  drawCircle(Color(0xFF202B35), r * .72f, c, style = Stroke(width = 10f))
+                  drawCircle(Color(0xFF0E141A), r * .60f, c)
+                  drawCircle(Color(0xFF27343E), r * .32f, c)
+                  drawCircle(Color(0xFF11171D), r * .18f, c)
+              }
+          }
+
+
+          @Composable
+          fun SpeakerProductImage(d: Driver, modifier: Modifier = Modifier) {
+              var failed by remember(d.imageUrl) { mutableStateOf(false) }
+              Box(modifier, contentAlignment = Alignment.Center) {
+                  if (d.imageUrl.isNotBlank() && !failed) {
+                      AsyncImage(
+                          model = d.imageUrl,
+                          contentDescription = d.displayName,
+                          modifier = Modifier.fillMaxSize(),
+                          contentScale = ContentScale.Fit,
+                          onError = { failed = true }
+                      )
+                  } else {
+                      SpeakerArt(Modifier.fillMaxSize().padding(4.dp), if (d.verified) Color(0xFF2BBEFF) else Color(0xFFFFB74D))
+                  }
+              }
+          }
+          
+          @Composable
+          fun HomeScreen(featured: Driver, catalogCount: Int, projectCount: Int, onCar: () -> Unit, onPa: () -> Unit, onLibrary: () -> Unit, onCompare: () -> Unit, onPreset: (EnclosurePreset) -> Unit) {
+              Page {
+                  item {
+                      DarkCard {
+                          Box(Modifier.fillMaxWidth().height(245.dp)) {
+                              Box(Modifier.fillMaxSize().background(
+                                  Brush.radialGradient(listOf(Color(0xFF0D6DCE).copy(alpha=.55f), Color(0xFF431885).copy(alpha=.30f), Color.Transparent))
+                              ))
+                              SpeakerProductImage(featured, Modifier.size(205.dp).align(Alignment.CenterEnd))
+                              Column(Modifier.align(Alignment.BottomStart).padding(4.dp)) {
+                                  Text("ออกแบบตู้ลำโพง", fontSize=30.sp, fontWeight=FontWeight.Black)
+                                  Text("รถยนต์ & PA", fontSize=18.sp, fontWeight=FontWeight.Bold, color=Color(0xFF55D4FF))
+                                  Text("คำนวณ • ออกแบบ • ตัดไม้ • กราฟ", color=Color(0xFFC0CED9), fontSize=11.sp)
+                              }
+                          }
+                      }
+                  }
+                  item { HomeWideButton("ตู้ลำโพงรถยนต์","ซับอึด • ประตู • หลังเบาะ",Icons.Rounded.DirectionsCar,listOf(Color(0xFF0878E9),Color(0xFF1E4FB7)),onCar) }
+                  item { HomeWideButton("ตู้ลำโพง PA","เบส • กลาง • แหลม • ฮอร์น",Icons.Rounded.Campaign,listOf(Color(0xFF9B21EA),Color(0xFF3736BF)),onPa) }
+                  item { Text("รูปแบบตู้ยอดนิยม",fontWeight=FontWeight.Bold,fontSize=18.sp) }
+                  item {
+                      Column(verticalArrangement=Arrangement.spacedBy(8.dp)) {
+                          Enclosures.all.take(9).chunked(3).forEach { row ->
+                              Row(Modifier.fillMaxWidth(),horizontalArrangement=Arrangement.spacedBy(8.dp)) {
+                                  row.forEach { item -> EnclosureHomeTile(item,Modifier.weight(1f)){onPreset(item)} }
+                                  repeat(3-row.size){ Spacer(Modifier.weight(1f)) }
+                              }
+                          }
+                      }
+                  }
+                  item {
+                      Row(horizontalArrangement=Arrangement.spacedBy(10.dp)) {
+                          SmallAction("ฐานข้อมูลดอก","$catalogCount รุ่น",Icons.Rounded.Storage,Modifier.weight(1f),onLibrary)
+                          SmallAction("สูตรตู้/เปรียบเทียบ","$projectCount โปรเจค",Icons.Rounded.CompareArrows,Modifier.weight(1f),onCompare)
+                      }
+                  }
+              }
+          }
+
+          @Composable
+          fun HomeWideButton(title:String,subtitle:String,icon:ImageVector,colors:List<Color>,onClick:()->Unit){
+              Card(Modifier.fillMaxWidth().height(98.dp).clickable(onClick=onClick),shape=RoundedCornerShape(22.dp),colors=CardDefaults.cardColors(containerColor=Color.Transparent)){
+                  Box(Modifier.fillMaxSize().background(Brush.horizontalGradient(colors)).padding(16.dp)){
+                      Icon(icon,null,Modifier.size(52.dp).align(Alignment.CenterStart),tint=Color.White.copy(alpha=.94f))
+                      Column(Modifier.align(Alignment.CenterStart).padding(start=70.dp)){Text(title,fontWeight=FontWeight.Black,fontSize=21.sp);Text(subtitle,color=Color.White.copy(alpha=.80f),fontSize=11.sp)}
+                      Icon(Icons.Rounded.ChevronRight,null,Modifier.align(Alignment.CenterEnd),tint=Color.White)
+                  }
+              }
+          }
+
+          @Composable
+          fun EnclosureHomeTile(e:EnclosurePreset,modifier:Modifier=Modifier,onClick:()->Unit){
+              Card(modifier.height(112.dp).clickable(onClick=onClick),shape=RoundedCornerShape(16.dp),colors=CardDefaults.cardColors(containerColor=Color(0xFF101821)),border=androidx.compose.foundation.BorderStroke(1.dp,Color.White.copy(alpha=.055f))){
+                  Column(Modifier.fillMaxSize().padding(8.dp),horizontalAlignment=Alignment.CenterHorizontally,verticalArrangement=Arrangement.Center){
+                      CabinetMini(Modifier.size(58.dp),e.kind!=EnclosureKind.SEALED)
+                      Text(e.nameTh,fontSize=10.sp,fontWeight=FontWeight.Bold,maxLines=1)
+                      Text(if(e.standard)"T/S" else "Preset",fontSize=8.sp,color=if(e.standard)Color(0xFF5ED4FF) else Color(0xFFB59AFF))
+                  }
+              }
+          }
+
+          @Composable
+          fun HomeBigButton(title: String, subtitle: String, icon: ImageVector, colors: List<Color>, modifier: Modifier, onClick: () -> Unit) {
+              Card(modifier.height(180.dp).clickable(onClick = onClick), shape = RoundedCornerShape(25.dp), colors = CardDefaults.cardColors(containerColor = Color.Transparent)) {
+                  Box(Modifier.fillMaxSize().background(Brush.linearGradient(colors)).padding(16.dp)) {
+                      Icon(icon, null, Modifier.size(50.dp).align(Alignment.TopEnd), tint = Color.White.copy(alpha = .85f))
+                      Column(Modifier.align(Alignment.BottomStart)) {
+                          Text(title, fontSize = 27.sp, fontWeight = FontWeight.Black); Text(subtitle, color = Color.White.copy(alpha = .78f), fontSize = 11.sp)
+                      }
+                  }
+              }
+          }
+          
+          @Composable
+          fun SmallAction(title: String, subtitle: String, icon: ImageVector, modifier: Modifier, onClick: () -> Unit) {
+              DarkCard(modifier.clickable(onClick = onClick)) {
+                  Icon(icon, null, tint = Color(0xFF38C2FF)); Text(title, fontWeight = FontWeight.Bold); Text(subtitle, color = Color(0xFF92A7B9), fontSize = 11.sp)
+              }
+          }
+          
+          @Composable
+          fun ModeScreen(category:String,onBack:()->Unit,onEnclosure:(EnclosurePreset)->Unit){
+              Page{
+                  item{TopTitle("เลือกประเภทการใช้งาน",onBack)}
+                  item{DarkCard{Text(category,color=Color(0xFF64D4FF),fontWeight=FontWeight.Black,fontSize=24.sp);Text(if(category=="รถยนต์")"ซับอึด • SPL • Daily • หลังเบาะ" else "Sub • Live • Touring • PA",color=Color(0xFF9DB1C1))}}
+                  item{Text("เลือกรูปแบบตู้",fontWeight=FontWeight.Bold,fontSize=18.sp)}
+                  item{Column(verticalArrangement=Arrangement.spacedBy(9.dp)){Enclosures.all.chunked(3).forEach{row->Row(Modifier.fillMaxWidth(),horizontalArrangement=Arrangement.spacedBy(9.dp)){row.forEach{item->EnclosureGridTile(item,Modifier.weight(1f)){onEnclosure(item)}};repeat(3-row.size){Spacer(Modifier.weight(1f))}}}}}
+                  item{DarkCard{Text("หมายเหตุ",fontWeight=FontWeight.Bold);Text("Sealed / Bass Reflex / Band-pass ใช้แบบจำลอง T/S; ตู้ฟาด บังเกอร์ เจบิน เทอร์โบ W-bin และ Scoop เป็น geometry preset สำหรับตั้งต้นและต้องยืนยัน path จริงก่อนผลิต",color=Color(0xFFA6B7C5),fontSize=10.sp)}}
+              }
+          }
+
+          @Composable
+          fun EnclosureGridTile(e:EnclosurePreset,modifier:Modifier=Modifier,onClick:()->Unit){
+              Card(modifier.height(140.dp).clickable(onClick=onClick),shape=RoundedCornerShape(18.dp),colors=CardDefaults.cardColors(containerColor=Color(0xFF101922)),border=androidx.compose.foundation.BorderStroke(1.dp,if(e.standard)Color(0xFF1E79A8).copy(alpha=.45f) else Color(0xFF7443A5).copy(alpha=.45f))){
+                  Column(Modifier.fillMaxSize().padding(9.dp),horizontalAlignment=Alignment.CenterHorizontally,verticalArrangement=Arrangement.Center){CabinetMini(Modifier.size(70.dp),e.kind!=EnclosureKind.SEALED);Spacer(Modifier.height(4.dp));Text(e.nameTh,fontWeight=FontWeight.Bold,fontSize=11.sp,maxLines=1);Text(e.subtitle,color=Color(0xFF8EA7BA),fontSize=8.sp,maxLines=1)}
+              }
+          }
+
+          @Composable
+          fun EnclosureCard(e: EnclosurePreset, onClick: (EnclosurePreset) -> Unit) {
+              DarkCard(Modifier.clickable { onClick(e) }) {
+                  Row(verticalAlignment = Alignment.CenterVertically) {
+                      CabinetMini(Modifier.size(82.dp), e.kind != EnclosureKind.SEALED)
+                      Spacer(Modifier.width(12.dp)); Column(Modifier.weight(1f)) {
+                          Row(verticalAlignment = Alignment.CenterVertically) {
+                              Text(e.nameTh, fontWeight = FontWeight.Bold, fontSize = 18.sp); Spacer(Modifier.width(7.dp)); Badge(if (e.standard) "T/S" else "Preset")
+                          }
+                          Text(e.subtitle, color = Color(0xFF77D5FF), fontSize = 11.sp)
+                          Text(e.note, color = Color(0xFF9AAFC0), fontSize = 10.sp, maxLines = 3, overflow = TextOverflow.Ellipsis)
+                      }
+                      Icon(Icons.Rounded.ChevronRight, null, tint = Color(0xFF72879A))
+                  }
+              }
+          }
+          
+          @Composable
+          fun CabinetMini(modifier: Modifier, vented: Boolean) {
+              Canvas(modifier) {
+                  val pad = 8f; drawRoundRect(Color(0xFFB7875B), Offset(pad, pad), androidx.compose.ui.geometry.Size(size.width - pad*2, size.height-pad*2), CornerRadius(10f, 10f))
+                  val c = Offset(size.width * .52f, size.height * .47f); drawCircle(Color(0xFF0B0D10), size.minDimension * .23f, c); drawCircle(Color(0xFF293642), size.minDimension*.16f,c)
+                  if (vented) drawRoundRect(Color(0xFF13191F), Offset(size.width*.22f,size.height*.76f), androidx.compose.ui.geometry.Size(size.width*.58f,size.height*.08f), CornerRadius(5f,5f))
+              }
+          }
+          
+          @Composable
+          fun LibraryScreen(catalog: List<Driver>, selected: Driver, onBack: (() -> Unit)?, onDetail: (Driver) -> Unit, onUse: (Driver) -> Unit, onAdd: () -> Unit, onCompare: () -> Unit, onSync: () -> Unit) {
+              var query by remember { mutableStateOf("") }
+              var sizeFilter by remember { mutableIntStateOf(0) }
+              var verifiedOnly by remember { mutableStateOf(false) }
+              val shown = catalog.filter { d ->
+                  (query.isBlank() || d.displayName.contains(query, true)) && (sizeFilter == 0 || d.sizeInch == sizeFilter) && (!verifiedOnly || d.verified)
+              }
+              Page {
+                  item { TopTitle("เลือกดอกลำโพง", onBack) { IconButton(onClick = onSync) { Icon(Icons.Rounded.Refresh, null) } } }
+                  item {
+                      OutlinedTextField(query, { query = it }, Modifier.fillMaxWidth(), singleLine = true, leadingIcon = { Icon(Icons.Rounded.Search, null) }, placeholder = { Text("ค้นหาแบรนด์ / รุ่น") }, shape = RoundedCornerShape(18.dp))
+                  }
+                  item {
+                      Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(7.dp)) {
+                          listOf(0,10,12,15,18,21).forEach { s -> FilterChip(selected = sizeFilter == s, onClick = { sizeFilter = s }, label = { Text(if (s==0) "ทั้งหมด" else "$s\"") }) }
+                          FilterChip(selected = verifiedOnly, onClick = { verifiedOnly = !verifiedOnly }, label = { Text("Verified") }, leadingIcon = { Icon(Icons.Rounded.Verified, null, Modifier.size(15.dp)) })
+                      }
+                  }
+                  item {
+                      Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                          FilledTonalButton(onClick = onAdd, Modifier.weight(1f)) { Icon(Icons.Rounded.Add, null); Spacer(Modifier.width(5.dp)); Text("เพิ่มดอกเอง") }
+                          OutlinedButton(onClick = onCompare, Modifier.weight(1f)) { Icon(Icons.Rounded.CompareArrows, null); Spacer(Modifier.width(5.dp)); Text("เปรียบเทียบ") }
+                      }
+                  }
+                  item { Text("พบ ${shown.size} รุ่น", color = Color(0xFF8EA3B5), fontSize = 11.sp) }
+                  items(shown, key = { it.id }) { d -> DriverCard(d, d.id == selected.id, { onDetail(d) }, { onUse(d) }) }
+              }
+          }
+          
+          @Composable
+          fun DriverCard(d: Driver, selected: Boolean, onDetail: () -> Unit, onUse: () -> Unit) {
+              Card(Modifier.fillMaxWidth().clickable(onClick = onDetail), shape = RoundedCornerShape(20.dp), colors = CardDefaults.cardColors(containerColor = if (selected) Color(0xFF10283A) else Color(0xFF0D151E))) {
+                  Row(Modifier.padding(13.dp), verticalAlignment = Alignment.CenterVertically) {
+                      SpeakerProductImage(d,Modifier.size(76.dp)); Spacer(Modifier.width(12.dp))
+                      Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                          Row(verticalAlignment = Alignment.CenterVertically) { Text(d.brand, color = Color(0xFF5DD0FF), fontSize = 11.sp); if (d.verified) { Spacer(Modifier.width(5.dp)); Icon(Icons.Rounded.Verified, null, Modifier.size(14.dp), tint = Color(0xFF2DDBA7)) } }
+                          Text(d.model, fontWeight = FontWeight.Bold, fontSize = 17.sp)
+                          Text("${d.sizeInch}\" • ${d.rmsW}W AES/RMS • ${d.ohm}Ω • ${d.sensitivityDb}dB", color = Color(0xFFA1B3C2), fontSize = 10.sp)
+                          Text("Fs ${d.fs} • Qts ${d.qts} • Vas ${d.vasL}L • EBP ${"%.0f".format(d.ebp)}", color = Color(0xFF879CAD), fontSize = 10.sp)
+                      }
+                      FilledTonalIconButton(onClick = onUse) { Icon(Icons.Rounded.ArrowForward, null) }
+                  }
+              }
+          }
+          
+          @Composable
+          fun DetailScreen(d: Driver, onBack: () -> Unit, onUse: () -> Unit) {
+              val context = LocalContext.current
+              Page {
+                  item { TopTitle("รายละเอียดดอก", onBack) }
+                  item {
+                      DarkCard {
+                          Row(verticalAlignment = Alignment.CenterVertically) {
+                              SpeakerProductImage(d,Modifier.size(135.dp)); Spacer(Modifier.width(14.dp)); Column(Modifier.weight(1f)) {
+                                  Text(d.brand, color = Color(0xFF5ED4FF)); Text(d.model, fontSize = 23.sp, fontWeight = FontWeight.Black)
+                                  Row(horizontalArrangement = Arrangement.spacedBy(5.dp)) { Badge("${d.sizeInch}\""); Badge("${d.ohm}Ω"); Badge(if(d.verified) "Verified" else "Custom") }
+                              }
+                          }
+                      }
+                  }
+                  item {
+                      DarkCard {
+                          Text("Thiele / Small", fontWeight = FontWeight.Bold, fontSize = 18.sp)
+                          TSRow("Fs", "${d.fs} Hz"); TSRow("Qts / Qes / Qms", "${d.qts} / ${d.qes} / ${d.qms}"); TSRow("Vas", "${d.vasL} L")
+                          TSRow("Sd", "${d.sdCm2} cm²"); TSRow("Xmax", "${d.xmaxMm} mm"); TSRow("Re / Le", "${d.re} Ω / ${d.leMh} mH"); TSRow("EBP Fs/Qes", "${"%.1f".format(d.ebp)}")
+                      }
+                  }
+                  item {
+                      DarkCard {
+                          Text("กำลัง / มิติ", fontWeight = FontWeight.Bold, fontSize = 18.sp)
+                          TSRow("Power", "${d.rmsW} W AES/RMS • ${d.programW} W program"); TSRow("Sensitivity", "${d.sensitivityDb} dB"); TSRow("Frequency", "${d.freqMinHz.toInt()}–${d.freqMaxHz.toInt()} Hz")
+                          TSRow("Cutout", "${d.cutoutMm} mm"); TSRow("Depth", "${d.depthMm} mm")
+                      }
+                  }
+                  if (d.sourceUrl.isNotBlank()) item {
+                      OutlinedButton(onClick = { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(d.sourceUrl))) }, Modifier.fillMaxWidth()) { Icon(Icons.Rounded.OpenInNew, null); Spacer(Modifier.width(7.dp)); Text("เปิดแหล่งข้อมูลผู้ผลิต") }
+                  }
+                  item { Button(onClick = onUse, Modifier.fillMaxWidth().height(54.dp), shape = RoundedCornerShape(16.dp)) { Text("ใช้ดอกนี้ออกแบบตู้", fontWeight = FontWeight.Bold) } }
+              }
+          }
+          
+          @Composable
+          fun Badge(text: String) { Surface(shape = RoundedCornerShape(8.dp), color = Color(0xFF173247)) { Text(text, Modifier.padding(horizontal = 7.dp, vertical = 3.dp), color = Color(0xFF70D5FF), fontSize = 9.sp, fontWeight = FontWeight.Bold) } }
+          
+          @Composable
+          fun TSRow(label: String, value: String) { Row(Modifier.fillMaxWidth().padding(vertical=2.dp)) { Text(label, Modifier.weight(1f), color = Color(0xFF9AAFC0)); Text(value, fontWeight = FontWeight.SemiBold) }; HorizontalDivider(color = Color.White.copy(alpha=.05f)) }
+          
+          @Composable
+          fun DesignScreen(category: String, driver: Driver, initial: EnclosurePreset, onChoose: () -> Unit, onCalculated: (DesignInput, DesignResult) -> Unit) {
+              var box by remember(initial.id) { mutableStateOf(initial) }
+              var count by remember { mutableIntStateOf(1) }
+              var target by remember { mutableFloatStateOf(max(25.0, min(80.0, driver.fs)).toFloat()) }
+              var thickness by remember { mutableIntStateOf(if (driver.sizeInch >= 18) 20 else 18) }
+              var qtc by remember { mutableFloatStateOf(.707f) }
+              var wiring by remember { mutableStateOf("ขนาน") }
+              val wiringOptions = SpeakerMath.wiringOptions(driver, count)
+              if (wiringOptions.none { it.first == wiring }) wiring = wiringOptions.first().first
+              Page {
+                  item { TopTitle("ออกแบบตู้ • $category") }
+                  item { StepBar(4) }
+                  item {
+                      Text("1  ดอกลำโพง", color = Color(0xFF6ED5FF), fontWeight = FontWeight.Bold)
+                      DarkCard { Row(verticalAlignment = Alignment.CenterVertically) { SpeakerArt(Modifier.size(62.dp)); Spacer(Modifier.width(10.dp)); Column(Modifier.weight(1f)) { Text(driver.displayName, fontWeight=FontWeight.Bold); Text("${driver.sizeInch}\" • Fs ${driver.fs} • Qts ${driver.qts}", color=Color(0xFF98ACBD),fontSize=10.sp) }; OutlinedButton(onClick=onChoose){Text("เปลี่ยน")} } }
+                  }
+                  item {
+                      Text("2  แบบตู้", color = Color(0xFF6ED5FF), fontWeight = FontWeight.Bold)
+                      Column(verticalArrangement=Arrangement.spacedBy(7.dp)) { Enclosures.all.chunked(2).forEach { row -> Row(horizontalArrangement=Arrangement.spacedBy(7.dp)) { row.forEach { e -> BoxChoice(e, e.id==box.id, Modifier.weight(1f)){box=e} }; if(row.size==1) Spacer(Modifier.weight(1f)) } } }
+                  }
+                  item {
+                      Text("3  จำนวน / โอห์ม", color = Color(0xFF6ED5FF), fontWeight = FontWeight.Bold)
+                      DarkCard {
+                          Row(verticalAlignment=Alignment.CenterVertically) { Text("จำนวนดอก", Modifier.weight(1f)); IconButton(onClick={if(count>1)count--}){Icon(Icons.Rounded.Remove,null)}; Text("$count",fontSize=22.sp,fontWeight=FontWeight.Black); IconButton(onClick={if(count<8)count++}){Icon(Icons.Rounded.Add,null)} }
+                          Text("การต่อ")
+                          Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement=Arrangement.spacedBy(6.dp)) { wiringOptions.forEach { (m,z) -> FilterChip(selected=wiring==m,onClick={wiring=m},label={Text("$m ${"%.1f".format(z)}Ω")}) } }
+                      }
+                  }
+                  item {
+                      Text("4  ค่าที่ต้องการ", color = Color(0xFF6ED5FF), fontWeight = FontWeight.Bold)
+                      DarkCard {
+                          if (box.kind == EnclosureKind.SEALED) {
+                              Row { Text("Qtc",Modifier.weight(1f)); Text("${"%.3f".format(qtc)}",color=Color(0xFF66D5FF),fontWeight=FontWeight.Bold) }
+                              Slider(qtc,{qtc=it},valueRange=.55f..1.10f)
+                              Text("0.577 = Bessel • 0.707 = Butterworth",color=Color(0xFF8FA3B5),fontSize=10.sp)
+                          } else {
+                              Row { Text("ความถี่จูนที่ต้องการ",Modifier.weight(1f)); Text("${target.roundToInt()} Hz",color=Color(0xFF66D5FF),fontWeight=FontWeight.Bold) }
+                              Slider(target,{target=it},valueRange=22f..90f)
+                          }
+                          Text("ความหนาไม้")
+                          Row(horizontalArrangement=Arrangement.spacedBy(5.dp)) { listOf(15,18,20,25).forEach { mm -> FilterChip(selected=thickness==mm,onClick={thickness=mm},label={Text("$mm mm")}) } }
+                      }
+                  }
+                  item {
+                      Button(onClick={
+                          val inp=DesignInput(driver,box,count,if(box.kind==EnclosureKind.SEALED)0.0 else target.toDouble(),thickness,wiring,qtc.toDouble())
+                          onCalculated(inp,SpeakerMath.calculate(inp))
+                      },Modifier.fillMaxWidth().height(58.dp),shape=RoundedCornerShape(17.dp)) { Icon(Icons.Rounded.Calculate,null); Spacer(Modifier.width(8.dp)); Text("คำนวณทุกอย่าง",fontWeight=FontWeight.Black,fontSize=17.sp) }
+                  }
+              }
+          }
+          
+          @Composable
+          fun StepBar(active: Int) { Row(Modifier.fillMaxWidth(), verticalAlignment=Alignment.CenterVertically) { (1..4).forEach { s -> Surface(shape=CircleShape,color=if(s<=active)Color(0xFF22B9FF)else Color(0xFF26333F)){Text("$s",Modifier.padding(horizontal=9.dp,vertical=5.dp),fontWeight=FontWeight.Bold,fontSize=10.sp)}; if(s<4)Box(Modifier.weight(1f).height(2.dp).background(if(s<active)Color(0xFF22B9FF)else Color(0xFF26333F))) } } }
+          
+          @Composable
+          fun BoxChoice(e: EnclosurePreset, selected: Boolean, modifier: Modifier, onClick:()->Unit) { Card(modifier.clickable(onClick=onClick),shape=RoundedCornerShape(15.dp),colors=CardDefaults.cardColors(containerColor=if(selected)Color(0xFF123B54)else Color(0xFF101820)),border=androidx.compose.foundation.BorderStroke(1.dp,if(selected)Color(0xFF2BBEFF)else Color.White.copy(alpha=.05f))){ Row(Modifier.padding(9.dp),verticalAlignment=Alignment.CenterVertically){ CabinetMini(Modifier.size(45.dp),e.kind!=EnclosureKind.SEALED); Spacer(Modifier.width(7.dp)); Column{Text(e.nameTh,fontWeight=FontWeight.Bold,fontSize=11.sp);Text(if(e.standard)"T/S standard model" else "Geometry preset",color=if(e.standard)Color(0xFF59D0FF)else Color(0xFFBE9BFF),fontSize=8.sp)} } } }
+          
+          @Composable
+          fun ResultScreen(inp: DesignInput, r: DesignResult, onBack:()->Unit, on3d:()->Unit, onCut:()->Unit, onGraph:()->Unit, onSave:()->Unit, onPdf:()->Unit) {
+              Page {
+                  item { TopTitle("ผลการคำนวณ", onBack) }
+                  item { Row(horizontalArrangement=Arrangement.spacedBy(6.dp)){ ResultTab("สรุป",true,Modifier.weight(1f),{}); ResultTab("3D",false,Modifier.weight(1f),on3d); ResultTab("ตัดไม้",false,Modifier.weight(1f),onCut); ResultTab("กราฟ",false,Modifier.weight(1f),onGraph) } }
+                  item {
+                      DarkCard {
+                          Row(verticalAlignment=Alignment.CenterVertically){ Box(Modifier.size(110.dp)){Cabinet3D(inp,r,Modifier.fillMaxSize(),.65f)}; Spacer(Modifier.width(10.dp)); Column(Modifier.weight(1f)){Text(inp.enclosure.nameTh,fontSize=22.sp,fontWeight=FontWeight.Black);Text(inp.driver.displayName,color=Color(0xFF70D5FF),fontSize=11.sp);Text(r.method,color=Color(0xFF91A6B8),fontSize=9.sp,maxLines=3)} }
+                      }
+                  }
+                  item { Row(horizontalArrangement=Arrangement.spacedBy(8.dp)){ ResultMetric("Net","${r.netL} L",Modifier.weight(1f)); ResultMetric("F3","${r.f3Hz} Hz",Modifier.weight(1f)); ResultMetric("โหลด","${r.impedanceOhm} Ω",Modifier.weight(1f)) } }
+                  item {
+                      DarkCard {
+                          Text("ขนาดตู้",fontWeight=FontWeight.Bold,fontSize=18.sp); Metric("ภายนอก W×H×D","${r.widthMm} × ${r.heightMm} × ${r.depthMm} mm"); Metric("ภายใน W×H×D","${r.innerWidthMm} × ${r.innerHeightMm} × ${r.innerDepthMm} mm")
+                          Metric("ปริมาตรรวมก่อนหัก","${r.grossL} L"); Metric("ดอก / พอร์ต / ค้ำ","${r.driverDisplacementL} / ${r.portDisplacementL} / ${r.braceDisplacementL} L")
+                          if(r.fbHz>0){Metric("Fb","${r.fbHz} Hz");Metric("พอร์ต","${r.portAreaCm2} cm² • ${r.portWidthMm}×${r.portHeightMm} × ยาว ${r.portLengthMm} mm")}
+                          if(inp.enclosure.kind==EnclosureKind.SEALED){Metric("Fc / Qtc","${r.fcHz} Hz / ${r.qtc}")}
+                          Metric("SPL ทฤษฎีจาก RMS","${r.splDb} dB @1m"); Metric("ไม้ 1220×2440","ประมาณ ${r.sheetCount} แผ่น")
+                      }
+                  }
+                  if(r.warnings.isNotEmpty()) item { DarkCard { Row(verticalAlignment=Alignment.CenterVertically){Icon(Icons.Rounded.Warning,null,tint=Color(0xFFFFB74D));Spacer(Modifier.width(8.dp));Text("ตรวจสอบก่อนผลิต",fontWeight=FontWeight.Bold)};r.warnings.forEach{Text("• $it",color=Color(0xFFFFD19A),fontSize=10.sp)} } }
+                  item { Row(horizontalArrangement=Arrangement.spacedBy(8.dp)){ Button(onClick=onSave,Modifier.weight(1f)){Icon(Icons.Rounded.Save,null);Spacer(Modifier.width(5.dp));Text("บันทึก")}; OutlinedButton(onClick=onPdf,Modifier.weight(1f)){Icon(Icons.Rounded.PictureAsPdf,null);Spacer(Modifier.width(5.dp));Text("PDF/แชร์")} } }
+              }
+          }
+          
+          @Composable
+          fun ResultTab(text:String,selected:Boolean,modifier:Modifier,onClick:()->Unit){ Surface(modifier.clickable(onClick=onClick),shape=RoundedCornerShape(11.dp),color=if(selected)Color(0xFF1E6388)else Color(0xFF111A23)){Text(text,Modifier.padding(vertical=9.dp),textAlign=androidx.compose.ui.text.style.TextAlign.Center,color=if(selected)Color.White else Color(0xFF91A6B8),fontSize=10.sp,fontWeight=FontWeight.Bold)} }
+          
+          @Composable
+          fun ResultMetric(label:String,value:String,modifier:Modifier){ DarkCard(modifier){Text(label,color=Color(0xFF8EA4B6),fontSize=10.sp);Text(value,fontSize=19.sp,fontWeight=FontWeight.Black,color=Color(0xFF67D5FF))} }
+          @Composable
+          fun Metric(label:String,value:String){Row(Modifier.fillMaxWidth()){Text(label,Modifier.weight(1f),color=Color(0xFF95A9BA));Text(value,fontWeight=FontWeight.Bold)};HorizontalDivider(color=Color.White.copy(alpha=.05f))}
+          
+          @Composable
+          fun ThreeDScreen(inp:DesignInput,r:DesignResult,onBack:()->Unit){
+              var angle by remember{mutableFloatStateOf(.66f)};var zoom by remember{mutableFloatStateOf(1f)}
+              Page{
+                  item{TopTitle("แบบตู้ 3D",onBack)}
+                  item{DarkCard{
+                      Cabinet3D(inp,r,Modifier.fillMaxWidth().height(390.dp).pointerInput(Unit){detectTransformGestures{_,pan,gestureZoom,_->angle=(angle+pan.x/700f).coerceIn(.10f,1.05f);zoom=(zoom*gestureZoom).coerceIn(.72f,1.55f)}},angle,zoom)
+                      Row(verticalAlignment=Alignment.CenterVertically){Text("ลากซ้าย/ขวาเพื่อหมุน • pinch เพื่อซูม",Modifier.weight(1f),color=Color(0xFF93A8B8),fontSize=10.sp);Text("${(zoom*100).roundToInt()}%",color=Color(0xFF6BD6FF),fontWeight=FontWeight.Bold)}
+                      Row{Text("มุม",Modifier.weight(1f));Text("${(angle*100).roundToInt()}%",color=Color(0xFF6BD6FF))};Slider(angle,{angle=it},valueRange=.10f..1.05f)
+                  }}
+                  item{DarkCard{Metric("W","${r.widthMm} mm");Metric("H","${r.heightMm} mm");Metric("D","${r.depthMm} mm");Metric("Cutout","${inp.driver.cutoutMm} mm")}}
+              }
+          }
+
+          @Composable
+          fun Cabinet3D(inp:DesignInput,r:DesignResult,modifier:Modifier,angle:Float,zoom:Float){Canvas(modifier){
+              val frontW=size.width*(.52f+.09f*(1-angle))*zoom;val frontH=size.height*.55f*zoom;val dx=size.width*.20f*angle*zoom;val dy=-size.height*.13f*angle*zoom
+              val x=(size.width-frontW-dx)/2f;val y=(size.height-frontH-dy)/2f
+              val front=Path().apply{moveTo(x,y);lineTo(x+frontW,y);lineTo(x+frontW,y+frontH);lineTo(x,y+frontH);close()}
+              val side=Path().apply{moveTo(x+frontW,y);lineTo(x+frontW+dx,y+dy);lineTo(x+frontW+dx,y+frontH+dy);lineTo(x+frontW,y+frontH);close()}
+              val top=Path().apply{moveTo(x,y);lineTo(x+dx,y+dy);lineTo(x+frontW+dx,y+dy);lineTo(x+frontW,y);close()}
+              drawPath(front,Color(0xFFC99560));drawPath(side,Color(0xFF875735));drawPath(top,Color(0xFFE0B17D));drawPath(front,Color.White.copy(alpha=.18f),style=Stroke(width=2f));drawPath(side,Color.White.copy(alpha=.12f),style=Stroke(width=2f))
+              val cols=if(inp.count==1)1 else min(2,inp.count);val rows=ceil(inp.count/cols.toDouble()).toInt();val rr=min(frontW/(cols*2.6f),frontH/(rows*2.65f))
+              repeat(inp.count){i->val col=i%cols;val row=i/cols;val cx=x+frontW*(col+1)/(cols+1f);val usableH=if(r.fbHz>0)frontH*.80f else frontH;val cy=y+usableH*(row+1)/(rows+1f);drawCircle(Color(0xFF06080A),rr,Offset(cx,cy));drawCircle(Color(0xFF26343E),rr*.84f,Offset(cx,cy),style=Stroke(width=max(3f,5f*zoom)));drawCircle(Color(0xFF10161C),rr*.56f,Offset(cx,cy));drawCircle(Color(0xFF26323B),rr*.25f,Offset(cx,cy))}
+              if(r.fbHz>0){val ph=max(9f,frontH*(r.portHeightMm.toFloat()/max(1,r.innerHeightMm))*0.85f);drawRoundRect(Color(0xFF070A0C),Offset(x+frontW*.08f,y+frontH-ph-8f),androidx.compose.ui.geometry.Size(frontW*.84f,ph),CornerRadius(5f,5f))}
+              drawLine(Color.White.copy(alpha=.55f),Offset(x,y+frontH+12f),Offset(x+frontW,y+frontH+12f),2f);drawLine(Color.White.copy(alpha=.55f),Offset(x-12f,y),Offset(x-12f,y+frontH),2f)
+          }}
+
+          @Composable
+          fun CutScreen(inp:DesignInput,r:DesignResult,onBack:()->Unit,onPdf:()->Unit){ val placements=remember(r){SpeakerMath.nestPanels(r.cutList)};var sheet by remember{mutableIntStateOf(0)};val sheets=max(1,(placements.maxOfOrNull{it.sheet}?:0)+1);Page{item{TopTitle("แบบตัดไม้",onBack){IconButton(onClick=onPdf){Icon(Icons.Rounded.PictureAsPdf,null)}}};item{DarkCard{Text("Cut list • ไม้ ${inp.thicknessMm} mm",fontWeight=FontWeight.Bold,fontSize=18.sp);r.cutList.forEachIndexed{i,c->Row(Modifier.fillMaxWidth().padding(vertical=4.dp),verticalAlignment=Alignment.CenterVertically){Surface(shape=CircleShape,color=Color(0xFF163B54)){Text("${i+1}",Modifier.padding(horizontal=8.dp,vertical=4.dp),fontSize=9.sp)};Spacer(Modifier.width(8.dp));Text(c.part,Modifier.weight(1f));Text(c.sizeText,color=Color(0xFFB0C2D0),fontSize=10.sp);Spacer(Modifier.width(7.dp));Text("×${c.qty}",fontWeight=FontWeight.Bold)}}}};item{DarkCard{Row(verticalAlignment=Alignment.CenterVertically){Text("วางแผ่น 1220×2440",Modifier.weight(1f),fontWeight=FontWeight.Bold);Text("${sheet+1}/$sheets",color=Color(0xFF63D2FF))};SheetLayout(placements.filter{it.sheet==sheet},Modifier.fillMaxWidth().height(430.dp));Row(Modifier.fillMaxWidth(),horizontalArrangement=Arrangement.SpaceBetween){OutlinedButton(onClick={if(sheet>0)sheet--},enabled=sheet>0){Text("ก่อนหน้า")};OutlinedButton(onClick={if(sheet<sheets-1)sheet++},enabled=sheet<sheets-1){Text("ถัดไป")}};Text("Layout เป็น shelf nesting อัตโนมัติ ให้ช่างเผื่อคมเลื่อย/kerf ตามเครื่องจริง",color=Color(0xFF8FA4B5),fontSize=9.sp)}}} }
+          
+          @Composable
+          fun SheetLayout(p:List<PanelPlacement>,modifier:Modifier){Canvas(modifier.background(Color(0xFF080D12),RoundedCornerShape(14.dp)).padding(10.dp)){val sx=size.width/1220f;val sy=size.height/2440f;drawRect(Color(0xFF2B333A),style=Stroke(width=2f));p.forEachIndexed{i,q->val x=q.x*sx;val y=q.y*sy;val w=q.width*sx;val h=q.height*sy;val colors=listOf(Color(0xFF2196F3),Color(0xFF00BFA5),Color(0xFFFFB300),Color(0xFF9C6BFF));drawRect(colors[i%colors.size].copy(alpha=.40f),Offset(x,y),androidx.compose.ui.geometry.Size(w,h));drawRect(colors[i%colors.size],Offset(x,y),androidx.compose.ui.geometry.Size(w,h),style=Stroke(width=2f))}}}
+          
+          @Composable
+          fun GraphScreen(inp:DesignInput,r:DesignResult,onBack:()->Unit){var tab by remember{mutableIntStateOf(0)};val pts=remember(tab,inp,r){when(tab){1->SpeakerMath.impedanceCurve(inp,r);2->SpeakerMath.excursionCurve(inp,r);else->SpeakerMath.responseCurve(inp,r)}};Page{item{TopTitle("กราฟวิเคราะห์",onBack)};item{Row(horizontalArrangement=Arrangement.spacedBy(6.dp)){listOf("SPL","Impedance","Excursion").forEachIndexed{i,s->ResultTab(s,tab==i,Modifier.weight(1f)){tab=i}}}};item{DarkCard{Text(when(tab){1->"Voice-coil impedance estimate (Ω)";2->"Cone excursion estimate (mm)";else->"Normalized frequency response (dB)"},fontWeight=FontWeight.Bold);EngineeringGraph(pts,tab,Modifier.fillMaxWidth().height(300.dp));Row(Modifier.fillMaxWidth(),horizontalArrangement=Arrangement.SpaceBetween){Text("15 Hz",fontSize=9.sp,color=Color(0xFF8499AA));Text("50",fontSize=9.sp,color=Color(0xFF8499AA));Text("100",fontSize=9.sp,color=Color(0xFF8499AA));Text("400 Hz",fontSize=9.sp,color=Color(0xFF8499AA))}}};item{DarkCard{when(tab){0->{Metric("F3","${r.f3Hz} Hz");Metric("Fb",if(r.fbHz>0)"${r.fbHz} Hz" else "Sealed");Text("กราฟ vented ใช้ Small 4th-order small-signal model; ไม่รวม room gain/diffraction",color=Color(0xFF91A6B8),fontSize=9.sp)};1->{Metric("Nominal","${inp.driver.ohm} Ω");Metric("โหลดรวม","${r.impedanceOhm} Ω");Text("รวม Re/Le และ motional impedance โดยประมาณ",color=Color(0xFF91A6B8),fontSize=9.sp)};else->{Metric("Xmax","${inp.driver.xmaxMm} mm");Text("Excursion เป็น normalized estimate สำหรับดูแนวโน้ม ไม่แทน large-signal simulation",color=Color(0xFFFFC27A),fontSize=9.sp)}}}}} }
+          
+          @Composable
+          fun EngineeringGraph(points:List<CurvePoint>,tab:Int,modifier:Modifier){Canvas(modifier.background(Color(0xFF070C11),RoundedCornerShape(12.dp)).padding(12.dp)){if(points.size<2)return@Canvas;val grid=Color.White.copy(alpha=.08f);repeat(7){i->val y=size.height*i/6f;drawLine(grid,Offset(0f,y),Offset(size.width,y),1f)};repeat(8){i->val x=size.width*i/7f;drawLine(grid,Offset(x,0f),Offset(x,size.height),1f)};val minX=ln(points.first().hz);val maxX=ln(points.last().hz);val rawMin=points.minOf{it.value};val rawMax=points.maxOf{it.value};val minY=when(tab){0->min(-30.0,rawMin);1->0.0;else->0.0};val maxY=when(tab){0->max(4.0,rawMax);1->max(16.0,rawMax*1.08);else->max(8.0,rawMax*1.08)};fun xy(p:CurvePoint):Offset{val x=((ln(p.hz)-minX)/(maxX-minX)*size.width).toFloat();val y=(size.height-(p.value-minY)/(maxY-minY)*size.height).toFloat();return Offset(x,y)};val path=Path();points.forEachIndexed{i,p->val q=xy(p);if(i==0)path.moveTo(q.x,q.y)else path.lineTo(q.x,q.y)};drawPath(path,when(tab){1->Color(0xFFFFB74D);2->Color(0xFF8A7CFF);else->Color(0xFF27C0FF)},style=Stroke(width=4f,cap=StrokeCap.Round))}}
+          
+          @Composable
+          fun CompareScreen(catalog:List<Driver>,aId:String,bId:String,onA:(String)->Unit,onB:(String)->Unit,onBack:()->Unit,onUse:(Driver)->Unit){val a=catalog.firstOrNull{it.id==aId}?:catalog.firstOrNull();val b=catalog.firstOrNull{it.id==bId}?:catalog.getOrNull(1)?:a;Page{item{TopTitle("เปรียบเทียบดอก",onBack)};item{Text("แตะรุ่นเพื่อเลื่อนไปรุ่นถัดไป",color=Color(0xFF8FA5B6),fontSize=10.sp)};if(a!=null&&b!=null){item{Row(horizontalArrangement=Arrangement.spacedBy(8.dp)){CompareHead(a,Modifier.weight(1f)){val i=catalog.indexOf(a);onA(catalog[(i+1)%catalog.size].id)};CompareHead(b,Modifier.weight(1f)){val i=catalog.indexOf(b);onB(catalog[(i+1)%catalog.size].id)}}};item{DarkCard{CompareRow("Fs","${a.fs}","${b.fs}","Hz");CompareRow("Qts","${a.qts}","${b.qts}","");CompareRow("Vas","${a.vasL}","${b.vasL}","L");CompareRow("Xmax","${a.xmaxMm}","${b.xmaxMm}","mm");CompareRow("Sensitivity","${a.sensitivityDb}","${b.sensitivityDb}","dB");CompareRow("Power","${a.rmsW}","${b.rmsW}","W");CompareRow("EBP","${"%.0f".format(a.ebp)}","${"%.0f".format(b.ebp)}","")}};item{Row(horizontalArrangement=Arrangement.spacedBy(8.dp)){Button(onClick={onUse(a)},Modifier.weight(1f)){Text("ใช้ ${a.model.take(12)}")};Button(onClick={onUse(b)},Modifier.weight(1f)){Text("ใช้ ${b.model.take(12)}")}}}}} }
+          @Composable
+          fun CompareHead(d:Driver,modifier:Modifier,onClick:()->Unit){DarkCard(modifier.clickable(onClick=onClick)){SpeakerProductImage(d,Modifier.fillMaxWidth().height(115.dp));Text(d.brand,color=Color(0xFF60D2FF),fontSize=10.sp);Text(d.model,fontWeight=FontWeight.Bold,maxLines=2)}}
+          @Composable
+          fun CompareRow(label:String,a:String,b:String,unit:String){Row(Modifier.fillMaxWidth().padding(vertical=4.dp)){Text(label,Modifier.weight(1.3f),color=Color(0xFF95A9B9));Text("$a $unit",Modifier.weight(1f),fontWeight=FontWeight.Bold);Text("$b $unit",Modifier.weight(1f),fontWeight=FontWeight.Bold)};HorizontalDivider(color=Color.White.copy(alpha=.05f))}
+          
+          @Composable
+          fun ProjectScreen(projects:List<SavedProject>,onDelete:(String)->Unit,onOpen:(SavedProject)->Unit,onNew:()->Unit){Page{item{TopTitle("โปรเจค")};if(projects.isEmpty())item{DarkCard{Icon(Icons.Rounded.FolderOpen,null,Modifier.size(48.dp),tint=Color(0xFF37C4FF));Text("ยังไม่มีโปรเจค",fontWeight=FontWeight.Bold,fontSize=19.sp);Text("คำนวณแล้วกดบันทึก โปรเจคจะอยู่ในเครื่อง",color=Color(0xFF93A8B9));Button(onClick=onNew){Text("เริ่มออกแบบ")}}}else items(projects,key={it.id}){p->DarkCard(Modifier.clickable{onOpen(p)}){Row(verticalAlignment=Alignment.CenterVertically){Icon(Icons.Rounded.Inventory2,null,Modifier.size(40.dp),tint=Color(0xFF59D1FF));Spacer(Modifier.width(10.dp));Column(Modifier.weight(1f)){Text(p.name,fontWeight=FontWeight.Bold);Text("${p.result.widthMm}×${p.result.heightMm}×${p.result.depthMm} mm • ${p.result.netL}L",color=Color(0xFF94A9BA),fontSize=10.sp)};IconButton(onClick={onDelete(p.id)}){Icon(Icons.Rounded.Delete,null,tint=Color(0xFFFF6E78))}}}}} }
+          
+          @Composable
+          fun MoreScreen(catalogCount:Int,onSyncOfficial:()->Unit,onSyncUrl:(String)->Unit){var url by remember{mutableStateOf(CatalogRepository.DEFAULT_REMOTE_URL)};Page{item{TopTitle("อื่นๆ")};item{DarkCard{Text("Speaker Box Designer TH",fontSize=21.sp,fontWeight=FontWeight.Black);Text("เวอร์ชัน 1.1 • Polished One UI dark",color=Color(0xFF63D2FF));Metric("ฐานข้อมูลในเครื่อง","$catalogCount รุ่น")}};item{DarkCard{Row(verticalAlignment=Alignment.CenterVertically){Icon(Icons.Rounded.CloudSync,null,tint=Color(0xFF39C7FF));Spacer(Modifier.width(9.dp));Column(Modifier.weight(1f)){Text("อัปเดต P.Audio อัตโนมัติ",fontWeight=FontWeight.Bold);Text("อ่านหน้า product สาธารณะและดึง T/S ที่ครบ",color=Color(0xFF94A8B9),fontSize=10.sp)}};Button(onClick=onSyncOfficial,Modifier.fillMaxWidth()){Icon(Icons.Rounded.Refresh,null);Spacer(Modifier.width(6.dp));Text("ซิงก์จากผู้ผลิตตอนนี้")}}};item{DarkCard{Text("Remote catalog JSON",fontWeight=FontWeight.Bold);OutlinedTextField(url,{url=it},Modifier.fillMaxWidth(),singleLine=false,minLines=2,label={Text("URL")});OutlinedButton(onClick={onSyncUrl(url.trim())},Modifier.fillMaxWidth()){Icon(Icons.Rounded.CloudDownload,null);Spacer(Modifier.width(6.dp));Text("นำเข้า/อัปเดต catalog")}}};item{DarkCard{Text("มาตรฐานและข้อจำกัด",fontWeight=FontWeight.Bold,fontSize=18.sp);Text("• Sealed: Thiele/Small second-order, Qtc/Vb/Fc/F3",fontSize=11.sp);Text("• Bass Reflex: Keele starting alignment + Small fourth-order response",fontSize=11.sp);Text("• Port: Helmholtz/Keele end-correction estimate",fontSize=11.sp);Text("• SPL = sensitivity + electrical RMS gain; ไม่ใช่ AES75 maximum linear SPL",fontSize=11.sp);Text("• ตู้ฟาด/บังเกอร์/เจบิน/เทอร์โบ/W-bin/Scoop = geometry preset ต้องยืนยันแบบทางเดินจริง",fontSize=11.sp,color=Color(0xFFFFC37B));Text("• Facebook/Marketplace ที่ต้องล็อกอินไม่ได้ scrape อัตโนมัติในแอป; ใช้ import JSON หรือเพิ่มดอกเองแทน",fontSize=11.sp,color=Color(0xFF9EB1C1))}}} }
+          
+          @Composable
+          fun AddDriverScreen(onBack:()->Unit,onSave:(Driver)->Unit){
+              var brand by remember{mutableStateOf("")};var model by remember{mutableStateOf("")};var size by remember{mutableStateOf("18")};var ohm by remember{mutableStateOf("8")};var power by remember{mutableStateOf("1000")};var fs by remember{mutableStateOf("")};var qts by remember{mutableStateOf("")};var qes by remember{mutableStateOf("")};var qms by remember{mutableStateOf("5")};var vas by remember{mutableStateOf("")};var sd by remember{mutableStateOf("")};var xmax by remember{mutableStateOf("")};var re by remember{mutableStateOf("")};var le by remember{mutableStateOf("0")};var sens by remember{mutableStateOf("")};var cutout by remember{mutableStateOf("")};var depth by remember{mutableStateOf("")};var error by remember{mutableStateOf("")}
+              Page{item{TopTitle("เพิ่มดอกลำโพง",onBack)};item{DarkCard{Text("กรอก T/S จาก datasheet",fontWeight=FontWeight.Bold);Text("ถ้าข้อมูลไม่ครบไม่ควรใช้คำนวณตู้",color=Color(0xFFFFC27A),fontSize=10.sp);SimpleField("แบรนด์",brand){brand=it};SimpleField("รุ่น",model){model=it};Row(horizontalArrangement=Arrangement.spacedBy(7.dp)){Box(Modifier.weight(1f)){SimpleField("นิ้ว",size){size=it}};Box(Modifier.weight(1f)){SimpleField("Ohm",ohm){ohm=it}};Box(Modifier.weight(1f)){SimpleField("W RMS",power){power=it}}};Row(horizontalArrangement=Arrangement.spacedBy(7.dp)){Box(Modifier.weight(1f)){SimpleField("Fs",fs){fs=it}};Box(Modifier.weight(1f)){SimpleField("Qts",qts){qts=it}};Box(Modifier.weight(1f)){SimpleField("Qes",qes){qes=it}}};Row(horizontalArrangement=Arrangement.spacedBy(7.dp)){Box(Modifier.weight(1f)){SimpleField("Qms",qms){qms=it}};Box(Modifier.weight(1f)){SimpleField("Vas L",vas){vas=it}}};Row(horizontalArrangement=Arrangement.spacedBy(7.dp)){Box(Modifier.weight(1f)){SimpleField("Sd cm²",sd){sd=it}};Box(Modifier.weight(1f)){SimpleField("Xmax mm",xmax){xmax=it}}};Row(horizontalArrangement=Arrangement.spacedBy(7.dp)){Box(Modifier.weight(1f)){SimpleField("Re",re){re=it}};Box(Modifier.weight(1f)){SimpleField("Le mH",le){le=it}};Box(Modifier.weight(1f)){SimpleField("Sensitivity",sens){sens=it}}};Row(horizontalArrangement=Arrangement.spacedBy(7.dp)){Box(Modifier.weight(1f)){SimpleField("Cutout mm",cutout){cutout=it}};Box(Modifier.weight(1f)){SimpleField("Depth mm",depth){depth=it}}};if(error.isNotBlank())Text(error,color=Color(0xFFFF6F78),fontSize=10.sp);Button(onClick={try{val d=Driver("custom-${System.currentTimeMillis()}",brand.trim().ifBlank{"Custom"},model.trim().ifBlank{throw IllegalArgumentException("กรอกรุ่น")},size.toInt(),ohm.toDouble(),power.toInt(),power.toInt()*2,fs.toDouble(),qts.toDouble(),qes.toDouble(),qms.toDouble(),vas.toDouble(),sd.toDouble(),xmax.toDouble(),re.toDouble(),le.toDouble(),sens.toDouble(),fs.toDouble(),1000.0,cutout.toDouble(),depth.toDouble(),"Custom","",false,true);onSave(d)}catch(e:Exception){error="กรอกค่าตัวเลขและ T/S ที่จำเป็นให้ครบ"}},Modifier.fillMaxWidth()){Text("บันทึกดอก")}}}} }
+          @Composable
+          fun SimpleField(label:String,value:String,onChange:(String)->Unit){OutlinedTextField(value,onChange,Modifier.fillMaxWidth(),label={Text(label)},singleLine=true)}
+          
+          @Composable
+          fun EmptyDesign(onStart:()->Unit){Page{item{TopTitle("ยังไม่มีผลคำนวณ")};item{DarkCard{Icon(Icons.Rounded.Calculate,null,Modifier.size(50.dp),tint=Color(0xFF38C5FF));Text("เลือกดอกและคำนวณก่อน",fontWeight=FontWeight.Bold,fontSize=19.sp);Button(onClick=onStart){Text("เริ่มคำนวณ")}}}}}
+          EOF_MainActivity_kt
+
+          cat > app/src/test/java/com/okn/speakerbox/SpeakerMathTest.kt <<'EOF_TEST'
+          package com.okn.speakerbox
+
+          import org.junit.Assert.*
+          import org.junit.Test
+
+          class SpeakerMathTest {
+              @Test fun sealedAndVentedAreFinite() {
+                  val d = SeedCatalog.drivers.first()
+                  val sealed = DesignInput(d, Enclosures.byId("sealed"), 1, 0.0, 18, "ขนาน", 0.707)
+                  val rs = SpeakerMath.calculate(sealed)
+                  assertTrue(rs.netL > 0 && rs.f3Hz > 0 && rs.widthMm > 0)
+                  val vented = DesignInput(d, Enclosures.byId("vented"), 1, 35.0, 18, "ขนาน")
+                  val rv = SpeakerMath.calculate(vented)
+                  assertTrue(rv.netL > 0 && rv.fbHz > 0 && rv.portLengthMm > 0)
+                  assertTrue(SpeakerMath.responseCurve(vented, rv).all { it.value.isFinite() })
+                  assertTrue(SpeakerMath.impedanceCurve(vented, rv).all { it.value.isFinite() })
+              }
+          }
+          EOF_TEST
+
+          cat > speaker_catalog.example.json <<'EOF_JSON'
+          [
+            {
+              "id":"example-driver", "brand":"Example", "model":"18SUB", "sizeInch":18, "ohm":8,
+              "rmsW":1000, "programW":2000, "fs":35, "qts":0.38, "qes":0.40, "qms":7.0,
+              "vasL":180, "sdCm2":1220, "xmaxMm":8, "re":5.5, "leMh":1.0, "sensitivityDb":96,
+              "freqMinHz":35, "freqMaxHz":1000, "cutoutMm":425, "depthMm":210,
+              "use":"PA Sub/LF", "sourceUrl":"https://manufacturer.example/datasheet", "verified":false, "custom":false, "imageUrl":""
+            }
+          ]
+          EOF_JSON
+
+      - name: Publish runtime speaker catalog
+        continue-on-error: true
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import json,re,urllib.request,html
+          src=Path("app/src/main/java/com/okn/speakerbox/Models.kt").read_text(encoding="utf-8")
+          rows=[]
+          for line in src.splitlines():
+              s=line.strip()
+              if not s.startswith('Driver("pa-'): continue
+              body=s[len("Driver("):].rstrip(",)")
+              vals=[];cur=[];quote=False;esc=False
+              for ch in body:
+                  if esc: cur.append(ch);esc=False;continue
+                  if ch=='\\': cur.append(ch);esc=True;continue
+                  if ch=='"': quote=not quote;cur.append(ch);continue
+                  if ch==',' and not quote: vals.append(''.join(cur).strip());cur=[];continue
+                  cur.append(ch)
+              vals.append(''.join(cur).strip())
+              def S(i): return vals[i].strip().strip('"')
+              def F(i): return float(vals[i])
+              def I(i): return int(float(vals[i]))
+              if len(vals)<23: continue
+              d={"id":S(0),"brand":S(1),"model":S(2),"sizeInch":I(3),"ohm":F(4),"rmsW":I(5),"programW":I(6),"fs":F(7),"qts":F(8),"qes":F(9),"qms":F(10),"vasL":F(11),"sdCm2":F(12),"xmaxMm":F(13),"re":F(14),"leMh":F(15),"sensitivityDb":F(16),"freqMinHz":F(17),"freqMaxHz":F(18),"cutoutMm":F(19),"depthMm":F(20),"use":S(21),"sourceUrl":S(22),"verified":True,"custom":False,"imageUrl":""}
+              try:
+                  req=urllib.request.Request(d["sourceUrl"],headers={"User-Agent":"Mozilla/5.0 SpeakerBoxDesignerTH/1.1"})
+                  page=urllib.request.urlopen(req,timeout=12).read().decode("utf-8","ignore")
+                  m=re.search(r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\']([^"\']+)',page,re.I) or re.search(r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+property=["\']og:image["\']',page,re.I)
+                  if m:d["imageUrl"]=html.unescape(m.group(1))
+              except Exception: pass
+              rows.append(d)
+          Path("speaker_catalog.json").write_text(json.dumps(rows,ensure_ascii=False,indent=2)+"\n",encoding="utf-8")
+          print(f"catalog rows={len(rows)} images={sum(bool(x['imageUrl']) for x in rows)}")
+          PY
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add speaker_catalog.json
+          if git diff --cached --quiet; then
+            echo "speaker_catalog.json unchanged"
+          else
+            git commit -m "Update speaker catalog for app v1.1 [skip ci]"
+            git push origin HEAD:main
+          fi
+
+      - name: Verify generated sources
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -s app/src/main/java/com/okn/speakerbox/MainActivity.kt
+          test -s app/src/main/java/com/okn/speakerbox/Calculators.kt
+          test -s app/src/main/java/com/okn/speakerbox/Data.kt
+          grep -q 'Small vented-box 4th-order' app/src/main/java/com/okn/speakerbox/Calculators.kt
+          grep -q 'exportAndShare' app/src/main/java/com/okn/speakerbox/PdfExporter.kt
+          grep -q 'syncPAudio' app/src/main/java/com/okn/speakerbox/Data.kt
+          grep -q 'SheetLayout' app/src/main/java/com/okn/speakerbox/MainActivity.kt
+
+      - name: Test calculations and build APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          gradle --no-daemon :app:testDebugUnitTest :app:assembleDebug --stacktrace
+
+      - name: Verify APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          APK=app/build/outputs/apk/debug/app-debug.apk
+          test -s "$APK"
+          unzip -t "$APK" >/dev/null
+          "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose "$APK"
+          "$ANDROID_HOME/build-tools/35.0.0/aapt" dump badging "$APK" | head -n 8
+          mkdir -p dist
+          cp "$APK" dist/ThaiSpeakerBoxDesigner-v1.1.0-polished-debug.apk
+          sha256sum dist/ThaiSpeakerBoxDesigner-v1.1.0-polished-debug.apk | tee dist/SHA256SUMS.txt
+          zip -9 -r dist/ThaiSpeakerBoxDesigner-v1.1.0-source.zip app settings.gradle.kts build.gradle.kts gradle.properties speaker_catalog.example.json speaker_catalog.json >/dev/null
+
+      - name: Build summary
+        shell: bash
+        run: |
+          {
+            echo '## Thai Speaker Box Designer FULL v1'
+            echo ''
+            echo '- UI: Samsung/One UI dark mock direction'
+            echo '- Calculator: sealed, vented, 4th band-pass; Thai/PA geometry presets clearly separated'
+            echo '- Working: driver search/filter, custom driver, P.Audio web sync, JSON catalog import, wiring, response/impedance/excursion charts, pseudo-3D, cut list, 1220x2440 layout, projects, PDF share'
+            echo '- Verified APK with apksigner + unzip integrity test'
+            echo ''
+            cat dist/SHA256SUMS.txt
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload APK and source artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: ThaiSpeakerBoxDesigner-v1.1.0-POLISHED
+          path: |
+            dist/ThaiSpeakerBoxDesigner-v1.1.0-polished-debug.apk
+            dist/ThaiSpeakerBoxDesigner-v1.1.0-source.zip
+            dist/SHA256SUMS.txt
+            speaker_catalog.example.json
+            speaker_catalog.json
+          if-no-files-found: error
+          retention-days: 30
