@@ -1,0 +1,443 @@
+name: OKN BP1048P4 V14 USB-C ONLY FEATURE REPORT FLASHBOOT ENTRY PROOF
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/OKN_BP1048P4_V14_USB_C_ONLY_FEATURE_REPORT_FLASHBOOT_ENTRY_PROOF.yml'
+
+permissions:
+  contents: read
+
+env:
+  SDK_REPO: "https://github.com/leadercxn/bp1048_sdk_v0.1.12.git"
+  SDK_COMMIT: "8105bd864b04995d81c9f9ae77cb158259f39015"
+
+  REQUIRED_PATH: "Samsung Galaxy S25+ -> USB-C cable -> DSP USB-C only"
+
+  SOLDER_ALLOWED: "NO"
+  BOARD_MOD_ALLOWED: "NO"
+  JTAG_ALLOWED: "NO"
+  SDP_ALLOWED: "NO"
+  AICE_ALLOWED: "NO"
+  HARDWARE_PROBE_ALLOWED: "NO"
+  LIVE_USB_COMMAND_ALLOWED: "NO"
+  FLASH_READ_ALLOWED: "NO"
+  FLASH_WRITE_ALLOWED: "NO"
+  FLASH_ERASE_ALLOWED: "NO"
+
+jobs:
+  static_proof:
+    name: V14 prove exact runtime HID Feature Report entry to FlashBoot
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+
+    steps:
+      - name: Enforce USB-C-only constraints
+        shell: bash
+        run: |
+          set -euo pipefail
+          for v in SOLDER_ALLOWED BOARD_MOD_ALLOWED JTAG_ALLOWED SDP_ALLOWED AICE_ALLOWED HARDWARE_PROBE_ALLOWED LIVE_USB_COMMAND_ALLOWED FLASH_READ_ALLOWED FLASH_WRITE_ALLOWED FLASH_ERASE_ALLOWED; do
+            test "${!v}" = "NO"
+          done
+          rm -rf /tmp/v14
+          mkdir -p /tmp/v14/evidence
+          cat > /tmp/v14/evidence/SAFETY.txt <<'EOF'
+          REQUIRED_PATH=Samsung Galaxy S25+ -> USB-C cable -> DSP USB-C only
+          SOLDER_ALLOWED=NO
+          BOARD_MOD_ALLOWED=NO
+          JTAG_ALLOWED=NO
+          SDP_ALLOWED=NO
+          AICE_ALLOWED=NO
+          HARDWARE_PROBE_ALLOWED=NO
+          LIVE_USB_COMMAND_ALLOWED=NO
+          TARGET_CONNECTED=NO
+          USB_CONTROL_TRANSFER_EXECUTED=NO
+          FLASH_READ_EXECUTED=NO
+          FLASH_WRITE_EXECUTED=NO
+          FLASH_ERASE_EXECUTED=NO
+          RUNTIME_OPCODE_0x11_EXECUTED=NO
+          EOF
+
+      - name: Fetch exact pinned SDK
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone -q "$SDK_REPO" /tmp/v14/sdk
+          git -C /tmp/v14/sdk checkout -q "$SDK_COMMIT"
+          test "$(git -C /tmp/v14/sdk rev-parse HEAD)" = "$SDK_COMMIT"
+          git -C /tmp/v14/sdk rev-parse HEAD > /tmp/v14/evidence/SDK_COMMIT.txt
+
+      - name: Prove active USB build configuration and HID data interface
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import json,re
+
+          S=Path('/tmp/v14/sdk')
+          E=Path('/tmp/v14/evidence')
+
+          app=(S/'BT_Audio_APP/bt_audio_app_src/inc/app_config.h').read_text(errors='replace')
+          boot=(S/'BT_Audio_APP/bt_audio_app_src/inc/flash_boot.h').read_text(errors='replace')
+          desc=(S/'MVsB1_Base_SDK/driver/driver_api/src/otg/device/otg_device_descriptor.h').read_text(errors='replace')
+
+          checks={
+              'usb_audio_enabled': bool(re.search(r'(?m)^\s*#define\s+CFG_APP_USB_AUDIO_MODE_EN\b',app)),
+              'usb_mode_audio_mic': bool(re.search(r'(?m)^\s*#define\s+CFG_PARA_USB_MODE\s+AUDIO_MIC\b',app)),
+              'communication_by_usb': bool(re.search(r'(?m)^\s*#define\s+CFG_COMMUNICATION_BY_USB\b',app)),
+              'flash_boot_enabled': bool(re.search(r'(?m)^\s*#define\s+FLASH_BOOT_EN\s+1\b',boot)),
+              'pctool_upgrade_enabled_in_flashboot': bool(re.search(r'#define\s+UP_PORT\s+\([^\n]*PCTOOL_ON',boot)),
+              'audio_mic_hid_data_interface_4': (
+                  '0x09,0x04,0x04,0x00,0x00,0x03' in desc and
+                  'InterFaceNum_Tab(AUDIO_MIC)[] = {0xFF,0x00,0x01,0x02,0x03,0x04}' in desc
+              ),
+              'feature_report_is_8_bytes': bool(re.search(
+                  r'0x95,\s*0x08,\s*\n\s*0x09,\s*0x01,\s*\n\s*0xB1,\s*0x02',
+                  desc,re.S
+              ))
+          }
+
+          for k,v in checks.items():
+              if not v:
+                  raise RuntimeError(f'proof failed: {k}')
+
+          result={
+              **checks,
+              'active_usb_mode':'AUDIO_MIC',
+              'hid_data_interface_number':4,
+              'hid_feature_report_type':3,
+              'hid_feature_report_id':0,
+              'hid_feature_report_bytes':8
+          }
+          (E/'V14_BUILD_USB_DESCRIPTOR_PROOF.json').write_text(
+              json.dumps(result,indent=2)+'\n'
+          )
+          PY
+
+      - name: Prove raw USB setup packet and Feature Report handlers
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import re,json
+
+          S=Path('/tmp/v14/sdk')
+          E=Path('/tmp/v14/evidence')
+          p=S/'MVsB1_Base_SDK/driver/driver_api/src/otg/device/otg_device_standard_request.c'
+          t=p.read_text(errors='replace')
+
+          checks={
+              'setup_buffer_8_bytes':'uint8_t Setup[8];' in t,
+              'request_buffer_256_bytes':'uint8_t Request[256];' in t,
+              'setup_received_raw':bool(re.search(r'OTG_DeviceSetupReceive\s*\(\s*Setup\s*,\s*8\s*,',t)),
+              'out_data_stage_received_into_request':bool(re.search(
+                  r'OTG_DeviceControlReceive\s*\(\s*Request\s*\+\s*i\s*\*\s*64',t
+              )),
+              'feature_get_handler':bool(re.search(
+                  r'\(Setup\[3\]\s*==\s*0x03\).*?\(Setup\[0\]\s*==\s*0xA1\).*?GetReport',
+                  t,re.S
+              )),
+              'feature_set_handler':bool(re.search(
+                  r'\(Setup\[3\]\s*==\s*0x03\).*?\(Setup\[0\]\s*==\s*0x21\).*?SetReport',
+                  t,re.S
+              )),
+              'set_clears_pc_upgrade':'pc_upgrade = 0;' in t,
+              'aa_unconditional_arm':bool(re.search(
+                  r'Request\[0\]\s*==\s*0xAA.*?pc_upgrade\s*=\s*1',
+                  t,re.S
+              )),
+              '55_conditional_arm':bool(re.search(
+                  r'Request\[0\]\s*==\s*0x55.*?memcmp\s*\(\s*\(uint8_t\*\)\(0x10000\s*\+\s*0xB8\)\s*,\s*Request\s*\+\s*1\s*,\s*4\s*\).*?pc_upgrade\s*=\s*1',
+                  t,re.S
+              )),
+              'get_returns_55_when_armed':bool(re.search(
+                  r'if\s*\(\s*pc_upgrade\s*\).*?Setup\[0\]\s*=\s*0x55',
+                  t,re.S
+              )),
+              'get_calls_usb_flashboot_entry':bool(re.search(
+                  r'if\s*\(\s*pc_upgrade\s*\).*?start_up_grate\s*\(\s*AppResourceUsbDevice\s*\)',
+                  t,re.S
+              )),
+              'android_getreport_signature_documented':'A1 01 00 01 03 00 01 00' in t,
+          }
+
+          for k,v in checks.items():
+              if not v:
+                  raise RuntimeError(f'proof failed: {k}')
+
+          # USB HID standard request numbers.
+          protocol={
+              'setup_layout':[
+                  'bmRequestType','bRequest','wValue_lo','wValue_hi',
+                  'wIndex_lo','wIndex_hi','wLength_lo','wLength_hi'
+              ],
+              'set_report_feature':{
+                  'bmRequestType':'0x21',
+                  'bRequest':'0x09',
+                  'wValue':'0x0300',
+                  'wIndex':4,
+                  'wLength':8,
+                  'setup_bytes':['0x21','0x09','0x00','0x03','0x04','0x00','0x08','0x00'],
+                  'unconditional_entry_payload':['0xAA','0x00','0x00','0x00','0x00','0x00','0x00','0x00'],
+                  'safe_clear_payload':['0x00','0x00','0x00','0x00','0x00','0x00','0x00','0x00']
+              },
+              'get_report_feature':{
+                  'bmRequestType':'0xA1',
+                  'bRequest':'0x01',
+                  'wValue':'0x0300',
+                  'wIndex':4,
+                  'wLength':8,
+                  'setup_bytes':['0xA1','0x01','0x00','0x03','0x04','0x00','0x08','0x00'],
+                  'armed_response_first_byte':'0x55',
+                  'unarmed_response_first_byte':'0x00'
+              },
+              'important':'The source handler keys on bmRequestType and Feature report type; Android should still use the standard HID GET_REPORT=0x01 and SET_REPORT=0x09 values.',
+              'live_execution_permitted':False
+          }
+
+          (E/'V14_FEATURE_REPORT_HANDLER_PROOF.json').write_text(
+              json.dumps({'checks':checks,'protocol':protocol},indent=2)+'\n'
+          )
+          PY
+
+      - name: Prove FlashBoot handoff semantics
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import re,json
+
+          S=Path('/tmp/v14/sdk')
+          E=Path('/tmp/v14/evidence')
+          t=(S/'BT_Audio_APP/bt_audio_app_src/device/upgrade.c').read_text(errors='replace')
+
+          checks={
+              'boot_flag_address_0x4000100c':'#define     ADR_FLASH_BOOT_FLAGE' in t and '(0x4000100C)' in t,
+              'usb_resource_sets_pc_flag':bool(re.search(
+                  r'UpdateResource\s*==\s*AppResourceUsbDevice.*?SREG_FLASH_BOOT_FLAGE\.PC\s*=\s*1',
+                  t,re.S
+              )),
+              'usb_resource_sets_update_flag':bool(re.search(
+                  r'UpdateResource\s*==\s*AppResourceUsbDevice.*?SREG_FLASH_BOOT_FLAGE\.updata\s*=\s*1',
+                  t,re.S
+              )),
+              'handoff_guarded_by_update_flag':bool(re.search(
+                  r'if\s*\(\s*SREG_FLASH_BOOT_FLAGE\.updata\s*\)',t
+              )),
+              'entry_point_is_zero':bool(re.search(r'jump_fun\s*=\s*\(fun\)0\s*;',t)),
+              'jumps_to_entry_zero':bool(re.search(r'\bjump_fun\s*\(\s*\)\s*;',t)),
+              'entry_function_contains_no_explicit_spiflash_erase_write':not bool(re.search(
+                  r'\b(?:SpiFlashErase|SpiFlashWrite|chiperas|codedata|bootdat|constdat|cnfgdat)\b',t
+              ))
+          }
+          for k,v in checks.items():
+              if not v:
+                  raise RuntimeError(f'proof failed: {k}')
+
+          result={
+              'checks':checks,
+              'flashboot_flag_address':'0x4000100C',
+              'usb_entry_sets':['PC=1','updata=1'],
+              'handoff':'save flag -> disable interrupts/cache/timers/DMA -> restore flag -> jump to address 0',
+              'entry_itself_explicit_flash_write_proven':False,
+              'entry_is_state_changing':True,
+              'full_upgrade_after_entry_may_erase_write_flash':True,
+              'live_test_not_authorized_by_this_workflow':True
+          }
+          (E/'V14_FLASHBOOT_HANDOFF_PROOF.json').write_text(
+              json.dumps(result,indent=2)+'\n'
+          )
+          PY
+
+      - name: Generate Android S25+ controlTransfer reference
+        shell: bash
+        run: |
+          set -euo pipefail
+          E=/tmp/v14/evidence
+
+          cat > "$E/V14_ANDROID_USB_REFERENCE.kt" <<'KOTLIN'
+          /*
+           * STATIC REFERENCE ONLY.
+           * Required physical path:
+           * Samsung Galaxy S25+ -> USB-C cable -> DSP USB-C.
+           *
+           * Do not call enterFlashBoot() until a controlled live-test stage.
+           * No JTAG/SDP/AICE/soldering/board modification is used.
+           */
+          import android.hardware.usb.UsbDeviceConnection
+
+          object Bp1048UsbFlashBootEntry {
+              const val HID_DATA_INTERFACE = 4
+              private const val HID_SET_REPORT = 0x09
+              private const val HID_GET_REPORT = 0x01
+              private const val FEATURE_REPORT_VALUE = 0x0300
+              private const val REPORT_LEN = 8
+              private const val TIMEOUT_MS = 1000
+
+              // Non-entry preflight: clears pc_upgrade RAM latch, then checks GET_REPORT.
+              fun preflightNoEntry(conn: UsbDeviceConnection): Boolean {
+                  val clear = ByteArray(REPORT_LEN)
+                  val setRc = conn.controlTransfer(
+                      0x21, HID_SET_REPORT, FEATURE_REPORT_VALUE,
+                      HID_DATA_INTERFACE, clear, clear.size, TIMEOUT_MS
+                  )
+                  if (setRc != REPORT_LEN) return false
+
+                  val resp = ByteArray(REPORT_LEN)
+                  val getRc = conn.controlTransfer(
+                      0xA1, HID_GET_REPORT, FEATURE_REPORT_VALUE,
+                      HID_DATA_INTERFACE, resp, resp.size, TIMEOUT_MS
+                  )
+                  return getRc > 0 && resp[0] == 0.toByte()
+              }
+
+              // STATE-CHANGING: arms unconditional PC upgrade then GET_REPORT hands off to FlashBoot.
+              // This does not itself send FlashBoot erase/write commands.
+              fun enterFlashBoot(conn: UsbDeviceConnection): Int {
+                  val arm = ByteArray(REPORT_LEN)
+                  arm[0] = 0xAA.toByte()
+
+                  val setRc = conn.controlTransfer(
+                      0x21, HID_SET_REPORT, FEATURE_REPORT_VALUE,
+                      HID_DATA_INTERFACE, arm, arm.size, TIMEOUT_MS
+                  )
+                  if (setRc != REPORT_LEN) return -1
+
+                  val resp = ByteArray(REPORT_LEN)
+                  return conn.controlTransfer(
+                      0xA1, HID_GET_REPORT, FEATURE_REPORT_VALUE,
+                      HID_DATA_INTERFACE, resp, resp.size, TIMEOUT_MS
+                  )
+                  // Device may disconnect/re-enumerate immediately after this call.
+                  // Watch for recovery VID:PID 0000:2244 separately.
+              }
+          }
+          KOTLIN
+
+          python3 - <<'PY'
+          from pathlib import Path
+          import json
+
+          E=Path('/tmp/v14/evidence')
+          result={
+              'required_phone':'Samsung Galaxy S25+',
+              'physical_transport':'USB-C to DSP USB-C only',
+              'runtime_vid_pid_project_evidence':'6324:1719',
+              'recovery_vid_pid_project_evidence':'0000:2244',
+              'active_usb_mode_static':'AUDIO_MIC',
+              'hid_data_interface':4,
+              'feature_report_bytes':8,
+              'safe_preflight_sequence':[
+                  'SET_REPORT Feature, payload 8x00 -> clears pc_upgrade',
+                  'GET_REPORT Feature -> expect first byte 0x00 and no FlashBoot handoff'
+              ],
+              'entry_sequence':[
+                  'SET_REPORT Feature, payload AA 00 00 00 00 00 00 00 -> pc_upgrade=1',
+                  'GET_REPORT Feature -> first response byte 0x55; firmware calls start_up_grate(AppResourceUsbDevice)',
+                  'start_up_grate sets PC/updata flags and jumps to address 0',
+                  'host watches detach/re-enumeration as recovery 0000:2244'
+              ],
+              'static_usb_only_flashboot_entry_proven':True,
+              'full_flash_update_protocol_execution_proven':False,
+              'live_usb_test_permitted':False,
+              'flash_write_permitted':False
+          }
+          (E/'V14_RESULT.json').write_text(json.dumps(result,indent=2)+'\n')
+
+          report=[
+              '# BP1048P4 V14 — USB-C-only Feature Report → FlashBoot entry proof','',
+              '- Required path: **Samsung Galaxy S25+ → USB-C → DSP USB-C only**.',
+              '- Build config statically selects `AUDIO_MIC`, USB communication, and `FLASH_BOOT_EN=1`.',
+              '- HID data interface for `AUDIO_MIC` is **4**.',
+              '- Feature report size is **8 bytes**.',
+              '- Arm request: `21 09 00 03 04 00 08 00`, payload `AA 00 00 00 00 00 00 00`.',
+              '- Trigger request: `A1 01 00 03 04 00 08 00`; armed response starts with `55`.',
+              '- Firmware then calls `start_up_grate(AppResourceUsbDevice)`, sets `PC=1`, `updata=1`, and jumps to address `0`.',
+              '- This proves a static USB-only route into FlashBoot. It does **not** yet authorize a live request or any flash erase/write.',
+              '- Runtime opcode `0x11` remains forbidden.'
+          ]
+          (E/'V14_REPORT.md').write_text('\n'.join(report)+'\n')
+          PY
+
+          cat "$E/V14_REPORT.md" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Final fail-closed assertions
+        shell: bash
+        run: |
+          set -euo pipefail
+          for v in SOLDER_ALLOWED BOARD_MOD_ALLOWED JTAG_ALLOWED SDP_ALLOWED AICE_ALLOWED HARDWARE_PROBE_ALLOWED LIVE_USB_COMMAND_ALLOWED FLASH_READ_ALLOWED FLASH_WRITE_ALLOWED FLASH_ERASE_ALLOWED; do
+            test "${!v}" = "NO"
+          done
+
+          python3 - <<'PY'
+          from pathlib import Path
+          import json
+
+          E=Path('/tmp/v14/evidence')
+          s=(E/'SAFETY.txt').read_text()
+          for x in [
+              'REQUIRED_PATH=Samsung Galaxy S25+ -> USB-C cable -> DSP USB-C only',
+              'SOLDER_ALLOWED=NO','BOARD_MOD_ALLOWED=NO','JTAG_ALLOWED=NO',
+              'SDP_ALLOWED=NO','AICE_ALLOWED=NO','HARDWARE_PROBE_ALLOWED=NO',
+              'LIVE_USB_COMMAND_ALLOWED=NO','TARGET_CONNECTED=NO',
+              'USB_CONTROL_TRANSFER_EXECUTED=NO',
+              'FLASH_READ_EXECUTED=NO','FLASH_WRITE_EXECUTED=NO','FLASH_ERASE_EXECUTED=NO',
+              'RUNTIME_OPCODE_0x11_EXECUTED=NO'
+          ]:
+              assert x in s, x
+
+          assert (E/'SDK_COMMIT.txt').read_text().strip() == \
+              '8105bd864b04995d81c9f9ae77cb158259f39015'
+
+          r=json.loads((E/'V14_RESULT.json').read_text())
+          assert r['static_usb_only_flashboot_entry_proven'] is True
+          assert r['hid_data_interface'] == 4
+          assert r['feature_report_bytes'] == 8
+          assert r['live_usb_test_permitted'] is False
+          assert r['flash_write_permitted'] is False
+
+          print('V14_USB_C_ONLY_FEATURE_REPORT_FLASHBOOT_ENTRY_PROOF_COMPLETE=YES')
+          print('USB_ONLY_FLASHBOOT_ENTRY_STATIC_PROVEN=YES')
+          print('HID_DATA_INTERFACE=4')
+          print('FEATURE_REPORT_BYTES=8')
+          print('LIVE_USB_COMMAND_ALLOWED=NO')
+          print('FLASH_WRITE_ALLOWED=NO')
+          print('SOLDER_ALLOWED=NO')
+          print('BOARD_MOD_ALLOWED=NO')
+          print('JTAG_ALLOWED=NO')
+          print('SDP_ALLOWED=NO')
+          print('AICE_ALLOWED=NO')
+          PY
+
+      - name: Package V14 evidence
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /tmp/v14/evidence
+          zip -9 -r /tmp/OKN_BP1048P4_V14_USB_C_ONLY_FLASHBOOT_ENTRY_EVIDENCE.zip . >/dev/null
+          sha256sum /tmp/OKN_BP1048P4_V14_USB_C_ONLY_FLASHBOOT_ENTRY_EVIDENCE.zip \
+            > /tmp/OKN_BP1048P4_V14_USB_C_ONLY_FLASHBOOT_ENTRY_EVIDENCE.zip.sha256
+
+      - name: Upload V14 evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: OKN-BP1048P4-V14-USB-C-ONLY-FLASHBOOT-ENTRY-EVIDENCE
+          path: |
+            /tmp/OKN_BP1048P4_V14_USB_C_ONLY_FLASHBOOT_ENTRY_EVIDENCE.zip
+            /tmp/OKN_BP1048P4_V14_USB_C_ONLY_FLASHBOOT_ENTRY_EVIDENCE.zip.sha256
+            /tmp/v14/evidence/V14_REPORT.md
+            /tmp/v14/evidence/V14_RESULT.json
+            /tmp/v14/evidence/V14_BUILD_USB_DESCRIPTOR_PROOF.json
+            /tmp/v14/evidence/V14_FEATURE_REPORT_HANDLER_PROOF.json
+            /tmp/v14/evidence/V14_FLASHBOOT_HANDOFF_PROOF.json
+            /tmp/v14/evidence/V14_ANDROID_USB_REFERENCE.kt
+            /tmp/v14/evidence/SDK_COMMIT.txt
+            /tmp/v14/evidence/SAFETY.txt
+          if-no-files-found: warn
+          retention-days: 90
