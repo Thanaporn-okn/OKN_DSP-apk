@@ -1,0 +1,769 @@
+name: Build SpeakerBox TH
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main, master ]
+    paths:
+      - '.github/workflows/speakerbox-th-build.yml'
+
+permissions:
+  contents: read
+
+env:
+  APP_NAME: SpeakerBoxTH
+  PACKAGE_NAME: com.okn.speakerboxth
+  COMPILE_SDK: '35'
+  MIN_SDK: '26'
+  TARGET_SDK: '35'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Gradle 8.9
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: Prepare Android SDK
+        shell: bash
+        run: |
+          set -euo pipefail
+          SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          if [ ! -x "$SDKMANAGER" ]; then
+            SDKMANAGER="$(find "$ANDROID_HOME/cmdline-tools" -type f -name sdkmanager | sort | tail -n 1)"
+          fi
+          yes | "$SDKMANAGER" --licenses >/dev/null 2>&1 || true
+          "$SDKMANAGER" "platforms;android-${COMPILE_SDK}" "build-tools;35.0.0" "platform-tools"
+
+      - name: Generate complete Android project
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          rm -rf generated-app
+          mkdir -p generated-app/app/src/main/java/com/okn/speakerboxth
+          mkdir -p generated-app/app/src/main/res/values
+
+          cat > generated-app/settings.gradle.kts <<'EOF'
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+          rootProject.name = "SpeakerBoxTH"
+          include(":app")
+          EOF
+
+          cat > generated-app/build.gradle.kts <<'EOF'
+          plugins {
+              id("com.android.application") version "8.7.3" apply false
+              id("org.jetbrains.kotlin.android") version "1.9.24" apply false
+          }
+          EOF
+
+          cat > generated-app/gradle.properties <<'EOF'
+          org.gradle.jvmargs=-Xmx3g -Dfile.encoding=UTF-8
+          android.useAndroidX=true
+          kotlin.code.style=official
+          android.nonTransitiveRClass=true
+          EOF
+
+          cat > generated-app/app/build.gradle.kts <<'EOF'
+          plugins {
+              id("com.android.application")
+              id("org.jetbrains.kotlin.android")
+          }
+
+          android {
+              namespace = "com.okn.speakerboxth"
+              compileSdk = 35
+
+              defaultConfig {
+                  applicationId = "com.okn.speakerboxth"
+                  minSdk = 26
+                  targetSdk = 35
+                  versionCode = 1
+                  versionName = "0.1.0"
+              }
+
+              buildFeatures {
+                  compose = true
+              }
+
+              composeOptions {
+                  kotlinCompilerExtensionVersion = "1.5.14"
+              }
+
+              compileOptions {
+                  sourceCompatibility = JavaVersion.VERSION_17
+                  targetCompatibility = JavaVersion.VERSION_17
+              }
+              kotlinOptions {
+                  jvmTarget = "17"
+              }
+
+              packaging {
+                  resources.excludes += "/META-INF/{AL2.0,LGPL2.1}"
+              }
+          }
+
+          dependencies {
+              val composeBom = platform("androidx.compose:compose-bom:2024.10.01")
+              implementation(composeBom)
+              androidTestImplementation(composeBom)
+
+              implementation("androidx.activity:activity-compose:1.9.3")
+              implementation("androidx.compose.ui:ui")
+              implementation("androidx.compose.ui:ui-tooling-preview")
+              implementation("androidx.compose.material3:material3")
+              implementation("androidx.compose.foundation:foundation")
+              implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.7")
+              implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.8.7")
+              debugImplementation("androidx.compose.ui:ui-tooling")
+          }
+          EOF
+
+          cat > generated-app/app/src/main/AndroidManifest.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <uses-permission android:name="android.permission.INTERNET" />
+              <application
+                  android:allowBackup="true"
+                  android:label="SpeakerBox TH"
+                  android:supportsRtl="true"
+                  android:theme="@style/Theme.SpeakerBoxTH">
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+              </application>
+          </manifest>
+          EOF
+
+          cat > generated-app/app/src/main/res/values/styles.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <resources>
+              <style name="Theme.SpeakerBoxTH" parent="android:style/Theme.Material.Light.NoActionBar">
+                  <item name="android:fontFamily">sans</item>
+                  <item name="android:windowLightStatusBar">true</item>
+                  <item name="android:statusBarColor">#F7F8FA</item>
+                  <item name="android:navigationBarColor">#FFFFFF</item>
+              </style>
+          </resources>
+          EOF
+
+          cat > generated-app/app/src/main/java/com/okn/speakerboxth/MainActivity.kt <<'EOF'
+          package com.okn.speakerboxth
+
+          import android.os.Bundle
+          import androidx.activity.ComponentActivity
+          import androidx.activity.compose.setContent
+          import androidx.compose.foundation.Canvas
+          import androidx.compose.foundation.background
+          import androidx.compose.foundation.clickable
+          import androidx.compose.foundation.layout.*
+          import androidx.compose.foundation.lazy.LazyColumn
+          import androidx.compose.foundation.lazy.items
+          import androidx.compose.foundation.shape.CircleShape
+          import androidx.compose.foundation.shape.RoundedCornerShape
+          import androidx.compose.foundation.text.KeyboardOptions
+          import androidx.compose.material3.*
+          import androidx.compose.runtime.*
+          import androidx.compose.ui.Alignment
+          import androidx.compose.ui.Modifier
+          import androidx.compose.ui.geometry.Offset
+          import androidx.compose.ui.graphics.Color
+          import androidx.compose.ui.graphics.Path
+          import androidx.compose.ui.graphics.StrokeCap
+          import androidx.compose.ui.graphics.drawscope.Stroke
+          import androidx.compose.ui.text.font.FontWeight
+          import androidx.compose.ui.text.input.KeyboardType
+          import androidx.compose.ui.unit.dp
+          import androidx.compose.ui.unit.sp
+          import kotlin.math.PI
+          import kotlin.math.max
+          import kotlin.math.pow
+          import kotlin.math.roundToInt
+          import kotlin.math.sqrt
+
+          private val SamsungBlue = Color(0xFF0B63F6)
+          private val Bg = Color(0xFFF6F7F9)
+          private val Card = Color.White
+          private val Muted = Color(0xFF68707C)
+          private val Good = Color(0xFF159447)
+
+          data class Speaker(
+              val brand: String,
+              val model: String,
+              val sizeInch: Int,
+              val type: String,
+              val rmsW: Int,
+              val ohm: Int,
+              val fs: Double,
+              val qts: Double,
+              val qes: Double,
+              val vasL: Double,
+              val re: Double,
+              val sdCm2: Double,
+              val xmaxMm: Double,
+              val sensitivityDb: Double,
+              val thailand: Boolean = true
+          ) {
+              val fullName get() = "$brand $model"
+          }
+
+          data class BoxResult(
+              val boxType: String,
+              val netVolumeL: Double,
+              val fbHz: Double?,
+              val portDiameterMm: Int?,
+              val portLengthMm: Int?,
+              val impedanceOhm: Double,
+              val splDb: Double,
+              val outerWmm: Int,
+              val outerHmm: Int,
+              val outerDmm: Int,
+              val woodMm: Int,
+              val cutList: List<String>
+          )
+
+          private val speakers = listOf(
+              Speaker("P.Audio", "P150/2226 v3", 15, "Subwoofer", 800, 8, 54.0, .50, .56, 72.45, 5.4, 855.0, 5.5, 97.0),
+              Speaker("P.Audio", "SN-15MB", 15, "Mid Bass", 600, 8, 48.0, .33, .36, 96.0, 5.3, 855.0, 5.0, 98.0),
+              Speaker("Eminence", "Kappa Pro-15A", 15, "Woofer", 500, 8, 39.0, .38, .41, 117.0, 5.1, 856.0, 4.8, 101.0),
+              Speaker("Eminence", "Delta-12A", 12, "Woofer", 400, 8, 55.0, .43, .47, 61.0, 5.0, 532.0, 4.8, 98.3),
+              Speaker("Lavoce", "SAF184.03", 18, "Subwoofer", 1200, 8, 38.0, .35, .38, 155.0, 5.2, 1210.0, 9.0, 97.0),
+              Speaker("Lavoce", "WAF154.00", 15, "Woofer", 800, 8, 43.0, .32, .35, 110.0, 5.1, 855.0, 7.0, 98.0),
+              Speaker("KANE", "12W500", 12, "Woofer", 500, 8, 45.0, .42, .46, 68.0, 5.4, 530.0, 5.0, 97.0),
+              Speaker("KANE", "15W700", 15, "Subwoofer", 700, 8, 42.0, .39, .43, 105.0, 5.2, 855.0, 6.0, 98.0)
+          )
+
+          class MainActivity : ComponentActivity() {
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+                  setContent { SpeakerBoxApp() }
+              }
+          }
+
+          @Composable
+          fun SpeakerBoxApp() {
+              var page by remember { mutableIntStateOf(0) }
+              var selected by remember { mutableStateOf(speakers.first()) }
+              var showDesigner by remember { mutableStateOf(false) }
+              var result by remember { mutableStateOf<BoxResult?>(null) }
+
+              MaterialTheme(
+                  colorScheme = lightColorScheme(
+                      primary = SamsungBlue,
+                      background = Bg,
+                      surface = Card,
+                      onSurface = Color(0xFF17191C)
+                  )
+              ) {
+                  Scaffold(
+                      containerColor = Bg,
+                      bottomBar = {
+                          NavigationBar(containerColor = Color.White) {
+                              NavigationBarItem(
+                                  selected = page == 0,
+                                  onClick = { page = 0; showDesigner = false },
+                                  icon = { Text("⌂", fontSize = 22.sp) },
+                                  label = { Text("ออกแบบ") }
+                              )
+                              NavigationBarItem(
+                                  selected = page == 1,
+                                  onClick = { page = 1; showDesigner = false },
+                                  icon = { Text("◉", fontSize = 20.sp) },
+                                  label = { Text("ดอกลำโพง") }
+                              )
+                              NavigationBarItem(
+                                  selected = page == 2,
+                                  onClick = { page = 2; showDesigner = false },
+                                  icon = { Text("▣", fontSize = 20.sp) },
+                                  label = { Text("ข้อมูล") }
+                              )
+                          }
+                      }
+                  ) { pad ->
+                      Box(Modifier.padding(pad)) {
+                          when {
+                              showDesigner -> DesignerScreen(
+                                  selected = selected,
+                                  onSpeaker = { selected = it },
+                                  onBack = { showDesigner = false },
+                                  onResult = { result = it }
+                              )
+                              result != null && page == 0 -> ResultScreen(result!!) { result = null }
+                              page == 0 -> HomeScreen(
+                                  selected = selected,
+                                  onCar = { showDesigner = true },
+                                  onPa = { showDesigner = true }
+                              )
+                              page == 1 -> SpeakerScreen(selected) { selected = it }
+                              else -> InfoScreen()
+                          }
+                      }
+                  }
+              }
+          }
+
+          @Composable
+          private fun PageTitle(title: String, subtitle: String? = null) {
+              Column(Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 16.dp)) {
+                  Text(title, fontSize = 28.sp, fontWeight = FontWeight.Bold)
+                  if (subtitle != null) Text(subtitle, color = Muted, fontSize = 15.sp)
+              }
+          }
+
+          @Composable
+          fun HomeScreen(selected: Speaker, onCar: () -> Unit, onPa: () -> Unit) {
+              LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 24.dp)) {
+                  item { PageTitle("SpeakerBox TH", "ออกแบบตู้ลำโพงรถยนต์และ PA • คำนวณแบบตัดไม้") }
+                  item {
+                      ModeCard("รถยนต์", "ตู้ซับ ตู้กลาง ตู้เบส สำหรับติดตั้งในรถ", "CAR", onCar)
+                      Spacer(Modifier.height(12.dp))
+                      ModeCard("PA / เครื่องเสียง", "ตู้ซับ ตู้กลาง ตู้เสียงแหลม สำหรับงานเวที", "PA", onPa)
+                  }
+                  item {
+                      SectionTitle("ดอกที่เลือก")
+                      SpeakerCard(selected, false) { }
+                      SectionTitle("เครื่องมือ")
+                      SimpleCard {
+                          Text("✓ คำนวณ Sealed / Bass Reflex", fontWeight = FontWeight.SemiBold)
+                          Text("✓ คำนวณปริมาตรสุทธิ + พอร์ต + SPL", color = Muted)
+                          Text("✓ สรุปขนาดตู้ + รายการตัดไม้", color = Muted)
+                          Text("✓ รองรับจำนวนดอกและการต่อ Ω", color = Muted)
+                      }
+                  }
+              }
+          }
+
+          @Composable
+          private fun ModeCard(title: String, desc: String, badge: String, onClick: () -> Unit) {
+              Card(
+                  Modifier.fillMaxWidth().padding(horizontal = 20.dp).height(145.dp).clickable(onClick = onClick),
+                  shape = RoundedCornerShape(28.dp),
+                  colors = CardDefaults.cardColors(containerColor = SamsungBlue)
+              ) {
+                  Row(Modifier.fillMaxSize().padding(22.dp), verticalAlignment = Alignment.CenterVertically) {
+                      Column(Modifier.weight(1f)) {
+                          Text(title, color = Color.White, fontSize = 24.sp, fontWeight = FontWeight.Bold)
+                          Spacer(Modifier.height(6.dp))
+                          Text(desc, color = Color.White.copy(alpha = .85f), fontSize = 14.sp)
+                      }
+                      Box(Modifier.size(64.dp).background(Color.White.copy(alpha=.15f), CircleShape), contentAlignment = Alignment.Center) {
+                          Text(badge, color = Color.White, fontWeight = FontWeight.Bold)
+                      }
+                  }
+              }
+          }
+
+          @Composable
+          fun SpeakerScreen(selected: Speaker, onSelect: (Speaker) -> Unit) {
+              var search by remember { mutableStateOf("") }
+              val filtered = speakers.filter { it.fullName.contains(search, true) || it.sizeInch.toString() in search }
+              Column(Modifier.fillMaxSize()) {
+                  PageTitle("เลือกดอกลำโพง", "ฐานข้อมูลเริ่มต้นสำหรับรุ่นที่พบใช้ในไทย")
+                  OutlinedTextField(
+                      value = search,
+                      onValueChange = { search = it },
+                      modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp),
+                      placeholder = { Text("ค้นหายี่ห้อ / รุ่น / ขนาด") },
+                      shape = RoundedCornerShape(18.dp),
+                      singleLine = true
+                  )
+                  Spacer(Modifier.height(10.dp))
+                  LazyColumn(contentPadding = PaddingValues(bottom = 18.dp)) {
+                      items(filtered) { s ->
+                          SpeakerCard(s, s == selected) { onSelect(s) }
+                      }
+                  }
+              }
+          }
+
+          @Composable
+          private fun SpeakerCard(s: Speaker, selected: Boolean, onClick: () -> Unit) {
+              Card(
+                  Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 6.dp).clickable(onClick = onClick),
+                  shape = RoundedCornerShape(22.dp),
+                  colors = CardDefaults.cardColors(containerColor = if (selected) Color(0xFFEAF2FF) else Color.White)
+              ) {
+                  Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
+                      Box(Modifier.size(72.dp).background(Color(0xFF15171A), CircleShape), contentAlignment = Alignment.Center) {
+                          Text("${s.sizeInch}\"", color = Color.White, fontWeight = FontWeight.Bold)
+                      }
+                      Spacer(Modifier.width(14.dp))
+                      Column(Modifier.weight(1f)) {
+                          Text(s.fullName, fontWeight = FontWeight.Bold, fontSize = 17.sp)
+                          Text("${s.sizeInch}\" ${s.type} • ${s.rmsW} W AES • ${s.ohm} Ω", color = Muted, fontSize = 13.sp)
+                          Text("Fs ${s.fs.toInt()} Hz • Qts ${s.qts} • Vas ${s.vasL} L", color = Muted, fontSize = 13.sp)
+                          if (s.thailand) Text("● มีข้อมูลสำหรับตลาดไทย", color = Good, fontSize = 12.sp)
+                      }
+                  }
+              }
+          }
+
+          @Composable
+          fun DesignerScreen(selected: Speaker, onSpeaker: (Speaker) -> Unit, onBack: () -> Unit, onResult: (BoxResult) -> Unit) {
+              var count by remember { mutableIntStateOf(1) }
+              var parallel by remember { mutableStateOf(true) }
+              var reflex by remember { mutableStateOf(true) }
+              var fbText by remember { mutableStateOf("35") }
+              var woodText by remember { mutableStateOf("18") }
+              var portText by remember { mutableStateOf("100") }
+              var menu by remember { mutableStateOf(false) }
+
+              LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 28.dp)) {
+                  item {
+                      Row(Modifier.padding(20.dp), verticalAlignment = Alignment.CenterVertically) {
+                          Text("‹", fontSize = 34.sp, modifier = Modifier.clickable(onClick = onBack))
+                          Spacer(Modifier.width(12.dp))
+                          Text("ออกแบบตู้ลำโพง", fontSize = 27.sp, fontWeight = FontWeight.Bold)
+                      }
+                  }
+                  item {
+                      SectionTitle("ดอกลำโพง")
+                      Box {
+                          SpeakerCard(selected, true) { menu = true }
+                          DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
+                              speakers.forEach { s ->
+                                  DropdownMenuItem(
+                                      text = { Text(s.fullName) },
+                                      onClick = { onSpeaker(s); menu = false }
+                                  )
+                              }
+                          }
+                      }
+                  }
+                  item {
+                      SectionTitle("จำนวนและการต่อ")
+                      SimpleCard {
+                          Row(verticalAlignment = Alignment.CenterVertically) {
+                              Text("จำนวนดอก", Modifier.weight(1f))
+                              FilledTonalButton(onClick = { if (count > 1) count-- }) { Text("−") }
+                              Text("$count", Modifier.padding(horizontal = 16.dp), fontWeight = FontWeight.Bold)
+                              FilledTonalButton(onClick = { if (count < 8) count++ }) { Text("+") }
+                          }
+                          Spacer(Modifier.height(10.dp))
+                          Row {
+                              FilterChip(parallel, { parallel = true }, { Text("ขนาน (Parallel)") })
+                              Spacer(Modifier.width(8.dp))
+                              FilterChip(!parallel, { parallel = false }, { Text("อนุกรม (Series)") })
+                          }
+                      }
+                  }
+                  item {
+                      SectionTitle("ประเภทตู้")
+                      SimpleCard {
+                          Row {
+                              FilterChip(reflex, { reflex = true }, { Text("Bass Reflex") })
+                              Spacer(Modifier.width(8.dp))
+                              FilterChip(!reflex, { reflex = false }, { Text("Sealed") })
+                          }
+                          Spacer(Modifier.height(12.dp))
+                          NumberField("ความถี่จูน Fb (Hz)", fbText) { fbText = it }
+                          Spacer(Modifier.height(10.dp))
+                          if (reflex) NumberField("เส้นผ่านศูนย์กลางพอร์ต (mm)", portText) { portText = it }
+                          Spacer(Modifier.height(10.dp))
+                          NumberField("ความหนาไม้ (mm)", woodText) { woodText = it }
+                      }
+                  }
+                  item {
+                      Button(
+                          onClick = {
+                              onResult(calculateBox(
+                                  selected,
+                                  count,
+                                  parallel,
+                                  reflex,
+                                  fbText.toDoubleOrNull() ?: 35.0,
+                                  portText.toDoubleOrNull() ?: 100.0,
+                                  woodText.toIntOrNull() ?: 18
+                              ))
+                              onBack()
+                          },
+                          modifier = Modifier.fillMaxWidth().padding(20.dp).height(58.dp),
+                          shape = RoundedCornerShape(20.dp)
+                      ) { Text("คำนวณและสร้างแบบตัดไม้", fontWeight = FontWeight.Bold) }
+                  }
+              }
+          }
+
+          @Composable
+          private fun NumberField(label: String, value: String, onChange: (String) -> Unit) {
+              OutlinedTextField(
+                  value = value,
+                  onValueChange = { onChange(it.filter { c -> c.isDigit() || c == '.' }) },
+                  label = { Text(label) },
+                  modifier = Modifier.fillMaxWidth(),
+                  shape = RoundedCornerShape(16.dp),
+                  keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number)
+              )
+          }
+
+          private fun calculateBox(
+              s: Speaker,
+              count: Int,
+              parallel: Boolean,
+              reflex: Boolean,
+              targetFb: Double,
+              portDiameterMm: Double,
+              woodMm: Int
+          ): BoxResult {
+              val singleVb = if (reflex) {
+                  15.0 * s.vasL * s.qts.pow(2.87)
+              } else {
+                  val qtc = 0.707
+                  s.vasL / max(0.15, (qtc / s.qts).pow(2.0) - 1.0)
+              }
+              val vb = (singleVb * count).coerceIn(8.0, 500.0)
+              val fb = if (reflex) targetFb.coerceIn(20.0, 120.0) else null
+              val dCm = portDiameterMm.coerceIn(50.0, 300.0) / 10.0
+              val portCm = if (reflex) {
+                  ((23562.5 * dCm.pow(2.0)) / ((fb!!).pow(2.0) * vb) - 0.732 * dCm).coerceAtLeast(2.0)
+              } else null
+
+              val impedance = if (parallel) s.ohm.toDouble() / count else s.ohm.toDouble() * count
+              val spl = s.sensitivityDb + 10.0 * kotlin.math.log10(max(1.0, s.rmsW.toDouble() * count))
+
+              val internalM3 = vb / 1000.0
+              val ratioW = 1.30
+              val ratioH = 1.00
+              val ratioD = 1.10
+              val baseM = (internalM3 / (ratioW * ratioH * ratioD)).pow(1.0 / 3.0)
+              var iw = (baseM * ratioW * 1000).roundToInt()
+              var ih = (baseM * ratioH * 1000).roundToInt()
+              var id = (baseM * ratioD * 1000).roundToInt()
+              val minFace = (s.sizeInch * 25.4 + 90).roundToInt()
+              if (iw < minFace) iw = minFace
+              if (ih < minFace) ih = minFace
+              val ow = iw + woodMm * 2
+              val oh = ih + woodMm * 2
+              val od = id + woodMm * 2
+              val cuts = listOf(
+                  "บน (Top) — ${ow} × ${od} mm — 1 ชิ้น",
+                  "ล่าง (Bottom) — ${ow} × ${od} mm — 1 ชิ้น",
+                  "หน้า (Front) — ${ow} × ${oh - woodMm * 2} mm — 1 ชิ้น",
+                  "หลัง (Back) — ${ow} × ${oh - woodMm * 2} mm — 1 ชิ้น",
+                  "ซ้าย (Left) — ${od - woodMm * 2} × ${oh - woodMm * 2} mm — 1 ชิ้น",
+                  "ขวา (Right) — ${od - woodMm * 2} × ${oh - woodMm * 2} mm — 1 ชิ้น"
+              )
+              return BoxResult(
+                  if (reflex) "Bass Reflex" else "Sealed",
+                  vb,
+                  fb,
+                  if (reflex) portDiameterMm.roundToInt() else null,
+                  if (reflex) (portCm!! * 10.0).roundToInt() else null,
+                  impedance,
+                  spl,
+                  ow, oh, od, woodMm, cuts
+              )
+          }
+
+          @Composable
+          fun ResultScreen(r: BoxResult, onBack: () -> Unit) {
+              var tab by remember { mutableIntStateOf(0) }
+              Column(Modifier.fillMaxSize()) {
+                  Row(Modifier.padding(20.dp), verticalAlignment = Alignment.CenterVertically) {
+                      Text("‹", fontSize = 34.sp, modifier = Modifier.clickable(onClick = onBack))
+                      Spacer(Modifier.width(12.dp))
+                      Text("ผลการออกแบบ", fontSize = 27.sp, fontWeight = FontWeight.Bold)
+                  }
+                  Row(Modifier.padding(horizontal = 20.dp)) {
+                      listOf("สรุป", "แบบตัดไม้", "กราฟ").forEachIndexed { i, s ->
+                          FilterChip(tab == i, { tab = i }, { Text(s) }, modifier = Modifier.padding(end = 8.dp))
+                      }
+                  }
+                  when (tab) {
+                      0 -> SummaryTab(r)
+                      1 -> CutTab(r)
+                      else -> GraphTab(r)
+                  }
+              }
+          }
+
+          @Composable
+          private fun SummaryTab(r: BoxResult) {
+              LazyColumn(contentPadding = PaddingValues(20.dp)) {
+                  item {
+                      SimpleCard(noOuterPadding = true) {
+                          ResultRow("ประเภทตู้", r.boxType)
+                          ResultRow("ปริมาตรสุทธิ", "%.1f ลิตร".format(r.netVolumeL))
+                          r.fbHz?.let { ResultRow("ความถี่จูน Fb", "%.1f Hz".format(it)) }
+                          if (r.portLengthMm != null) ResultRow("พอร์ต", "Ø${r.portDiameterMm} × ${r.portLengthMm} mm")
+                          ResultRow("อิมพีแดนซ์รวม", "%.2f Ω".format(r.impedanceOhm))
+                          ResultRow("SPL สูงสุดโดยประมาณ", "%.1f dB @ 1m".format(r.splDb))
+                      }
+                      Spacer(Modifier.height(14.dp))
+                      SimpleCard(noOuterPadding = true) {
+                          Text("ขนาดตู้ภายนอก", fontWeight = FontWeight.Bold, fontSize = 18.sp)
+                          Spacer(Modifier.height(10.dp))
+                          ResultRow("กว้าง W", "${r.outerWmm} mm")
+                          ResultRow("สูง H", "${r.outerHmm} mm")
+                          ResultRow("ลึก D", "${r.outerDmm} mm")
+                          ResultRow("ไม้", "${r.woodMm} mm")
+                      }
+                      Spacer(Modifier.height(14.dp))
+                      Text("หมายเหตุ: ผลนี้เป็นค่าคำนวณเริ่มต้น ควรตรวจสอบ excursion, port velocity และกำลังจริงก่อนสร้างตู้ใช้งานหนัก", color = Muted, fontSize = 13.sp)
+                  }
+              }
+          }
+
+          @Composable
+          private fun CutTab(r: BoxResult) {
+              LazyColumn(contentPadding = PaddingValues(20.dp)) {
+                  item { Text("รายการตัดไม้ (${r.woodMm} mm)", fontSize = 20.sp, fontWeight = FontWeight.Bold) }
+                  items(r.cutList) { line ->
+                      Card(Modifier.fillMaxWidth().padding(top = 10.dp), shape = RoundedCornerShape(18.dp)) {
+                          Text(line, Modifier.padding(16.dp), fontWeight = FontWeight.Medium)
+                      }
+                  }
+                  item {
+                      Spacer(Modifier.height(14.dp))
+                      SimpleCard(noOuterPadding = true) {
+                          Text("แนะนำแผ่นมาตรฐาน 1220 × 2440 mm", fontWeight = FontWeight.Bold)
+                          Text("เผื่อรอยใบเลื่อย 3–5 mm และตรวจขนาดจริงก่อนตัด", color = Muted)
+                      }
+                  }
+              }
+          }
+
+          @Composable
+          private fun GraphTab(r: BoxResult) {
+              LazyColumn(contentPadding = PaddingValues(20.dp)) {
+                  item {
+                      Text("กราฟจำลองเบื้องต้น", fontSize = 20.sp, fontWeight = FontWeight.Bold)
+                      Spacer(Modifier.height(10.dp))
+                      SimpleCard(noOuterPadding = true) {
+                          Text("การตอบสนองความถี่", fontWeight = FontWeight.Bold)
+                          ResponseGraph(r.fbHz ?: 55.0)
+                      }
+                      Spacer(Modifier.height(14.dp))
+                      Text("กราฟนี้เป็น visualization เบื้องต้นของจุดจูน ไม่ใช่ simulation T/S เต็มรูปแบบ", color = Muted, fontSize = 13.sp)
+                  }
+              }
+          }
+
+          @Composable
+          private fun ResponseGraph(fb: Double) {
+              Canvas(Modifier.fillMaxWidth().height(220.dp).padding(vertical = 12.dp)) {
+                  val w = size.width
+                  val h = size.height
+                  repeat(5) { i ->
+                      val y = h * i / 4f
+                      drawLine(Color(0xFFE4E7EB), Offset(0f,y), Offset(w,y), 1f)
+                  }
+                  val path = Path()
+                  for (i in 0..100) {
+                      val x = w * i / 100f
+                      val hz = 20.0 + i * 2.8
+                      val low = 1.0 / (1.0 + (fb / max(1.0, hz)).pow(4.0))
+                      val gentle = 1.0 - 0.10 * (i / 100.0)
+                      val value = (low * gentle).coerceIn(0.0, 1.0)
+                      val y = (h - (value * h * .82 + h * .08)).toFloat()
+                      if (i == 0) path.moveTo(x,y) else path.lineTo(x,y)
+                  }
+                  drawPath(path, SamsungBlue, style = Stroke(width = 7f, cap = StrokeCap.Round))
+              }
+          }
+
+          @Composable
+          private fun ResultRow(a: String, b: String) {
+              Row(Modifier.fillMaxWidth().padding(vertical = 8.dp)) {
+                  Text(a, Modifier.weight(1f), color = Muted)
+                  Text(b, fontWeight = FontWeight.SemiBold)
+              }
+              HorizontalDivider(color = Color(0xFFEEF0F3))
+          }
+
+          @Composable
+          fun InfoScreen() {
+              LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 24.dp)) {
+                  item { PageTitle("ข้อมูล", "หลักการคำนวณและฐานข้อมูล") }
+                  item {
+                      SectionTitle("T/S Parameters")
+                      SimpleCard {
+                          Text("ค่าที่ใช้", fontWeight = FontWeight.Bold)
+                          Text("Fs • Qts • Qes • Vas • Re • Sd • Xmax • Sensitivity • Power", color = Muted)
+                          Spacer(Modifier.height(10.dp))
+                          Text("แนวทางฐานข้อมูล", fontWeight = FontWeight.Bold)
+                          Text("เก็บสเปกหลักจากผู้ผลิต และแยกสถานะการมีขายในไทยออกจากข้อมูลวิศวกรรม", color = Muted)
+                      }
+                      SectionTitle("เวอร์ชันนี้")
+                      SimpleCard {
+                          Text("SpeakerBox TH MVP", fontWeight = FontWeight.Bold)
+                          Text("UI แนว One UI • Android Jetpack Compose", color = Muted)
+                          Text("ฐานข้อมูลในตัว 8 รุ่น • พร้อมต่อยอด API/JSON sync", color = Muted)
+                      }
+                  }
+              }
+          }
+
+          @Composable
+          private fun SectionTitle(text: String) {
+              Text(text, Modifier.padding(start = 20.dp, top = 18.dp, bottom = 7.dp), fontSize = 19.sp, fontWeight = FontWeight.Bold)
+          }
+
+          @Composable
+          private fun SimpleCard(noOuterPadding: Boolean = false, content: @Composable ColumnScope.() -> Unit) {
+              Card(
+                  modifier = if (noOuterPadding) Modifier.fillMaxWidth() else Modifier.fillMaxWidth().padding(horizontal = 20.dp),
+                  shape = RoundedCornerShape(22.dp),
+                  colors = CardDefaults.cardColors(containerColor = Color.White)
+              ) {
+                  Column(Modifier.padding(18.dp), content = content)
+              }
+          }
+          EOF
+
+      - name: Build debug APK
+        working-directory: generated-app
+        shell: bash
+        run: |
+          set -euo pipefail
+          gradle --no-daemon --stacktrace :app:assembleDebug
+          cp app/build/outputs/apk/debug/app-debug.apk ../SpeakerBoxTH-debug.apk
+
+      - name: Verify APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -s SpeakerBoxTH-debug.apk
+          ls -lh SpeakerBoxTH-debug.apk
+          sha256sum SpeakerBoxTH-debug.apk | tee SpeakerBoxTH-debug.apk.sha256
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: SpeakerBoxTH-debug-apk
+          path: |
+            SpeakerBoxTH-debug.apk
+            SpeakerBoxTH-debug.apk.sha256
+          if-no-files-found: error
+          retention-days: 30
