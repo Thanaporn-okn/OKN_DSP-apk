@@ -1,4 +1,4 @@
-name: OKN BP1048P4 MASTER V8.6 EXACT CODESTART + SDK FLASHBOOT — ALL IN ONE
+name: OKN BP1048P4 MASTER V8.6.1 FIX CODESTART JOIN — ALL IN ONE
 
 on:
   workflow_dispatch:
@@ -1440,7 +1440,7 @@ jobs:
               else:
                   hdr=0
               code_rva=rva+hdr
-              typ,meth=identity.get(tok,('',''))
+              typ,meth=identity.get(tok.upper(),('',''))
               rec=(tok,rva,hdr,code_rva,typ,meth,str(row.Name))
               code_by_rva.setdefault(code_rva,[]).append(rec)
               method_rows.append(rec)
@@ -1475,17 +1475,19 @@ jobs:
           (ev/'V8_6_UNMATCHED_CODESTART_MAP.tsv').write_text(
               'map_key\tmap_rva\n'+''.join(f'0x{k:08X}\t0x{r:08X}\n' for k,r in unmatched),errors='replace')
 
-          exact_by_key={f'0x{x[0]:08X}':x for x in exact}
+          exact_by_key={x[0]:x for x in exact}
           def correct(src,dst):
               p=ev/src
-              if not p.exists(): return 0
+              if not p.exists(): raise FileNotFoundError(p)
               lines=p.read_text(errors='replace').splitlines()
-              if not lines: return 0
+              if not lines: raise ValueError('Empty CFG input: '+str(p))
               hdr=lines[0].split('\t')
               out=[lines[0]+'\texact_token\texact_type\texact_method\texact_metadata_name']
               n=0
               for line in lines[1:]:
-                  q=line.split('\t'); key=q[0].upper() if q else ''
+                  q=line.split('\t')
+                  if not line.strip(): continue
+                  key=int(q[0].strip(),0)
                   x=exact_by_key.get(key)
                   if x:
                       _,_,tok,rva,hs,cr,typ,meth,mname=x
@@ -1502,7 +1504,7 @@ jobs:
           cp=ev/'V8_6_CORRECTED_CFG_PINVOKE_CALLS.tsv'
           if cp.exists():
               for line in cp.read_text(errors='replace').splitlines()[1:]:
-                  if re.search(r'HidD_|ReadFile|WriteFile|CreateFile|SetupDi',line,re.I): hid.append(line)
+                  if line.split('\t')[-4] and re.search(r'HidD_|ReadFile|WriteFile|CreateFile|SetupDi',line,re.I): hid.append(line)
           (ev/'V8_6_EXACT_HID_CALLS.txt').write_text('\n'.join(hid)+'\n' if hid else 'NO_EXACT_HID_CALLS\n')
 
           status={
@@ -1515,9 +1517,13 @@ jobs:
               'FLASH_ALLOWED':False
           }
           (ev/'V8_6_CODESTART_STATUS.json').write_text(json.dumps(status,indent=2)+'\n')
+          for src,count in [('IL_CFG_PINVOKE_CALLS.tsv',c_calls),('IL_CFG_CONSTANTS.tsv',c_const)]:
+              expected=sum(1 for line in (ev/src).read_text().splitlines()[1:] if line.strip())
+              if count!=expected: raise ValueError(f'{src}: matched {count}/{expected}; correlation incomplete')
           '@ | Set-Content "$root\correct_codestart.py" -Encoding UTF8
 
           python "$root\correct_codestart.py"
+          if ($LASTEXITCODE -ne 0) { throw "Exact code-start correlation failed; inspect evidence" }
           "" | Add-Content $env:GITHUB_STEP_SUMMARY
           "# V8.6 exact IL code-start correction" | Add-Content $env:GITHUB_STEP_SUMMARY
           Get-Content "$ev\V8_6_CODESTART_STATUS.json" | Add-Content $env:GITHUB_STEP_SUMMARY
@@ -1848,4 +1854,5 @@ jobs:
           print('SDK_FLASHBOOT_V8_6_COMPLETE=YES')
           print('FLASH_ALLOWED=NO')
           PY
+
 
