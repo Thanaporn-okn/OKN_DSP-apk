@@ -1,0 +1,593 @@
+name: OKN BP1048P4 V18 USB-C ONLY EXACT HOST BLOCK SEQUENCE PROOF
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/OKN_BP1048P4_V18_USB_C_ONLY_EXACT_HOST_BLOCK_SEQUENCE_PROOF.yml'
+
+permissions:
+  contents: read
+
+env:
+  SDK_REPO: "https://github.com/leadercxn/bp1048_sdk_v0.1.12.git"
+  SDK_COMMIT: "8105bd864b04995d81c9f9ae77cb158259f39015"
+  EXPECTED_FLASHBOOT_SHA256: "6b632435152478ecd6a8c3697b044caf253630f70923b27c8cbe8baa509148a6"
+
+  REQUIRED_PATH: "Samsung Galaxy S25+ -> USB-C cable -> DSP USB-C only"
+
+  SOLDER_ALLOWED: "NO"
+  BOARD_MOD_ALLOWED: "NO"
+  JTAG_ALLOWED: "NO"
+  SDP_ALLOWED: "NO"
+  AICE_ALLOWED: "NO"
+  HARDWARE_PROBE_ALLOWED: "NO"
+  LIVE_USB_COMMAND_ALLOWED: "NO"
+  FLASH_READ_ALLOWED: "NO"
+  FLASH_WRITE_ALLOWED: "NO"
+  FLASH_ERASE_ALLOWED: "NO"
+
+jobs:
+  static_proof:
+    name: V18 prove exact 16x256 block receive and ACK sequence
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+
+    steps:
+      - name: Enforce USB-C-only constraints
+        shell: bash
+        run: |
+          set -euo pipefail
+          for v in SOLDER_ALLOWED BOARD_MOD_ALLOWED JTAG_ALLOWED SDP_ALLOWED AICE_ALLOWED HARDWARE_PROBE_ALLOWED LIVE_USB_COMMAND_ALLOWED FLASH_READ_ALLOWED FLASH_WRITE_ALLOWED FLASH_ERASE_ALLOWED; do
+            test "${!v}" = "NO"
+          done
+          rm -rf /tmp/v18
+          mkdir -p /tmp/v18/evidence /tmp/v18/tool
+          cat > /tmp/v18/evidence/SAFETY.txt <<'EOF'
+          REQUIRED_PATH=Samsung Galaxy S25+ -> USB-C cable -> DSP USB-C only
+          SOLDER_ALLOWED=NO
+          BOARD_MOD_ALLOWED=NO
+          JTAG_ALLOWED=NO
+          SDP_ALLOWED=NO
+          AICE_ALLOWED=NO
+          HARDWARE_PROBE_ALLOWED=NO
+          LIVE_USB_COMMAND_ALLOWED=NO
+          TARGET_CONNECTED=NO
+          USB_CONTROL_TRANSFER_EXECUTED=NO
+          FLASH_READ_EXECUTED=NO
+          FLASH_WRITE_EXECUTED=NO
+          FLASH_ERASE_EXECUTED=NO
+          RUNTIME_OPCODE_0x11_EXECUTED=NO
+          EOF
+
+      - name: Fetch SDK and reconstruct hash-pinned FlashBoot
+        shell: bash
+        run: |
+          set -euo pipefail
+          S=/tmp/v18/sdk
+          E=/tmp/v18/evidence
+
+          git clone -q "$SDK_REPO" "$S"
+          git -C "$S" checkout -q "$SDK_COMMIT"
+          test "$(git -C "$S" rev-parse HEAD)" = "$SDK_COMMIT"
+          git -C "$S" rev-parse HEAD > "$E/SDK_COMMIT.txt"
+
+          cd "$S"
+          mapfile -t DIRS < <(find BT_Audio_APP MVsB1_Base_SDK develop_lib -type d | sort)
+          ARGS=()
+          for d in "${DIRS[@]}"; do ARGS+=("-I$d"); done
+
+          gcc -E -P "${ARGS[@]}" \
+            BT_Audio_APP/bt_audio_app_src/device/flash_boot.c \
+            -o /tmp/v18/flash_boot.pre.c
+
+          python3 - <<'PY'
+          from pathlib import Path
+          import re,hashlib,json
+
+          src=Path('/tmp/v18/flash_boot.pre.c').read_text(errors='replace')
+          E=Path('/tmp/v18/evidence')
+          m=re.search(
+              r'const\s+unsigned\s+char\s+flash_data\s*\[\s*65536\s*\]\s*=\s*\{(.*?)\}\s*;',
+              src,re.S
+          )
+          if not m: raise RuntimeError('flash_data initializer missing')
+
+          body=m.group(1); toks=[]; buf=[]; depth=0
+          for ch in body:
+              if ch=='(':
+                  depth+=1; buf.append(ch)
+              elif ch==')':
+                  depth=max(0,depth-1); buf.append(ch)
+              elif ch==',' and depth==0:
+                  x=''.join(buf).strip()
+                  if x: toks.append(x)
+                  buf=[]
+              else:
+                  buf.append(ch)
+          x=''.join(buf).strip()
+          if x: toks.append(x)
+
+          vals=[]
+          for i,t in enumerate(toks):
+              t=re.sub(r'(?i)(0x[0-9a-f]+|\b\d+)(?:u|ul|ull|l|ll)\b',r'\1',t).strip()
+              if not re.fullmatch(r'[0-9a-fA-FxX\s()+\-*/%<>&|~]+',t):
+                  raise RuntimeError(f'unresolved token {i}: {t}')
+              vals.append(eval(t,{'__builtins__':{}},{}) & 0xff)
+
+          if len(vals)!=65536: raise RuntimeError(f'bad size {len(vals)}')
+          b=bytes(vals)
+          sha=hashlib.sha256(b).hexdigest()
+          if sha != '6b632435152478ecd6a8c3697b044caf253630f70923b27c8cbe8baa509148a6':
+              raise RuntimeError('FlashBoot hash mismatch')
+
+          Path('/tmp/v18/flash_boot.bin').write_bytes(b)
+          (E/'V18_FLASHBOOT.json').write_text(json.dumps({'bytes':len(b),'sha256':sha},indent=2)+'\n')
+          PY
+
+      - name: Build NDS32 objdump and disassemble exact image
+        shell: bash
+        run: |
+          set -euo pipefail
+          E=/tmp/v18/evidence
+          cd /tmp/v18/tool
+
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq \
+            build-essential curl xz-utils bison flex texinfo zlib1g-dev >/dev/null
+
+          V=2.42
+          curl -fL --retry 3 --connect-timeout 15 --max-time 120 \
+            "https://ftp.gnu.org/gnu/binutils/binutils-${V}.tar.xz" -o binutils.tar.xz
+          tar -xf binutils.tar.xz
+          mkdir build
+          cd build
+          ../binutils-${V}/configure \
+            --target=nds32le-elf --disable-nls --disable-werror \
+            --disable-gdb --disable-gprofng --disable-gas --disable-ld \
+            > "$E/BINUTILS_CONFIGURE.txt" 2>&1
+          make -j2 all-binutils > "$E/BINUTILS_BUILD.txt" 2>&1
+
+          OBJDUMP=/tmp/v18/tool/build/binutils/objdump
+          "$OBJDUMP" --version > "$E/OBJDUMP_VERSION.txt"
+
+          ok=0
+          for arch in nds32 nds32:v3s nds32:v3; do
+            if "$OBJDUMP" -D -z -b binary -m "$arch" -EL \
+              /tmp/v18/flash_boot.bin > /tmp/v18/flash_boot.dis 2>/dev/null; then
+              echo "$arch" > "$E/OBJDUMP_ARCH.txt"
+              ok=1
+              break
+            fi
+          done
+          test "$ok" -eq 1
+
+      - name: Extract exact protocol windows
+        shell: bash
+        run: |
+          set -euo pipefail
+          E=/tmp/v18/evidence
+          python3 - <<'PY'
+          from pathlib import Path
+          import re,json
+
+          lines=Path('/tmp/v18/flash_boot.dis').read_text(errors='replace').splitlines()
+          E=Path('/tmp/v18/evidence')
+          rx=re.compile(r'^\s*([0-9a-fA-F]+):\s+')
+          rows=[]
+          for l in lines:
+              m=rx.match(l)
+              if m: rows.append((int(m.group(1),16),l))
+
+          windows={
+              'ONE_OUTPUT_REPORT_HELPER_4AB6':(0x4AB6,0x4AD0),
+              'GET_ACK_HELPER_4AD0':(0x4AD0,0x4B2E),
+              'RX_4K_HELPER_4B2E':(0x4B2E,0x4B64),
+              'COMMAND_LOOP_4B98':(0x4B98,0x4C08),
+              'BOOTDAT_5064':(0x5064,0x51BC),
+              'CODEDATA_51BC':(0x51BC,0x52EE),
+              'CONSTDAT_52EE':(0x52EE,0x53F2),
+              'CNFGDAT_53F2':(0x53F2,0x54F6),
+          }
+
+          meta={}
+          for name,(a,b) in windows.items():
+              txt='\n'.join(l for addr,l in rows if a<=addr<b)+'\n'
+              if not txt.strip(): raise RuntimeError('empty '+name)
+              (E/f'{name}.txt').write_text(txt)
+              meta[name]={'start':f'0x{a:04X}','end_exclusive':f'0x{b:04X}'}
+
+          (E/'V18_WINDOWS.json').write_text(json.dumps(meta,indent=2)+'\n')
+          PY
+
+      - name: Prove one command report and exact 16 x 256 receive loop
+        shell: bash
+        run: |
+          set -euo pipefail
+          E=/tmp/v18/evidence
+
+          python3 - <<'PY'
+          from pathlib import Path
+          import re,json
+
+          E=Path('/tmp/v18/evidence')
+          one=(E/'ONE_OUTPUT_REPORT_HELPER_4AB6.txt').read_text(errors='replace')
+          rx=(E/'RX_4K_HELPER_4B2E.txt').read_text(errors='replace')
+          loop=(E/'COMMAND_LOOP_4B98.txt').read_text(errors='replace')
+
+          one_checks={
+              'calls_low_level_receive_0x2714':bool(re.search(r'jal\s+0x2714\b',one)),
+              'returns_boolean_success':(
+                  bool(re.search(r'beqz38\s+\$r0',one)) and
+                  '#1' in one and '#0' in one
+              )
+          }
+
+          rx_checks={
+              'preserves_base_pointer_in_r7':bool(re.search(r'mov55\s+\$r7,\s*\$r0',rx)),
+              'loop_index_starts_zero':bool(re.search(r'movi55\s+\$r6,\s*#0',rx)),
+              'index_shift_left_8':bool(re.search(r'slli\s+\$r0,\s*\$r6,\s*#8',rx)),
+              'adds_base_pointer':bool(re.search(r'add45\s+\$r0,\s*\$r7',rx)),
+              'receives_one_report_each_iteration':bool(re.search(r'jal\s+0x4ab6\b',rx)),
+              'increments_index_by_one':bool(re.search(r'addi45\s+\$r6,\s*#1',rx)),
+              'loops_while_index_lt_16':bool(re.search(r'sltsi45\s+\$r6,\s*#0x10',rx)),
+              'returns_success_after_loop':bool(re.search(r'movi55\s+\$r0,\s*#1',rx)),
+              'timeout_constant_1001_ticks':bool(re.search(r'#0x3e9',rx,re.I))
+          }
+
+          loop_checks={
+              'command_buffer_is_gp_0x884':bool(re.search(r'addi\.gp\s+\$r0,\s*#0x884.*?jal\s+0x4ab6',loop,re.S)),
+              'command_first4_loaded_from_buffer':all(x in loop for x in [
+                  '[$r6 + #0]','[$r6 + #1]','[$r6 + #2]','[$r6 + #3]'
+              ])
+          }
+
+          for group in [one_checks,rx_checks,loop_checks]:
+              for k,v in group.items():
+                  if not v: raise RuntimeError('proof failed: '+k)
+
+          result={
+              'command_packet':{
+                  'reports_before_dispatch':1,
+                  'report_bytes':256,
+                  'buffer':'gp+0x884',
+                  'command_ascii_starts_at_offset':0
+              },
+              'block_receive':{
+                  'report_bytes':256,
+                  'report_count':16,
+                  'total_bytes':4096,
+                  'destination_formula':'base + (index << 8)',
+                  'index_range':'0..15',
+                  'timeout_constant_ticks':1001
+              },
+              'checks':{
+                  'one_report_helper':one_checks,
+                  'block_helper':rx_checks,
+                  'command_loop':loop_checks
+              }
+          }
+          (E/'V18_RX_SEQUENCE.json').write_text(json.dumps(result,indent=2)+'\n')
+          PY
+
+      - name: Prove GET_REPORT ACK transaction
+        shell: bash
+        run: |
+          set -euo pipefail
+          E=/tmp/v18/evidence
+          python3 - <<'PY'
+          from pathlib import Path
+          import re,json
+
+          E=Path('/tmp/v18/evidence')
+          t=(E/'GET_ACK_HELPER_4AD0.txt').read_text(errors='replace')
+
+          checks={
+              'bmRequestType_A1':bool(re.search(r'lbi\s+\$r1,\s*\[\$sp\s*\+\s*#4\].*?#0xa1',t,re.S|re.I)),
+              'bRequest_GET_REPORT_01':bool(re.search(r'lbi\s+\$r1,\s*\[\$sp\s*\+\s*#5\].*?#1',t,re.S)),
+              'wValue_high_input_report_01':bool(re.search(r'lbi\s+\$r1,\s*\[\$sp\s*\+\s*#7\].*?#1',t,re.S)),
+              'wLength_high_01_for_256':bool(re.search(r'lbi\s+\$r7,\s*\[\$sp\s*\+\s*#0xb\].*?#1',t,re.S)),
+              'response_length_0x100':bool(re.search(r'movi\s+\$r1,\s*#0x100',t,re.I)),
+              'sends_response_via_0x9352':bool(re.search(r'jal\s+0x9352\b',t)),
+              'timeout_constant_101_ticks':bool(re.search(r'#0x65',t,re.I))
+          }
+          for k,v in checks.items():
+              if not v: raise RuntimeError('ACK helper proof failed: '+k)
+
+          result={
+              'setup':{
+                  'bmRequestType':'0xA1',
+                  'bRequest':'0x01 GET_REPORT',
+                  'wValue':'0x0100 Input report ID 0',
+                  'wIndex':0,
+                  'wLength':256
+              },
+              'response_bytes':256,
+              'timeout_constant_ticks':101,
+              'checks':checks
+          }
+          (E/'V18_ACK_SEQUENCE.json').write_text(json.dumps(result,indent=2)+'\n')
+          PY
+
+      - name: Prove section block ordering
+        shell: bash
+        run: |
+          set -euo pipefail
+          E=/tmp/v18/evidence
+
+          python3 - <<'PY'
+          from pathlib import Path
+          import re,json
+
+          E=Path('/tmp/v18/evidence')
+
+          fixed={}
+          for name,fn in [('bootdat','BOOTDAT_5064.txt'),('codedata','CODEDATA_51BC.txt')]:
+              t=(E/fn).read_text(errors='replace')
+              checks={
+                  'block_count_ceil_len_div_4096':(
+                      bool(re.search(r'srli\s+\$r9,\s*\$r0,\s*#0xc',t)) and
+                      bool(re.search(r'andi\s+\$r0,\s*\$r0,\s*#0xfff',t))
+                  ),
+                  'stream_index_starts_at_1':bool(re.search(r'movi55\s+\$r6,\s*#1',t)),
+                  'stream_address_base_0x10000_plus_index_4k':bool(re.search(
+                      r'addi\s+\$r8,\s*\$r6,\s*#0x10.*?slli\s+\$r8,\s*\$r8,\s*#0xc',
+                      t,re.S
+                  )),
+                  'each_stream_block_received_by_4b2e':bool(re.search(r'jal\s+0x4b2e\b',t)),
+                  'each_stream_block_written_as_0x1000':bool(re.search(
+                      r'movi\s+\$r2,\s*#0x1000.*?jal\s+0x438a',t,re.S
+                  )),
+                  'each_stream_block_ACKed_by_4ad0':bool(re.search(r'jal\s+0x4ad0\b',t)),
+                  'loop_while_index_lt_block_count':bool(re.search(r'slt45\s+\$r6,\s*\$r9',t)),
+                  'block0_received_after_stream_loop':bool(re.search(
+                      r'slt45\s+\$r6,\s*\$r9.*?addi\.gp\s+\$r0,\s*#0x884.*?jal\s+0x4b2e',
+                      t,re.S
+                  )),
+                  'block0_written_in_16_chunks_of_256_descending':(
+                      bool(re.search(r'movi55\s+\$r6,\s*#0xf',t)) and
+                      bool(re.search(r'slli\s+\$r1,\s*\$r6,\s*#8',t)) and
+                      bool(re.search(r'movi\s+\$r2,\s*#0x100.*?jal\s+0xfd0',t,re.S)) and
+                      bool(re.search(r'subi45\s+\$r6,\s*#1',t))
+                  ),
+                  'block0_readback_verify_4096':bool(re.search(
+                      r'movi\s+\$r0,\s*#0x10000.*?movi\s+\$r2,\s*#0x1000.*?jal\s+0xe0e.*?jal\s+0xabfc',
+                      t,re.S
+                  )),
+                  'final_ACK_after_verify':bool(re.search(r'#0x55.*?jal\s+0x4ad0',t,re.S))
+              }
+              for k,v in checks.items():
+                  if not v: raise RuntimeError(f'{name} proof failed: {k}')
+
+              fixed[name]={
+                  'flash_base':'0x00010000',
+                  'host_block_order':'1,2,...,N-1, then 0',
+                  'blocks_are_4096_bytes':True,
+                  'reports_per_block':16,
+                  'ack_after_each_block':True,
+                  'block0_special_write':'16 x 256-byte flash writes in descending chunk index 15..0',
+                  'checks':checks
+              }
+
+          offset_sections={}
+          for name,fn in [('constdat','CONSTDAT_52EE.txt'),('cnfgdat','CNFGDAT_53F2.txt')]:
+              t=(E/fn).read_text(errors='replace')
+              checks={
+                  'block_count_ceil_len_div_4096':(
+                      bool(re.search(r'srli\s+\$r9,\s*\$r0,\s*#0xc',t)) and
+                      bool(re.search(r'andi\s+\$r0,\s*\$r3,\s*#0xfff|andi\s+\$r0,\s*\$r0,\s*#0xfff',t))
+                  ),
+                  'stream_index_starts_at_1':bool(re.search(r'movi55\s+\$r6,\s*#1',t)),
+                  'stream_address_offset_plus_index_4k':bool(re.search(
+                      r'slli\s+\$r0,\s*\$r6,\s*#0xc.*?add\s+\$r8,\s*\$r0,\s*\$r1',
+                      t,re.S
+                  )),
+                  'each_stream_block_received_by_4b2e':bool(re.search(r'jal\s+0x4b2e\b',t)),
+                  'each_stream_block_written_as_0x1000':bool(re.search(
+                      r'movi\s+\$r2,\s*#0x1000.*?jal\s+0x438a',t,re.S
+                  )),
+                  'each_stream_block_ACKed':bool(re.search(r'jal\s+0x4ad0\b',t)),
+                  'block0_received_after_loop':bool(re.search(
+                      r'bnec.*?#0x55.*?jal\s+0x4b2e',t,re.S
+                  )),
+                  'block0_written_at_section_offset':bool(re.search(
+                      r'lwi37\.sp\s+\$r0.*?addi\.gp\s+\$r1,\s*#0x884.*?movi\s+\$r2,\s*#0x1000.*?jal\s+0x438a',
+                      t,re.S
+                  )),
+                  'final_ACK':bool(re.search(r'#0x55.*?jal\s+0x4ad0',t,re.S))
+              }
+              for k,v in checks.items():
+                  if not v: raise RuntimeError(f'{name} proof failed: {k}')
+
+              offset_sections[name]={
+                  'flash_base':'section offset from cxxx metadata',
+                  'host_block_order':'1,2,...,N-1, then 0',
+                  'blocks_are_4096_bytes':True,
+                  'reports_per_block':16,
+                  'ack_after_each_block':True,
+                  'checks':checks
+              }
+
+          (E/'V18_BLOCK_ORDER.json').write_text(json.dumps({
+              'fixed_base_sections':fixed,
+              'offset_sections':offset_sections,
+              'padding_rule':'Receiver always consumes full 4096-byte blocks; host must provide 16 full 256-byte reports for every block, including the final partial logical block. Exact pad byte value is not yet proven.',
+              'partial_block_pad_value_proven':False
+          },indent=2)+'\n')
+          PY
+
+      - name: Generate Android host sequence model
+        shell: bash
+        run: |
+          set -euo pipefail
+          E=/tmp/v18/evidence
+
+          cat > "$E/V18_ANDROID_HOST_SEQUENCE.kt" <<'KOTLIN'
+          /*
+           * STATIC HOST SEQUENCE MODEL ONLY.
+           * REQUIRED: Samsung Galaxy S25+ -> USB-C -> DSP USB-C.
+           * NO live chip erase or flash writes are enabled.
+           */
+          object Bp1048RecoveryHostSequence {
+              const val REPORT_BYTES = 256
+              const val BLOCK_BYTES = 4096
+              const val REPORTS_PER_BLOCK = 16
+              const val ACK_STATUS_OFFSET = 8
+              const val ACK_OK = 0x55
+
+              fun transferOrder(blockCount: Int): List<Int> {
+                  require(blockCount >= 1)
+                  // FlashBoot deliberately commits block 0 last.
+                  return buildList {
+                      for (i in 1 until blockCount) add(i)
+                      add(0)
+                  }
+              }
+
+              /*
+               * For each section:
+               * 1) SET_REPORT 256-byte command packet (ASCII command at byte 0).
+               * 2) For every block index from transferOrder(N):
+               *      - send exactly 16 SET_REPORT Output reports, 256 bytes each.
+               *      - issue one GET_REPORT Input request, 256-byte response.
+               *      - require ACK[8] == 0x55 before continuing.
+               *
+               * Recovery transport:
+               *   SET_REPORT: 0x21 / 0x09 / wValue 0x0200 / interface 0 / 256 bytes
+               *   GET_REPORT: 0xA1 / 0x01 / wValue 0x0100 / interface 0 / 256 bytes
+               *
+               * The final logical partial block is still received as 4096 bytes.
+               * Padding byte semantics remain unproven, therefore executor is withheld.
+               */
+          }
+          KOTLIN
+
+          python3 - <<'PY'
+          from pathlib import Path
+          import json
+
+          E=Path('/tmp/v18/evidence')
+          rx=json.loads((E/'V18_RX_SEQUENCE.json').read_text())
+          ack=json.loads((E/'V18_ACK_SEQUENCE.json').read_text())
+          order=json.loads((E/'V18_BLOCK_ORDER.json').read_text())
+
+          result={
+              'required_path':'Samsung Galaxy S25+ -> USB-C -> DSP USB-C only',
+              'recovery_transport':{
+                  'vid_pid':'0000:2244',
+                  'interface':0,
+                  'set_report':'21 09 00 02 00 00 00 01',
+                  'get_report':'A1 01 00 01 00 00 00 01',
+                  'report_bytes':256
+              },
+              'one_command_packet_before_handler_proven':True,
+              'exact_helper_loop_16x256_proven':True,
+              'block_bytes':4096,
+              'ack_get_report_256_proven':True,
+              'ack_status_offset':8,
+              'section_block_order_proven':'1..N-1 then 0',
+              'boot_code_base':'0x00010000',
+              'const_config_bases':'from cxxx metadata offsets',
+              'partial_block_requires_full_4096_transport':True,
+              'partial_block_pad_byte_proven':False,
+              'crc_algorithm_proven':False,
+              'complete_live_updater_ready':False,
+              'live_usb_command_permitted':False,
+              'flash_erase_write_permitted':False,
+              'next_static_target':'Recover firmware container/file layout and exact pad byte + CRC algorithm/coverage so Android can build cxxx metadata and 4096-byte blocks identically to the vendor updater before any live flash test.'
+          }
+          (E/'V18_RESULT.json').write_text(json.dumps(result,indent=2)+'\n')
+
+          md=[
+              '# BP1048P4 V18 — exact recovery host block sequence','',
+              '- Required physical path remains **Samsung Galaxy S25+ → USB-C → DSP USB-C only**.',
+              '- Helper `0x4B2E` is proven to receive exactly **16 × 256-byte reports = 4096 bytes**.',
+              '- Helper `0x4AD0` is proven to wait for HID `GET_REPORT` and return **256 bytes**.',
+              '- Each data section begins with one 256-byte command report.',
+              '- Block transfer order for `bootdat/codedata/constdat/cnfgdat` is **1..N-1, then block 0 last**.',
+              '- Host sends 16 SET_REPORTs for each block and then requests one GET_REPORT ACK; ACK status is byte 8.',
+              '- Final logical partial block still consumes a full 4096-byte transport block; exact padding byte remains unproven.',
+              '- CRC algorithm/coverage remains unproven, so no live flash executor is enabled.',
+              '- No soldering, board modification, JTAG/SDP/AICE, or live flash command is used.'
+          ]
+          (E/'V18_REPORT.md').write_text('\n'.join(md)+'\n')
+          PY
+
+          cat "$E/V18_REPORT.md" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Final fail-closed assertions
+        shell: bash
+        run: |
+          set -euo pipefail
+          for v in SOLDER_ALLOWED BOARD_MOD_ALLOWED JTAG_ALLOWED SDP_ALLOWED AICE_ALLOWED HARDWARE_PROBE_ALLOWED LIVE_USB_COMMAND_ALLOWED FLASH_READ_ALLOWED FLASH_WRITE_ALLOWED FLASH_ERASE_ALLOWED; do
+            test "${!v}" = "NO"
+          done
+
+          python3 - <<'PY'
+          from pathlib import Path
+          import json
+          E=Path('/tmp/v18/evidence')
+          r=json.loads((E/'V18_RESULT.json').read_text())
+          assert r['required_path'] == 'Samsung Galaxy S25+ -> USB-C -> DSP USB-C only'
+          assert r['one_command_packet_before_handler_proven'] is True
+          assert r['exact_helper_loop_16x256_proven'] is True
+          assert r['block_bytes'] == 4096
+          assert r['ack_get_report_256_proven'] is True
+          assert r['ack_status_offset'] == 8
+          assert r['section_block_order_proven'] == '1..N-1 then 0'
+          assert r['partial_block_pad_byte_proven'] is False
+          assert r['crc_algorithm_proven'] is False
+          assert r['complete_live_updater_ready'] is False
+          assert r['live_usb_command_permitted'] is False
+          assert r['flash_erase_write_permitted'] is False
+
+          print('V18_EXACT_HOST_BLOCK_SEQUENCE_PROOF_COMPLETE=YES')
+          print('EXACT_16_X_256_HELPER_LOOP_PROVEN=YES')
+          print('BLOCK_ORDER=1_TO_N_MINUS_1_THEN_0')
+          print('ACK_REPORT_BYTES=256')
+          print('ACK_STATUS_OFFSET=8')
+          print('LIVE_USB_COMMAND_ALLOWED=NO')
+          print('FLASH_WRITE_ALLOWED=NO')
+          print('SOLDER_ALLOWED=NO')
+          print('BOARD_MOD_ALLOWED=NO')
+          PY
+
+      - name: Package V18 evidence
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /tmp/v18/evidence
+          zip -9 -r /tmp/OKN_BP1048P4_V18_EXACT_HOST_BLOCK_SEQUENCE_EVIDENCE.zip . >/dev/null
+          sha256sum /tmp/OKN_BP1048P4_V18_EXACT_HOST_BLOCK_SEQUENCE_EVIDENCE.zip \
+            > /tmp/OKN_BP1048P4_V18_EXACT_HOST_BLOCK_SEQUENCE_EVIDENCE.zip.sha256
+
+      - name: Upload V18 evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: OKN-BP1048P4-V18-EXACT-HOST-BLOCK-SEQUENCE-EVIDENCE
+          path: |
+            /tmp/OKN_BP1048P4_V18_EXACT_HOST_BLOCK_SEQUENCE_EVIDENCE.zip
+            /tmp/OKN_BP1048P4_V18_EXACT_HOST_BLOCK_SEQUENCE_EVIDENCE.zip.sha256
+            /tmp/v18/evidence/V18_REPORT.md
+            /tmp/v18/evidence/V18_RESULT.json
+            /tmp/v18/evidence/V18_RX_SEQUENCE.json
+            /tmp/v18/evidence/V18_ACK_SEQUENCE.json
+            /tmp/v18/evidence/V18_BLOCK_ORDER.json
+            /tmp/v18/evidence/V18_ANDROID_HOST_SEQUENCE.kt
+            /tmp/v18/evidence/ONE_OUTPUT_REPORT_HELPER_4AB6.txt
+            /tmp/v18/evidence/GET_ACK_HELPER_4AD0.txt
+            /tmp/v18/evidence/RX_4K_HELPER_4B2E.txt
+            /tmp/v18/evidence/COMMAND_LOOP_4B98.txt
+            /tmp/v18/evidence/BOOTDAT_5064.txt
+            /tmp/v18/evidence/CODEDATA_51BC.txt
+            /tmp/v18/evidence/CONSTDAT_52EE.txt
+            /tmp/v18/evidence/CNFGDAT_53F2.txt
+            /tmp/v18/evidence/V18_FLASHBOOT.json
+            /tmp/v18/evidence/OBJDUMP_ARCH.txt
+            /tmp/v18/evidence/OBJDUMP_VERSION.txt
+            /tmp/v18/evidence/SDK_COMMIT.txt
+            /tmp/v18/evidence/SAFETY.txt
+          if-no-files-found: warn
+          retention-days: 90
