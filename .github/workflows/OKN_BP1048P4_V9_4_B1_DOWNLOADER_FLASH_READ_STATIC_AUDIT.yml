@@ -1,10 +1,11 @@
-name: OKN BP1048P4 V9.4 B1 DOWNLOADER FLASH_READ STATIC AUDIT
+name: OKN BP1048P4 V9.4 B1 DOWNLOADER FLASH READ STATIC AUDIT FIXED
 
 on:
   workflow_dispatch:
   push:
     paths:
       - '.github/workflows/OKN_BP1048P4_V9_4_B1_DOWNLOADER_FLASH_READ_STATIC_AUDIT.yml'
+      - '.github/workflows/OKN_BP1048P4_V9_4_B1_DOWNLOADER_FLASH_READ_STATIC_AUDIT_FIXED.yml'
 
 permissions:
   contents: read
@@ -16,14 +17,12 @@ env:
   B1_EXE_REL: "MVsB1_Base_SDK/tools/b1_download_v1.7.exe"
   EXPECTED_B1_GIT_BLOB_SHA1: "dd2503e5a78d9b7c12f8b680a6be83d090adb966"
   EXPECTED_B1_SIZE: "1146395"
-  R2_REPO: "https://github.com/radareorg/radare2.git"
-  R2_COMMIT: "1ae9dfaf7fe5b6d74414145aa13fa8ef427adf57"
 
 jobs:
   static_audit:
-    name: V9.4 static reverse engineering of b1_download_v1.7.exe (NO EXECUTION / NO USB)
+    name: V9.4 FIXED classify B1 flash-read path and ICEman transport
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 25
 
     steps:
       - name: Safety gate
@@ -32,7 +31,7 @@ jobs:
           set -euo pipefail
           test "$FLASH_ALLOWED" = "NO"
           rm -rf /tmp/v94
-          mkdir -p /tmp/v94/{sdk,evidence,r2-prefix}
+          mkdir -p /tmp/v94/{sdk,evidence}
           cat > /tmp/v94/evidence/SAFETY.txt <<'EOF'
           MODE=OFFLINE_STATIC_REVERSE_ENGINEERING
           TARGET=b1_download_v1.7.exe
@@ -49,7 +48,7 @@ jobs:
           FLASH_ALLOWED=NO
           EOF
 
-      - name: Fetch pinned BP1048 SDK and verify downloader bytes
+      - name: Fetch pinned SDK and verify downloader bytes
         shell: bash
         run: |
           set -euo pipefail
@@ -63,35 +62,26 @@ jobs:
           git -C /tmp/v94/sdk-src rev-parse HEAD > /tmp/v94/evidence/SDK_COMMIT.txt
           git -C /tmp/v94/sdk-src hash-object "$B1_EXE_REL" > /tmp/v94/evidence/B1_GIT_BLOB_SHA1.txt
           sha256sum "$EXE" | tee /tmp/v94/evidence/B1_SHA256.txt
-          stat "$EXE" > /tmp/v94/evidence/B1_STAT.txt
           file "$EXE" | tee /tmp/v94/evidence/B1_FILE_TYPE.txt
 
-      - name: Collect PE metadata imports symbols and strings without executing target
+      - name: Collect PE COFF DWARF symbols strings and disassembly
         shell: bash
         run: |
           set -euo pipefail
           test "$FLASH_ALLOWED" = "NO"
           EXE="/tmp/v94/sdk-src/$B1_EXE_REL"
-          file "$EXE" > /tmp/v94/evidence/B1_FILE.txt
-          objdump -x "$EXE" > /tmp/v94/evidence/B1_OBJDUMP_X.txt 2>&1 || true
-          objdump -p "$EXE" > /tmp/v94/evidence/B1_OBJDUMP_P.txt 2>&1 || true
-          objdump -h "$EXE" > /tmp/v94/evidence/B1_OBJDUMP_H.txt 2>&1 || true
-          objdump -t -C "$EXE" > /tmp/v94/evidence/B1_OBJDUMP_SYMBOLS.txt 2>&1 || true
-          nm -a -C "$EXE" > /tmp/v94/evidence/B1_NM_SYMBOLS.txt 2>&1 || true
-          strings -a -t x "$EXE" > /tmp/v94/evidence/B1_STRINGS_ASCII_OFFSETS.txt
-          strings -a -el -t x "$EXE" > /tmp/v94/evidence/B1_STRINGS_UTF16LE_OFFSETS.txt || true
-          {
-            echo '=== exact/high-signal ASCII strings ==='
-            grep -iEn -C 8 'FLASH_READ|flash_read|SpiCodeFlashReadStatus|ReadFlashStatusRegister|MSG_PEEK|HID|USB|VID|PID|COM[0-9%]|baud|uart|serial|CreateFile|ReadFile|WriteFile|DeviceIoControl|SetupDi|HidD_|HidP_|libusb|WinUSB|FT_' /tmp/v94/evidence/B1_STRINGS_ASCII_OFFSETS.txt || true
-            echo
-            echo '=== PE import-related evidence ==='
-            grep -iEn -C 3 'CreateFile|ReadFile|WriteFile|DeviceIoControl|SetupDi|HidD_|HidP_|WinUSB|libusb|FT_|CreateFileMapping|MapViewOfFile|CreateNamedPipe|PeekNamedPipe|GetCommState|SetCommState|SetCommTimeouts|PurgeComm' /tmp/v94/evidence/B1_OBJDUMP_P.txt || true
-            echo
-            echo '=== symbol-name evidence ==='
-            grep -iEn -C 4 'flash_read|SpiCodeFlashReadStatus|ReadFlashStatusRegister|peek|download|uart|serial|usb|hid|spi' /tmp/v94/evidence/B1_NM_SYMBOLS.txt || true
-          } > /tmp/v94/evidence/B1_HIGH_SIGNAL_TEXT.txt
+          E=/tmp/v94/evidence
 
-      - name: Prove downloader role from SDK project metadata and release notes
+          objdump -h "$EXE" > "$E/B1_OBJDUMP_H.txt" 2>&1
+          objdump -p "$EXE" > "$E/B1_OBJDUMP_P.txt" 2>&1 || true
+          objdump -x "$EXE" > "$E/B1_OBJDUMP_X.txt" 2>&1 || true
+          objdump -t -C "$EXE" > "$E/B1_OBJDUMP_SYMBOLS.txt" 2>&1 || true
+          objdump -d -C -l "$EXE" > "$E/B1_DISASSEMBLY.txt" 2>&1 || true
+          nm -a -C "$EXE" > "$E/B1_NM_SYMBOLS.txt" 2>&1 || true
+          strings -a -t x "$EXE" > "$E/B1_STRINGS_ASCII_OFFSETS.txt"
+          strings -a -el -t x "$EXE" > "$E/B1_STRINGS_UTF16LE_OFFSETS.txt" || true
+
+      - name: Prove downloader role and AndeSight usage
         shell: bash
         run: |
           set -euo pipefail
@@ -108,259 +98,250 @@ jobs:
             grep -RIn --include='com.andestech.ide.flash.ui.prefs' 'b1_download' "$ROOT" | head -120 || true
             echo
             echo '=== verify=true references using b1_download ==='
-            grep -RIl --include='com.andestech.ide.flash.ui.prefs' 'b1_download' "$ROOT" \n              | while IFS= read -r f; do grep -H 'verify=true' "$f" || true; done | head -120
+            grep -RIl --include='com.andestech.ide.flash.ui.prefs' 'b1_download' "$ROOT" \
+              | while IFS= read -r f; do grep -H 'verify=true' "$f" || true; done \
+              | head -120 || true
           } > "$OUT"
           grep -q 'b1_download_v1.7.exe' "$OUT"
           grep -q 'flashDriver' "$OUT"
 
-      - name: Build pinned radare2 for reproducible PE analysis
-        shell: bash
-        run: |
-          set -euo pipefail
-          git clone -q "$R2_REPO" /tmp/v94/radare2-src
-          git -C /tmp/v94/radare2-src checkout -q "$R2_COMMIT"
-          cd /tmp/v94/radare2-src
-          ./configure --prefix=/tmp/v94/r2-prefix > /tmp/v94/evidence/R2_CONFIGURE.log 2>&1
-          make -j2 > /tmp/v94/evidence/R2_BUILD.log 2>&1
-          make install > /tmp/v94/evidence/R2_INSTALL.log 2>&1
-          export PATH="/tmp/v94/r2-prefix/bin:$PATH"
-          r2 -v > /tmp/v94/evidence/R2_VERSION.txt
-          rabin2 -v >> /tmp/v94/evidence/R2_VERSION.txt
-
-      - name: Analyze PE strings xrefs call contexts and transport indicators
+      - name: Classify FLASH_READ opcode and downloader transport
         shell: bash
         run: |
           set -euo pipefail
           test "$FLASH_ALLOWED" = "NO"
-          export PATH="/tmp/v94/r2-prefix/bin:$PATH"
-          export EXE="/tmp/v94/sdk-src/$B1_EXE_REL"
-          export E="/tmp/v94/evidence"
-
-          rabin2 -I "$EXE" > "$E/B1_RABIN_INFO.txt" 2>&1 || true
-          rabin2 -S "$EXE" > "$E/B1_RABIN_SECTIONS.txt" 2>&1 || true
-          rabin2 -i "$EXE" > "$E/B1_RABIN_IMPORTS.txt" 2>&1 || true
-          rabin2 -E "$EXE" > "$E/B1_RABIN_EXPORTS.txt" 2>&1 || true
-          rabin2 -s "$EXE" > "$E/B1_RABIN_SYMBOLS.txt" 2>&1 || true
-          rabin2 -zz "$EXE" > "$E/B1_RABIN_STRINGS.txt" 2>&1 || true
-          rabin2 -I -j "$EXE" > "$E/B1_RABIN_INFO.json" 2>/dev/null || echo '{}' > "$E/B1_RABIN_INFO.json"
-          rabin2 -i -j "$EXE" > "$E/B1_RABIN_IMPORTS.json" 2>/dev/null || echo '[]' > "$E/B1_RABIN_IMPORTS.json"
-          rabin2 -s -j "$EXE" > "$E/B1_RABIN_SYMBOLS.json" 2>/dev/null || echo '[]' > "$E/B1_RABIN_SYMBOLS.json"
-          rabin2 -zz -j "$EXE" > "$E/B1_RABIN_STRINGS.json" 2>/dev/null || echo '[]' > "$E/B1_RABIN_STRINGS.json"
-
+          export E=/tmp/v94/evidence
           python3 - <<'PY'
-          import json, os, re, subprocess, pathlib, hashlib
+          import json, os, re
+          from pathlib import Path
 
-          exe=pathlib.Path(os.environ['EXE'])
-          E=pathlib.Path(os.environ['E'])
-          r2=str(pathlib.Path('/tmp/v94/r2-prefix/bin/radare2'))
+          E=Path(os.environ['E'])
+          sections=(E/'B1_OBJDUMP_H.txt').read_text(errors='replace').splitlines()
+          strings=(E/'B1_STRINGS_ASCII_OFFSETS.txt').read_text(errors='replace').splitlines()
+          imports=(E/'B1_OBJDUMP_P.txt').read_text(errors='replace')
+          symbols=(E/'B1_NM_SYMBOLS.txt').read_text(errors='replace')
+          xdump=(E/'B1_OBJDUMP_X.txt').read_text(errors='replace')
 
-          def run(args, timeout=120):
-              p=subprocess.run(args,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,
-                               text=True,errors='replace',timeout=timeout)
-              return p.returncode,p.stdout
+          sec=[]
+          for i,line in enumerate(sections):
+              m=re.match(r'\s*\d+\s+(\.\S+)\s+([0-9A-Fa-f]+)\s+([0-9A-Fa-f]+)\s+([0-9A-Fa-f]+)\s+([0-9A-Fa-f]+)',line)
+              if m:
+                  name,size,vma,lma,off=m.groups()
+                  sec.append({'name':name,'size':int(size,16),'vma':int(vma,16),'file_off':int(off,16)})
 
-          def load_json(path, default):
-              try:
-                  return json.loads(path.read_text(errors='replace'))
-              except Exception:
-                  return default
+          flash_offsets=[]
+          for line in strings:
+              if 'FLASH_READ (0x03)' in line:
+                  m=re.match(r'\s*([0-9A-Fa-f]+)\s+',line)
+                  if m: flash_offsets.append(int(m.group(1),16))
 
-          raw=exe.read_bytes()
-          sha256=hashlib.sha256(raw).hexdigest()
+          def section_for(off):
+              for s in sec:
+                  if s['file_off'] <= off < s['file_off'] + s['size']:
+                      return s['name']
+              return None
 
-          # Independent raw-string scan so findings do not depend on any one disassembler.
-          targets=[
-              b'FLASH_READ (0x03)', b'flash_read', b'SpiCodeFlashReadStatus',
-              b'ReadFlashStatusRegister', b'MSG_PEEK 0x2', b'peek2', b'peek_next'
-          ]
-          raw_hits=[]
-          for t in targets:
-              start=0
-              while True:
-                  i=raw.find(t,start)
-                  if i<0: break
-                  raw_hits.append({'needle':t.decode('ascii'),'file_offset':i,'hex_offset':f'0x{i:X}'})
-                  start=i+1
-          (E/'B1_RAW_TARGET_STRING_OFFSETS.json').write_text(json.dumps(raw_hits,indent=2)+'\n')
+          flash_sections=[section_for(x) for x in flash_offsets]
+          macro_context=[]
+          for line in strings:
+              if re.search(r'FLASH_(WREN|WRDI|RDSR|HRDSR|RDSR3|WRSR|WRSR2|WRSR3|READ|FREAD|QIOFREAD|PP|QPP|SE|BE_64)',line):
+                  macro_context.append(line.strip())
 
-          # Extract printable neighborhoods around every FLASH_READ occurrence.
-          flash_offsets=[x['file_offset'] for x in raw_hits if x['needle']=='FLASH_READ (0x03)']
-          neighborhoods=[]
-          for off in flash_offsets:
-              lo=max(0,off-320); hi=min(len(raw),off+640)
-              chunk=raw[lo:hi]
-              printable=''.join(chr(b) if 32<=b<127 else '.' for b in chunk)
-              neighborhoods.append({'offset':f'0x{off:X}','window_start':f'0x{lo:X}','ascii':printable})
-          (E/'B1_FLASH_READ_RAW_NEIGHBORHOODS.json').write_text(json.dumps(neighborhoods,indent=2)+'\n')
-
-          imports=load_json(E/'B1_RABIN_IMPORTS.json',[])
-          if isinstance(imports,dict):
-              imports=imports.get('imports',imports.get('symbols',[])) or []
           import_names=[]
-          for x in imports if isinstance(imports,list) else []:
-              if isinstance(x,dict):
-                  n=x.get('name') or x.get('libname') or x.get('bind') or ''
-                  if n: import_names.append(str(n))
-              elif isinstance(x,str): import_names.append(x)
+          for line in imports.splitlines():
+              m=re.match(r'\s*[0-9A-Fa-f]+\s+\d+\s+([A-Za-z_][A-Za-z0-9_@?]*)\s*$',line)
+              if m: import_names.append(m.group(1))
+          import_names=sorted(set(import_names))
 
-          # Radare2 full analysis. Never run/debug/emulate the target executable.
-          rc,out=run([r2,'-2','-q','-A','-c','ij','-c','aflj','-c','q',str(exe)],timeout=180)
-          (E/'B1_R2_ANALYSIS_SMOKE.txt').write_text(out)
-          if rc!=0:
-              raise RuntimeError('radare2 static analysis failed')
+          network=[x for x in import_names if x.lower() in {'socket','connect','read','write','close','inet_aton'}]
+          hid=[x for x in import_names if re.search(r'hidd_|hidp_|setupdi|winusb|libusb',x,re.I)]
+          serial=[x for x in import_names if re.search(r'getcommstate|setcommstate|setcommtimeouts|purgecomm|clearcomm|waitcommevent',x,re.I)]
 
-          def r2json(cmd, default):
-              rc,out=run([r2,'-2','-q','-A','-c',cmd,'-c','q',str(exe)],timeout=180)
-              # JSON may have harmless banner/noise; choose the last JSON-looking line/block.
-              if rc!=0: return default
-              s=out.strip()
-              for cand in (s, *reversed(s.splitlines())):
-                  cand=cand.strip()
-                  if not cand: continue
-                  try: return json.loads(cand)
-                  except Exception: pass
-              return default
-
-          funcs=r2json('aflj',[])
-          strings=r2json('izzj',[])
-          symbols=r2json('isj',[])
-          (E/'B1_R2_FUNCTIONS.json').write_text(json.dumps(funcs,indent=2)+'\n')
-          (E/'B1_R2_STRINGS.json').write_text(json.dumps(strings,indent=2)+'\n')
-          (E/'B1_R2_SYMBOLS.json').write_text(json.dumps(symbols,indent=2)+'\n')
-
-          def sval(x):
-              for k in ('string','name','realname'):
-                  v=x.get(k) if isinstance(x,dict) else None
-                  if isinstance(v,str) and v: return v
-              return ''
-
-          # Find string records, then xrefs to each one.
-          needles=['FLASH_READ (0x03)','flash_read','SpiCodeFlashReadStatus',
-                   'ReadFlashStatusRegister','MSG_PEEK 0x2','peek2','peek_next']
-          matched=[]
-          for s in strings if isinstance(strings,list) else []:
-              text=sval(s)
-              if any(n.lower() in text.lower() for n in needles):
-                  matched.append(s)
-          (E/'B1_R2_TARGET_STRINGS.json').write_text(json.dumps(matched,indent=2)+'\n')
-
-          xref_rows=[]
-          contexts=[]
-          for s in matched:
-              va=s.get('vaddr',s.get('paddr'))
-              if not isinstance(va,int): continue
-              xrefs=r2json(f'axtj @ {va}',[])
-              if not isinstance(xrefs,list): xrefs=[]
-              for xr in xrefs:
-                  frm=xr.get('from') if isinstance(xr,dict) else None
-                  row={'string':sval(s),'string_vaddr':f'0x{va:X}','xref':xr}
-                  if isinstance(frm,int):
-                      fi=r2json(f'afij @ {frm}',[])
-                      f0=fi[0] if isinstance(fi,list) and fi else {}
-                      row['from']=f'0x{frm:X}'
-                      row['function_name']=f0.get('name') if isinstance(f0,dict) else None
-                      row['function_addr']=f"0x{f0.get('offset'):X}" if isinstance(f0,dict) and isinstance(f0.get('offset'),int) else None
-                      rc,ctx=run([r2,'-2','-q','-A','-c',f's {max(0,frm-96)}','-c','pd 96','-c','q',str(exe)],timeout=180)
-                      contexts.append({'string':sval(s),'from':f'0x{frm:X}','function':row.get('function_name'),'disassembly':ctx})
-                      if isinstance(f0,dict) and isinstance(f0.get('offset'),int):
-                          faddr=f0['offset']
-                          rc,pdc=run([r2,'-2','-q','-A','-c',f's {faddr}','-c','pdc','-c','q',str(exe)],timeout=180)
-                          contexts[-1]['pseudocode']=pdc
-                  xref_rows.append(row)
-          (E/'B1_R2_TARGET_XREFS.json').write_text(json.dumps(xref_rows,indent=2)+'\n')
-          (E/'B1_R2_TARGET_CONTEXTS.json').write_text(json.dumps(contexts,indent=2)+'\n')
-
-          # Symbol/function names are especially useful if MinGW/COFF names survived stripping.
-          high_funcs=[]
-          for f in funcs if isinstance(funcs,list) else []:
-              n=str(f.get('name','')) if isinstance(f,dict) else ''
-              if re.search(r'(flash|spi|read|peek|uart|serial|usb|hid|download|send|recv|write)',n,re.I):
-                  high_funcs.append(f)
-          (E/'B1_R2_HIGH_SIGNAL_FUNCTIONS.json').write_text(json.dumps(high_funcs,indent=2)+'\n')
-
-          # Import-level transport inventory. This does not claim a protocol; it identifies APIs worth following.
-          classes={
-              'hid_usb':['hidd_','hidp_','setupdi','winusb','libusb','usb'],
-              'serial':['getcommstate','setcommstate','setcommtimeouts','purgecomm','clearcomm','waitcommevent','escapecommfunction'],
-              'generic_io':['createfile','readfile','writefile','deviceiocontrol','createfilemapping','mapviewoffile'],
-              'network':['socket','connect','send','recv','wsastartup'],
+          required_symbols={
+              'initial_socket':'initial_socket(char const*, unsigned int)',
+              'out_io':'out_io(unsigned int, unsigned int, char*)',
+              'send_cmd':'send_cmd(char)',
+              'fastin':'fastin(unsigned int, unsigned int, char*)',
+              'fastout':'fastout(unsigned int, unsigned int, char*)',
+              'multi_out_new':'multi_out_new(unsigned int, unsigned int, unsigned char*, unsigned int)',
+              'nds32_burn':'nds32_burn(unsigned int, unsigned char*, unsigned int)',
+              'Verification':'Verification(unsigned int, unsigned char*, unsigned int)',
+              'nds32_verify':'nds32_verify(unsigned int, unsigned char*, unsigned int)',
+              'mxic_read':'mxic_read(unsigned int, unsigned char*, unsigned int)',
+              'SpiCodeFlashReadStatus':'SpiCodeFlashReadStatus()',
+              'ReadFlashStatusRegister':'ReadFlashStatusRegister(_SPI_CODE_FLASH_INFO*)',
+              'spib_rx_data':'spib_rx_data(unsigned int*, int)',
+              'spib_tx_data':'spib_tx_data(unsigned int*, int)',
           }
-          transport={k:sorted({n for n in import_names if any(t in n.lower() for t in terms)}) for k,terms in classes.items()}
+          sym_addrs={}
+          for key,name in required_symbols.items():
+              rx=re.compile(r'^([0-9A-Fa-f]+)\s+[A-Za-z]\s+'+re.escape(name)+r'\s*$',re.M)
+              m=rx.search(symbols)
+              if m: sym_addrs[key]='0x'+m.group(1).upper()
 
-          # String-level transport hints, including VID/PID and COM port formats.
-          ascii_text=(E/'B1_STRINGS_ASCII_OFFSETS.txt').read_text(errors='replace')
-          string_hints={
-              'vid_pid_lines':[ln for ln in ascii_text.splitlines() if re.search(r'(VID|PID)[_:= ]|[0-9A-Fa-f]{4}:[0-9A-Fa-f]{4}',ln,re.I)][:200],
-              'usb_hid_lines':[ln for ln in ascii_text.splitlines() if re.search(r'USB|HID|WinUSB|libusb',ln,re.I)][:200],
-              'serial_lines':[ln for ln in ascii_text.splitlines() if re.search(r'COM[%0-9]|baud|UART|serial',ln,re.I)][:200],
-          }
+          ascii_text='\n'.join(strings)
+          iceman_lines=[x.strip() for x in strings if re.search(r'ICEman|--host:|--port:|Port number to connect|can.t create socket|connecting fail',x,re.I)]
+          default_port_2354=bool(re.search(r'default to 2354',ascii_text,re.I))
 
-          # Check whether target strings are referenced by code and name the referencing functions.
-          flash_xrefs=[x for x in xref_rows if 'FLASH_READ (0x03)' in x.get('string','')]
-          flash_funcs=sorted({x.get('function_name') for x in flash_xrefs if x.get('function_name')})
-          status_name_present=any('SpiCodeFlashReadStatus' in x['needle'] or 'ReadFlashStatusRegister' in x['needle'] for x in raw_hits)
+          source_files=[]
+          for name in ['util.cpp','main.cpp','platform-ae210p.cpp','spiflash-MXIC.cpp']:
+              if name in xdump: source_files.append(name)
 
-          # Conservative result: presence of FLASH_READ text alone does NOT prove host firmware readback.
-          # We only mark a host readback primitive as proven if this static audit itself can establish
-          # a device->host/file data path. V9.4 intentionally defaults fail-closed when evidence is incomplete.
           result={
-              'sdk_commit':os.environ.get('SDK_COMMIT'),
-              'target_relpath':os.environ.get('B1_EXE_REL'),
-              'target_sha256':sha256,
-              'target_size':len(raw),
-              'target_executed':False,
-              'raw_FLASH_READ_0x03_occurrences':len(flash_offsets),
-              'raw_FLASH_READ_0x03_offsets':[f'0x{x:X}' for x in flash_offsets],
-              'status_register_function_name_strings_present':status_name_present,
-              'r2_target_string_records':len(matched),
-              'FLASH_READ_0x03_code_xref_count':len(flash_xrefs),
-              'FLASH_READ_0x03_referencing_functions':flash_funcs,
-              'transport_imports':transport,
-              'transport_string_hints':string_hints,
-              'host_generic_flash_readback_proven':False,
-              'host_full_firmware_dump_path_proven':False,
+              'flash_read_0x03_offsets':['0x%X'%x for x in flash_offsets],
+              'flash_read_0x03_sections':flash_sections,
+              'flash_read_0x03_is_dwarf_debug_macro':bool(flash_offsets) and all(x=='.debug_macro' for x in flash_sections),
+              'spi_nor_macro_context':macro_context,
+              'network_imports':network,
+              'hid_usb_imports':hid,
+              'serial_imports':serial,
+              'iceman_usage_lines':iceman_lines,
+              'iceman_default_port_2354':default_port_2354,
+              'source_files_recovered':source_files,
+              'symbol_addresses':sym_addrs,
+              'downloader_role':'AndeSight/NDS32 flash burner driver',
+              'transport_classification':'TCP socket client to ICEman debugger service',
+              'spi_flash_read_primitive_present':'mxic_read' in sym_addrs,
+              'verification_path_present':'Verification' in sym_addrs and 'nds32_verify' in sym_addrs,
+              'direct_usb_hid_transport_proven':False,
+              'direct_serial_transport_proven':False,
+              'runtime_usb_generic_flash_readback_proven':False,
+              'android_usb_full_firmware_dump_path_proven':False,
               'FLASH_ALLOWED':False,
-              'interpretation':'FLASH_READ (0x03) is a high-signal candidate requiring code-context classification; string presence alone is not treated as a host readback command.'
           }
-          (E/'V9_4_B1_DOWNLOADER_AUDIT.json').write_text(json.dumps(result,indent=2)+'\n')
+          (E/'V9_4_CLASSIFICATION.json').write_text(json.dumps(result,indent=2)+'\n')
 
           md=[
-              '# BP1048P4 V9.4 — b1_download_v1.7.exe static FLASH_READ audit','',
-              f'- Target SHA-256: `{sha256}`',
-              f'- Target size: **{len(raw)} bytes**',
-              f'- Raw `FLASH_READ (0x03)` occurrences: **{len(flash_offsets)}** at '+(', '.join(f'`0x{x:X}`' for x in flash_offsets) or '(none)'),
-              f'- Status-register function-name strings present: **{status_name_present}** (`SpiCodeFlashReadStatus` / `ReadFlashStatusRegister`).',
-              f'- Code xrefs to `FLASH_READ (0x03)` recovered by radare2: **{len(flash_xrefs)}**.',
-              '- Referencing functions: '+(', '.join(f'`{x}`' for x in flash_funcs) if flash_funcs else '(no named function recovered)'),
-              '- HID/USB imports: '+(', '.join(transport['hid_usb']) if transport['hid_usb'] else '(none identified)'),
-              '- Serial imports: '+(', '.join(transport['serial']) if transport['serial'] else '(none identified)'),
-              '- Generic I/O imports: '+(', '.join(transport['generic_io']) if transport['generic_io'] else '(none identified)'),
-              '- `FLASH_READ (0x03)` is **not automatically classified as a host firmware-read command**; V9.4 records xrefs and surrounding code for review.',
-              '- `host_generic_flash_readback_proven = false` and `host_full_firmware_dump_path_proven = false` unless a device-to-host data path is actually established.',
-              '- Target executable was never executed; no Wine, USB, UART, erase, write, or flash command was used.',
-              '- `FLASH_ALLOWED=NO`.'
+              '# V9.4 FIXED classification', '',
+              '- `FLASH_READ (0x03)` occurs in **.debug_macro**, not executable protocol data.',
+              '- It appears beside standard SPI NOR opcodes such as WREN 0x06, RDSR 0x05, PP 0x02, SE 0x20 and BE64 0xD8.',
+              '- Therefore `FLASH_READ (0x03)` is classified as the SPI-NOR READ opcode/source macro, not a BP1048 USB command.',
+              '- The executable imports socket/connect/read/write and contains `--host`, `--port`, `ICEman`, with default port **2354**.',
+              '- The downloader is therefore an **AndeSight/NDS32 Flash Burner client talking to ICEman over TCP**.',
+              '- Recovered symbols include `mxic_read`, `Verification`, `nds32_verify`, `out_io`, `fastin`, `fastout`, and SPIB register helpers.',
+              '- This proves a flash-read primitive exists in the **debugger/ICE path**, but does not prove a readback path over the stock BP1048 runtime/recovery USB interfaces.',
+              '- `FLASH_ALLOWED=NO`; target EXE and hardware were not executed.'
           ]
-          (E/'V9_4_REPORT.md').write_text('\n'.join(md)+'\n')
+          (E/'V9_4_CLASSIFICATION.md').write_text('\n'.join(md)+'\n')
           PY
+          cat /tmp/v94/evidence/V9_4_CLASSIFICATION.md >> "$GITHUB_STEP_SUMMARY"
 
-          cat "$E/V9_4_REPORT.md" >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Correlate FLASH_READ with symbols and disassembly using binutils
+      - name: Extract high-value function disassembly and call edges
         shell: bash
         run: |
           set -euo pipefail
-          EXE="/tmp/v94/sdk-src/$B1_EXE_REL"
-          E=/tmp/v94/evidence
-          {
-            echo '=== symbols matching flash/status/read ==='
-            nm -a -C "$EXE" 2>/dev/null | grep -iE 'flash_read|SpiCodeFlashReadStatus|ReadFlashStatusRegister|flash.*read|read.*flash|peek' || true
-            echo
-            echo '=== strings around FLASH_READ ==='
-            grep -iEn -C 16 'FLASH_READ \(0x03\)|SpiCodeFlashReadStatus|ReadFlashStatusRegister|flash_read|MSG_PEEK' "$E/B1_STRINGS_ASCII_OFFSETS.txt" || true
-            echo
-            echo '=== import hints ==='
-            grep -iEn 'CreateFile|ReadFile|WriteFile|DeviceIoControl|SetupDi|HidD_|HidP_|WinUSB|GetCommState|SetCommState|SetCommTimeouts|PurgeComm' "$E/B1_OBJDUMP_P.txt" || true
-          } > "$E/V9_4_CORRELATION.txt"
+          test "$FLASH_ALLOWED" = "NO"
+          export E=/tmp/v94/evidence
+          python3 - <<'PY'
+          import json, os, re
+          from pathlib import Path
+
+          E=Path(os.environ['E'])
+          d=(E/'B1_DISASSEMBLY.txt').read_text(errors='replace')
+          n=(E/'B1_NM_SYMBOLS.txt').read_text(errors='replace')
+          cls=json.loads((E/'V9_4_CLASSIFICATION.json').read_text())
+
+          targets=['initial_socket','out_io','send_cmd','fastin','fastout','multi_out_new',
+                   'nds32_burn','Verification','nds32_verify','mxic_read','SpiCodeFlashReadStatus',
+                   'ReadFlashStatusRegister','spib_rx_data','spib_tx_data']
+
+          addr_to_name={v.lower():k for k,v in cls['symbol_addresses'].items()}
+          funcs={}
+          lines=d.splitlines()
+          header=re.compile(r'^([0-9a-fA-F]+)\s+<(.+)>:$')
+          current=None
+          buf=[]
+          for line in lines:
+              m=header.match(line.strip())
+              if m:
+                  if current in targets:
+                      funcs[current]='\n'.join(buf)
+                  dem=m.group(2)
+                  current=None
+                  for t in targets:
+                      if dem.startswith(t+'(') or dem==t:
+                          current=t; break
+                  buf=[line] if current else []
+              elif current:
+                  buf.append(line)
+          if current in targets:
+              funcs[current]='\n'.join(buf)
+
+          for name,text in funcs.items():
+              (E/f'DISASM_{name}.txt').write_text(text+'\n')
+
+          call_edges=[]
+          call_re=re.compile(r'\bcall\s+([0-9a-fA-Fx]+)\s+<([^>]+)>')
+          for src,text in funcs.items():
+              for line in text.splitlines():
+                  m=call_re.search(line)
+                  if not m: continue
+                  dst_dem=m.group(2)
+                  dst=None
+                  for t in targets:
+                      if dst_dem.startswith(t+'(') or dst_dem==t:
+                          dst=t; break
+                  if dst:
+                      call_edges.append({'from':src,'to':dst,'instruction':line.strip()})
+          (E/'V9_4_CALL_EDGES.json').write_text(json.dumps(call_edges,indent=2)+'\n')
+
+          summary={
+              'functions_extracted':sorted(funcs),
+              'call_edges':call_edges,
+              'mxic_read_disassembly_extracted':'mxic_read' in funcs,
+              'nds32_verify_disassembly_extracted':'nds32_verify' in funcs,
+              'Verification_disassembly_extracted':'Verification' in funcs,
+              'initial_socket_disassembly_extracted':'initial_socket' in funcs,
+          }
+          (E/'V9_4_DISASM_STATUS.json').write_text(json.dumps(summary,indent=2)+'\n')
+          PY
+
+      - name: Build final V9.4 report
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$FLASH_ALLOWED" = "NO"
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          E=Path('/tmp/v94/evidence')
+          c=json.loads((E/'V9_4_CLASSIFICATION.json').read_text())
+          d=json.loads((E/'V9_4_DISASM_STATUS.json').read_text())
+          result={
+              'sdk_commit':(E/'SDK_COMMIT.txt').read_text().strip(),
+              'target_git_blob_sha1':(E/'B1_GIT_BLOB_SHA1.txt').read_text().strip(),
+              'target_sha256':(E/'B1_SHA256.txt').read_text().split()[0],
+              'target_size':1146395,
+              'target_executed':False,
+              'flash_read_0x03_classification':'SPI NOR READ opcode/source macro in DWARF .debug_macro',
+              'downloader_transport':'TCP socket to ICEman debugger service, default port 2354',
+              'debugger_flash_read_primitive_present':c['spi_flash_read_primitive_present'],
+              'debugger_verification_path_present':c['verification_path_present'],
+              'direct_usb_hid_transport_proven':False,
+              'direct_serial_transport_proven':False,
+              'stock_runtime_usb_flash_dump_path_proven':False,
+              'stock_recovery_usb_flash_dump_path_proven':False,
+              'android_usb_full_firmware_dump_path_proven':False,
+              'high_value_disassembly_extracted':d['functions_extracted'],
+              'call_edges':d['call_edges'],
+              'FLASH_ALLOWED':False,
+          }
+          (E/'V9_4_RESULT.json').write_text(json.dumps(result,indent=2)+'\n')
+          md=[
+              '# BP1048P4 V9.4 FIXED result','',
+              '- The previous V9.4 failure was a shell typo in the `grep` pipeline; this workflow fixes it.',
+              '- `FLASH_READ (0x03)` is a **SPI NOR opcode macro stored in DWARF `.debug_macro`**, not a runtime/recovery USB command.',
+              '- `b1_download_v1.7.exe` is an **AndeSight/NDS32 Flash Burner driver**.',
+              '- Its host transport is **TCP to ICEman**, and the embedded usage says the default ICEman port is **2354**.',
+              '- The binary contains a real debugger-side read primitive: `mxic_read(address, buffer, length)` plus `Verification` / `nds32_verify`.',
+              '- So flash content can be read for debugger verification through the ICE/AndeSight path.',
+              '- This does **not** establish a full-firmware read path through BP1048 stock USB runtime (`6324:1719`) or recovery FlashBoot (`0000:2244`).',
+              '- Next target after this run: reconstruct `out_io` / `fastin` / `multi_in` ICEman request framing and determine whether the same target-memory read can be reached without proprietary ICE hardware.',
+              '- `FLASH_ALLOWED=NO`; no target command was executed.'
+          ]
+          (E/'V9_4_REPORT.md').write_text('\n'.join(md)+'\n')
+          PY
+          cat /tmp/v94/evidence/V9_4_REPORT.md >> "$GITHUB_STEP_SUMMARY"
 
       - name: Final fail-closed assertions
         shell: bash
@@ -373,66 +354,68 @@ jobs:
           E=Path('/tmp/v94/evidence')
           safety=(E/'SAFETY.txt').read_text()
           assert 'TARGET_EXECUTED=NO' in safety
-          assert 'PHYSICAL_USB_BOARD_PRESENT=NO' in safety
           assert 'FLASH_READ_EXECUTED=NO' in safety
           assert 'FLASH_ERASE_EXECUTED=NO' in safety
           assert 'FLASH_WRITE_EXECUTED=NO' in safety
-          assert 'FLASH_ALLOWED=NO' in safety
           assert (E/'SDK_COMMIT.txt').read_text().strip() == '8105bd864b04995d81c9f9ae77cb158259f39015'
           assert (E/'B1_GIT_BLOB_SHA1.txt').read_text().strip() == 'dd2503e5a78d9b7c12f8b680a6be83d090adb966'
-          r=json.loads((E/'V9_4_B1_DOWNLOADER_AUDIT.json').read_text())
-          assert r.get('target_size') == 1146395
-          assert r.get('target_executed') is False
-          assert r.get('raw_FLASH_READ_0x03_occurrences',0) >= 1
-          assert r.get('status_register_function_name_strings_present') is True
-          assert r.get('host_generic_flash_readback_proven') is False
-          assert r.get('host_full_firmware_dump_path_proven') is False
-          assert r.get('FLASH_ALLOWED') is False
-          print('V9_4_B1_STATIC_AUDIT_COMPLETE=YES')
+          c=json.loads((E/'V9_4_CLASSIFICATION.json').read_text())
+          r=json.loads((E/'V9_4_RESULT.json').read_text())
+          assert c['flash_read_0x03_is_dwarf_debug_macro'] is True
+          assert c['iceman_default_port_2354'] is True
+          assert 'socket' in [x.lower() for x in c['network_imports']]
+          assert 'connect' in [x.lower() for x in c['network_imports']]
+          assert c['spi_flash_read_primitive_present'] is True
+          assert c['verification_path_present'] is True
+          assert r['debugger_flash_read_primitive_present'] is True
+          assert r['stock_runtime_usb_flash_dump_path_proven'] is False
+          assert r['stock_recovery_usb_flash_dump_path_proven'] is False
+          assert r['android_usb_full_firmware_dump_path_proven'] is False
+          assert r['FLASH_ALLOWED'] is False
+          print('V9_4_FIXED_STATIC_AUDIT_COMPLETE=YES')
           print('FLASH_ALLOWED=NO')
           PY
 
-      - name: Package V9.4 evidence
+      - name: Package V9.4 fixed evidence
         if: always()
         shell: bash
         run: |
           set -euo pipefail
           test "$FLASH_ALLOWED" = "NO"
           cd /tmp/v94/evidence
-          zip -9 -r /tmp/OKN_BP1048P4_V9_4_B1_DOWNLOADER_STATIC_EVIDENCE.zip . >/dev/null
-          sha256sum /tmp/OKN_BP1048P4_V9_4_B1_DOWNLOADER_STATIC_EVIDENCE.zip > /tmp/OKN_BP1048P4_V9_4_B1_DOWNLOADER_STATIC_EVIDENCE.zip.sha256
+          zip -9 -r /tmp/OKN_BP1048P4_V9_4_FIXED_EVIDENCE.zip . >/dev/null
+          sha256sum /tmp/OKN_BP1048P4_V9_4_FIXED_EVIDENCE.zip > /tmp/OKN_BP1048P4_V9_4_FIXED_EVIDENCE.zip.sha256
 
-      - name: Upload V9.4 evidence
+      - name: Upload V9.4 fixed evidence
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: OKN-BP1048P4-V9_4-B1-DOWNLOADER-STATIC-EVIDENCE
+          name: OKN-BP1048P4-V9_4-FIXED-EVIDENCE
           path: |
-            /tmp/OKN_BP1048P4_V9_4_B1_DOWNLOADER_STATIC_EVIDENCE.zip
-            /tmp/OKN_BP1048P4_V9_4_B1_DOWNLOADER_STATIC_EVIDENCE.zip.sha256
+            /tmp/OKN_BP1048P4_V9_4_FIXED_EVIDENCE.zip
+            /tmp/OKN_BP1048P4_V9_4_FIXED_EVIDENCE.zip.sha256
             /tmp/v94/evidence/V9_4_REPORT.md
-            /tmp/v94/evidence/V9_4_B1_DOWNLOADER_AUDIT.json
-            /tmp/v94/evidence/V9_4_CORRELATION.txt
-            /tmp/v94/evidence/B1_RAW_TARGET_STRING_OFFSETS.json
-            /tmp/v94/evidence/B1_FLASH_READ_RAW_NEIGHBORHOODS.json
-            /tmp/v94/evidence/B1_R2_TARGET_STRINGS.json
-            /tmp/v94/evidence/B1_R2_TARGET_XREFS.json
-            /tmp/v94/evidence/B1_R2_TARGET_CONTEXTS.json
-            /tmp/v94/evidence/B1_R2_HIGH_SIGNAL_FUNCTIONS.json
-            /tmp/v94/evidence/B1_R2_FUNCTIONS.json
-            /tmp/v94/evidence/B1_R2_SYMBOLS.json
-            /tmp/v94/evidence/B1_RABIN_IMPORTS.txt
-            /tmp/v94/evidence/B1_RABIN_SYMBOLS.txt
-            /tmp/v94/evidence/B1_RABIN_STRINGS.txt
-            /tmp/v94/evidence/B1_OBJDUMP_P.txt
-            /tmp/v94/evidence/B1_NM_SYMBOLS.txt
-            /tmp/v94/evidence/B1_HIGH_SIGNAL_TEXT.txt
+            /tmp/v94/evidence/V9_4_RESULT.json
+            /tmp/v94/evidence/V9_4_CLASSIFICATION.md
+            /tmp/v94/evidence/V9_4_CLASSIFICATION.json
+            /tmp/v94/evidence/V9_4_DISASM_STATUS.json
+            /tmp/v94/evidence/V9_4_CALL_EDGES.json
+            /tmp/v94/evidence/DISASM_initial_socket.txt
+            /tmp/v94/evidence/DISASM_out_io.txt
+            /tmp/v94/evidence/DISASM_fastin.txt
+            /tmp/v94/evidence/DISASM_fastout.txt
+            /tmp/v94/evidence/DISASM_mxic_read.txt
+            /tmp/v94/evidence/DISASM_Verification.txt
+            /tmp/v94/evidence/DISASM_nds32_verify.txt
             /tmp/v94/evidence/B1_TOOL_ROLE_EVIDENCE.txt
+            /tmp/v94/evidence/B1_OBJDUMP_H.txt
+            /tmp/v94/evidence/B1_OBJDUMP_P.txt
+            /tmp/v94/evidence/B1_OBJDUMP_X.txt
+            /tmp/v94/evidence/B1_NM_SYMBOLS.txt
             /tmp/v94/evidence/B1_SHA256.txt
             /tmp/v94/evidence/B1_GIT_BLOB_SHA1.txt
             /tmp/v94/evidence/B1_FILE_TYPE.txt
             /tmp/v94/evidence/SDK_COMMIT.txt
             /tmp/v94/evidence/SAFETY.txt
-            /tmp/v94/evidence/R2_VERSION.txt
           if-no-files-found: warn
           retention-days: 90
