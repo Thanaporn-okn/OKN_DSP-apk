@@ -1,0 +1,1291 @@
+name: Build Thai Speaker Box Designer - First Mock UI
+
+'on':
+  workflow_dispatch:
+  push:
+    branches: [ "main" ]
+
+permissions:
+  contents: read
+
+jobs:
+  build-android:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v4
+        with:
+          accept-android-sdk-licenses: 'true'
+          log-accepted-android-sdk-licenses: 'false'
+          packages: 'platform-tools platforms;android-35 build-tools;35.0.0'
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.10.2"
+
+      - name: Generate Android project
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          rm -rf app settings.gradle.kts build.gradle.kts gradle.properties
+          mkdir -p app/src/main/java/com/okn/speakerbox
+          mkdir -p app/src/main/res/values
+
+          cat > settings.gradle.kts <<'EOF'
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+          rootProject.name = "ThaiSpeakerBoxDesigner"
+          include(":app")
+          EOF
+
+          cat > build.gradle.kts <<'EOF'
+          plugins {
+              id("com.android.application") version "8.7.3" apply false
+              id("org.jetbrains.kotlin.android") version "2.0.21" apply false
+              id("org.jetbrains.kotlin.plugin.compose") version "2.0.21" apply false
+          }
+          EOF
+
+          cat > gradle.properties <<'EOF'
+          org.gradle.jvmargs=-Xmx3g -Dfile.encoding=UTF-8
+          android.useAndroidX=true
+          kotlin.code.style=official
+          android.nonTransitiveRClass=true
+          EOF
+
+          cat > app/build.gradle.kts <<'EOF'
+          plugins {
+              id("com.android.application")
+              id("org.jetbrains.kotlin.android")
+              id("org.jetbrains.kotlin.plugin.compose")
+          }
+
+          android {
+              namespace = "com.okn.speakerbox"
+              compileSdk = 35
+
+              defaultConfig {
+                  applicationId = "com.okn.speakerbox"
+                  minSdk = 26
+                  targetSdk = 35
+                  versionCode = 2
+                  versionName = "0.2.0-first-mock-ui"
+              }
+
+              buildFeatures { compose = true }
+
+              packaging {
+                  resources {
+                      excludes += "/META-INF/{AL2.0,LGPL2.1}"
+                  }
+              }
+          }
+
+          dependencies {
+              implementation(platform("androidx.compose:compose-bom:2024.12.01"))
+              implementation("androidx.activity:activity-compose:1.10.0")
+              implementation("androidx.compose.ui:ui")
+              implementation("androidx.compose.ui:ui-tooling-preview")
+              implementation("androidx.compose.foundation:foundation")
+              implementation("androidx.compose.material3:material3")
+              implementation("androidx.compose.material:material-icons-extended")
+              debugImplementation("androidx.compose.ui:ui-tooling")
+          }
+          EOF
+
+          cat > app/src/main/AndroidManifest.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <application
+                  android:allowBackup="true"
+                  android:label="Speaker Box Designer TH"
+                  android:supportsRtl="true"
+                  android:theme="@style/Theme.SpeakerBox">
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+              </application>
+          </manifest>
+          EOF
+
+          cat > app/src/main/res/values/themes.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <resources>
+              <style name="Theme.SpeakerBox" parent="android:style/Theme.Material.NoActionBar">
+                  <item name="android:fontFamily">sans</item>
+                  <item name="android:windowLightStatusBar">false</item>
+                  <item name="android:statusBarColor">#05080D</item>
+                  <item name="android:navigationBarColor">#05080D</item>
+                  <item name="android:windowActionModeOverlay">true</item>
+              </style>
+          </resources>
+          EOF
+
+          cat > app/src/main/java/com/okn/speakerbox/MainActivity.kt <<'EOF'
+          package com.okn.speakerbox
+
+          import android.os.Bundle
+          import androidx.activity.ComponentActivity
+          import androidx.activity.compose.setContent
+          import androidx.compose.foundation.Canvas
+          import androidx.compose.foundation.background
+          import androidx.compose.foundation.clickable
+          import androidx.compose.foundation.layout.*
+          import androidx.compose.foundation.lazy.LazyColumn
+          import androidx.compose.foundation.lazy.LazyListScope
+          import androidx.compose.foundation.lazy.LazyRow
+          import androidx.compose.foundation.lazy.items
+          import androidx.compose.foundation.shape.CircleShape
+          import androidx.compose.foundation.shape.RoundedCornerShape
+          import androidx.compose.material.icons.Icons
+          import androidx.compose.material.icons.rounded.*
+          import androidx.compose.material3.*
+          import androidx.compose.runtime.*
+          import androidx.compose.ui.Alignment
+          import androidx.compose.ui.Modifier
+          import androidx.compose.ui.geometry.Offset
+          import androidx.compose.ui.geometry.Rect
+          import androidx.compose.ui.graphics.Brush
+          import androidx.compose.ui.graphics.Color
+          import androidx.compose.ui.graphics.Path
+          import androidx.compose.ui.graphics.StrokeCap
+          import androidx.compose.ui.graphics.drawscope.Stroke
+          import androidx.compose.ui.graphics.vector.ImageVector
+          import androidx.compose.ui.text.font.FontWeight
+          import androidx.compose.ui.text.style.TextOverflow
+          import androidx.compose.ui.unit.dp
+          import androidx.compose.ui.unit.sp
+          import kotlin.math.ceil
+          import kotlin.math.log10
+          import kotlin.math.pow
+          import kotlin.math.round
+
+          data class Driver(
+              val brand: String,
+              val model: String,
+              val sizeInch: Int,
+              val ohm: Int,
+              val rmsW: Int,
+              val maxW: Int,
+              val fs: Double,
+              val qts: Double,
+              val qes: Double,
+              val vasL: Double,
+              val sdCm2: Double,
+              val xmaxMm: Double,
+              val re: Double,
+              val sensitivityDb: Double,
+              val use: String
+          )
+
+          data class DesignResult(
+              val netL: Double,
+              val grossL: Double,
+              val fbHz: Double,
+              val f3Hz: Double,
+              val splDb: Double,
+              val widthMm: Int,
+              val heightMm: Int,
+              val depthMm: Int,
+              val portAreaCm2: Int,
+              val portLengthMm: Int,
+              val sheetCount: Int,
+              val cutList: List<CutItem>
+          )
+
+          data class CutItem(val part: String, val size: String, val qty: Int)
+
+          enum class Screen {
+              HOME, MODE, LIBRARY, DETAIL, DESIGN, RESULT, CUT, GRAPH, COMPARE, PROJECTS, MORE
+          }
+
+          private val drivers = listOf(
+              Driver("P.Audio", "C18-650EL V4", 18, 8, 650, 1300, 34.0, 0.36, 0.38, 220.0, 1210.0, 8.0, 5.8, 96.0, "รถยนต์ / PA"),
+              Driver("KANE", "LV-1580", 15, 8, 800, 1600, 32.0, 0.38, 0.41, 180.0, 855.0, 8.5, 5.6, 97.0, "รถยนต์ / PA"),
+              Driver("Audio Device", "AD-1200S", 12, 4, 1200, 2400, 35.0, 0.41, 0.44, 85.0, 530.0, 10.0, 3.2, 95.0, "รถยนต์"),
+              Driver("NPE", "LS-10M", 10, 8, 300, 600, 55.0, 0.47, 0.51, 32.0, 330.0, 4.0, 5.9, 94.0, "Midbass"),
+              Driver("OBOM", "OB-654", 6, 4, 200, 400, 68.0, 0.52, 0.56, 12.0, 145.0, 3.0, 3.1, 92.0, "รถยนต์"),
+              Driver("P.Audio", "BM-400", 4, 8, 100, 200, 82.0, 0.58, 0.62, 4.8, 78.0, 2.0, 6.1, 91.0, "Midrange")
+          )
+
+          private val enclosureNames = listOf(
+              "ปิด (Sealed)", "เปิด (Bass Reflex)", "แบนพาส", "ตู้ฟาด",
+              "บังเกอร์", "เจบิน", "เทอร์โบ", "W-bin", "ออร์เดอร์ 6"
+          )
+
+          class MainActivity : ComponentActivity() {
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+                  setContent { AppTheme { SpeakerDesignerApp() } }
+              }
+          }
+
+          @Composable
+          fun AppTheme(content: @Composable () -> Unit) {
+              MaterialTheme(
+                  colorScheme = darkColorScheme(
+                      primary = Color(0xFF21B5FF),
+                      secondary = Color(0xFF8259FF),
+                      tertiary = Color(0xFF00E4C7),
+                      background = Color(0xFF05080D),
+                      surface = Color(0xFF0B121A),
+                      surfaceVariant = Color(0xFF141E29),
+                      onBackground = Color.White,
+                      onSurface = Color.White,
+                      onSurfaceVariant = Color(0xFFC5D1DD)
+                  ),
+                  content = content
+              )
+          }
+
+          @Composable
+          fun SpeakerDesignerApp() {
+              var screen by remember { mutableStateOf(Screen.HOME) }
+              var category by remember { mutableStateOf("รถยนต์") }
+              var selected by remember { mutableStateOf(drivers.first()) }
+              var selectedBox by remember { mutableStateOf("เปิด (Bass Reflex)") }
+              var result by remember { mutableStateOf<DesignResult?>(null) }
+              var lastCount by remember { mutableIntStateOf(1) }
+              var lastTarget by remember { mutableDoubleStateOf(38.0) }
+              var lastThickness by remember { mutableIntStateOf(18) }
+
+              fun goBottom(index: Int) {
+                  screen = when (index) {
+                      0 -> Screen.HOME
+                      1 -> Screen.LIBRARY
+                      2 -> Screen.DESIGN
+                      3 -> Screen.PROJECTS
+                      else -> Screen.MORE
+                  }
+              }
+
+              val bottomIndex = when (screen) {
+                  Screen.HOME, Screen.MODE -> 0
+                  Screen.LIBRARY, Screen.DETAIL, Screen.COMPARE -> 1
+                  Screen.DESIGN, Screen.RESULT, Screen.CUT, Screen.GRAPH -> 2
+                  Screen.PROJECTS -> 3
+                  Screen.MORE -> 4
+              }
+
+              Scaffold(
+                  containerColor = Color(0xFF05080D),
+                  bottomBar = {
+                      NavigationBar(containerColor = Color(0xFF081018), tonalElevation = 0.dp) {
+                          val nav = listOf(
+                              Triple("หน้าแรก", Icons.Rounded.Home, 0),
+                              Triple("ค้นหาดอก", Icons.Rounded.Search, 1),
+                              Triple("คำนวณ", Icons.Rounded.Calculate, 2),
+                              Triple("โปรเจค", Icons.Rounded.Folder, 3),
+                              Triple("อื่นๆ", Icons.Rounded.MoreHoriz, 4)
+                          )
+                          nav.forEach { (label, icon, index) ->
+                              NavigationBarItem(
+                                  selected = bottomIndex == index,
+                                  onClick = { goBottom(index) },
+                                  icon = { Icon(icon, null) },
+                                  label = { Text(label, fontSize = 10.sp) },
+                                  colors = NavigationBarItemDefaults.colors(
+                                      indicatorColor = Color(0xFF123650),
+                                      selectedIconColor = Color(0xFF25B8FF),
+                                      selectedTextColor = Color(0xFF25B8FF),
+                                      unselectedIconColor = Color(0xFF8192A2),
+                                      unselectedTextColor = Color(0xFF8192A2)
+                                  )
+                              )
+                          }
+                      }
+                  }
+              ) { padding ->
+                  Box(Modifier.padding(padding)) {
+                      when (screen) {
+                          Screen.HOME -> HomeScreen(
+                              onCar = { category = "รถยนต์"; screen = Screen.MODE },
+                              onPa = { category = "PA"; screen = Screen.MODE },
+                              onLibrary = { screen = Screen.LIBRARY },
+                              onCompare = { screen = Screen.COMPARE }
+                          )
+                          Screen.MODE -> ModeScreen(
+                              category = category,
+                              onBack = { screen = Screen.HOME },
+                              onEnclosure = { name ->
+                                  selectedBox = name
+                                  screen = Screen.LIBRARY
+                              }
+                          )
+                          Screen.LIBRARY -> LibraryScreen(
+                              category = category,
+                              selected = selected,
+                              onDetail = { selected = it; screen = Screen.DETAIL },
+                              onSelect = { selected = it; screen = Screen.DESIGN },
+                              onCompare = { screen = Screen.COMPARE }
+                          )
+                          Screen.DETAIL -> DetailScreen(
+                              driver = selected,
+                              onBack = { screen = Screen.LIBRARY },
+                              onGraph = { screen = Screen.GRAPH },
+                              onUse = { screen = Screen.DESIGN }
+                          )
+                          Screen.DESIGN -> DesignScreen(
+                              category = category,
+                              driver = selected,
+                              initialBox = selectedBox,
+                              onChooseDriver = { screen = Screen.LIBRARY },
+                              onCalculated = { box, count, target, thickness, r ->
+                                  selectedBox = box
+                                  lastCount = count
+                                  lastTarget = target
+                                  lastThickness = thickness
+                                  result = r
+                                  screen = Screen.RESULT
+                              }
+                          )
+                          Screen.RESULT -> ResultScreen(
+                              driver = selected,
+                              boxName = selectedBox,
+                              count = lastCount,
+                              result = result ?: calculateDesign(selected, selectedBox, lastCount, lastTarget, lastThickness),
+                              onCut = { screen = Screen.CUT },
+                              onGraph = { screen = Screen.GRAPH },
+                              onBack = { screen = Screen.DESIGN }
+                          )
+                          Screen.CUT -> CutScreen(
+                              result = result ?: calculateDesign(selected, selectedBox, lastCount, lastTarget, lastThickness),
+                              thickness = lastThickness,
+                              onBack = { screen = Screen.RESULT }
+                          )
+                          Screen.GRAPH -> GraphScreen(
+                              driver = selected,
+                              result = result ?: calculateDesign(selected, selectedBox, lastCount, lastTarget, lastThickness),
+                              onBack = { screen = if (result == null) Screen.DETAIL else Screen.RESULT }
+                          )
+                          Screen.COMPARE -> CompareScreen(
+                              onBack = { screen = Screen.LIBRARY },
+                              onSelect = { selected = it; screen = Screen.DETAIL }
+                          )
+                          Screen.PROJECTS -> ProjectScreen(
+                              driver = selected,
+                              boxName = selectedBox,
+                              result = result,
+                              onOpen = { if (result != null) screen = Screen.RESULT else screen = Screen.DESIGN }
+                          )
+                          Screen.MORE -> MoreScreen()
+                      }
+                  }
+              }
+          }
+
+          @Composable
+          fun Page(content: LazyListScope.() -> Unit) {
+              LazyColumn(
+                  modifier = Modifier
+                      .fillMaxSize()
+                      .background(
+                          Brush.verticalGradient(
+                              listOf(Color(0xFF07111C), Color(0xFF05080D), Color(0xFF05080D))
+                          )
+                      ),
+                  contentPadding = PaddingValues(start = 14.dp, end = 14.dp, top = 10.dp, bottom = 18.dp),
+                  verticalArrangement = Arrangement.spacedBy(11.dp),
+                  content = content
+              )
+          }
+
+          @Composable
+          fun TopTitle(title: String, onBack: (() -> Unit)? = null, action: (@Composable () -> Unit)? = null) {
+              Row(
+                  Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                  verticalAlignment = Alignment.CenterVertically
+              ) {
+                  if (onBack != null) {
+                      IconButton(onClick = onBack) { Icon(Icons.Rounded.ArrowBack, null) }
+                  }
+                  Text(title, Modifier.weight(1f), fontSize = 23.sp, fontWeight = FontWeight.Bold)
+                  if (action != null) action()
+              }
+          }
+
+          @Composable
+          fun DarkCard(
+              modifier: Modifier = Modifier,
+              padding: PaddingValues = PaddingValues(14.dp),
+              content: @Composable ColumnScope.() -> Unit
+          ) {
+              Card(
+                  modifier = modifier,
+                  shape = RoundedCornerShape(20.dp),
+                  colors = CardDefaults.cardColors(containerColor = Color(0xFF101923)),
+                  border = androidx.compose.foundation.BorderStroke(1.dp, Color.White.copy(alpha = 0.04f))
+              ) {
+                  Column(Modifier.padding(padding), verticalArrangement = Arrangement.spacedBy(8.dp), content = content)
+              }
+          }
+
+          @Composable
+          fun SpeakerArt(modifier: Modifier = Modifier, accent: Color = Color(0xFF22B8FF)) {
+              Canvas(modifier = modifier) {
+                  val c = Offset(size.width / 2f, size.height / 2f)
+                  val r = size.minDimension / 2f
+                  drawCircle(Color(0xFF06090D), r, c)
+                  drawCircle(Color(0xFF243747), r * .90f, c, style = Stroke(width = r * .09f))
+                  drawCircle(Color(0xFF0C141C), r * .76f, c)
+                  drawCircle(Color(0xFF182631), r * .64f, c, style = Stroke(width = r * .08f))
+                  drawCircle(Color(0xFF05070A), r * .52f, c)
+                  drawCircle(accent.copy(alpha = .40f), r * .43f, c, style = Stroke(width = r * .025f))
+                  drawCircle(Color(0xFF17242E), r * .30f, c)
+                  drawCircle(Color(0xFF070A0D), r * .16f, c)
+              }
+          }
+
+          @Composable
+          fun HomeScreen(onCar: () -> Unit, onPa: () -> Unit, onLibrary: () -> Unit, onCompare: () -> Unit) {
+              Page {
+                  item {
+                      DarkCard(
+                          modifier = Modifier.fillMaxWidth(),
+                          padding = PaddingValues(0.dp)
+                      ) {
+                          Box(
+                              Modifier
+                                  .fillMaxWidth()
+                                  .height(260.dp)
+                                  .background(
+                                      Brush.linearGradient(
+                                          listOf(Color(0xFF00142B), Color(0xFF08101D), Color(0xFF270740))
+                                      )
+                                  )
+                          ) {
+                              SpeakerArt(
+                                  Modifier.size(205.dp).align(Alignment.TopCenter).offset(y = 8.dp),
+                                  accent = Color(0xFF2B9CFF)
+                              )
+                              Column(
+                                  Modifier.align(Alignment.BottomStart).padding(20.dp)
+                              ) {
+                                  Text("ออกแบบตู้ลำโพง", fontSize = 30.sp, fontWeight = FontWeight.ExtraBold)
+                                  Text("รถยนต์ & PA", fontSize = 22.sp, color = Color(0xFF27B9FF), fontWeight = FontWeight.Bold)
+                                  Text("คำนวณ • ออกแบบ • ตัดไม้ • ครบในแอปเดียว", color = Color(0xFFD1DFEA), fontSize = 13.sp)
+                              }
+                          }
+                      }
+                  }
+
+                  item {
+                      HomeBigButton(
+                          title = "ตู้ลำโพงรถยนต์",
+                          subtitle = "ซับวูฟเฟอร์ • ประตู • หลังเบาะ",
+                          icon = Icons.Rounded.DirectionsCar,
+                          colors = listOf(Color(0xFF087FE8), Color(0xFF00B8FF)),
+                          onClick = onCar
+                      )
+                  }
+                  item {
+                      HomeBigButton(
+                          title = "ตู้ลำโพง PA",
+                          subtitle = "เบส • กลาง • แหลม • ฮอร์น",
+                          icon = Icons.Rounded.SpeakerGroup,
+                          colors = listOf(Color(0xFF6334EF), Color(0xFFC329F1)),
+                          onClick = onPa
+                      )
+                  }
+                  item {
+                      Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                          SmallAction("ฐานข้อมูลดอก", "ดอกลำโพงในไทย", Icons.Rounded.Storage, Modifier.weight(1f), onLibrary)
+                          SmallAction("สูตรตู้ลำโพง", "รวมสูตรยอดนิยม", Icons.Rounded.ViewInAr, Modifier.weight(1f), onCompare)
+                      }
+                  }
+              }
+          }
+
+          @Composable
+          fun HomeBigButton(title: String, subtitle: String, icon: ImageVector, colors: List<Color>, onClick: () -> Unit) {
+              Card(
+                  Modifier.fillMaxWidth().clickable(onClick = onClick),
+                  shape = RoundedCornerShape(20.dp),
+                  colors = CardDefaults.cardColors(containerColor = Color.Transparent)
+              ) {
+                  Row(
+                      Modifier.background(Brush.horizontalGradient(colors)).padding(18.dp),
+                      verticalAlignment = Alignment.CenterVertically
+                  ) {
+                      Surface(shape = CircleShape, color = Color.White.copy(alpha = .16f)) {
+                          Icon(icon, null, Modifier.padding(14.dp).size(30.dp), Color.White)
+                      }
+                      Spacer(Modifier.width(14.dp))
+                      Column(Modifier.weight(1f)) {
+                          Text(title, fontWeight = FontWeight.Bold, fontSize = 20.sp)
+                          Text(subtitle, color = Color.White.copy(alpha = .84f), fontSize = 12.sp)
+                      }
+                      Icon(Icons.Rounded.ChevronRight, null)
+                  }
+              }
+          }
+
+          @Composable
+          fun SmallAction(title: String, subtitle: String, icon: ImageVector, modifier: Modifier, onClick: () -> Unit) {
+              DarkCard(modifier.clickable(onClick = onClick)) {
+                  Icon(icon, null, tint = Color(0xFF26B8FF), modifier = Modifier.size(28.dp))
+                  Text(title, fontWeight = FontWeight.Bold)
+                  Text(subtitle, color = Color(0xFF8FA4B8), fontSize = 11.sp)
+              }
+          }
+
+          @Composable
+          fun ModeScreen(category: String, onBack: () -> Unit, onEnclosure: (String) -> Unit) {
+              Page {
+                  item { TopTitle("เลือกประเภทการใช้งาน", onBack) }
+                  item {
+                      Card(
+                          shape = RoundedCornerShape(22.dp),
+                          colors = CardDefaults.cardColors(containerColor = Color.Transparent)
+                      ) {
+                          Box(
+                              Modifier.fillMaxWidth().height(118.dp).background(
+                                  Brush.linearGradient(
+                                      if (category == "รถยนต์") listOf(Color(0xFF0B91F2), Color(0xFF1549B6))
+                                      else listOf(Color(0xFF7A2BE7), Color(0xFF3B1A8A))
+                                  )
+                              )
+                          ) {
+                              Icon(
+                                  if (category == "รถยนต์") Icons.Rounded.DirectionsCar else Icons.Rounded.SpeakerGroup,
+                                  null,
+                                  Modifier.size(82.dp).align(Alignment.CenterEnd).padding(end = 18.dp),
+                                  Color.White.copy(alpha = .75f)
+                              )
+                              Column(Modifier.align(Alignment.CenterStart).padding(18.dp)) {
+                                  Text(category, fontSize = 28.sp, fontWeight = FontWeight.ExtraBold)
+                                  Text(
+                                      if (category == "รถยนต์") "ซับบ็อกซ์ / ประตู / หลังเบาะ / SPL" else "เบส / กลาง / แหลม / Line array / Horn",
+                                      color = Color.White.copy(alpha = .85f), fontSize = 12.sp
+                                  )
+                              }
+                          }
+                      }
+                  }
+                  item { Text("รูปแบบตู้ยอดนิยม", fontWeight = FontWeight.Bold, fontSize = 18.sp) }
+                  item {
+                      Column(verticalArrangement = Arrangement.spacedBy(9.dp)) {
+                          enclosureNames.chunked(3).forEach { row ->
+                              Row(horizontalArrangement = Arrangement.spacedBy(9.dp)) {
+                                  row.forEach { name ->
+                                      EnclosureTile(name, Modifier.weight(1f)) { onEnclosure(name) }
+                                  }
+                                  repeat(3 - row.size) { Spacer(Modifier.weight(1f)) }
+                              }
+                          }
+                      }
+                  }
+              }
+          }
+
+          @Composable
+          fun EnclosureTile(name: String, modifier: Modifier = Modifier, onClick: () -> Unit) {
+              DarkCard(modifier.clickable(onClick = onClick), PaddingValues(10.dp)) {
+                  CabinetMini(Modifier.fillMaxWidth().height(62.dp), highlighted = name.contains("เปิด") || name.contains("Reflex"))
+                  Text(name, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.align(Alignment.CenterHorizontally))
+              }
+          }
+
+          @Composable
+          fun CabinetMini(modifier: Modifier, highlighted: Boolean = false) {
+              Canvas(modifier) {
+                  val body = if (highlighted) Color(0xFF243E55) else Color(0xFF1A242E)
+                  drawRoundRect(body, cornerRadius = androidx.compose.ui.geometry.CornerRadius(12f, 12f))
+                  val r = size.minDimension * .30f
+                  val c = Offset(size.width * .43f, size.height * .52f)
+                  drawCircle(Color(0xFF05080B), r, c)
+                  drawCircle(Color(0xFF455B6B), r * .82f, c, style = Stroke(width = 5f))
+                  drawCircle(Color(0xFF101820), r * .58f, c)
+                  if (highlighted) {
+                      drawRoundRect(Color(0xFF111B24), topLeft = Offset(size.width * .78f, size.height * .18f), size = androidx.compose.ui.geometry.Size(size.width * .10f, size.height * .64f))
+                  }
+              }
+          }
+
+          @Composable
+          fun LibraryScreen(category: String, selected: Driver, onDetail: (Driver) -> Unit, onSelect: (Driver) -> Unit, onCompare: () -> Unit) {
+              var query by remember { mutableStateOf("") }
+              var brand by remember { mutableStateOf("ทั้งหมด") }
+              val brands = listOf("ทั้งหมด", "P.Audio", "KANE", "Audio Device", "NPE", "OBOM")
+              val filtered = drivers.filter {
+                  (brand == "ทั้งหมด" || it.brand == brand) &&
+                      (query.isBlank() || (it.brand + " " + it.model).contains(query, ignoreCase = true))
+              }
+              Page {
+                  item {
+                      TopTitle("ค้นหาดอกลำโพง", action = {
+                          IconButton(onClick = onCompare) { Icon(Icons.Rounded.Tune, null) }
+                      })
+                  }
+                  item {
+                      OutlinedTextField(
+                          value = query,
+                          onValueChange = { query = it },
+                          leadingIcon = { Icon(Icons.Rounded.Search, null) },
+                          trailingIcon = { Icon(Icons.Rounded.FilterAlt, null) },
+                          placeholder = { Text("ค้นหาแบรนด์ รุ่น ขนาด ...") },
+                          modifier = Modifier.fillMaxWidth(),
+                          singleLine = true,
+                          shape = RoundedCornerShape(16.dp)
+                      )
+                  }
+                  item {
+                      LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                          items(listOf("ทั้งหมด", "รถยนต์", "PA", "ซับวูฟเฟอร์")) { item ->
+                              FilterChip(selected = (item == "ทั้งหมด" || item == category), onClick = {}, label = { Text(item) })
+                          }
+                      }
+                  }
+                  item {
+                      LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                          items(brands) { b ->
+                              FilterChip(selected = brand == b, onClick = { brand = b }, label = { Text(b) })
+                          }
+                      }
+                  }
+                  items(filtered) { d ->
+                      DriverCard(d, selected == d, onDetail = { onDetail(d) }, onSelect = { onSelect(d) })
+                  }
+              }
+          }
+
+          @Composable
+          fun DriverCard(driver: Driver, selected: Boolean, onDetail: () -> Unit, onSelect: () -> Unit) {
+              Card(
+                  modifier = Modifier.fillMaxWidth().clickable(onClick = onDetail),
+                  shape = RoundedCornerShape(18.dp),
+                  colors = CardDefaults.cardColors(containerColor = if (selected) Color(0xFF12283A) else Color(0xFF101923))
+              ) {
+                  Row(Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
+                      Box(
+                          Modifier.size(82.dp).background(Color(0xFF071018), RoundedCornerShape(16.dp)),
+                          contentAlignment = Alignment.Center
+                      ) {
+                          SpeakerArt(Modifier.size(70.dp), accent = if (driver.brand == "P.Audio") Color(0xFF22B8FF) else Color(0xFF6B7D8E))
+                      }
+                      Spacer(Modifier.width(12.dp))
+                      Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                          Text("${driver.brand} ${driver.model}", fontWeight = FontWeight.Bold, fontSize = 16.sp)
+                          Text("${driver.sizeInch}\" Subwoofer", color = Color(0xFF9AACBD), fontSize = 12.sp)
+                          Text("${driver.rmsW}W RMS   ${driver.ohm}Ω", color = Color(0xFFD5DFE7), fontSize = 12.sp)
+                          Text("Fs ${driver.fs.toInt()}Hz   Qts ${driver.qts}   Vas ${driver.vasL.toInt()}L   Sens ${driver.sensitivityDb.toInt()}dB", color = Color(0xFF7FCDF5), fontSize = 10.sp)
+                      }
+                      Column(horizontalAlignment = Alignment.End) {
+                          Icon(Icons.Rounded.FavoriteBorder, null, tint = Color(0xFF9AABBA))
+                          Spacer(Modifier.height(12.dp))
+                          FilledTonalButton(onClick = onSelect, contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp)) { Text("เลือก", fontSize = 11.sp) }
+                      }
+                  }
+              }
+          }
+
+          @Composable
+          fun DetailScreen(driver: Driver, onBack: () -> Unit, onGraph: () -> Unit, onUse: () -> Unit) {
+              Page {
+                  item { TopTitle("รายละเอียดดอกลำโพง", onBack) { Icon(Icons.Rounded.FavoriteBorder, null, tint = Color(0xFFFF3D74)) } }
+                  item {
+                      Box(Modifier.fillMaxWidth().height(210.dp), contentAlignment = Alignment.Center) {
+                          SpeakerArt(Modifier.size(205.dp), accent = Color(0xFF1EB7FF))
+                      }
+                  }
+                  item {
+                      Text("${driver.brand} ${driver.model}", fontSize = 24.sp, fontWeight = FontWeight.ExtraBold)
+                      Text("${driver.sizeInch}\" Subwoofer", color = Color(0xFFB8C4D0))
+                      Row(horizontalArrangement = Arrangement.spacedBy(7.dp)) {
+                          Badge(driver.brand)
+                          Badge("${driver.use}")
+                          Badge("นิยมในไทย")
+                      }
+                  }
+                  item {
+                      Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                          StatBox("${driver.rmsW}W", "RMS", Modifier.weight(1f))
+                          StatBox("${driver.maxW}W", "MAX", Modifier.weight(1f))
+                          StatBox("${driver.ohm}Ω", "Impedance", Modifier.weight(1f))
+                      }
+                  }
+                  item {
+                      DarkCard {
+                          Text("ข้อมูล Thiele/Small (T/S)", fontWeight = FontWeight.Bold, fontSize = 17.sp)
+                          TSRow("Fs", "${driver.fs} Hz")
+                          TSRow("Qts", "${driver.qts}")
+                          TSRow("Qes", "${driver.qes}")
+                          TSRow("Vas", "${driver.vasL} L")
+                          TSRow("Sd", "${driver.sdCm2} cm²")
+                          TSRow("Xmax", "${driver.xmaxMm} mm")
+                          TSRow("Re", "${driver.re} Ω")
+                          TSRow("Sensitivity", "${driver.sensitivityDb} dB (1W/1m)")
+                      }
+                  }
+                  item {
+                      Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                          OutlinedButton(onClick = onGraph, modifier = Modifier.weight(1f)) { Icon(Icons.Rounded.ShowChart, null); Spacer(Modifier.width(6.dp)); Text("ดูกราฟ T/S") }
+                          Button(onClick = onUse, modifier = Modifier.weight(1f)) { Text("เลือกใช้ดอกนี้") }
+                      }
+                  }
+              }
+          }
+
+          @Composable
+          fun Badge(text: String) {
+              Surface(shape = RoundedCornerShape(12.dp), color = Color(0xFF162433)) {
+                  Text(text, Modifier.padding(horizontal = 9.dp, vertical = 5.dp), color = Color(0xFFB7CBE0), fontSize = 10.sp)
+              }
+          }
+
+          @Composable
+          fun StatBox(value: String, label: String, modifier: Modifier = Modifier) {
+              DarkCard(modifier, PaddingValues(10.dp)) {
+                  Text(value, fontWeight = FontWeight.Bold, fontSize = 17.sp)
+                  Text(label, color = Color(0xFF8FA3B5), fontSize = 10.sp)
+              }
+          }
+
+          @Composable
+          fun TSRow(label: String, value: String) {
+              Row(Modifier.fillMaxWidth()) {
+                  Text(label, Modifier.weight(1f), color = Color(0xFFAAB8C5))
+                  Text(value, fontWeight = FontWeight.SemiBold)
+              }
+              HorizontalDivider(color = Color.White.copy(alpha = .06f))
+          }
+
+          @Composable
+          fun DesignScreen(
+              category: String,
+              driver: Driver,
+              initialBox: String,
+              onChooseDriver: () -> Unit,
+              onCalculated: (String, Int, Double, Int, DesignResult) -> Unit
+          ) {
+              var selectedBox by remember(initialBox) { mutableStateOf(initialBox) }
+              var count by remember { mutableIntStateOf(1) }
+              var targetHz by remember { mutableFloatStateOf(38f) }
+              var thickness by remember { mutableIntStateOf(18) }
+              var wiring by remember { mutableStateOf("${driver.ohm} Ω") }
+
+              Page {
+                  item { TopTitle("ออกแบบตู้ลำโพง (${category})") }
+                  item { StepBar(1) }
+                  item {
+                      Text("1  เลือกดอกลำโพง", fontWeight = FontWeight.Bold, color = Color(0xFF75D4FF))
+                      DarkCard {
+                          Row(verticalAlignment = Alignment.CenterVertically) {
+                              SpeakerArt(Modifier.size(62.dp))
+                              Spacer(Modifier.width(10.dp))
+                              Column(Modifier.weight(1f)) {
+                                  Text("${driver.brand} ${driver.model}", fontWeight = FontWeight.Bold)
+                                  Text("${driver.sizeInch}\" • ${driver.rmsW}W RMS • ${driver.ohm}Ω", color = Color(0xFF9CAFBE), fontSize = 11.sp)
+                              }
+                              OutlinedButton(onClick = onChooseDriver) { Text("เปลี่ยนดอก", fontSize = 10.sp) }
+                          }
+                      }
+                  }
+                  item {
+                      Text("2  รูปแบบตู้", fontWeight = FontWeight.Bold, color = Color(0xFF75D4FF))
+                      Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                          enclosureNames.chunked(3).forEach { row ->
+                              Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                  row.forEach { name ->
+                                      BoxChoice(name, selectedBox == name, Modifier.weight(1f)) { selectedBox = name }
+                                  }
+                                  repeat(3 - row.size) { Spacer(Modifier.weight(1f)) }
+                              }
+                          }
+                      }
+                  }
+                  item {
+                      Text("3  ตั้งค่าการคำนวณ", fontWeight = FontWeight.Bold, color = Color(0xFF75D4FF))
+                      DarkCard {
+                          Text("จำนวนดอก")
+                          Row(verticalAlignment = Alignment.CenterVertically) {
+                              FilledTonalIconButton(onClick = { if (count > 1) count-- }) { Icon(Icons.Rounded.Remove, null) }
+                              Text("$count", Modifier.padding(horizontal = 22.dp), fontSize = 22.sp, fontWeight = FontWeight.Bold)
+                              FilledTonalIconButton(onClick = { if (count < 8) count++ }) { Icon(Icons.Rounded.Add, null) }
+                              Spacer(Modifier.weight(1f))
+                              Text("ดอก", color = Color(0xFF91A4B6))
+                          }
+                          Text("การต่อโอห์ม")
+                          Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                              listOf("${driver.ohm} Ω", "${(driver.ohm / 2.0)} Ω", "${driver.ohm * 2} Ω").forEach { w ->
+                                  FilterChip(selected = wiring == w, onClick = { wiring = w }, label = { Text(w) })
+                              }
+                          }
+                          Row(verticalAlignment = Alignment.CenterVertically) {
+                              Text("ความถี่ที่ต้องการ (Fb)", Modifier.weight(1f))
+                              Text("${targetHz.toInt()} Hz", color = Color(0xFF5DD1FF), fontWeight = FontWeight.Bold)
+                          }
+                          Slider(value = targetHz, onValueChange = { targetHz = it }, valueRange = 25f..80f)
+                          Text("ความหนาไม้")
+                          Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                              listOf(15, 18, 20, 25).forEach { mm ->
+                                  FilterChip(selected = thickness == mm, onClick = { thickness = mm }, label = { Text("$mm mm") })
+                              }
+                          }
+                      }
+                  }
+                  item {
+                      Button(
+                          onClick = {
+                              val r = calculateDesign(driver, selectedBox, count, targetHz.toDouble(), thickness)
+                              onCalculated(selectedBox, count, targetHz.toDouble(), thickness, r)
+                          },
+                          Modifier.fillMaxWidth().height(55.dp),
+                          shape = RoundedCornerShape(15.dp)
+                      ) {
+                          Icon(Icons.Rounded.Calculate, null)
+                          Spacer(Modifier.width(8.dp))
+                          Text("คำนวณ", fontWeight = FontWeight.Bold, fontSize = 17.sp)
+                      }
+                  }
+              }
+          }
+
+          @Composable
+          fun StepBar(active: Int) {
+              Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                  (1..4).forEach { step ->
+                      Surface(shape = CircleShape, color = if (step <= active) Color(0xFF1DB6FF) else Color(0xFF25313C)) {
+                          Text("$step", Modifier.padding(horizontal = 9.dp, vertical = 5.dp), fontWeight = FontWeight.Bold, fontSize = 11.sp)
+                      }
+                      if (step < 4) {
+                          Box(Modifier.weight(1f).height(2.dp).background(if (step < active) Color(0xFF1DB6FF) else Color(0xFF25313C)))
+                      }
+                  }
+              }
+          }
+
+          @Composable
+          fun BoxChoice(name: String, selected: Boolean, modifier: Modifier, onClick: () -> Unit) {
+              Card(
+                  modifier.clickable(onClick = onClick),
+                  shape = RoundedCornerShape(14.dp),
+                  colors = CardDefaults.cardColors(containerColor = if (selected) Color(0xFF113A54) else Color(0xFF111A23)),
+                  border = androidx.compose.foundation.BorderStroke(1.dp, if (selected) Color(0xFF20B8FF) else Color.White.copy(alpha = .05f))
+              ) {
+                  Column(Modifier.padding(8.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                      CabinetMini(Modifier.fillMaxWidth().height(48.dp), highlighted = selected)
+                      Spacer(Modifier.height(5.dp))
+                      Text(name, fontSize = 9.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                  }
+              }
+          }
+
+          private fun calculateDesign(d: Driver, boxName: String, count: Int, targetHz: Double, thickness: Int): DesignResult {
+              val totalVas = d.vasL * count
+              val qtc = 0.707
+              val sealedNet = (totalVas / ((qtc / d.qts).pow(2.0) - 1.0)).let { if (it.isFinite()) it else d.vasL * .5 * count }.coerceAtLeast(d.vasL * .32 * count)
+              val isSealed = boxName.contains("ปิด") || boxName.contains("Sealed")
+              val isBand = boxName.contains("แบนพาส") || boxName.contains("ออร์เดอร์")
+              val isHornLike = boxName.contains("W-bin") || boxName.contains("เทอร์โบ") || boxName.contains("เจบิน") || boxName.contains("ฟาด") || boxName.contains("บังเกอร์")
+              val net = when {
+                  isSealed -> sealedNet
+                  isBand -> sealedNet * 1.75
+                  isHornLike -> (d.vasL * .85 * count).coerceAtLeast(55.0 * count)
+                  else -> (15.0 * totalVas * d.qts.pow(2.87)).coerceIn(d.vasL * .45 * count, d.vasL * 1.15 * count)
+              }
+              val fb = if (isSealed) 0.0 else targetHz
+              val f3 = when {
+                  isSealed -> d.fs * (qtc / d.qts)
+                  isBand -> targetHz * .90
+                  isHornLike -> targetHz * .95
+                  else -> targetHz * .92
+              }
+              val spl = d.sensitivityDb + 10.0 * log10((d.rmsW * count).toDouble().coerceAtLeast(1.0))
+              val driverDisp = d.sizeInch * .55 * count
+              val brace = net * .05
+              val portArea = if (isSealed) 0 else (d.sdCm2 * count * .17).toInt().coerceAtLeast(80)
+              val portLength = if (isSealed) 0 else ((23562.5 * portArea / (targetHz.pow(2.0) * net)).coerceIn(12.0, 70.0) * 10).toInt()
+              val portVolume = if (isSealed) 0.0 else (portArea * (portLength / 10.0)) / 1000.0
+              val gross = net + driverDisp + brace + portVolume
+
+              val ratioW = if (d.sizeInch >= 18) 1.55 else 1.42
+              val ratioH = 1.0
+              val ratioD = 1.12
+              val mm3 = gross * 1_000_000.0
+              val base = (mm3 / (ratioW * ratioH * ratioD)).pow(1.0 / 3.0)
+              val innerW = base * ratioW
+              val innerH = base * ratioH
+              val innerD = base * ratioD
+              val w = (innerW + 2 * thickness).toInt()
+              val h = (innerH + 2 * thickness).toInt()
+              val dep = (innerD + 2 * thickness).toInt()
+
+              val cuts = mutableListOf(
+                  CutItem("ด้านบน", "$w × $dep mm", 1),
+                  CutItem("ด้านล่าง", "$w × $dep mm", 1),
+                  CutItem("ด้านหน้า", "$w × ${h - 2 * thickness} mm", 1),
+                  CutItem("ด้านหลัง", "$w × ${h - 2 * thickness} mm", 1),
+                  CutItem("ด้านซ้าย", "${h - 2 * thickness} × ${dep - 2 * thickness} mm", 1),
+                  CutItem("ด้านขวา", "${h - 2 * thickness} × ${dep - 2 * thickness} mm", 1)
+              )
+              if (!isSealed) cuts += CutItem("แผ่นพอร์ต", "${(portArea / 10).coerceAtLeast(8) * 10} × $portLength mm", 1)
+              cuts += CutItem("ค้ำตู้", "ปรับตามตำแหน่งดอก/พอร์ต", 2)
+
+              val panelArea = (2.0 * w * dep + 2.0 * w * h + 2.0 * h * dep) / 1_000_000.0
+              val sheetArea = 1.22 * 2.44
+              val sheetCount = ceil(panelArea / sheetArea * 1.15).toInt().coerceAtLeast(1)
+
+              return DesignResult(
+                  netL = round(net * 10) / 10,
+                  grossL = round(gross * 10) / 10,
+                  fbHz = round(fb * 10) / 10,
+                  f3Hz = round(f3 * 10) / 10,
+                  splDb = round(spl * 10) / 10,
+                  widthMm = w,
+                  heightMm = h,
+                  depthMm = dep,
+                  portAreaCm2 = portArea,
+                  portLengthMm = portLength,
+                  sheetCount = sheetCount,
+                  cutList = cuts
+              )
+          }
+
+          @Composable
+          fun ResultScreen(driver: Driver, boxName: String, count: Int, result: DesignResult, onCut: () -> Unit, onGraph: () -> Unit, onBack: () -> Unit) {
+              Page {
+                  item { TopTitle("ผลการคำนวณ", onBack) }
+                  item {
+                      Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                          TabPill("สรุป", true, Modifier.weight(1f), {})
+                          TabPill("แบบตู้ 3D", false, Modifier.weight(1f), {})
+                          TabPill("แบบตัดไม้", false, Modifier.weight(1f), onCut)
+                          TabPill("กราฟ", false, Modifier.weight(1f), onGraph)
+                      }
+                  }
+                  item {
+                      DarkCard {
+                          Text("ข้อมูลตู้", fontWeight = FontWeight.Bold, fontSize = 18.sp)
+                          Box(Modifier.fillMaxWidth().height(210.dp), contentAlignment = Alignment.Center) {
+                              Cabinet3D(result, Modifier.fillMaxSize())
+                          }
+                          Metric("ดอกลำโพง", "${driver.brand} ${driver.model}")
+                          Metric("จำนวนดอก", "$count ดอก")
+                          Metric("ประเภทตู้", boxName)
+                      }
+                  }
+                  item {
+                      Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                          ResultMetric("Net", "${result.netL} L", Modifier.weight(1f))
+                          ResultMetric("Gross", "${result.grossL} L", Modifier.weight(1f))
+                      }
+                  }
+                  item {
+                      Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                          ResultMetric("Fb", if (result.fbHz > 0) "${result.fbHz} Hz" else "Sealed", Modifier.weight(1f))
+                          ResultMetric("F3", "${result.f3Hz} Hz", Modifier.weight(1f))
+                      }
+                  }
+                  item {
+                      DarkCard {
+                          Text("ความดัง (SPL)", fontWeight = FontWeight.Bold, fontSize = 18.sp)
+                          Metric("Sensitivity", "${driver.sensitivityDb} dB (1W/1m)")
+                          Metric("Max SPL โดยประมาณ", "${result.splDb} dB @ 1m")
+                          Text("ค่าความดังเป็นการประเมินจากข้อมูลผู้ผลิต ไม่ใช่ผลวัดภาคสนาม/AES", color = Color(0xFFFFC463), fontSize = 10.sp)
+                      }
+                  }
+                  item {
+                      Button(onClick = onCut, Modifier.fillMaxWidth()) { Icon(Icons.Rounded.Carpenter, null); Spacer(Modifier.width(6.dp)); Text("สร้างแบบตัดไม้") }
+                  }
+              }
+          }
+
+          @Composable
+          fun TabPill(text: String, selected: Boolean, modifier: Modifier, onClick: () -> Unit) {
+              Surface(modifier.clickable(onClick = onClick), shape = RoundedCornerShape(16.dp), color = if (selected) Color(0xFF1BB5FF) else Color(0xFF131E28)) {
+                  Text(text, Modifier.padding(horizontal = 7.dp, vertical = 9.dp), fontSize = 10.sp, color = if (selected) Color.Black else Color.White, fontWeight = FontWeight.Bold)
+              }
+          }
+
+          @Composable
+          fun ResultMetric(label: String, value: String, modifier: Modifier) {
+              DarkCard(modifier) {
+                  Text(label, color = Color(0xFF95A9BB), fontSize = 11.sp)
+                  Text(value, fontSize = 19.sp, fontWeight = FontWeight.Bold)
+              }
+          }
+
+          @Composable
+          fun Metric(label: String, value: String) {
+              Row(Modifier.fillMaxWidth()) {
+                  Text(label, Modifier.weight(1f), color = Color(0xFF92A5B7))
+                  Text(value, fontWeight = FontWeight.SemiBold)
+              }
+          }
+
+          @Composable
+          fun Cabinet3D(r: DesignResult, modifier: Modifier) {
+              Canvas(modifier.padding(15.dp)) {
+                  val x = size.width * .12f
+                  val y = size.height * .20f
+                  val w = size.width * .63f
+                  val h = size.height * .58f
+                  val dx = size.width * .14f
+                  val dy = -size.height * .12f
+                  val front = Path().apply {
+                      moveTo(x, y); lineTo(x + w, y); lineTo(x + w, y + h); lineTo(x, y + h); close()
+                  }
+                  val side = Path().apply {
+                      moveTo(x + w, y); lineTo(x + w + dx, y + dy); lineTo(x + w + dx, y + h + dy); lineTo(x + w, y + h); close()
+                  }
+                  val top = Path().apply {
+                      moveTo(x, y); lineTo(x + dx, y + dy); lineTo(x + w + dx, y + dy); lineTo(x + w, y); close()
+                  }
+                  drawPath(front, Color(0xFFC9935B))
+                  drawPath(side, Color(0xFF9A693F))
+                  drawPath(top, Color(0xFFE0AE73))
+                  val c = Offset(x + w * .48f, y + h * .51f)
+                  val rr = h * .31f
+                  drawCircle(Color(0xFF090B0E), rr, c)
+                  drawCircle(Color(0xFF34414B), rr * .83f, c, style = Stroke(width = 6f))
+                  drawCircle(Color(0xFF111820), rr * .56f, c)
+                  drawLine(Color.White.copy(alpha = .75f), Offset(x, y + h + 16f), Offset(x + w, y + h + 16f), 2f)
+                  drawLine(Color.White.copy(alpha = .75f), Offset(x - 15f, y), Offset(x - 15f, y + h), 2f)
+              }
+          }
+
+          @Composable
+          fun CutScreen(result: DesignResult, thickness: Int, onBack: () -> Unit) {
+              Page {
+                  item { TopTitle("แบบตัดไม้", onBack) }
+                  item {
+                      Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                          TabPill("สรุป", false, Modifier.weight(1f), onBack)
+                          TabPill("แบบตู้ 3D", false, Modifier.weight(1f), onBack)
+                          TabPill("แบบตัดไม้", true, Modifier.weight(1f), {})
+                          TabPill("กราฟ", false, Modifier.weight(1f), {})
+                      }
+                  }
+                  item {
+                      DarkCard {
+                          Text("ขนาดตู้ภายนอก", fontWeight = FontWeight.Bold, fontSize = 17.sp)
+                          Metric("กว้าง (W)", "${result.widthMm} mm")
+                          Metric("สูง (H)", "${result.heightMm} mm")
+                          Metric("ลึก (D)", "${result.depthMm} mm")
+                          Metric("ความหนาไม้", "$thickness mm")
+                      }
+                  }
+                  item {
+                      DarkCard {
+                          Text("รายการตัดไม้ (mm)", fontWeight = FontWeight.Bold, fontSize = 17.sp)
+                          result.cutList.forEachIndexed { index, cut ->
+                              Row(Modifier.fillMaxWidth().padding(vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                                  Surface(shape = CircleShape, color = listOf(Color(0xFF168CFF), Color(0xFF22C58A), Color(0xFFFFB547), Color(0xFFB55CFF))[index % 4]) {
+                                      Text("${index + 1}", Modifier.padding(horizontal = 8.dp, vertical = 4.dp), color = Color.Black, fontWeight = FontWeight.Bold, fontSize = 10.sp)
+                                  }
+                                  Spacer(Modifier.width(9.dp))
+                                  Text(cut.part, Modifier.weight(1f))
+                                  Text(cut.size, color = Color(0xFFB8C9D8), fontSize = 11.sp)
+                                  Spacer(Modifier.width(8.dp))
+                                  Text("×${cut.qty}", fontWeight = FontWeight.Bold)
+                              }
+                              HorizontalDivider(color = Color.White.copy(alpha = .05f))
+                          }
+                      }
+                  }
+                  item {
+                      DarkCard {
+                          Metric("จำนวนแผ่นไม้ 1220 × 2440", "ประมาณ ${result.sheetCount} แผ่น")
+                          Metric("พื้นที่พอร์ต", if (result.portAreaCm2 == 0) "ไม่มีพอร์ต" else "${result.portAreaCm2} cm²")
+                          Metric("ความยาวพอร์ต", if (result.portLengthMm == 0) "-" else "${result.portLengthMm} mm")
+                      }
+                  }
+              }
+          }
+
+          @Composable
+          fun GraphScreen(driver: Driver, result: DesignResult, onBack: () -> Unit) {
+              Page {
+                  item { TopTitle("กราฟผลตอบสนอง", onBack) }
+                  item {
+                      Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                          TabPill("SPL", true, Modifier.weight(1f), {})
+                          TabPill("Impedance", false, Modifier.weight(1f), {})
+                          TabPill("Cone Excursion", false, Modifier.weight(1f), {})
+                      }
+                  }
+                  item {
+                      DarkCard {
+                          Text("SPL Response (1W/1m)", fontWeight = FontWeight.Bold)
+                          ResponseGraph(result)
+                      }
+                  }
+                  item {
+                      DarkCard {
+                          Text("ค่าที่สำคัญ", fontWeight = FontWeight.Bold, fontSize = 17.sp)
+                          Metric("F3 โดยประมาณ", "${result.f3Hz} Hz")
+                          Metric("จุดจูน", if (result.fbHz > 0) "${result.fbHz} Hz" else "Sealed")
+                          Metric("Sensitivity", "${driver.sensitivityDb} dB")
+                          Metric("SPL จากกำลัง RMS", "${result.splDb} dB @ 1m")
+                      }
+                  }
+              }
+          }
+
+          @Composable
+          fun ResponseGraph(r: DesignResult) {
+              Canvas(
+                  Modifier.fillMaxWidth().height(240.dp).background(Color(0xFF080E14), RoundedCornerShape(12.dp)).padding(12.dp)
+              ) {
+                  val grid = Color.White.copy(alpha = .09f)
+                  repeat(7) { i ->
+                      val y = size.height * i / 6f
+                      drawLine(grid, Offset(0f, y), Offset(size.width, y), 1f)
+                  }
+                  repeat(10) { i ->
+                      val x = size.width * i / 9f
+                      drawLine(grid, Offset(x, 0f), Offset(x, size.height), 1f)
+                  }
+                  fun curve(color: Color, shift: Float, height: Float) {
+                      val p = Path()
+                      p.moveTo(0f, size.height * .90f)
+                      p.cubicTo(size.width * .12f, size.height * (.78f - shift), size.width * .20f, size.height * (.20f + shift), size.width * .37f, size.height * height)
+                      p.cubicTo(size.width * .58f, size.height * (height - .03f), size.width * .78f, size.height * (height + .03f), size.width, size.height * (height + .05f))
+                      drawPath(p, color, style = Stroke(width = 4f, cap = StrokeCap.Round))
+                  }
+                  curve(Color(0xFF1AB7FF), 0f, .22f)
+                  curve(Color(0xFFFF4569), .03f, .24f)
+                  curve(Color(0xFF4BE08C), -.02f, .27f)
+                  val kneeX = ((r.f3Hz - 20.0) / 180.0).coerceIn(.08, .75).toFloat() * size.width
+                  drawLine(Color(0xFFFFD15A), Offset(kneeX, 0f), Offset(kneeX, size.height), 2f)
+              }
+          }
+
+          @Composable
+          fun CompareScreen(onBack: () -> Unit, onSelect: (Driver) -> Unit) {
+              Page {
+                  item { TopTitle("ตัวอย่างดอกลำโพงในฐานข้อมูล", onBack) }
+                  item {
+                      LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                          items(listOf("ทั้งหมด", "Subwoofer", "Midbass", "Midrange")) { s ->
+                              FilterChip(selected = s == "ทั้งหมด", onClick = {}, label = { Text(s) })
+                          }
+                      }
+                  }
+                  items(drivers) { d -> DriverCard(d, false, onDetail = { onSelect(d) }, onSelect = { onSelect(d) }) }
+              }
+          }
+
+          @Composable
+          fun ProjectScreen(driver: Driver, boxName: String, result: DesignResult?, onOpen: () -> Unit) {
+              Page {
+                  item { TopTitle("บันทึกและส่งออก") }
+                  if (result == null) {
+                      item {
+                          DarkCard {
+                              Icon(Icons.Rounded.FolderOpen, null, Modifier.size(44.dp), tint = Color(0xFF20B8FF))
+                              Text("ยังไม่มีโปรเจคที่คำนวณ", fontWeight = FontWeight.Bold, fontSize = 18.sp)
+                              Text("เริ่มจากแท็บคำนวณ แล้วผลล่าสุดจะมาแสดงตรงนี้", color = Color(0xFF92A6B8))
+                              Button(onClick = onOpen) { Text("เริ่มออกแบบ") }
+                          }
+                      }
+                  } else {
+                      item {
+                          DarkCard {
+                              Row(verticalAlignment = Alignment.CenterVertically) {
+                                  Box(Modifier.size(86.dp)) { Cabinet3D(result, Modifier.fillMaxSize()) }
+                                  Spacer(Modifier.width(10.dp))
+                                  Column {
+                                      Text("โปรเจคของฉัน 01", fontWeight = FontWeight.Bold, fontSize = 18.sp)
+                                      Text("${driver.brand} ${driver.model}", color = Color(0xFF9BB0C2))
+                                      Text(boxName, color = Color(0xFF69CCFA), fontSize = 11.sp)
+                                  }
+                              }
+                              HorizontalDivider(color = Color.White.copy(alpha = .06f))
+                              Metric("ความจุสุทธิ", "${result.netL} ลิตร")
+                              Metric("ความถี่จูน", if (result.fbHz > 0) "${result.fbHz} Hz" else "Sealed")
+                              Metric("ขนาดภายนอก", "${result.widthMm} × ${result.heightMm} × ${result.depthMm} mm")
+                              Metric("จำนวนแผ่นไม้", "${result.sheetCount} แผ่น")
+                              Button(onClick = onOpen, Modifier.fillMaxWidth()) { Text("เปิดโปรเจค") }
+                              OutlinedButton(onClick = {}, Modifier.fillMaxWidth()) { Icon(Icons.Rounded.PictureAsPdf, null); Spacer(Modifier.width(6.dp)); Text("ส่งออกเป็น PDF (เตรียมไว้)") }
+                          }
+                      }
+                  }
+              }
+          }
+
+          @Composable
+          fun MoreScreen() {
+              Page {
+                  item { TopTitle("อื่นๆ") }
+                  item {
+                      DarkCard {
+                          Text("Speaker Box Designer TH", fontWeight = FontWeight.Bold, fontSize = 20.sp)
+                          Text("UI ตามต้นแบบรูปแรก • Samsung/One UI style", color = Color(0xFF86D5FB))
+                          Text("เครื่องคำนวณใช้ข้อมูล T/S และแยกสูตรตลาดไทยออกจากแบบจำลองมาตรฐาน", color = Color(0xFFA0B2C1), fontSize = 12.sp)
+                      }
+                  }
+                  item { SettingRow(Icons.Rounded.DarkMode, "ธีมมืด", "เปิดใช้งาน") }
+                  item { SettingRow(Icons.Rounded.SystemUpdate, "อัปเดตฐานข้อมูลดอก", "Catalog sync") }
+                  item { SettingRow(Icons.Rounded.Info, "มาตรฐานและแหล่งข้อมูล", "T/S • AES • ผู้ผลิต") }
+              }
+          }
+
+          @Composable
+          fun SettingRow(icon: ImageVector, title: String, subtitle: String) {
+              DarkCard {
+                  Row(verticalAlignment = Alignment.CenterVertically) {
+                      Icon(icon, null, tint = Color(0xFF22B9FF))
+                      Spacer(Modifier.width(12.dp))
+                      Column(Modifier.weight(1f)) {
+                          Text(title, fontWeight = FontWeight.Bold)
+                          Text(subtitle, color = Color(0xFF91A5B7), fontSize = 11.sp)
+                      }
+                      Icon(Icons.Rounded.ChevronRight, null, tint = Color(0xFF8294A5))
+                  }
+              }
+          }
+          EOF
+
+      - name: Build debug APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          gradle --version
+          gradle :app:assembleDebug --stacktrace
+
+      - name: Copy APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          cp app/build/outputs/apk/debug/app-debug.apk out/ThaiSpeakerBoxDesigner-v0.2-first-ui-debug.apk
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: ThaiSpeakerBoxDesigner-v0.2-first-ui-debug
+          path: out/ThaiSpeakerBoxDesigner-v0.2-first-ui-debug.apk
+          if-no-files-found: error
+          retention-days: 14
