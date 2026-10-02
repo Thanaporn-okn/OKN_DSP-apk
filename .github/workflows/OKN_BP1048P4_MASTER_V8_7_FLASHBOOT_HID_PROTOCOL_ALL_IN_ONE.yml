@@ -1,4 +1,4 @@
-name: OKN BP1048P4 V8.8 USB TRACE + HID CALLERS — ALL IN ONE
+name: OKN BP1048P4 V8.8.1 BOM FIX + USB TRACE — ALL IN ONE
 
 on:
   workflow_dispatch:
@@ -1430,7 +1430,7 @@ jobs:
 
           root=Path(__import__('os').environ['RUNNER_TEMP'])/'bpv8'
           ev=root/'evidence'; rt=ev/'runtime'; exe=root/'client'/'official.exe'
-          base=int((rt/'MODULE_BASE.txt').read_text().strip(),0)
+          base=int((rt/'MODULE_BASE.txt').read_text(encoding='utf-8-sig').strip(),0)
 
           def normhex(v):
               try:
@@ -1446,7 +1446,7 @@ jobs:
               if not d.exists(): continue
               for p in d.glob('*.txt'):
                   q={}
-                  for line in p.read_text(errors='replace').splitlines():
+                  for line in p.read_text(encoding='utf-8-sig',errors='replace').splitlines():
                       if '=' in line:
                           k,v=line.split('=',1); q[k.strip()]=v.strip()
                   tok=normhex(q.get('token',''))
@@ -1479,7 +1479,7 @@ jobs:
           amap=[]
           mp=rt/'MAP_ADDRESS_INDEX.tsv'
           if mp.exists():
-              for line in mp.read_text(errors='replace').splitlines():
+              for line in mp.read_text(encoding='utf-8-sig',errors='replace').splitlines():
                   q=line.split('\t')
                   if not q: continue
                   try: key=int(q[0],0)
@@ -1510,7 +1510,7 @@ jobs:
           def correct(src,dst):
               p=ev/src
               if not p.exists(): raise RuntimeError('Missing '+src)
-              lines=p.read_text(errors='replace').splitlines()
+              lines=p.read_text(encoding='utf-8-sig',errors='replace').splitlines()
               if not lines: raise RuntimeError('Empty '+src)
               hdr=lines[0].split('\t')
               out=[lines[0]+'\texact_token\texact_type\texact_method\texact_metadata_name']
@@ -1529,7 +1529,7 @@ jobs:
           c_calls=correct('IL_CFG_PINVOKE_CALLS.tsv','V8_7_CORRECTED_CFG_PINVOKE_CALLS.tsv')
           c_const=correct('IL_CFG_CONSTANTS.tsv','V8_7_CORRECTED_CFG_CONSTANTS.tsv')
           for src,count in [('IL_CFG_PINVOKE_CALLS.tsv',c_calls),('IL_CFG_CONSTANTS.tsv',c_const)]:
-              expected=sum(bool(x.strip()) for x in (ev/src).read_text().splitlines()[1:])
+              expected=sum(bool(x.strip()) for x in (ev/src).read_text(encoding='utf-8-sig').splitlines()[1:])
               if count != expected or expected == 0:
                   raise RuntimeError(f'Incomplete exact code-start join: {src}: {count}/{expected}')
 
@@ -1537,7 +1537,7 @@ jobs:
           hid=[]
           cp=ev/'V8_7_CORRECTED_CFG_PINVOKE_CALLS.tsv'
           if cp.exists():
-              for line in cp.read_text(errors='replace').splitlines()[1:]:
+              for line in cp.read_text(encoding='utf-8-sig',errors='replace').splitlines()[1:]:
                   if re.search(r'HidD_|ReadFile|WriteFile|CreateFile|SetupDi',line,re.I): hid.append(line)
           (ev/'V8_7_EXACT_HID_CALLS.txt').write_text('\n'.join(hid)+'\n' if hid else 'NO_EXACT_HID_CALLS\n')
 
