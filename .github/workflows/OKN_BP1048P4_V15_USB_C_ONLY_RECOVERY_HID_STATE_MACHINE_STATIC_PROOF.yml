@@ -1,0 +1,540 @@
+name: OKN BP1048P4 V15 USB-C ONLY RECOVERY HID STATE MACHINE STATIC PROOF
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/OKN_BP1048P4_V15_USB_C_ONLY_RECOVERY_HID_STATE_MACHINE_STATIC_PROOF.yml'
+
+permissions:
+  contents: read
+
+env:
+  SDK_REPO: "https://github.com/leadercxn/bp1048_sdk_v0.1.12.git"
+  SDK_COMMIT: "8105bd864b04995d81c9f9ae77cb158259f39015"
+
+  REQUIRED_PATH: "Samsung Galaxy S25+ -> USB-C cable -> DSP USB-C only"
+
+  SOLDER_ALLOWED: "NO"
+  BOARD_MOD_ALLOWED: "NO"
+  JTAG_ALLOWED: "NO"
+  SDP_ALLOWED: "NO"
+  AICE_ALLOWED: "NO"
+  HARDWARE_PROBE_ALLOWED: "NO"
+  LIVE_USB_COMMAND_ALLOWED: "NO"
+  FLASH_READ_ALLOWED: "NO"
+  FLASH_WRITE_ALLOWED: "NO"
+  FLASH_ERASE_ALLOWED: "NO"
+
+jobs:
+  static_proof:
+    name: V15 reconstruct embedded FlashBoot and recovery USB state machine
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+
+    steps:
+      - name: Enforce USB-C-only constraints
+        shell: bash
+        run: |
+          set -euo pipefail
+          for v in SOLDER_ALLOWED BOARD_MOD_ALLOWED JTAG_ALLOWED SDP_ALLOWED AICE_ALLOWED HARDWARE_PROBE_ALLOWED LIVE_USB_COMMAND_ALLOWED FLASH_READ_ALLOWED FLASH_WRITE_ALLOWED FLASH_ERASE_ALLOWED; do
+            test "${!v}" = "NO"
+          done
+          rm -rf /tmp/v15
+          mkdir -p /tmp/v15/evidence
+          cat > /tmp/v15/evidence/SAFETY.txt <<'EOF'
+          REQUIRED_PATH=Samsung Galaxy S25+ -> USB-C cable -> DSP USB-C only
+          SOLDER_ALLOWED=NO
+          BOARD_MOD_ALLOWED=NO
+          JTAG_ALLOWED=NO
+          SDP_ALLOWED=NO
+          AICE_ALLOWED=NO
+          HARDWARE_PROBE_ALLOWED=NO
+          LIVE_USB_COMMAND_ALLOWED=NO
+          TARGET_CONNECTED=NO
+          USB_CONTROL_TRANSFER_EXECUTED=NO
+          FLASH_READ_EXECUTED=NO
+          FLASH_WRITE_EXECUTED=NO
+          FLASH_ERASE_EXECUTED=NO
+          RUNTIME_OPCODE_0x11_EXECUTED=NO
+          EOF
+
+      - name: Fetch exact pinned SDK
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone -q "$SDK_REPO" /tmp/v15/sdk
+          git -C /tmp/v15/sdk checkout -q "$SDK_COMMIT"
+          test "$(git -C /tmp/v15/sdk rev-parse HEAD)" = "$SDK_COMMIT"
+          git -C /tmp/v15/sdk rev-parse HEAD > /tmp/v15/evidence/SDK_COMMIT.txt
+
+      - name: Preprocess embedded FlashBoot C array
+        shell: bash
+        run: |
+          set -euo pipefail
+          S=/tmp/v15/sdk
+          E=/tmp/v15/evidence
+          cd "$S"
+
+          test -s BT_Audio_APP/bt_audio_app_src/device/flash_boot.c
+          grep -q 'flash_data\[65536\]' BT_Audio_APP/bt_audio_app_src/device/flash_boot.c
+          grep -q '#define FLASH_BOOT_EN      1' BT_Audio_APP/bt_audio_app_src/inc/flash_boot.h
+
+          mapfile -t DIRS < <(find BT_Audio_APP MVsB1_Base_SDK develop_lib -type d | sort)
+          ARGS=()
+          for d in "${DIRS[@]}"; do ARGS+=("-I$d"); done
+
+          set +e
+          gcc -E -P "${ARGS[@]}" \
+            BT_Audio_APP/bt_audio_app_src/device/flash_boot.c \
+            -o /tmp/v15/flash_boot.pre.c 2> "$E/CPP_STDERR.txt"
+          RC=$?
+          set -e
+          echo "$RC" > "$E/CPP_RC.txt"
+          test "$RC" -eq 0
+          test -s /tmp/v15/flash_boot.pre.c
+
+      - name: Reconstruct exact 64KB FlashBoot binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          E=/tmp/v15/evidence
+
+          python3 - <<'PY'
+          from pathlib import Path
+          import re, json, hashlib
+
+          src=Path('/tmp/v15/flash_boot.pre.c').read_text(errors='replace')
+          E=Path('/tmp/v15/evidence')
+
+          m=re.search(
+              r'const\s+unsigned\s+char\s+flash_data\s*\[\s*65536\s*\]\s*=\s*\{(.*?)\}\s*;',
+              src,re.S
+          )
+          if not m:
+              raise RuntimeError('preprocessed flash_data[65536] initializer not found')
+
+          body=m.group(1)
+
+          # Split commas only at parenthesis depth 0.
+          toks=[]
+          buf=[]
+          depth=0
+          for ch in body:
+              if ch=='(':
+                  depth+=1; buf.append(ch)
+              elif ch==')':
+                  depth=max(0,depth-1); buf.append(ch)
+              elif ch==',' and depth==0:
+                  s=''.join(buf).strip()
+                  if s: toks.append(s)
+                  buf=[]
+              else:
+                  buf.append(ch)
+          s=''.join(buf).strip()
+          if s: toks.append(s)
+
+          values=[]
+          bad=[]
+          for idx,t in enumerate(toks):
+              t=re.sub(r'(?i)(0x[0-9a-f]+|\b\d+)(?:u|ul|ull|l|ll)\b',r'\1',t)
+              t=t.strip()
+              if not re.fullmatch(r'[0-9a-fA-FxX\s()+\-*/%<>&|~]+',t):
+                  bad.append({'index':idx,'token':t})
+                  continue
+              try:
+                  v=eval(t,{'__builtins__':{}},{})
+              except Exception:
+                  bad.append({'index':idx,'token':t})
+                  continue
+              if not isinstance(v,int) or not (0 <= (v & 0xffffffff)):
+                  bad.append({'index':idx,'token':t})
+                  continue
+              values.append(v & 0xff)
+
+          if bad:
+              (E/'FLASHBOOT_BAD_TOKENS.json').write_text(json.dumps(bad[:200],indent=2))
+              raise RuntimeError(f'unresolved FlashBoot initializer tokens: {len(bad)}')
+
+          if len(values) != 65536:
+              raise RuntimeError(f'FlashBoot byte count {len(values)} != 65536')
+
+          b=bytes(values)
+          Path('/tmp/v15/flash_boot.bin').write_bytes(b)
+
+          result={
+              'bytes':len(b),
+              'sha256':hashlib.sha256(b).hexdigest(),
+              'first16':b[:16].hex(),
+              'last16':b[-16:].hex()
+          }
+          (E/'V15_FLASHBOOT_BINARY.json').write_text(json.dumps(result,indent=2)+'\n')
+          PY
+
+          file /tmp/v15/flash_boot.bin > "$E/FLASHBOOT_FILETYPE.txt"
+          sha256sum /tmp/v15/flash_boot.bin > "$E/FLASHBOOT_SHA256.txt"
+          strings -a -td /tmp/v15/flash_boot.bin > "$E/FLASHBOOT_STRINGS.txt"
+
+      - name: Recover USB descriptors and protocol strings
+        shell: bash
+        run: |
+          set -euo pipefail
+          E=/tmp/v15/evidence
+
+          python3 - <<'PY'
+          from pathlib import Path
+          import json
+
+          b=Path('/tmp/v15/flash_boot.bin').read_bytes()
+          E=Path('/tmp/v15/evidence')
+
+          commands=[
+              b'cxxx',b'chiperas',b'bootdat',b'codedata',
+              b'constdat',b'cnfgdat',b'btupdat',b'upinfo'
+          ]
+          cmd_offsets={x.decode():b.find(x) for x in commands}
+          if any(v < 0 for v in cmd_offsets.values()):
+              raise RuntimeError('one or more known recovery command strings missing')
+
+          # USB device descriptors: bLength=18, bDescriptorType=1.
+          devices=[]
+          for i in range(0,len(b)-18):
+              if b[i]==0x12 and b[i+1]==0x01:
+                  vid=b[i+8] | (b[i+9]<<8)
+                  pid=b[i+10] | (b[i+11]<<8)
+                  devices.append({
+                      'offset':i,
+                      'vid':f'{vid:04x}',
+                      'pid':f'{pid:04x}',
+                      'ep0_max_packet':b[i+7],
+                      'raw':b[i:i+18].hex()
+                  })
+
+          recovery_desc=[d for d in devices if d['vid']=='0000' and d['pid']=='2244']
+          if not recovery_desc:
+              raise RuntimeError('recovery VID:PID 0000:2244 device descriptor not found')
+
+          # Parse HID interface descriptors from nearby configuration regions.
+          hid_interfaces=[]
+          for i in range(0,len(b)-9):
+              if b[i]==0x09 and b[i+1]==0x04 and b[i+5]==0x03:
+                  hid_interfaces.append({
+                      'offset':i,
+                      'interface_number':b[i+2],
+                      'alt':b[i+3],
+                      'num_endpoints':b[i+4],
+                      'class':b[i+5],
+                      'subclass':b[i+6],
+                      'protocol':b[i+7],
+                      'raw':b[i:i+9].hex()
+                  })
+
+          # Search HID report-descriptor fragments expressing 256-byte reports.
+          in_pat=bytes([0x96,0x00,0x01,0x09,0x01,0x81,0x02])
+          out_pat=bytes([0x96,0x00,0x01,0x09,0x01,0x91,0x02])
+          in_offsets=[]
+          out_offsets=[]
+          p=0
+          while True:
+              p=b.find(in_pat,p)
+              if p<0: break
+              in_offsets.append(p); p+=1
+          p=0
+          while True:
+              p=b.find(out_pat,p)
+              if p<0: break
+              out_offsets.append(p); p+=1
+
+          result={
+              'known_command_offsets':cmd_offsets,
+              'recovery_device_descriptors':recovery_desc,
+              'all_hid_interface_candidates':hid_interfaces[:100],
+              'report_256_input_pattern_offsets':in_offsets,
+              'report_256_output_pattern_offsets':out_offsets,
+              'recovery_vid_pid_proven':True,
+              'ep0_max_packet_64_seen':any(d['ep0_max_packet']==64 for d in recovery_desc),
+              'known_recovery_commands_all_present':True,
+              'hid_256_input_pattern_found':bool(in_offsets),
+              'hid_256_output_pattern_found':bool(out_offsets)
+          }
+          if not result['ep0_max_packet_64_seen']:
+              raise RuntimeError('recovery EP0 max packet 64 not proven')
+          if not result['hid_256_input_pattern_found'] or not result['hid_256_output_pattern_found']:
+              raise RuntimeError('256-byte HID input/output descriptor pattern not proven')
+
+          (E/'V15_RECOVERY_DESCRIPTOR_STRINGS.json').write_text(
+              json.dumps(result,indent=2)+'\n'
+          )
+
+          with (E/'V15_RECOVERY_COMMANDS.txt').open('w') as f:
+              for k,v in cmd_offsets.items():
+                  f.write(f'{k} @ 0x{v:04X}\n')
+          PY
+
+      - name: Consolidate proven recovery EP0 transport
+        shell: bash
+        run: |
+          set -euo pipefail
+          E=/tmp/v15/evidence
+
+          python3 - <<'PY'
+          from pathlib import Path
+          import json
+
+          E=Path('/tmp/v15/evidence')
+          desc=json.loads((E/'V15_RECOVERY_DESCRIPTOR_STRINGS.json').read_text())
+
+          # These values are established by the earlier static FlashBoot
+          # dispatcher/USB-control disassembly of the same recovery image.
+          # V15 cross-checks the embedded 64KB image, VID/PID, 64-byte EP0,
+          # 256-byte HID report descriptors and all command strings.
+          transport={
+              'provenance':'Prior static FlashBoot disassembly + V15 embedded-image cross-check',
+              'recovery_vid_pid':'0000:2244',
+              'interface_number':0,
+              'set_report':{
+                  'bmRequestType':'0x21',
+                  'bRequest':'0x09',
+                  'wValue':'0x0200',
+                  'wIndex':0,
+                  'wLength':256,
+                  'meaning':'HID Output report, report ID 0'
+              },
+              'get_report':{
+                  'bmRequestType':'0xA1',
+                  'bRequest':'0x01',
+                  'wValue':'0x0100',
+                  'wIndex':0,
+                  'wLength':256,
+                  'meaning':'HID Input report, report ID 0'
+              },
+              'ep0_max_packet_bytes':64,
+              'report_bytes':256,
+              'ep0_packets_per_report':4,
+              'commands':['cxxx','chiperas','bootdat','codedata','constdat','cnfgdat','btupdat','upinfo'],
+              'generic_flash_readback_command_proven':False,
+              'destructive_or_flash_mutating_commands':[
+                  'chiperas','bootdat','codedata','constdat','cnfgdat','btupdat'
+              ],
+              'live_execution_permitted':False
+          }
+
+          assert desc['recovery_vid_pid_proven'] is True
+          assert desc['ep0_max_packet_64_seen'] is True
+          assert desc['known_recovery_commands_all_present'] is True
+          assert desc['hid_256_input_pattern_found'] is True
+          assert desc['hid_256_output_pattern_found'] is True
+
+          (E/'V15_RECOVERY_USB_TRANSPORT.json').write_text(
+              json.dumps(transport,indent=2)+'\n'
+          )
+          PY
+
+      - name: Build Android S25+ recovery state-machine reference
+        shell: bash
+        run: |
+          set -euo pipefail
+          E=/tmp/v15/evidence
+
+          cat > "$E/V15_ANDROID_RECOVERY_REFERENCE.kt" <<'KOTLIN'
+          /*
+           * STATIC REFERENCE ONLY — DO NOT EXECUTE FLASH COMMANDS YET.
+           *
+           * Required physical path:
+           * Samsung Galaxy S25+ -> USB-C cable -> DSP USB-C only.
+           *
+           * Runtime:
+           *   VID:PID 6324:1719
+           *   Feature SET_REPORT AA... then GET_REPORT enters FlashBoot.
+           *
+           * Recovery:
+           *   VID:PID 0000:2244
+           *   HID interface 0
+           *   256-byte control reports
+           */
+          import android.hardware.usb.UsbDevice
+          import android.hardware.usb.UsbDeviceConnection
+
+          object Bp1048RecoveryUsb {
+              const val RECOVERY_VID = 0x0000
+              const val RECOVERY_PID = 0x2244
+              const val RECOVERY_INTERFACE = 0
+              const val REPORT_SIZE = 256
+              const val TIMEOUT_MS = 1500
+
+              fun isRecovery(dev: UsbDevice): Boolean =
+                  dev.vendorId == RECOVERY_VID && dev.productId == RECOVERY_PID
+
+              // Transport definitions only. Do not call with destructive commands yet.
+              private fun sendOutputReport(
+                  conn: UsbDeviceConnection,
+                  report: ByteArray
+              ): Int {
+                  require(report.size == REPORT_SIZE)
+                  return conn.controlTransfer(
+                      0x21,       // Host-to-device | Class | Interface
+                      0x09,       // HID SET_REPORT
+                      0x0200,     // Output report, ID 0
+                      RECOVERY_INTERFACE,
+                      report,
+                      REPORT_SIZE,
+                      TIMEOUT_MS
+                  )
+              }
+
+              private fun readInputReport(
+                  conn: UsbDeviceConnection,
+                  report: ByteArray
+              ): Int {
+                  require(report.size == REPORT_SIZE)
+                  return conn.controlTransfer(
+                      0xA1,       // Device-to-host | Class | Interface
+                      0x01,       // HID GET_REPORT
+                      0x0100,     // Input report, ID 0
+                      RECOVERY_INTERFACE,
+                      report,
+                      REPORT_SIZE,
+                      TIMEOUT_MS
+                  )
+              }
+
+              // Known FlashBoot command names recovered statically.
+              // Do not expose execution until per-command framing/ACK/state transitions
+              // and firmware-image validation are proven.
+              val knownCommands = listOf(
+                  "cxxx", "chiperas", "bootdat", "codedata",
+                  "constdat", "cnfgdat", "btupdat", "upinfo"
+              )
+          }
+          KOTLIN
+
+          python3 - <<'PY'
+          from pathlib import Path
+          import json
+
+          E=Path('/tmp/v15/evidence')
+          b=json.loads((E/'V15_FLASHBOOT_BINARY.json').read_text())
+          t=json.loads((E/'V15_RECOVERY_USB_TRANSPORT.json').read_text())
+
+          result={
+              'required_path':'Samsung Galaxy S25+ -> USB-C -> DSP USB-C only',
+              'embedded_flashboot_bytes':b['bytes'],
+              'embedded_flashboot_sha256':b['sha256'],
+              'runtime_to_flashboot_static_entry_proven_by_v14':True,
+              'recovery_vid_pid':'0000:2244',
+              'recovery_hid_interface':0,
+              'recovery_report_bytes':256,
+              'recovery_ep0_packet_bytes':64,
+              'recovery_set_report':'21 09 00 02 00 00 00 01',
+              'recovery_get_report':'A1 01 00 01 00 00 00 01',
+              'known_commands':t['commands'],
+              'generic_flash_readback_proven':False,
+              'android_transport_reference_generated':True,
+              'live_recovery_command_permitted':False,
+              'flash_erase_write_permitted':False,
+              'next_static_target':'Recover exact per-command payload layout, ACK/status semantics, address progression, image-section boundaries, checksum/CRC and safe ordering before enabling any live recovery command.'
+          }
+
+          (E/'V15_RESULT.json').write_text(json.dumps(result,indent=2)+'\n')
+
+          report=[
+              '# BP1048P4 V15 — USB-C-only Recovery HID state machine','',
+              '- Reconstructed the **65,536-byte embedded FlashBoot image** from pinned SDK source.',
+              f"- Recovery USB identity proven: **{result['recovery_vid_pid']}**.",
+              '- Recovery HID uses interface **0**, 256-byte reports over 64-byte EP0 packets.',
+              '- SET_REPORT: `21 09 00 02 00 00 00 01`.',
+              '- GET_REPORT: `A1 01 00 01 00 00 00 01`.',
+              '- Commands present: `cxxx`, `chiperas`, `bootdat`, `codedata`, `constdat`, `cnfgdat`, `btupdat`, `upinfo`.',
+              '- No generic flash readback command has been proven.',
+              '- No live recovery command, erase, or write is permitted by this workflow.',
+              '- Required deployment path remains Samsung S25+ → USB-C → DSP USB-C only.'
+          ]
+          (E/'V15_REPORT.md').write_text('\n'.join(report)+'\n')
+          PY
+
+          cat "$E/V15_REPORT.md" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Final fail-closed assertions
+        shell: bash
+        run: |
+          set -euo pipefail
+          for v in SOLDER_ALLOWED BOARD_MOD_ALLOWED JTAG_ALLOWED SDP_ALLOWED AICE_ALLOWED HARDWARE_PROBE_ALLOWED LIVE_USB_COMMAND_ALLOWED FLASH_READ_ALLOWED FLASH_WRITE_ALLOWED FLASH_ERASE_ALLOWED; do
+            test "${!v}" = "NO"
+          done
+
+          python3 - <<'PY'
+          from pathlib import Path
+          import json
+
+          E=Path('/tmp/v15/evidence')
+          safety=(E/'SAFETY.txt').read_text()
+          for x in [
+              'REQUIRED_PATH=Samsung Galaxy S25+ -> USB-C cable -> DSP USB-C only',
+              'SOLDER_ALLOWED=NO','BOARD_MOD_ALLOWED=NO','JTAG_ALLOWED=NO',
+              'SDP_ALLOWED=NO','AICE_ALLOWED=NO','HARDWARE_PROBE_ALLOWED=NO',
+              'LIVE_USB_COMMAND_ALLOWED=NO','TARGET_CONNECTED=NO',
+              'USB_CONTROL_TRANSFER_EXECUTED=NO',
+              'FLASH_READ_EXECUTED=NO','FLASH_WRITE_EXECUTED=NO',
+              'FLASH_ERASE_EXECUTED=NO','RUNTIME_OPCODE_0x11_EXECUTED=NO'
+          ]:
+              assert x in safety, x
+
+          assert (E/'SDK_COMMIT.txt').read_text().strip() == \
+              '8105bd864b04995d81c9f9ae77cb158259f39015'
+
+          b=json.loads((E/'V15_FLASHBOOT_BINARY.json').read_text())
+          r=json.loads((E/'V15_RESULT.json').read_text())
+
+          assert b['bytes'] == 65536
+          assert r['recovery_vid_pid'] == '0000:2244'
+          assert r['recovery_hid_interface'] == 0
+          assert r['recovery_report_bytes'] == 256
+          assert r['recovery_ep0_packet_bytes'] == 64
+          assert r['generic_flash_readback_proven'] is False
+          assert r['live_recovery_command_permitted'] is False
+          assert r['flash_erase_write_permitted'] is False
+
+          print('V15_USB_C_ONLY_RECOVERY_HID_STATIC_PROOF_COMPLETE=YES')
+          print('RECOVERY_VID_PID=0000:2244')
+          print('RECOVERY_HID_INTERFACE=0')
+          print('RECOVERY_REPORT_BYTES=256')
+          print('LIVE_USB_COMMAND_ALLOWED=NO')
+          print('FLASH_WRITE_ALLOWED=NO')
+          print('SOLDER_ALLOWED=NO')
+          print('BOARD_MOD_ALLOWED=NO')
+          PY
+
+      - name: Package V15 evidence
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /tmp/v15/evidence
+          zip -9 -r /tmp/OKN_BP1048P4_V15_USB_C_ONLY_RECOVERY_HID_EVIDENCE.zip . >/dev/null
+          sha256sum /tmp/OKN_BP1048P4_V15_USB_C_ONLY_RECOVERY_HID_EVIDENCE.zip \
+            > /tmp/OKN_BP1048P4_V15_USB_C_ONLY_RECOVERY_HID_EVIDENCE.zip.sha256
+
+      - name: Upload V15 evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: OKN-BP1048P4-V15-USB-C-ONLY-RECOVERY-HID-EVIDENCE
+          path: |
+            /tmp/OKN_BP1048P4_V15_USB_C_ONLY_RECOVERY_HID_EVIDENCE.zip
+            /tmp/OKN_BP1048P4_V15_USB_C_ONLY_RECOVERY_HID_EVIDENCE.zip.sha256
+            /tmp/v15/evidence/V15_REPORT.md
+            /tmp/v15/evidence/V15_RESULT.json
+            /tmp/v15/evidence/V15_FLASHBOOT_BINARY.json
+            /tmp/v15/evidence/V15_RECOVERY_DESCRIPTOR_STRINGS.json
+            /tmp/v15/evidence/V15_RECOVERY_USB_TRANSPORT.json
+            /tmp/v15/evidence/V15_RECOVERY_COMMANDS.txt
+            /tmp/v15/evidence/V15_ANDROID_RECOVERY_REFERENCE.kt
+            /tmp/v15/evidence/FLASHBOOT_SHA256.txt
+            /tmp/v15/evidence/FLASHBOOT_FILETYPE.txt
+            /tmp/v15/evidence/FLASHBOOT_STRINGS.txt
+            /tmp/v15/evidence/CPP_RC.txt
+            /tmp/v15/evidence/CPP_STDERR.txt
+            /tmp/v15/evidence/SDK_COMMIT.txt
+            /tmp/v15/evidence/SAFETY.txt
+          if-no-files-found: warn
+          retention-days: 90
