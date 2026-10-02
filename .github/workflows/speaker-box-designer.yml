@@ -1,0 +1,502 @@
+name: Build Speaker Box Designer APK
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - ".github/workflows/speaker-box-designer.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Accept Android licenses and install SDK
+        shell: bash
+        run: |
+          set -euo pipefail
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager "platform-tools" "platforms;android-35" "build-tools;35.0.0"
+
+      - name: Create complete Android project
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          rm -rf generated-app
+          mkdir -p generated-app/app/src/main/java/com/okn/speakerbox
+          mkdir -p generated-app/app/src/main/res/values
+          mkdir -p generated-app/app/src/main/res/mipmap-hdpi
+
+          cat > generated-app/settings.gradle.kts <<'EOF'
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+
+          rootProject.name = "SpeakerBoxDesigner"
+          include(":app")
+          EOF
+
+          cat > generated-app/build.gradle.kts <<'EOF'
+          plugins {
+              id("com.android.application") version "8.7.3" apply false
+              id("org.jetbrains.kotlin.android") version "1.9.24" apply false
+          }
+          EOF
+
+          cat > generated-app/app/build.gradle.kts <<'EOF'
+          plugins {
+              id("com.android.application")
+              id("org.jetbrains.kotlin.android")
+          }
+
+          android {
+              namespace = "com.okn.speakerbox"
+              compileSdk = 35
+
+              defaultConfig {
+                  applicationId = "com.okn.speakerbox"
+                  minSdk = 24
+                  targetSdk = 35
+                  versionCode = 1
+                  versionName = "1.0"
+              }
+
+              buildFeatures {
+                  compose = true
+              }
+
+              composeOptions {
+                  kotlinCompilerExtensionVersion = "1.5.14"
+              }
+
+              compileOptions {
+                  sourceCompatibility = JavaVersion.VERSION_17
+                  targetCompatibility = JavaVersion.VERSION_17
+              }
+
+              kotlinOptions {
+                  jvmTarget = "17"
+              }
+
+              packaging {
+                  resources {
+                      excludes += "/META-INF/{AL2.0,LGPL2.1}"
+                  }
+              }
+          }
+
+          dependencies {
+              implementation(platform("androidx.compose:compose-bom:2024.10.01"))
+              implementation("androidx.activity:activity-compose:1.9.3")
+              implementation("androidx.compose.ui:ui")
+              implementation("androidx.compose.ui:ui-tooling-preview")
+              implementation("androidx.compose.material3:material3")
+              debugImplementation("androidx.compose.ui:ui-tooling")
+          }
+          EOF
+
+          cat > generated-app/app/src/main/AndroidManifest.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <application
+                  android:allowBackup="true"
+                  android:label="Speaker Box Designer"
+                  android:theme="@style/Theme.SpeakerBox">
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+              </application>
+          </manifest>
+          EOF
+
+          cat > generated-app/app/src/main/res/values/styles.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <resources>
+              <style name="Theme.SpeakerBox" parent="android:style/Theme.Material.Light.NoActionBar">
+                  <item name="android:fontFamily">sans</item>
+                  <item name="android:windowLightStatusBar">true</item>
+                  <item name="android:statusBarColor">#F7F8FA</item>
+                  <item name="android:navigationBarColor">#F7F8FA</item>
+              </style>
+          </resources>
+          EOF
+
+          cat > generated-app/app/src/main/java/com/okn/speakerbox/MainActivity.kt <<'EOF'
+          package com.okn.speakerbox
+
+          import android.os.Bundle
+          import androidx.activity.ComponentActivity
+          import androidx.activity.compose.setContent
+          import androidx.compose.foundation.background
+          import androidx.compose.foundation.layout.*
+          import androidx.compose.foundation.rememberScrollState
+          import androidx.compose.foundation.shape.RoundedCornerShape
+          import androidx.compose.foundation.text.KeyboardOptions
+          import androidx.compose.foundation.verticalScroll
+          import androidx.compose.material3.*
+          import androidx.compose.runtime.*
+          import androidx.compose.ui.Alignment
+          import androidx.compose.ui.Modifier
+          import androidx.compose.ui.graphics.Color
+          import androidx.compose.ui.text.font.FontWeight
+          import androidx.compose.ui.text.input.KeyboardType
+          import androidx.compose.ui.unit.dp
+          import androidx.compose.ui.unit.sp
+          import kotlin.math.*
+
+          class MainActivity : ComponentActivity() {
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+                  setContent {
+                      MaterialTheme(
+                          colorScheme = lightColorScheme(
+                              primary = Color(0xFF0B6BFF),
+                              background = Color(0xFFF7F8FA),
+                              surface = Color.White
+                          )
+                      ) {
+                          SpeakerBoxApp()
+                      }
+                  }
+              }
+          }
+
+          data class CalcResult(
+              val netLiters: Double,
+              val widthMm: Int,
+              val heightMm: Int,
+              val depthMm: Int,
+              val portAreaCm2: Double,
+              val portLengthCm: Double,
+              val totalOhm: Double,
+              val splDb: Double,
+              val woodAreaM2: Double,
+              val sheets: Int,
+              val cuts: List<String>
+          )
+
+          fun d(v: String, fallback: Double) = v.toDoubleOrNull() ?: fallback
+          fun i(v: String, fallback: Int) = v.toIntOrNull() ?: fallback
+
+          fun calculate(
+              sizeIn: Double,
+              count: Int,
+              ohmEach: Double,
+              sensitivity: Double,
+              rms: Double,
+              fb: Double,
+              sealed: Boolean,
+              woodMm: Double
+          ): CalcResult {
+              val driverLiters = when {
+                  sizeIn <= 6.5 -> 8.0
+                  sizeIn <= 8 -> 15.0
+                  sizeIn <= 10 -> 28.0
+                  sizeIn <= 12 -> 50.0
+                  sizeIn <= 15 -> 85.0
+                  else -> 130.0
+              }
+              val net = driverLiters * count * if (sealed) 0.72 else 1.10
+              val totalOhm = max(0.1, ohmEach / count)
+              val spl = sensitivity + 10.0 * log10(max(1.0, rms * count))
+              val ratioW = 1.62
+              val ratioH = 1.00
+              val ratioD = 0.79
+              val internalM3 = net / 1000.0
+              val k = cbrt(internalM3 / (ratioW * ratioH * ratioD))
+              val wi = ratioW * k
+              val hi = ratioH * k
+              val di = ratioD * k
+              val t = woodMm / 1000.0
+              val w = ((wi + 2*t) * 1000).roundToInt()
+              val h = ((hi + 2*t) * 1000).roundToInt()
+              val dep = ((di + 2*t) * 1000).roundToInt()
+
+              val sdPerDriverCm2 = Math.PI * (sizeIn * 2.54 * 0.39).pow(2)
+              val portArea = if (sealed) 0.0 else max(45.0, sdPerDriverCm2 * count * 0.11)
+
+              val areaM2 = portArea / 10000.0
+              val veffM3 = max(0.005, net / 1000.0)
+              val c = 343.0
+              val diameterEq = sqrt(4.0 * areaM2 / Math.PI)
+              val rawL = if (sealed) 0.0 else (areaM2 / (veffM3 * (2.0 * Math.PI * fb / c).pow(2)))
+              val endCorrection = 0.73 * diameterEq
+              val portLength = if (sealed) 0.0 else max(0.03, rawL - endCorrection) * 100.0
+
+              val wM = w / 1000.0
+              val hM = h / 1000.0
+              val dM = dep / 1000.0
+              val woodArea = 2*(wM*dM) + 2*(wM*hM) + 2*(hM*dM)
+              val sheetArea = 1.22 * 2.44
+              val sheets = ceil(woodArea * 1.15 / sheetArea).toInt().coerceAtLeast(1)
+
+              val cuts = listOf(
+                  "บน/ล่าง 2 ชิ้น  ${w} × ${dep} มม.",
+                  "หน้า/หลัง 2 ชิ้น  ${w} × ${h} มม.",
+                  "ซ้าย/ขวา 2 ชิ้น  ${dep} × ${h} มม."
+              )
+
+              return CalcResult(
+                  netLiters = net,
+                  widthMm = w,
+                  heightMm = h,
+                  depthMm = dep,
+                  portAreaCm2 = portArea,
+                  portLengthCm = portLength,
+                  totalOhm = totalOhm,
+                  splDb = spl,
+                  woodAreaM2 = woodArea,
+                  sheets = sheets,
+                  cuts = cuts
+              )
+          }
+
+          @Composable
+          fun SpeakerBoxApp() {
+              var isCar by remember { mutableStateOf(true) }
+              var sealed by remember { mutableStateOf(false) }
+
+              var size by remember { mutableStateOf("12") }
+              var count by remember { mutableStateOf("1") }
+              var ohm by remember { mutableStateOf("4") }
+              var sensitivity by remember { mutableStateOf("95") }
+              var rms by remember { mutableStateOf("500") }
+              var fb by remember { mutableStateOf("35") }
+              var wood by remember { mutableStateOf("18") }
+
+              var result by remember { mutableStateOf<CalcResult?>(null) }
+
+              Surface(
+                  modifier = Modifier.fillMaxSize(),
+                  color = Color(0xFFF7F8FA)
+              ) {
+                  Column(
+                      modifier = Modifier
+                          .fillMaxSize()
+                          .verticalScroll(rememberScrollState())
+                          .padding(horizontal = 18.dp, vertical = 22.dp),
+                      verticalArrangement = Arrangement.spacedBy(14.dp)
+                  ) {
+                      Text(
+                          "Speaker Box Designer",
+                          fontSize = 28.sp,
+                          fontWeight = FontWeight.Bold
+                      )
+                      Text(
+                          "ออกแบบตู้ลำโพงรถยนต์และ PA พร้อมรายการตัดไม้",
+                          color = Color(0xFF656A73)
+                      )
+
+                      SectionCard("ประเภทงาน") {
+                          Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                              SelectChip("รถยนต์", isCar) { isCar = true }
+                              SelectChip("PA / กลางแจ้ง", !isCar) { isCar = false }
+                          }
+                      }
+
+                      SectionCard("ประเภทตู้") {
+                          Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                              SelectChip("ตู้เปิด Bass Reflex", !sealed) { sealed = false }
+                              SelectChip("ตู้ปิด Sealed", sealed) { sealed = true }
+                          }
+                      }
+
+                      SectionCard("ข้อมูลดอกลำโพง") {
+                          InputRow("ขนาดดอก (นิ้ว)", size) { size = it }
+                          InputRow("จำนวนดอก", count) { count = it }
+                          InputRow("Ω ต่อดอก", ohm) { ohm = it }
+                          InputRow("Sensitivity dB", sensitivity) { sensitivity = it }
+                          InputRow("กำลัง RMS/ดอก (W)", rms) { rms = it }
+                          if (!sealed) InputRow("ความถี่จูน Fb (Hz)", fb) { fb = it }
+                          InputRow("ความหนาไม้ (มม.)", wood) { wood = it }
+                      }
+
+                      Button(
+                          modifier = Modifier
+                              .fillMaxWidth()
+                              .height(58.dp),
+                          shape = RoundedCornerShape(18.dp),
+                          onClick = {
+                              result = calculate(
+                                  sizeIn = d(size, 12.0),
+                                  count = i(count, 1).coerceAtLeast(1),
+                                  ohmEach = d(ohm, 4.0),
+                                  sensitivity = d(sensitivity, 95.0),
+                                  rms = d(rms, 500.0),
+                                  fb = d(fb, 35.0).coerceAtLeast(15.0),
+                                  sealed = sealed,
+                                  woodMm = d(wood, 18.0)
+                              )
+                          }
+                      ) {
+                          Text("คำนวณแบบตู้", fontSize = 17.sp, fontWeight = FontWeight.Bold)
+                      }
+
+                      result?.let { r ->
+                          SectionCard("ผลการคำนวณ") {
+                              ResultLine("ปริมาตรตู้สุทธิ", "%.1f ลิตร".format(r.netLiters))
+                              ResultLine("ขนาดภายนอก", "${r.widthMm} × ${r.heightMm} × ${r.depthMm} มม.")
+                              ResultLine("โหลดรวมโดยประมาณ", "%.2f Ω".format(r.totalOhm))
+                              ResultLine("SPL ทฤษฎี", "%.1f dB @ 1m".format(r.splDb))
+                              if (!sealed) {
+                                  ResultLine("พื้นที่พอร์ต", "%.1f cm²".format(r.portAreaCm2))
+                                  ResultLine("ความยาวพอร์ต", "%.1f cm".format(r.portLengthCm))
+                              }
+                          }
+
+                          SectionCard("แบบตัดไม้") {
+                              r.cuts.forEach {
+                                  Text(
+                                      it,
+                                      modifier = Modifier.padding(vertical = 5.dp),
+                                      fontSize = 16.sp
+                                  )
+                              }
+                              HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
+                              ResultLine("พื้นที่ไม้รวม", "%.2f m²".format(r.woodAreaM2))
+                              ResultLine("แผ่น 1220 × 2440 มม.", "${r.sheets} แผ่น")
+                          }
+
+                          AssistCard(
+                              colors = CardDefaults.cardColors(
+                                  containerColor = Color(0xFFEAF2FF)
+                              )
+                          ) {
+                              Text(
+                                  "หมายเหตุ",
+                                  fontWeight = FontWeight.Bold,
+                                  color = Color(0xFF0B57D0)
+                              )
+                              Spacer(Modifier.height(4.dp))
+                              Text(
+                                  "โหมด Quick เป็นค่าประมาณสำหรับเริ่มออกแบบ หากต้องการความแม่นยำสูงควรใช้ค่า T/S ของดอก เช่น Fs, Qts, Vas และ Xmax.",
+                                  color = Color(0xFF3F4D63)
+                              )
+                          }
+                      }
+
+                      Spacer(Modifier.height(24.dp))
+                  }
+              }
+          }
+
+          @Composable
+          fun SectionCard(title: String, content: @Composable ColumnScope.() -> Unit) {
+              Card(
+                  modifier = Modifier.fillMaxWidth(),
+                  shape = RoundedCornerShape(24.dp),
+                  colors = CardDefaults.cardColors(containerColor = Color.White)
+              ) {
+                  Column(
+                      modifier = Modifier.padding(18.dp),
+                      verticalArrangement = Arrangement.spacedBy(10.dp)
+                  ) {
+                      Text(title, fontSize = 19.sp, fontWeight = FontWeight.Bold)
+                      content()
+                  }
+              }
+          }
+
+          @Composable
+          fun SelectChip(text: String, selected: Boolean, onClick: () -> Unit) {
+              FilterChip(
+                  selected = selected,
+                  onClick = onClick,
+                  label = { Text(text) },
+                  shape = RoundedCornerShape(16.dp)
+              )
+          }
+
+          @Composable
+          fun InputRow(label: String, value: String, onValueChange: (String) -> Unit) {
+              OutlinedTextField(
+                  modifier = Modifier.fillMaxWidth(),
+                  value = value,
+                  onValueChange = onValueChange,
+                  label = { Text(label) },
+                  singleLine = true,
+                  keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                  shape = RoundedCornerShape(16.dp)
+              )
+          }
+
+          @Composable
+          fun ResultLine(label: String, value: String) {
+              Row(
+                  modifier = Modifier
+                      .fillMaxWidth()
+                      .padding(vertical = 3.dp),
+                  horizontalArrangement = Arrangement.SpaceBetween,
+                  verticalAlignment = Alignment.CenterVertically
+              ) {
+                  Text(label, color = Color(0xFF5C626C))
+                  Text(value, fontWeight = FontWeight.SemiBold)
+              }
+          }
+          EOF
+
+      - name: Download Gradle 8.9
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -L --retry 3 -o /tmp/gradle.zip \
+            https://services.gradle.org/distributions/gradle-8.9-bin.zip
+          unzip -q /tmp/gradle.zip -d /tmp
+          echo "/tmp/gradle-8.9/bin" >> "$GITHUB_PATH"
+
+      - name: Build debug APK
+        shell: bash
+        working-directory: generated-app
+        run: |
+          set -euo pipefail
+          gradle --no-daemon clean assembleDebug
+
+      - name: Rename APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p output
+          cp generated-app/app/build/outputs/apk/debug/app-debug.apk \
+            output/SpeakerBoxDesigner-debug.apk
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: SpeakerBoxDesigner-APK
+          path: output/SpeakerBoxDesigner-debug.apk
+          if-no-files-found: error
+          retention-days: 30
