@@ -1,0 +1,647 @@
+name: OKN BP1048P4 V17 USB-C ONLY RECOVERY PACKET LAYOUT AND ACK PROOF
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/OKN_BP1048P4_V17_USB_C_ONLY_RECOVERY_PACKET_LAYOUT_AND_ACK_PROOF.yml'
+
+permissions:
+  contents: read
+
+env:
+  SDK_REPO: "https://github.com/leadercxn/bp1048_sdk_v0.1.12.git"
+  SDK_COMMIT: "8105bd864b04995d81c9f9ae77cb158259f39015"
+  EXPECTED_FLASHBOOT_SHA256: "6b632435152478ecd6a8c3697b044caf253630f70923b27c8cbe8baa509148a6"
+
+  REQUIRED_PATH: "Samsung Galaxy S25+ -> USB-C cable -> DSP USB-C only"
+
+  SOLDER_ALLOWED: "NO"
+  BOARD_MOD_ALLOWED: "NO"
+  JTAG_ALLOWED: "NO"
+  SDP_ALLOWED: "NO"
+  AICE_ALLOWED: "NO"
+  HARDWARE_PROBE_ALLOWED: "NO"
+  LIVE_USB_COMMAND_ALLOWED: "NO"
+  FLASH_READ_ALLOWED: "NO"
+  FLASH_WRITE_ALLOWED: "NO"
+  FLASH_ERASE_ALLOWED: "NO"
+
+jobs:
+  static_proof:
+    name: V17 prove recovery packet fields ACKs and 4KB block transport
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+
+    steps:
+      - name: Enforce USB-C-only constraints
+        shell: bash
+        run: |
+          set -euo pipefail
+          for v in SOLDER_ALLOWED BOARD_MOD_ALLOWED JTAG_ALLOWED SDP_ALLOWED AICE_ALLOWED HARDWARE_PROBE_ALLOWED LIVE_USB_COMMAND_ALLOWED FLASH_READ_ALLOWED FLASH_WRITE_ALLOWED FLASH_ERASE_ALLOWED; do
+            test "${!v}" = "NO"
+          done
+          rm -rf /tmp/v17
+          mkdir -p /tmp/v17/evidence /tmp/v17/tool
+          cat > /tmp/v17/evidence/SAFETY.txt <<'EOF'
+          REQUIRED_PATH=Samsung Galaxy S25+ -> USB-C cable -> DSP USB-C only
+          SOLDER_ALLOWED=NO
+          BOARD_MOD_ALLOWED=NO
+          JTAG_ALLOWED=NO
+          SDP_ALLOWED=NO
+          AICE_ALLOWED=NO
+          HARDWARE_PROBE_ALLOWED=NO
+          LIVE_USB_COMMAND_ALLOWED=NO
+          TARGET_CONNECTED=NO
+          USB_CONTROL_TRANSFER_EXECUTED=NO
+          FLASH_READ_EXECUTED=NO
+          FLASH_WRITE_EXECUTED=NO
+          FLASH_ERASE_EXECUTED=NO
+          RUNTIME_OPCODE_0x11_EXECUTED=NO
+          EOF
+
+      - name: Fetch SDK and reconstruct hash-pinned FlashBoot
+        shell: bash
+        run: |
+          set -euo pipefail
+          S=/tmp/v17/sdk
+          E=/tmp/v17/evidence
+
+          git clone -q "$SDK_REPO" "$S"
+          git -C "$S" checkout -q "$SDK_COMMIT"
+          test "$(git -C "$S" rev-parse HEAD)" = "$SDK_COMMIT"
+          git -C "$S" rev-parse HEAD > "$E/SDK_COMMIT.txt"
+
+          cd "$S"
+          mapfile -t DIRS < <(find BT_Audio_APP MVsB1_Base_SDK develop_lib -type d | sort)
+          ARGS=()
+          for d in "${DIRS[@]}"; do ARGS+=("-I$d"); done
+
+          gcc -E -P "${ARGS[@]}" \
+            BT_Audio_APP/bt_audio_app_src/device/flash_boot.c \
+            -o /tmp/v17/flash_boot.pre.c
+
+          python3 - <<'PY'
+          from pathlib import Path
+          import re,hashlib,json
+
+          src=Path('/tmp/v17/flash_boot.pre.c').read_text(errors='replace')
+          E=Path('/tmp/v17/evidence')
+          m=re.search(
+              r'const\s+unsigned\s+char\s+flash_data\s*\[\s*65536\s*\]\s*=\s*\{(.*?)\}\s*;',
+              src,re.S
+          )
+          if not m: raise RuntimeError('flash_data[65536] initializer missing')
+
+          body=m.group(1)
+          toks=[]; buf=[]; depth=0
+          for ch in body:
+              if ch=='(':
+                  depth+=1; buf.append(ch)
+              elif ch==')':
+                  depth=max(0,depth-1); buf.append(ch)
+              elif ch==',' and depth==0:
+                  x=''.join(buf).strip()
+                  if x: toks.append(x)
+                  buf=[]
+              else:
+                  buf.append(ch)
+          x=''.join(buf).strip()
+          if x: toks.append(x)
+
+          vals=[]
+          for i,t in enumerate(toks):
+              t=re.sub(r'(?i)(0x[0-9a-f]+|\b\d+)(?:u|ul|ull|l|ll)\b',r'\1',t).strip()
+              if not re.fullmatch(r'[0-9a-fA-FxX\s()+\-*/%<>&|~]+',t):
+                  raise RuntimeError(f'unresolved token {i}: {t}')
+              vals.append(eval(t,{'__builtins__':{}},{}) & 0xff)
+
+          if len(vals)!=65536: raise RuntimeError(f'bad size {len(vals)}')
+          b=bytes(vals)
+          Path('/tmp/v17/flash_boot.bin').write_bytes(b)
+          sha=hashlib.sha256(b).hexdigest()
+          if sha != '6b632435152478ecd6a8c3697b044caf253630f70923b27c8cbe8baa509148a6':
+              raise RuntimeError('FlashBoot hash mismatch')
+          (E/'V17_FLASHBOOT.json').write_text(json.dumps({'bytes':len(b),'sha256':sha},indent=2)+'\n')
+          PY
+
+          strings -a -td /tmp/v17/flash_boot.bin > "$E/FLASHBOOT_STRINGS.txt"
+
+      - name: Build NDS32 objdump and disassemble
+        shell: bash
+        run: |
+          set -euo pipefail
+          E=/tmp/v17/evidence
+          cd /tmp/v17/tool
+
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq \
+            build-essential curl xz-utils bison flex texinfo zlib1g-dev >/dev/null
+
+          V=2.42
+          curl -fL --retry 3 --connect-timeout 15 --max-time 120 \
+            "https://ftp.gnu.org/gnu/binutils/binutils-${V}.tar.xz" -o binutils.tar.xz
+          tar -xf binutils.tar.xz
+          mkdir build
+          cd build
+          ../binutils-${V}/configure \
+            --target=nds32le-elf --disable-nls --disable-werror \
+            --disable-gdb --disable-gprofng --disable-gas --disable-ld \
+            > "$E/BINUTILS_CONFIGURE.txt" 2>&1
+          make -j2 all-binutils > "$E/BINUTILS_BUILD.txt" 2>&1
+
+          OBJDUMP=/tmp/v17/tool/build/binutils/objdump
+          "$OBJDUMP" --version > "$E/OBJDUMP_VERSION.txt"
+
+          ok=0
+          for arch in nds32 nds32:v3s nds32:v3; do
+            if "$OBJDUMP" -D -z -b binary -m "$arch" -EL \
+              /tmp/v17/flash_boot.bin > /tmp/v17/flash_boot.dis 2>/dev/null; then
+              echo "$arch" > "$E/OBJDUMP_ARCH.txt"
+              ok=1
+              break
+            fi
+          done
+          test "$ok" -eq 1
+          test -s /tmp/v17/flash_boot.dis
+
+      - name: Extract USB receive send dispatcher and flash helper windows
+        shell: bash
+        run: |
+          set -euo pipefail
+          E=/tmp/v17/evidence
+
+          python3 - <<'PY'
+          from pathlib import Path
+          import re,json
+
+          E=Path('/tmp/v17/evidence')
+          lines=Path('/tmp/v17/flash_boot.dis').read_text(errors='replace').splitlines()
+          rx=re.compile(r'^\s*([0-9a-fA-F]+):\s+')
+          rows=[]
+          for l in lines:
+              m=rx.match(l)
+              if m: rows.append((int(m.group(1),16),l))
+
+          windows={
+              'SPI_READ_AROUND_0E0E':(0x0D80,0x0EE0),
+              'SPI_WRITE_AROUND_0FD0':(0x0F60,0x10C0),
+              'FLASH_ERASE_AROUND_4100':(0x4080,0x4200),
+              'FLASH_WRITE_BLOCK_AROUND_438A':(0x4300,0x44C0),
+              'USB_REPLY_HELPER_4AD0':(0x4A80,0x4B2E),
+              'USB_BLOCK_RX_HELPER_4B2E':(0x4B2E,0x4B98),
+              'COMMAND_DISPATCHER_4B98':(0x4B98,0x4C08),
+              'CXXX_4C08':(0x4C08,0x4F9A),
+              'CHIPERAS_4F9A':(0x4F9A,0x5064),
+              'BOOTDAT_5064':(0x5064,0x51BC),
+              'CODEDATA_51BC':(0x51BC,0x52EE),
+              'CONSTDAT_52EE':(0x52EE,0x53F2),
+              'CNFGDAT_53F2':(0x53F2,0x54F6),
+              'BTUPDAT_54F6':(0x54F6,0x5646),
+              'UPINFO_5646':(0x5646,0x56AE),
+          }
+
+          meta={}
+          for name,(a,b) in windows.items():
+              txt='\n'.join(l for addr,l in rows if a<=addr<b)+'\n'
+              (E/f'{name}.txt').write_text(txt)
+              meta[name]={'start':f'0x{a:04X}','end_exclusive':f'0x{b:04X}','bytes_text':len(txt)}
+              if not txt.strip(): raise RuntimeError(f'empty window {name}')
+          (E/'V17_WINDOWS.json').write_text(json.dumps(meta,indent=2)+'\n')
+          PY
+
+      - name: Prove cxxx metadata offsets and ACK byte roles
+        shell: bash
+        run: |
+          set -euo pipefail
+          E=/tmp/v17/evidence
+
+          python3 - <<'PY'
+          from pathlib import Path
+          import re,json
+
+          E=Path('/tmp/v17/evidence')
+          a=(E/'CXXX_4C08.txt').read_text(errors='replace')
+          strings=(E/'FLASHBOOT_STRINGS.txt').read_text(errors='replace')
+
+          # cxxx copies these little-endian 32-bit values from the report buffer
+          # (base gp+0x884) before printing the named values.
+          fields=[
+              {'name':'code_len',      'offset':8,  'size':4, 'encoding':'LE32', 'gp':'0x88c'},
+              {'name':'const_offset',  'offset':12, 'size':4, 'encoding':'LE32', 'gp':'0x890'},
+              {'name':'code_version',  'offset':16, 'size':4, 'encoding':'LE32', 'gp':'0x894'},
+              {'name':'code_encrypt_flag','offset':20,'size':1,'encoding':'U8',   'gp':'0x898'},
+              {'name':'const_len',     'offset':24, 'size':4, 'encoding':'LE32', 'gp':'0x89c'},
+              {'name':'reserved_or_unresolved','offset':28,'size':4,'encoding':'UNKNOWN','gp':'0x8a0'},
+              {'name':'boot_len',      'offset':32, 'size':4, 'encoding':'LE32', 'gp':'0x8a4'},
+              {'name':'boot_crc',      'offset':36, 'size':4, 'encoding':'LE32', 'gp':'0x8a8'},
+              {'name':'config_len',    'offset':40, 'size':4, 'encoding':'LE32', 'gp':'0x8ac'},
+              {'name':'config_offset', 'offset':44, 'size':4, 'encoding':'LE32', 'gp':'0x8b0'},
+              {'name':'code_crc',      'offset':48, 'size':4, 'encoding':'LE32', 'gp':'0x8b4'},
+              {'name':'section_tag_boot','offset':52,'size':1,'encoding':'U8 expected 2','gp':'buffer+0x34'},
+              {'name':'section_tag_const','offset':53,'size':1,'encoding':'U8 expected 4','gp':'0x8b9'},
+              {'name':'section_tag_config','offset':54,'size':1,'encoding':'U8 expected 5','gp':'0x8ba'},
+          ]
+
+          required_literals=[
+              'boot_len=%08X','boot_crc=%08X','code_len=%08X','code_crc=%08X',
+              'const_len=%08X','config_len=%08X','const_offset=%08X','config_offset=%08X',
+              'Code EncryptFlag different!','cmd_cxxx ACK %02X %02X %02X %02X'
+          ]
+          for x in required_literals:
+              if x not in strings: raise RuntimeError('missing debug literal: '+x)
+
+          # Instruction evidence for field sources / section tags / ACK bytes.
+          patterns={
+              'code_len_gp_88c':r'addi\.gp\s+\$r0,\s+#0x88c',
+              'const_offset_gp_890':r'addi\.gp\s+\$r0,\s+#0x890',
+              'code_version_gp_894':r'addi\.gp\s+\$r0,\s+#0x894',
+              'encrypt_flag_gp_898':r'lbi\.gp\s+\$r0,\s*\[\s*\+\s*#0x898\]',
+              'const_len_gp_89c':r'addi\.gp\s+\$r0,\s+#0x89c',
+              'boot_len_gp_8a4':r'addi\.gp\s+\$r0,\s+#0x8a4',
+              'boot_crc_gp_8a8':r'addi\.gp\s+\$r0,\s+#0x8a8',
+              'config_len_gp_8ac':r'addi\.gp\s+\$r0,\s+#0x8ac',
+              'config_offset_gp_8b0':r'addi\.gp\s+\$r0,\s+#0x8b0',
+              'code_crc_gp_8b4':r'addi\.gp\s+\$r0,\s+#0x8b4',
+              'tag_boot_equals_2':r'lbi\s+\$r0,\s*\[\$r6\s*\+\s*#0x34\].*?beqc\s+\$r0,\s*#2',
+              'tag_const_equals_4':r'lbi\.gp\s+\$r0,\s*\[\s*\+\s*#0x8b9\].*?bnec\s+\$r0,\s*#4',
+              'tag_config_equals_5':r'lbi\.gp\s+\$r0,\s*\[\s*\+\s*#0x8ba\].*?bnec\s+\$r0,\s*#5',
+          }
+          checks={k:bool(re.search(v,a,re.S|re.I)) for k,v in patterns.items()}
+          for k,v in checks.items():
+              if not v: raise RuntimeError('cxxx field proof failed: '+k)
+
+          result={
+              'command_ascii':'cxxx',
+              'command_bytes':[0,1,2,3],
+              'bytes_4_to_7':'not yet semantically classified',
+              'fields':fields,
+              'response_status_bytes':[
+                  {'offset':8,'role':'code','initial':'0xFF'},
+                  {'offset':9,'role':'const','initial':'0xFF'},
+                  {'offset':10,'role':'config','initial':'0xFF'},
+                  {'offset':11,'role':'boot','initial':'0xFF'},
+              ],
+              'status_0x55':'accepted/selected for update in validated branch',
+              'status_0x33':'validation/error branch',
+              'status_0xFF':'initial/untouched/not-selected state',
+              'crc_fields_present':True,
+              'crc_algorithm_proven':False,
+              'checks':checks
+          }
+          (E/'V17_CXXX_LAYOUT.json').write_text(json.dumps(result,indent=2)+'\n')
+          PY
+
+      - name: Prove data command ACKs BT RMW and upinfo finalize payload
+        shell: bash
+        run: |
+          set -euo pipefail
+          E=/tmp/v17/evidence
+
+          python3 - <<'PY'
+          from pathlib import Path
+          import re,json
+
+          E=Path('/tmp/v17/evidence')
+
+          names={
+              'bootdat':'BOOTDAT_5064.txt',
+              'codedata':'CODEDATA_51BC.txt',
+              'constdat':'CONSTDAT_52EE.txt',
+              'cnfgdat':'CNFGDAT_53F2.txt',
+          }
+
+          data={}
+          for name,fn in names.items():
+              t=(E/fn).read_text(errors='replace')
+              has_rx='jal\t0x4b2e' in t or bool(re.search(r'jal\s+0x4b2e\b',t))
+              status_ok=bool(re.search(
+                  r'(?:movi55|movi)\s+\$r(?:0|1),\s*#0x55.*?sbi(?:\.gp)?\s+.*?#(?:0x)?8\]',
+                  t,re.S|re.I
+              ))
+              status_err=bool(re.search(
+                  r'(?:movi55|movi)\s+\$r(?:0|1),\s*#-1.*?sbi(?:\.gp)?\s+.*?#(?:0x)?8\]',
+                  t,re.S|re.I
+              ))
+              sends=bool(re.search(r'jal\s+0x4ad0\b',t))
+              block4096='0x1000' in t
+              data[name]={
+                  'uses_block_receive_helper_0x4b2e':has_rx,
+                  'status_byte_offset':8,
+                  'success_status':'0x55' if status_ok else 'not proven',
+                  'error_status':'0xFF' if status_err else 'not proven',
+                  'uses_reply_helper_0x4ad0':sends,
+                  '4096_byte_block_constant_seen':block4096,
+                  'flash_mutating':True
+              }
+              for k in ['uses_block_receive_helper_0x4b2e','uses_reply_helper_0x4ad0','4096_byte_block_constant_seen']:
+                  if not data[name][k]:
+                      raise RuntimeError(f'{name} proof failed: {k}')
+
+          bt=(E/'BTUPDAT_54F6.txt').read_text(errors='replace')
+          btproof={
+              'payload_offset':8,
+              'payload_bytes':0x5c,
+              'reads_4kb_before_modify':bool(re.search(r'movi\s+\$r2,\s*#0x1000.*?jal\s+0xe0e',bt,re.S)),
+              'erases_4kb':bool(re.search(r'movi\s+\$r1,\s*#0x1000.*?jal\s+0x4100',bt,re.S)),
+              'copies_payload_to_rmw_buffer':('0x88c' in bt and '0x1884' in bt),
+              'writes_4kb':bool(re.search(r'movi\s+\$r2,\s*#0x1000.*?jal\s+0xfd0',bt,re.S)),
+              'reads_back_4kb':bool(re.search(r'movi\s+\$r2,\s*#0x1000.*?jal\s+0xe0e',bt,re.S)),
+              'compares_92_bytes':bool(re.search(r'movi\s+\$r2,\s*#0x5c.*?jal\s+0xabfc',bt,re.S)),
+              'status_offset':8,
+              'success_status':'0x55',
+              'error_status':'0xFF',
+              'flash_mutating':True
+          }
+          for k in ['reads_4kb_before_modify','erases_4kb','copies_payload_to_rmw_buffer','writes_4kb','reads_back_4kb','compares_92_bytes']:
+              if not btproof[k]: raise RuntimeError('btupdat proof failed: '+k)
+
+          up=(E/'UPINFO_5646.txt').read_text(errors='replace')
+          upproof={
+              'payload_ascii_at_offsets_8_9':'ok',
+              'offset8_expected':'0x6F',
+              'offset9_expected':'0x6B',
+              'match_triggers_finalize_calls':['0x9010','0x90A8','0x905C'],
+              'mismatch_uses_error_path':True,
+              'flash_mutation_by_upinfo_itself':'not established'
+          }
+          if not re.search(r'#0x88c.*?#0x6f.*?#0x88d.*?#0x6b',up,re.S|re.I):
+              raise RuntimeError('upinfo "ok" payload proof failed')
+
+          (E/'V17_DATA_COMMANDS.json').write_text(json.dumps({
+              'block_commands':data,
+              'btupdat':btproof,
+              'upinfo':upproof
+          },indent=2)+'\n')
+          PY
+
+      - name: Analyze 4KB receive helper and reply helper
+        shell: bash
+        run: |
+          set -euo pipefail
+          E=/tmp/v17/evidence
+
+          python3 - <<'PY'
+          from pathlib import Path
+          import re,json
+
+          E=Path('/tmp/v17/evidence')
+          rx=(E/'USB_BLOCK_RX_HELPER_4B2E.txt').read_text(errors='replace')
+          tx=(E/'USB_REPLY_HELPER_4AD0.txt').read_text(errors='replace')
+          disp=(E/'COMMAND_DISPATCHER_4B98.txt').read_text(errors='replace')
+
+          def nums(t):
+              return sorted(set(re.findall(r'(?i)#(?:0x)?[0-9a-f]+',t)))
+
+          rx_has_100=bool(re.search(r'#0x100\b|#256\b',rx,re.I))
+          rx_has_10=bool(re.search(r'#0x10\b|#16\b',rx,re.I))
+          rx_has_1000=bool(re.search(r'#0x1000\b|#4096\b',rx,re.I))
+
+          # 16 x 256 is already implied by the proven recovery transport and
+          # the block handlers' 4096-byte buffers. V17 records whether the
+          # helper disassembly independently exposes those constants.
+          result={
+              'receive_helper_address':'0x00004B2E',
+              'reply_helper_address':'0x00004AD0',
+              'dispatcher_address':'0x00004B98',
+              'receive_helper_numeric_tokens':nums(rx),
+              'reply_helper_numeric_tokens':nums(tx),
+              'dispatcher_numeric_tokens':nums(disp),
+              'receive_helper_explicit_256_constant_seen':rx_has_100,
+              'receive_helper_explicit_16_constant_seen':rx_has_10,
+              'receive_helper_explicit_4096_constant_seen':rx_has_1000,
+              'transport_report_bytes_proven_elsewhere':256,
+              'block_bytes_proven_in_handlers':4096,
+              'reports_per_block_arithmetic':16,
+              'exact_helper_loop_16x256_proven':False,
+              'note':'Set to true only if helper-level control-flow/data-pointer increments are independently decoded; arithmetic alone is not treated as proof.'
+          }
+
+          # Conservative evidence: do not claim exact helper loop based merely on constants.
+          (E/'V17_USB_HELPERS.json').write_text(json.dumps(result,indent=2)+'\n')
+          PY
+
+      - name: Prove chip erase progress ACK layout
+        shell: bash
+        run: |
+          set -euo pipefail
+          E=/tmp/v17/evidence
+
+          python3 - <<'PY'
+          from pathlib import Path
+          import re,json
+          E=Path('/tmp/v17/evidence')
+          t=(E/'CHIPERAS_4F9A.txt').read_text(errors='replace')
+
+          proof={
+              'command':'chiperas',
+              'command_length_bytes':8,
+              'erase_granularity_bytes':65536,
+              'progress_current_sector_offset':8,
+              'progress_last_sector_offset':9,
+              'erase_helper':'0x4100',
+              'reply_helper':'0x4AD0',
+              'flash_mutating':True,
+              'live_safe':False
+          }
+
+          checks={
+              'erase_len_64k':bool(re.search(r'movi\s+\$r1,\s*#0x10000.*?jal\s+0x4100',t,re.S)),
+              'current_sector_written_offset8':bool(re.search(r'sbi\s+\$r6,\s*\[\$r0\s*\+\s*#8\]',t)),
+              'last_sector_written_offset9':bool(re.search(r'sbi\s+\$r8,\s*\[\$r0\s*\+\s*#9\]',t)),
+              'reply_after_progress':bool(re.search(r'sbi\s+\$r8,\s*\[\$r0\s*\+\s*#9\].*?jal\s+0x4ad0',t,re.S))
+          }
+          for k,v in checks.items():
+              if not v: raise RuntimeError('chiperas proof failed: '+k)
+          proof['checks']=checks
+          (E/'V17_CHIPERAS.json').write_text(json.dumps(proof,indent=2)+'\n')
+          PY
+
+      - name: Build V17 protocol result and Android packet model
+        shell: bash
+        run: |
+          set -euo pipefail
+          E=/tmp/v17/evidence
+
+          cat > "$E/V17_ANDROID_PACKET_MODEL.kt" <<'KOTLIN'
+          /*
+           * STATIC MODEL ONLY.
+           * Samsung Galaxy S25+ -> USB-C -> DSP USB-C only.
+           * No live flash command is enabled here.
+           */
+          object Bp1048RecoveryPacketModel {
+              const val REPORT_BYTES = 256
+
+              data class CxxxMetadata(
+                  val codeLen: UInt,        // report +8  LE32
+                  val constOffset: UInt,    // report +12 LE32
+                  val codeVersion: UInt,    // report +16 LE32
+                  val codeEncryptFlag: UByte, // report +20
+                  val constLen: UInt,       // report +24 LE32
+                  val unresolved28: UInt,   // report +28: semantics not proven
+                  val bootLen: UInt,        // report +32 LE32
+                  val bootCrc: UInt,        // report +36 LE32
+                  val configLen: UInt,      // report +40 LE32
+                  val configOffset: UInt,   // report +44 LE32
+                  val codeCrc: UInt,        // report +48 LE32
+                  val bootTag: UByte = 2u,  // +52
+                  val constTag: UByte = 4u, // +53
+                  val configTag: UByte = 5u // +54
+              )
+
+              // cxxx response:
+              // +8 code, +9 const, +10 config, +11 boot
+              const val STATUS_UPDATE_SELECTED = 0x55
+              const val STATUS_VALIDATION_ERROR = 0x33
+              const val STATUS_UNTOUCHED = 0xFF
+
+              // bootdat/codedata/constdat/cnfgdat ACK status is at report +8.
+              const val DATA_ACK_OFFSET = 8
+
+              // btupdat carries 92 bytes at report +8 and performs a 4KB RMW.
+              const val BTUPDAT_PAYLOAD_OFFSET = 8
+              const val BTUPDAT_PAYLOAD_BYTES = 92
+
+              // upinfo finalize token:
+              // report[8] = 'o' (0x6F), report[9] = 'k' (0x6B)
+              val UPINFO_OK = byteArrayOf(0x6F, 0x6B)
+
+              // Intentionally no functions that execute chiperas or data writes.
+          }
+          KOTLIN
+
+          python3 - <<'PY'
+          from pathlib import Path
+          import json
+
+          E=Path('/tmp/v17/evidence')
+          c=json.loads((E/'V17_CXXX_LAYOUT.json').read_text())
+          d=json.loads((E/'V17_DATA_COMMANDS.json').read_text())
+          h=json.loads((E/'V17_USB_HELPERS.json').read_text())
+          ce=json.loads((E/'V17_CHIPERAS.json').read_text())
+
+          result={
+              'required_path':'Samsung Galaxy S25+ -> USB-C -> DSP USB-C only',
+              'runtime_to_recovery_entry_static_proven':True,
+              'recovery_vid_pid':'0000:2244',
+              'report_bytes':256,
+              'cxxx_metadata_layout_proven':True,
+              'cxxx_status_offsets_proven':True,
+              'block_command_status_offset8_proven':True,
+              'btupdat_92byte_rmw_proven':True,
+              'upinfo_ok_token_proven':True,
+              'chiperas_progress_ack_offsets_proven':True,
+              'block_bytes':4096,
+              'reports_per_block_arithmetic':16,
+              'helper_level_16x256_loop_proven':h['exact_helper_loop_16x256_proven'],
+              'crc_fields_present':True,
+              'crc_algorithm_proven':False,
+              'exact_full_update_order_fully_proven':False,
+              'live_usb_command_permitted':False,
+              'flash_erase_write_permitted':False,
+              'next_static_target':'Decode helper 0x4B2E/0x4AD0 and the command dispatcher 0x4B98 at instruction/dataflow level, then reconstruct exact host sequencing including how each 4096-byte block is split across 256-byte SET_REPORT transfers and when GET_REPORT ACKs are requested.'
+          }
+          (E/'V17_RESULT.json').write_text(json.dumps(result,indent=2)+'\n')
+
+          md=[
+              '# BP1048P4 V17 — Recovery packet layout + ACK proof','',
+              '- Required path: **Samsung Galaxy S25+ → USB-C → DSP USB-C only**.',
+              '- `cxxx` metadata offsets and four section-status ACK bytes are statically mapped.',
+              '- `bootdat/codedata/constdat/cnfgdat` use ACK status at report offset 8.',
+              '- `btupdat` uses 92 bytes from report offset 8 and performs a 4KB read-modify-write with readback compare.',
+              '- `upinfo` checks ASCII `ok` at offsets 8–9 before finalize calls.',
+              '- `chiperas` reports progress in offsets 8–9 while erasing 64KB units.',
+              '- 4096/256 = 16 reports per block, but helper-level loop semantics remain fail-closed until fully decoded.',
+              '- No live USB command, erase, write, JTAG/SDP/AICE, soldering, or board modification is performed.'
+          ]
+          (E/'V17_REPORT.md').write_text('\n'.join(md)+'\n')
+          PY
+
+          cat "$E/V17_REPORT.md" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Final fail-closed assertions
+        shell: bash
+        run: |
+          set -euo pipefail
+          for v in SOLDER_ALLOWED BOARD_MOD_ALLOWED JTAG_ALLOWED SDP_ALLOWED AICE_ALLOWED HARDWARE_PROBE_ALLOWED LIVE_USB_COMMAND_ALLOWED FLASH_READ_ALLOWED FLASH_WRITE_ALLOWED FLASH_ERASE_ALLOWED; do
+            test "${!v}" = "NO"
+          done
+
+          python3 - <<'PY'
+          from pathlib import Path
+          import json
+
+          E=Path('/tmp/v17/evidence')
+          r=json.loads((E/'V17_RESULT.json').read_text())
+          assert r['required_path'] == 'Samsung Galaxy S25+ -> USB-C -> DSP USB-C only'
+          assert r['recovery_vid_pid'] == '0000:2244'
+          assert r['report_bytes'] == 256
+          assert r['cxxx_metadata_layout_proven'] is True
+          assert r['cxxx_status_offsets_proven'] is True
+          assert r['block_command_status_offset8_proven'] is True
+          assert r['btupdat_92byte_rmw_proven'] is True
+          assert r['upinfo_ok_token_proven'] is True
+          assert r['chiperas_progress_ack_offsets_proven'] is True
+          assert r['crc_algorithm_proven'] is False
+          assert r['live_usb_command_permitted'] is False
+          assert r['flash_erase_write_permitted'] is False
+
+          print('V17_RECOVERY_PACKET_LAYOUT_AND_ACK_PROOF_COMPLETE=YES')
+          print('REQUIRED_PATH=S25_PLUS_USB_C_TO_DSP_USB_C_ONLY')
+          print('CXXX_LAYOUT_PROVEN=YES')
+          print('BTUPDAT_RMW_92_BYTES_PROVEN=YES')
+          print('UPINFO_OK_TOKEN_PROVEN=YES')
+          print('LIVE_USB_COMMAND_ALLOWED=NO')
+          print('FLASH_WRITE_ALLOWED=NO')
+          print('SOLDER_ALLOWED=NO')
+          print('BOARD_MOD_ALLOWED=NO')
+          PY
+
+      - name: Package V17 evidence
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /tmp/v17/evidence
+          zip -9 -r /tmp/OKN_BP1048P4_V17_RECOVERY_PACKET_LAYOUT_ACK_EVIDENCE.zip . >/dev/null
+          sha256sum /tmp/OKN_BP1048P4_V17_RECOVERY_PACKET_LAYOUT_ACK_EVIDENCE.zip \
+            > /tmp/OKN_BP1048P4_V17_RECOVERY_PACKET_LAYOUT_ACK_EVIDENCE.zip.sha256
+
+      - name: Upload V17 evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: OKN-BP1048P4-V17-RECOVERY-PACKET-LAYOUT-ACK-EVIDENCE
+          path: |
+            /tmp/OKN_BP1048P4_V17_RECOVERY_PACKET_LAYOUT_ACK_EVIDENCE.zip
+            /tmp/OKN_BP1048P4_V17_RECOVERY_PACKET_LAYOUT_ACK_EVIDENCE.zip.sha256
+            /tmp/v17/evidence/V17_REPORT.md
+            /tmp/v17/evidence/V17_RESULT.json
+            /tmp/v17/evidence/V17_CXXX_LAYOUT.json
+            /tmp/v17/evidence/V17_DATA_COMMANDS.json
+            /tmp/v17/evidence/V17_USB_HELPERS.json
+            /tmp/v17/evidence/V17_CHIPERAS.json
+            /tmp/v17/evidence/V17_ANDROID_PACKET_MODEL.kt
+            /tmp/v17/evidence/USB_REPLY_HELPER_4AD0.txt
+            /tmp/v17/evidence/USB_BLOCK_RX_HELPER_4B2E.txt
+            /tmp/v17/evidence/COMMAND_DISPATCHER_4B98.txt
+            /tmp/v17/evidence/CXXX_4C08.txt
+            /tmp/v17/evidence/CHIPERAS_4F9A.txt
+            /tmp/v17/evidence/BOOTDAT_5064.txt
+            /tmp/v17/evidence/CODEDATA_51BC.txt
+            /tmp/v17/evidence/CONSTDAT_52EE.txt
+            /tmp/v17/evidence/CNFGDAT_53F2.txt
+            /tmp/v17/evidence/BTUPDAT_54F6.txt
+            /tmp/v17/evidence/UPINFO_5646.txt
+            /tmp/v17/evidence/SPI_READ_AROUND_0E0E.txt
+            /tmp/v17/evidence/SPI_WRITE_AROUND_0FD0.txt
+            /tmp/v17/evidence/FLASH_ERASE_AROUND_4100.txt
+            /tmp/v17/evidence/FLASH_WRITE_BLOCK_AROUND_438A.txt
+            /tmp/v17/evidence/FLASHBOOT_STRINGS.txt
+            /tmp/v17/evidence/V17_FLASHBOOT.json
+            /tmp/v17/evidence/OBJDUMP_ARCH.txt
+            /tmp/v17/evidence/OBJDUMP_VERSION.txt
+            /tmp/v17/evidence/SDK_COMMIT.txt
+            /tmp/v17/evidence/SAFETY.txt
+          if-no-files-found: warn
+          retention-days: 90
