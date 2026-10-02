@@ -1,0 +1,322 @@
+name: OKN BP1048P4 V9.8 DEBUG LINK AND DATASHEET DISCOVERY ALL IN ONE
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/OKN_BP1048P4_V9_8_DEBUG_LINK_AND_DATASHEET_DISCOVERY_ALL_IN_ONE.yml'
+
+permissions:
+  contents: read
+
+env:
+  FLASH_ALLOWED: "NO"
+  AICE_USB_ALLOWED: "NO"
+  HARDWARE_PROBE_ALLOWED: "NO"
+  DATASHEET_DOWNLOAD_ALLOWED: "NO"
+  SDK_REPO: "https://github.com/leadercxn/bp1048_sdk_v0.1.12.git"
+  SDK_COMMIT: "8105bd864b04995d81c9f9ae77cb158259f39015"
+  OPENOCD_REPO: "https://github.com/openocd-org/openocd.git"
+  OPENOCD_COMMIT: "f342aac0845a69d591ad39a025d74e9c765f6420"
+  WOLFTECH_DOWNLOAD_PAGE: "https://www.wolftech-radio.com/jrwm"
+  JLCPCB_BP1048P4_PAGE: "https://jlcpcb.com/partdetail/JLCPCBAssembly-BP1048P4/C9900019351"
+
+jobs:
+  static_discovery:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - name: Safety gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$FLASH_ALLOWED" = "NO"
+          test "$AICE_USB_ALLOWED" = "NO"
+          test "$HARDWARE_PROBE_ALLOWED" = "NO"
+          test "$DATASHEET_DOWNLOAD_ALLOWED" = "NO"
+          rm -rf /tmp/v98
+          mkdir -p /tmp/v98/evidence
+          cat > /tmp/v98/evidence/SAFETY.txt <<'EOF'
+          TARGET_BP1048_CONNECTED=NO
+          AICE_CONNECTED=NO
+          OPENOCD_EXECUTED=NO
+          ICEMAN_EXECUTED=NO
+          USB_COMMAND_SENT=NO
+          JTAG_COMMAND_SENT=NO
+          SDP_COMMAND_SENT=NO
+          UNKNOWN_BOARD_PIN_PROBED=NO
+          DATASHEET_PDF_DOWNLOADED=NO
+          DATASHEET_PDF_ANALYZED=NO
+          FLASH_READ_EXECUTED=NO
+          FLASH_ERASE_EXECUTED=NO
+          FLASH_WRITE_EXECUTED=NO
+          FLASH_ALLOWED=NO
+          AICE_USB_ALLOWED=NO
+          HARDWARE_PROBE_ALLOWED=NO
+          DATASHEET_DOWNLOAD_ALLOWED=NO
+          EOF
+
+      - name: Fetch pinned source
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone -q "$SDK_REPO" /tmp/v98/sdk-src
+          git -C /tmp/v98/sdk-src checkout -q "$SDK_COMMIT"
+          test "$(git -C /tmp/v98/sdk-src rev-parse HEAD)" = "$SDK_COMMIT"
+          git clone -q "$OPENOCD_REPO" /tmp/v98/openocd-src
+          git -C /tmp/v98/openocd-src checkout -q "$OPENOCD_COMMIT"
+          test "$(git -C /tmp/v98/openocd-src rev-parse HEAD)" = "$OPENOCD_COMMIT"
+          git -C /tmp/v98/sdk-src rev-parse HEAD > /tmp/v98/evidence/SDK_COMMIT.txt
+          git -C /tmp/v98/openocd-src rev-parse HEAD > /tmp/v98/evidence/OPENOCD_COMMIT.txt
+
+      - name: Audit OpenOCD AICE debug-link modes
+        shell: bash
+        run: |
+          set -euo pipefail
+          O=/tmp/v98/openocd-src
+          E=/tmp/v98/evidence
+          grep -RInE --binary-files=without-match \
+            '(2[- ]wire|two[- ]wire|serial[[:space:]]+debug|detect[-_]?2wire|\bJDP\b|Andes.{0,40}\bSDP\b|\bSDP\b.{0,40}debug)' \
+            "$O/src/jtag/aice" "$O/tcl/interface/nds32-aice.cfg" \
+            > "$E/OPENOCD_AICE_DEBUG_LINK_SEARCH.txt" || true
+          cat "$O/tcl/interface/nds32-aice.cfg" > "$E/OPENOCD_AICE_CFG.txt"
+          python3 - <<'PY'
+          from pathlib import Path
+          import json
+          E=Path('/tmp/v98/evidence')
+          hits=(E/'OPENOCD_AICE_DEBUG_LINK_SEARCH.txt').read_text(errors='replace').strip()
+          cfg=(E/'OPENOCD_AICE_CFG.txt').read_text(errors='replace')
+          r={
+            'explicit_2wire_sdp_jdp_terms_found_in_pinned_aice_backend':bool(hits),
+            'matches':hits.splitlines()[:200] if hits else [],
+            'aice_usb_selected':'aice port aice_usb' in cfg,
+            'aice_vid_pid_1cfc_0000':'aice vid_pid 0x1CFC 0x0000' in cfg,
+            'scope_note':'No match only means the pinned OpenOCD AICE subtree/config does not expose these terms; AICE hardware may support link-mode auto-detection outside this source path.'
+          }
+          assert r['aice_usb_selected'] and r['aice_vid_pid_1cfc_0000']
+          (E/'V9_8_OPENOCD_DEBUG_LINK.json').write_text(json.dumps(r,indent=2)+'\n')
+          PY
+
+      - name: Audit BP1048 SDK debug-link clues
+        shell: bash
+        run: |
+          set -euo pipefail
+          S=/tmp/v98/sdk-src
+          E=/tmp/v98/evidence
+          grep -RInE --binary-files=without-match \
+            --include='*.c' --include='*.h' --include='*.cfg' --include='*.prefs' --include='*.launch' --include='*.tpl' --include='*.txt' \
+            '(2[- ]wire|two[- ]wire|serial[[:space:]]+debug|detect[-_]?2wire|\bJDP\b|Andes.{0,40}\bSDP\b|\bSDP\b.{0,40}debug)' \
+            "$S/MVsB1_Base_SDK" "$S/BT_Audio_APP" \
+            > "$E/SDK_ANDES_DEBUG_LINK_SEARCH.txt" || true
+          grep -RInE --binary-files=without-match \
+            --include='*.prefs' --include='*.launch' --include='*.tpl' \
+            'connectType=ICE|iceman\.misc\.args|reset-hold-script\.tpl|targetURI=.*LOCALHOST' \
+            "$S/MVsB1_Base_SDK" "$S/BT_Audio_APP" \
+            > "$E/SDK_ICEMAN_PROJECT_METADATA.txt" || true
+          find "$S" -type f \( -iname '*reset*hold*.tpl' -o -iname '*iceman*' -o -iname '*aice*' \) \
+            -print | sort > "$E/SDK_DEBUG_RELATED_FILENAMES.txt"
+          python3 - <<'PY'
+          from pathlib import Path
+          import json
+          E=Path('/tmp/v98/evidence')
+          links=(E/'SDK_ANDES_DEBUG_LINK_SEARCH.txt').read_text(errors='replace').strip()
+          meta=(E/'SDK_ICEMAN_PROJECT_METADATA.txt').read_text(errors='replace')
+          names=(E/'SDK_DEBUG_RELATED_FILENAMES.txt').read_text(errors='replace')
+          r={
+            'explicit_andes_2wire_sdp_jdp_text_found':bool(links),
+            'search_lines':links.splitlines()[:200] if links else [],
+            'andes_ice_project_metadata_present':('connectType=ICE' in meta and 'iceman.misc.args' in meta),
+            'reset_hold_script_referenced':'reset-hold-script.tpl' in meta,
+            'reset_hold_script_file_present':'reset-hold-script.tpl' in names,
+            'debug_related_filenames':names.splitlines()[:200] if names else []
+          }
+          assert r['andes_ice_project_metadata_present']
+          assert r['reset_hold_script_referenced']
+          (E/'V9_8_SDK_DEBUG_LINK.json').write_text(json.dumps(r,indent=2)+'\n')
+          PY
+
+      - name: Discover BP1048P4 datasheet URL without PDF download
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$DATASHEET_DOWNLOAD_ALLOWED" = "NO"
+          E=/tmp/v98/evidence
+          set +e
+          curl -L --compressed --max-time 30 --connect-timeout 10 -A 'Mozilla/5.0' \
+            "$WOLFTECH_DOWNLOAD_PAGE" -o "$E/WOLFTECH_DOWNLOAD_PAGE.html" -D "$E/WOLFTECH_HEADERS.txt"
+          RC=$?
+          set -e
+          echo "$RC" > "$E/WOLFTECH_CURL_RC.txt"
+          python3 - <<'PY'
+          from pathlib import Path
+          import json,re,html
+          from urllib.parse import urljoin
+          E=Path('/tmp/v98/evidence')
+          p=E/'WOLFTECH_DOWNLOAD_PAGE.html'
+          txt=p.read_text(errors='replace') if p.exists() else ''
+          base='https://www.wolftech-radio.com/jrwm'
+          snippets=[]
+          for m in re.finditer('BP1048P4',txt,re.I):
+              snippets.append(txt[max(0,m.start()-1000):min(len(txt),m.end()+1800)])
+          (E/'WOLFTECH_BP1048P4_CONTEXT.txt').write_text('\n\n---\n\n'.join(snippets[:20]))
+          candidates=[]
+          seen=set()
+          attr_re=re.compile(r"(?is)(href|src|data-[a-z0-9_-]+)\s*=\s*[\"']([^\"']+)[\"']")
+          for m in attr_re.finditer(txt):
+              val=html.unescape(m.group(2))
+              if 'bp1048' in val.lower() or '.pdf' in val.lower():
+                  u=urljoin(base,val)
+                  if u not in seen:
+                      seen.add(u); candidates.append(u)
+          url_re=re.compile(r'https?://[^\s"\'<>]+')
+          for m in url_re.finditer(txt):
+              u=html.unescape(m.group(0))
+              if ('bp1048' in u.lower() or '.pdf' in u.lower()) and u not in seen:
+                  seen.add(u); candidates.append(u)
+          direct=[u for u in candidates if 'bp1048' in u.lower() and '.pdf' in u.lower()]
+          r={
+            'curl_succeeded':(E/'WOLFTECH_CURL_RC.txt').read_text().strip()=='0',
+            'bp1048p4_text_present':'BP1048P4' in txt,
+            'candidate_urls':candidates[:100],
+            'direct_bp1048p4_pdf_candidates':direct[:30],
+            'pdf_download_attempted':False,
+            'pdf_analyzed':False
+          }
+          (E/'V9_8_DATASHEET_DISCOVERY.json').write_text(json.dumps(r,indent=2,ensure_ascii=False)+'\n')
+          PY
+
+      - name: Cross-check BP1048P4 package page
+        shell: bash
+        run: |
+          set -euo pipefail
+          E=/tmp/v98/evidence
+          set +e
+          curl -L --compressed --max-time 30 --connect-timeout 10 -A 'Mozilla/5.0' \
+            "$JLCPCB_BP1048P4_PAGE" -o "$E/JLCPCB_BP1048P4.html" -D "$E/JLCPCB_HEADERS.txt"
+          RC=$?
+          set -e
+          echo "$RC" > "$E/JLCPCB_CURL_RC.txt"
+          grep -iEn -C 5 'BP1048P4|LQFP48|LQFP-48|7x7' "$E/JLCPCB_BP1048P4.html" \
+            > "$E/JLCPCB_PACKAGE_EVIDENCE.txt" || true
+
+      - name: Build V9.8 result
+        shell: bash
+        run: |
+          set -euo pipefail
+          E=/tmp/v98/evidence
+          python3 - <<'PY'
+          from pathlib import Path
+          import json
+          E=Path('/tmp/v98/evidence')
+          o=json.loads((E/'V9_8_OPENOCD_DEBUG_LINK.json').read_text())
+          s=json.loads((E/'V9_8_SDK_DEBUG_LINK.json').read_text())
+          d=json.loads((E/'V9_8_DATASHEET_DISCOVERY.json').read_text())
+          j=(E/'JLCPCB_PACKAGE_EVIDENCE.txt').read_text(errors='replace')
+          r={
+            'openocd_explicit_2wire_sdp_jdp_terms_found':o['explicit_2wire_sdp_jdp_terms_found_in_pinned_aice_backend'],
+            'sdk_explicit_andes_2wire_sdp_jdp_text_found':s['explicit_andes_2wire_sdp_jdp_text_found'],
+            'sdk_reset_hold_script_referenced':s['reset_hold_script_referenced'],
+            'sdk_reset_hold_script_file_present':s['reset_hold_script_file_present'],
+            'wolftech_page_retrieved':d['curl_succeeded'],
+            'wolftech_bp1048p4_text_seen':d['bp1048p4_text_present'],
+            'direct_pdf_candidate_count':len(d['direct_bp1048p4_pdf_candidates']),
+            'direct_pdf_candidates':d['direct_bp1048p4_pdf_candidates'],
+            'jlcpcb_lqfp48_text_seen':('LQFP48' in j or 'LQFP-48' in j),
+            'FLASH_ALLOWED':False,
+            'AICE_USB_ALLOWED':False,
+            'HARDWARE_PROBE_ALLOWED':False,
+            'DATASHEET_DOWNLOAD_ALLOWED':False
+          }
+          (E/'V9_8_RESULT.json').write_text(json.dumps(r,indent=2,ensure_ascii=False)+'\n')
+          md=[
+            '# BP1048P4 V9.8 — debug-link and datasheet discovery','',
+            f"- OpenOCD pinned AICE subtree explicit 2-wire/SDP/JDP terms: **{r['openocd_explicit_2wire_sdp_jdp_terms_found']}**.",
+            f"- Pinned BP1048 SDK explicit Andes 2-wire/SDP/JDP text: **{r['sdk_explicit_andes_2wire_sdp_jdp_text_found']}**.",
+            f"- `reset-hold-script.tpl` referenced: **{r['sdk_reset_hold_script_referenced']}**; file present in pinned SDK: **{r['sdk_reset_hold_script_file_present']}**.",
+            f"- Wolftech download page retrieved: **{r['wolftech_page_retrieved']}**; BP1048P4 text seen: **{r['wolftech_bp1048p4_text_seen']}**.",
+            f"- Direct BP1048P4 PDF URL candidates found without downloading PDF: **{r['direct_pdf_candidate_count']}**.",
+            f"- JLCPCB LQFP48 text seen: **{r['jlcpcb_lqfp48_text_seen']}**.",
+            '- No PDF was downloaded/analyzed and no hardware/debug command was sent.',
+            '- `FLASH_ALLOWED=NO`, `AICE_USB_ALLOWED=NO`, `HARDWARE_PROBE_ALLOWED=NO`, `DATASHEET_DOWNLOAD_ALLOWED=NO`.'
+          ]
+          (E/'V9_8_REPORT.md').write_text('\n'.join(md)+'\n')
+          PY
+          cat "$E/V9_8_REPORT.md" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Final fail-closed assertions
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$FLASH_ALLOWED" = "NO"
+          test "$AICE_USB_ALLOWED" = "NO"
+          test "$HARDWARE_PROBE_ALLOWED" = "NO"
+          test "$DATASHEET_DOWNLOAD_ALLOWED" = "NO"
+          python3 - <<'PY'
+          from pathlib import Path
+          import json
+          E=Path('/tmp/v98/evidence')
+          safety=(E/'SAFETY.txt').read_text()
+          for x in [
+            'TARGET_BP1048_CONNECTED=NO','AICE_CONNECTED=NO','OPENOCD_EXECUTED=NO',
+            'ICEMAN_EXECUTED=NO','USB_COMMAND_SENT=NO','JTAG_COMMAND_SENT=NO',
+            'SDP_COMMAND_SENT=NO','UNKNOWN_BOARD_PIN_PROBED=NO',
+            'DATASHEET_PDF_DOWNLOADED=NO','DATASHEET_PDF_ANALYZED=NO',
+            'FLASH_READ_EXECUTED=NO','FLASH_ERASE_EXECUTED=NO','FLASH_WRITE_EXECUTED=NO',
+            'FLASH_ALLOWED=NO','AICE_USB_ALLOWED=NO','HARDWARE_PROBE_ALLOWED=NO',
+            'DATASHEET_DOWNLOAD_ALLOWED=NO'
+          ]:
+              assert x in safety, x
+          assert (E/'SDK_COMMIT.txt').read_text().strip() == '8105bd864b04995d81c9f9ae77cb158259f39015'
+          assert (E/'OPENOCD_COMMIT.txt').read_text().strip() == 'f342aac0845a69d591ad39a025d74e9c765f6420'
+          s=json.loads((E/'V9_8_SDK_DEBUG_LINK.json').read_text())
+          r=json.loads((E/'V9_8_RESULT.json').read_text())
+          assert s['andes_ice_project_metadata_present'] is True
+          assert s['reset_hold_script_referenced'] is True
+          assert r['FLASH_ALLOWED'] is False
+          assert r['AICE_USB_ALLOWED'] is False
+          assert r['HARDWARE_PROBE_ALLOWED'] is False
+          assert r['DATASHEET_DOWNLOAD_ALLOWED'] is False
+          print('V9_8_DEBUG_LINK_AND_DATASHEET_DISCOVERY_COMPLETE=YES')
+          print('FLASH_ALLOWED=NO')
+          print('AICE_USB_ALLOWED=NO')
+          print('HARDWARE_PROBE_ALLOWED=NO')
+          print('DATASHEET_DOWNLOAD_ALLOWED=NO')
+          PY
+
+      - name: Package V9.8 evidence
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /tmp/v98/evidence
+          zip -9 -r /tmp/OKN_BP1048P4_V9_8_DEBUG_LINK_DATASHEET_DISCOVERY_EVIDENCE.zip . >/dev/null
+          sha256sum /tmp/OKN_BP1048P4_V9_8_DEBUG_LINK_DATASHEET_DISCOVERY_EVIDENCE.zip \
+            > /tmp/OKN_BP1048P4_V9_8_DEBUG_LINK_DATASHEET_DISCOVERY_EVIDENCE.zip.sha256
+
+      - name: Upload V9.8 evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: OKN-BP1048P4-V9_8-DEBUG-LINK-DATASHEET-DISCOVERY-EVIDENCE
+          path: |
+            /tmp/OKN_BP1048P4_V9_8_DEBUG_LINK_DATASHEET_DISCOVERY_EVIDENCE.zip
+            /tmp/OKN_BP1048P4_V9_8_DEBUG_LINK_DATASHEET_DISCOVERY_EVIDENCE.zip.sha256
+            /tmp/v98/evidence/V9_8_REPORT.md
+            /tmp/v98/evidence/V9_8_RESULT.json
+            /tmp/v98/evidence/V9_8_OPENOCD_DEBUG_LINK.json
+            /tmp/v98/evidence/V9_8_SDK_DEBUG_LINK.json
+            /tmp/v98/evidence/V9_8_DATASHEET_DISCOVERY.json
+            /tmp/v98/evidence/OPENOCD_AICE_DEBUG_LINK_SEARCH.txt
+            /tmp/v98/evidence/SDK_ANDES_DEBUG_LINK_SEARCH.txt
+            /tmp/v98/evidence/SDK_ICEMAN_PROJECT_METADATA.txt
+            /tmp/v98/evidence/SDK_DEBUG_RELATED_FILENAMES.txt
+            /tmp/v98/evidence/WOLFTECH_CURL_RC.txt
+            /tmp/v98/evidence/WOLFTECH_HEADERS.txt
+            /tmp/v98/evidence/WOLFTECH_BP1048P4_CONTEXT.txt
+            /tmp/v98/evidence/JLCPCB_CURL_RC.txt
+            /tmp/v98/evidence/JLCPCB_PACKAGE_EVIDENCE.txt
+            /tmp/v98/evidence/SDK_COMMIT.txt
+            /tmp/v98/evidence/OPENOCD_COMMIT.txt
+            /tmp/v98/evidence/SAFETY.txt
+          if-no-files-found: warn
+          retention-days: 90
