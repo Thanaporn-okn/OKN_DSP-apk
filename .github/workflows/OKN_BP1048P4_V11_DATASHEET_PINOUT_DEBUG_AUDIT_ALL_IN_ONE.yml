@@ -1,0 +1,407 @@
+name: OKN BP1048P4 V11 DATASHEET PINOUT DEBUG AUDIT ALL IN ONE
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/OKN_BP1048P4_V11_DATASHEET_PINOUT_DEBUG_AUDIT_ALL_IN_ONE.yml'
+
+permissions:
+  contents: read
+
+env:
+  FLASH_ALLOWED: "NO"
+  HARDWARE_PROBE_ALLOWED: "NO"
+  USB_COMMAND_ALLOWED: "NO"
+  JTAG_COMMAND_ALLOWED: "NO"
+
+  PUBLIC_DATASHEET_DOWNLOAD_ALLOWED: "YES"
+  FILEDOWNLOAD_URL: "https://www.wolftech-radio.com/filedownload/2975009"
+  EXPECTED_FILENAME: "BP1048P4数据手册_V0.8.pdf"
+
+jobs:
+  datasheet_audit:
+    name: V11 extract BP1048P4 datasheet pinout and debug evidence
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+
+    steps:
+      - name: Safety gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$FLASH_ALLOWED" = "NO"
+          test "$HARDWARE_PROBE_ALLOWED" = "NO"
+          test "$USB_COMMAND_ALLOWED" = "NO"
+          test "$JTAG_COMMAND_ALLOWED" = "NO"
+          test "$PUBLIC_DATASHEET_DOWNLOAD_ALLOWED" = "YES"
+
+          rm -rf /tmp/v11
+          mkdir -p /tmp/v11/evidence
+
+          cat > /tmp/v11/evidence/SAFETY.txt <<'EOF'
+          MODE=PUBLIC_DATASHEET_STATIC_ANALYSIS
+          TARGET_BP1048_CONNECTED=NO
+          AICE_CONNECTED=NO
+          OPENOCD_EXECUTED=NO
+          ICEMAN_EXECUTED=NO
+          USB_COMMAND_SENT=NO
+          JTAG_COMMAND_SENT=NO
+          UNKNOWN_BOARD_PIN_PROBED=NO
+          FLASH_READ_EXECUTED=NO
+          FLASH_ERASE_EXECUTED=NO
+          FLASH_WRITE_EXECUTED=NO
+          FLASH_ALLOWED=NO
+          HARDWARE_PROBE_ALLOWED=NO
+          USB_COMMAND_ALLOWED=NO
+          JTAG_COMMAND_ALLOWED=NO
+          PUBLIC_DATASHEET_DOWNLOAD_ALLOWED=YES
+          EOF
+
+      - name: Install PDF text tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq poppler-utils >/dev/null
+
+      - name: Download and verify public BP1048P4 datasheet
+        shell: bash
+        run: |
+          set -euo pipefail
+          E=/tmp/v11/evidence
+
+          curl -fL --compressed --max-redirs 10 \
+            --connect-timeout 10 --max-time 60 \
+            -A 'Mozilla/5.0' \
+            "$FILEDOWNLOAD_URL" \
+            -D "$E/DOWNLOAD_HEADERS.txt" \
+            -o /tmp/v11/BP1048P4_V0.8.pdf
+
+          test -s /tmp/v11/BP1048P4_V0.8.pdf
+          head -c 5 /tmp/v11/BP1048P4_V0.8.pdf | grep -q '%PDF-'
+
+          stat -c '%s' /tmp/v11/BP1048P4_V0.8.pdf > "$E/PDF_SIZE_BYTES.txt"
+          sha256sum /tmp/v11/BP1048P4_V0.8.pdf > "$E/PDF_SHA256.txt"
+          file /tmp/v11/BP1048P4_V0.8.pdf > "$E/PDF_FILETYPE.txt"
+          pdfinfo /tmp/v11/BP1048P4_V0.8.pdf > "$E/PDF_INFO.txt"
+
+          grep -iE 'Content-Type|Content-Disposition|Content-Length|HTTP/' \
+            "$E/DOWNLOAD_HEADERS.txt" > "$E/DOWNLOAD_HEADER_SUMMARY.txt" || true
+
+      - name: Extract layout-preserving text
+        shell: bash
+        run: |
+          set -euo pipefail
+          E=/tmp/v11/evidence
+
+          pdftotext -layout -enc UTF-8 \
+            /tmp/v11/BP1048P4_V0.8.pdf \
+            "$E/BP1048P4_V0.8_LAYOUT.txt"
+
+          test -s "$E/BP1048P4_V0.8_LAYOUT.txt"
+
+          python3 - <<'PY'
+          from pathlib import Path
+          import json,re
+
+          E=Path('/tmp/v11/evidence')
+          txt=(E/'BP1048P4_V0.8_LAYOUT.txt').read_text(errors='replace')
+          pages=txt.split('\f')
+          if pages and not pages[-1].strip():
+              pages=pages[:-1]
+
+          terms = {
+            'pin_table': [
+              r'(?i)\bpin\b', r'pin\s*(?:name|no|number|description)',
+              r'引脚', r'管脚', r'脚位', r'封装'
+            ],
+            'jtag_5wire': [
+              r'(?i)\bJTAG\b', r'(?i)\bTCK\b', r'(?i)\bTMS\b',
+              r'(?i)\bTDI\b', r'(?i)\bTDO\b', r'(?i)\bTRST\b'
+            ],
+            'andes_debug': [
+              r'(?i)\bAICE\b', r'(?i)\bICE\b', r'(?i)\bEDM\b',
+              r'(?i)\bJDP\b', r'(?i)\bSDP\b',
+              r'调试', r'仿真'
+            ],
+            'boot_download': [
+              r'(?i)\bBOOT\b', r'(?i)\bISP\b', r'(?i)\bUART\b',
+              r'(?i)\bDOWNLOAD\b', r'下载', r'烧录', r'升级'
+            ],
+            'gpio': [
+              r'(?i)\bGPIO\b', r'(?i)\bIO\b', r'复用', r'功能复用'
+            ]
+          }
+
+          hits={}
+          for category,pats in terms.items():
+              rows=[]
+              for pno,page in enumerate(pages,1):
+                  for pat in pats:
+                      for m in re.finditer(pat,page):
+                          lo=max(0,m.start()-450)
+                          hi=min(len(page),m.end()+900)
+                          context=page[lo:hi].replace('\x00','')
+                          rows.append({
+                              'page':pno,
+                              'pattern':pat,
+                              'context':context
+                          })
+                          if len(rows)>=300:
+                              break
+                      if len(rows)>=300:
+                          break
+              hits[category]=rows
+
+          summary={
+              'page_count_from_text_split':len(pages),
+              'hit_counts':{k:len(v) for k,v in hits.items()},
+              'pages_by_category':{
+                  k:sorted(set(x['page'] for x in v))
+                  for k,v in hits.items()
+              }
+          }
+
+          (E/'V11_KEYWORD_HITS.json').write_text(
+              json.dumps(hits,indent=2,ensure_ascii=False)+'\n'
+          )
+          (E/'V11_TEXT_SUMMARY.json').write_text(
+              json.dumps(summary,indent=2,ensure_ascii=False)+'\n'
+          )
+
+          # Human-readable evidence, grouped by category/page.
+          with (E/'V11_KEYWORD_CONTEXT.txt').open('w') as f:
+              for cat,rows in hits.items():
+                  f.write(f'===== {cat} =====\n')
+                  last=None
+                  for row in rows:
+                      key=(row['page'],row['pattern'])
+                      if key != last:
+                          f.write(f"\n--- page {row['page']} / {row['pattern']} ---\n")
+                          last=key
+                      f.write(row['context'])
+                      f.write('\n')
+                  f.write('\n')
+          PY
+
+      - name: Recover likely pin tables and signal rows
+        shell: bash
+        run: |
+          set -euo pipefail
+          E=/tmp/v11/evidence
+
+          python3 - <<'PY'
+          from pathlib import Path
+          import json,re
+
+          E=Path('/tmp/v11/evidence')
+          txt=(E/'BP1048P4_V0.8_LAYOUT.txt').read_text(errors='replace')
+          pages=txt.split('\f')
+          if pages and not pages[-1].strip():
+              pages=pages[:-1]
+
+          signal_re=re.compile(
+              r'(?i)\b(?:TCK|TMS|TDI|TDO|TRST|JTAG|AICE|ICE|EDM|JDP|SDP|'
+              r'BOOT\w*|UART\w*|RXD\w*|TXD\w*|GPIO\w*)\b'
+          )
+          row_re=re.compile(r'(?m)^.*(?:TCK|TMS|TDI|TDO|TRST|JTAG|AICE|ICE|EDM|JDP|SDP|'
+                            r'BOOT|UART|RXD|TXD|GPIO|调试|下载|烧录).*$',
+                            re.I)
+
+          candidate_pages=[]
+          rows=[]
+          for pno,page in enumerate(pages,1):
+              score=0
+              if re.search(r'引脚|管脚|Pin\s*(?:Name|Description|No)',page,re.I):
+                  score += 3
+              if signal_re.search(page):
+                  score += 2
+              if re.search(r'GPIO|复用|功能',page,re.I):
+                  score += 1
+
+              if score:
+                  candidate_pages.append({
+                      'page':pno,
+                      'score':score,
+                      'preview':page[:2500]
+                  })
+
+              for line in row_re.findall(page):
+                  rows.append({'page':pno,'line':line.strip()})
+
+          # De-duplicate rows while preserving order.
+          seen=set()
+          uniq=[]
+          for r in rows:
+              key=(r['page'],r['line'])
+              if key not in seen:
+                  seen.add(key); uniq.append(r)
+
+          result={
+              'candidate_pages':candidate_pages,
+              'signal_rows':uniq[:1000],
+              'explicit_tck_found':any(re.search(r'(?i)\bTCK\b',r['line']) for r in uniq),
+              'explicit_tms_found':any(re.search(r'(?i)\bTMS\b',r['line']) for r in uniq),
+              'explicit_tdi_found':any(re.search(r'(?i)\bTDI\b',r['line']) for r in uniq),
+              'explicit_tdo_found':any(re.search(r'(?i)\bTDO\b',r['line']) for r in uniq),
+              'explicit_sdp_found':any(re.search(r'(?i)\bSDP\b',r['line']) for r in uniq),
+              'explicit_jdp_found':any(re.search(r'(?i)\bJDP\b',r['line']) for r in uniq),
+              'explicit_ice_or_aice_found':any(re.search(r'(?i)\b(?:ICE|AICE)\b',r['line']) for r in uniq)
+          }
+
+          (E/'V11_PIN_SIGNAL_ROWS.json').write_text(
+              json.dumps(result,indent=2,ensure_ascii=False)+'\n'
+          )
+
+          with (E/'V11_SIGNAL_ROWS.txt').open('w') as f:
+              for r in uniq:
+                  f.write(f"P{r['page']}: {r['line']}\n")
+          PY
+
+      - name: Build V11 report
+        shell: bash
+        run: |
+          set -euo pipefail
+          E=/tmp/v11/evidence
+
+          python3 - <<'PY'
+          from pathlib import Path
+          import json,re
+
+          E=Path('/tmp/v11/evidence')
+          info=(E/'PDF_INFO.txt').read_text(errors='replace')
+          summary=json.loads((E/'V11_TEXT_SUMMARY.json').read_text())
+          pins=json.loads((E/'V11_PIN_SIGNAL_ROWS.json').read_text())
+
+          m=re.search(r'(?m)^Pages:\s*(\d+)',info)
+          pdf_pages=int(m.group(1)) if m else None
+
+          result={
+              'source_url':'https://www.wolftech-radio.com/filedownload/2975009',
+              'filename':'BP1048P4数据手册_V0.8.pdf',
+              'pdf_pages':pdf_pages,
+              'text_pages':summary['page_count_from_text_split'],
+              'keyword_hit_counts':summary['hit_counts'],
+              'keyword_pages':summary['pages_by_category'],
+              'explicit_tck_found':pins['explicit_tck_found'],
+              'explicit_tms_found':pins['explicit_tms_found'],
+              'explicit_tdi_found':pins['explicit_tdi_found'],
+              'explicit_tdo_found':pins['explicit_tdo_found'],
+              'explicit_sdp_found':pins['explicit_sdp_found'],
+              'explicit_jdp_found':pins['explicit_jdp_found'],
+              'explicit_ice_or_aice_found':pins['explicit_ice_or_aice_found'],
+              'candidate_pin_debug_pages':[x['page'] for x in pins['candidate_pages']],
+              'hardware_touched':False,
+              'flash_touched':False,
+              'FLASH_ALLOWED':False,
+              'HARDWARE_PROBE_ALLOWED':False,
+              'USB_COMMAND_ALLOWED':False,
+              'JTAG_COMMAND_ALLOWED':False
+          }
+
+          (E/'V11_RESULT.json').write_text(
+              json.dumps(result,indent=2,ensure_ascii=False)+'\n'
+          )
+
+          md=[
+              '# BP1048P4 V11 — datasheet pinout/debug static audit','',
+              f"- PDF pages: **{pdf_pages}**",
+              f"- Keyword hit counts: `{result['keyword_hit_counts']}`",
+              f"- Explicit TCK/TMS/TDI/TDO found in extracted text: "
+              f"**{result['explicit_tck_found']}/{result['explicit_tms_found']}/"
+              f"{result['explicit_tdi_found']}/{result['explicit_tdo_found']}**",
+              f"- Explicit SDP/JDP found: **{result['explicit_sdp_found']}/{result['explicit_jdp_found']}**",
+              f"- Explicit ICE/AICE found: **{result['explicit_ice_or_aice_found']}**",
+              f"- Candidate pin/debug pages: `{result['candidate_pin_debug_pages']}`",
+              '- Public datasheet download/text extraction only.',
+              '- No BP1048 target, USB, AICE, JTAG, flash-read, erase, or write operation was executed.',
+              '- `FLASH_ALLOWED=NO`, `HARDWARE_PROBE_ALLOWED=NO`, `USB_COMMAND_ALLOWED=NO`, `JTAG_COMMAND_ALLOWED=NO`.'
+          ]
+          (E/'V11_REPORT.md').write_text('\n'.join(md)+'\n')
+          PY
+
+          cat "$E/V11_REPORT.md" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Final fail-closed assertions
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$FLASH_ALLOWED" = "NO"
+          test "$HARDWARE_PROBE_ALLOWED" = "NO"
+          test "$USB_COMMAND_ALLOWED" = "NO"
+          test "$JTAG_COMMAND_ALLOWED" = "NO"
+
+          python3 - <<'PY'
+          from pathlib import Path
+          import json
+
+          E=Path('/tmp/v11/evidence')
+          s=(E/'SAFETY.txt').read_text()
+          for x in [
+              'TARGET_BP1048_CONNECTED=NO',
+              'AICE_CONNECTED=NO',
+              'OPENOCD_EXECUTED=NO',
+              'ICEMAN_EXECUTED=NO',
+              'USB_COMMAND_SENT=NO',
+              'JTAG_COMMAND_SENT=NO',
+              'UNKNOWN_BOARD_PIN_PROBED=NO',
+              'FLASH_READ_EXECUTED=NO',
+              'FLASH_ERASE_EXECUTED=NO',
+              'FLASH_WRITE_EXECUTED=NO',
+              'FLASH_ALLOWED=NO',
+              'HARDWARE_PROBE_ALLOWED=NO',
+              'USB_COMMAND_ALLOWED=NO',
+              'JTAG_COMMAND_ALLOWED=NO',
+              'PUBLIC_DATASHEET_DOWNLOAD_ALLOWED=YES'
+          ]:
+              assert x in s, x
+
+          r=json.loads((E/'V11_RESULT.json').read_text())
+          assert r['hardware_touched'] is False
+          assert r['flash_touched'] is False
+          assert r['FLASH_ALLOWED'] is False
+          assert r['HARDWARE_PROBE_ALLOWED'] is False
+          assert r['USB_COMMAND_ALLOWED'] is False
+          assert r['JTAG_COMMAND_ALLOWED'] is False
+
+          print('V11_DATASHEET_PINOUT_DEBUG_AUDIT_COMPLETE=YES')
+          print('FLASH_ALLOWED=NO')
+          print('HARDWARE_PROBE_ALLOWED=NO')
+          print('USB_COMMAND_ALLOWED=NO')
+          print('JTAG_COMMAND_ALLOWED=NO')
+          PY
+
+      - name: Package V11 evidence
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /tmp/v11/evidence
+          zip -9 -r /tmp/OKN_BP1048P4_V11_DATASHEET_PINOUT_DEBUG_AUDIT_EVIDENCE.zip . >/dev/null
+          sha256sum /tmp/OKN_BP1048P4_V11_DATASHEET_PINOUT_DEBUG_AUDIT_EVIDENCE.zip \
+            > /tmp/OKN_BP1048P4_V11_DATASHEET_PINOUT_DEBUG_AUDIT_EVIDENCE.zip.sha256
+
+      - name: Upload V11 evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: OKN-BP1048P4-V11-DATASHEET-PINOUT-DEBUG-AUDIT-EVIDENCE
+          path: |
+            /tmp/OKN_BP1048P4_V11_DATASHEET_PINOUT_DEBUG_AUDIT_EVIDENCE.zip
+            /tmp/OKN_BP1048P4_V11_DATASHEET_PINOUT_DEBUG_AUDIT_EVIDENCE.zip.sha256
+            /tmp/v11/evidence/V11_REPORT.md
+            /tmp/v11/evidence/V11_RESULT.json
+            /tmp/v11/evidence/V11_TEXT_SUMMARY.json
+            /tmp/v11/evidence/V11_KEYWORD_HITS.json
+            /tmp/v11/evidence/V11_KEYWORD_CONTEXT.txt
+            /tmp/v11/evidence/V11_PIN_SIGNAL_ROWS.json
+            /tmp/v11/evidence/V11_SIGNAL_ROWS.txt
+            /tmp/v11/evidence/PDF_INFO.txt
+            /tmp/v11/evidence/PDF_SIZE_BYTES.txt
+            /tmp/v11/evidence/PDF_SHA256.txt
+            /tmp/v11/evidence/PDF_FILETYPE.txt
+            /tmp/v11/evidence/DOWNLOAD_HEADER_SUMMARY.txt
+            /tmp/v11/evidence/SAFETY.txt
+          if-no-files-found: warn
+          retention-days: 90
