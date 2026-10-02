@@ -1,0 +1,261 @@
+name: OKN BP1048P4 V9.6 OPENOCD AICE NDS32 STATIC PROOF ALL IN ONE
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/OKN_BP1048P4_V9_6_OPENOCD_AICE_NDS32_STATIC_PROOF_ALL_IN_ONE.yml'
+
+permissions:
+  contents: read
+
+env:
+  FLASH_ALLOWED: "NO"
+  AICE_USB_ALLOWED: "NO"
+  TARGET_EXECUTION_ALLOWED: "NO"
+  SDK_REPO: "https://github.com/leadercxn/bp1048_sdk_v0.1.12.git"
+  SDK_COMMIT: "8105bd864b04995d81c9f9ae77cb158259f39015"
+  OPENOCD_REPO: "https://github.com/openocd-org/openocd.git"
+  OPENOCD_COMMIT: "f342aac0845a69d591ad39a025d74e9c765f6420"
+  EXPECTED_AICE_VID: "0x1CFC"
+  EXPECTED_AICE_PID: "0x0000"
+  EXPECTED_FASTREAD_CMD: "0x27"
+  EXPECTED_READ_MEM_CMD: "0x26"
+  EXPECTED_V95_WINDOW_BYTES: "1024"
+
+jobs:
+  static_proof:
+    name: V9.6 prove OpenOCD AICE NDS32 read path without hardware
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+
+    steps:
+      - name: Safety gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$FLASH_ALLOWED" = "NO"
+          test "$AICE_USB_ALLOWED" = "NO"
+          test "$TARGET_EXECUTION_ALLOWED" = "NO"
+          rm -rf /tmp/v96
+          mkdir -p /tmp/v96/evidence
+          cat > /tmp/v96/evidence/SAFETY.txt <<'EOF'
+          MODE=OFFLINE_STATIC_SOURCE_AUDIT
+          TARGET_BP1048_CONNECTED=NO
+          AICE_CONNECTED=NO
+          OPENOCD_EXECUTED=NO
+          ICEMAN_EXECUTED=NO
+          USB_OPENED=NO
+          TCP_CONNECTION_OPENED=NO
+          TARGET_MEMORY_READ_EXECUTED=NO
+          FLASH_READ_EXECUTED=NO
+          FLASH_ERASE_EXECUTED=NO
+          FLASH_WRITE_EXECUTED=NO
+          FLASH_ALLOWED=NO
+          AICE_USB_ALLOWED=NO
+          EOF
+
+      - name: Fetch pinned BP1048 SDK and OpenOCD v0.11 source
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone -q "$SDK_REPO" /tmp/v96/sdk-src
+          git -C /tmp/v96/sdk-src checkout -q "$SDK_COMMIT"
+          test "$(git -C /tmp/v96/sdk-src rev-parse HEAD)" = "$SDK_COMMIT"
+
+          git clone -q "$OPENOCD_REPO" /tmp/v96/openocd-src
+          git -C /tmp/v96/openocd-src checkout -q "$OPENOCD_COMMIT"
+          test "$(git -C /tmp/v96/openocd-src rev-parse HEAD)" = "$OPENOCD_COMMIT"
+
+          git -C /tmp/v96/sdk-src rev-parse HEAD > /tmp/v96/evidence/SDK_COMMIT.txt
+          git -C /tmp/v96/openocd-src rev-parse HEAD > /tmp/v96/evidence/OPENOCD_COMMIT.txt
+
+      - name: Prove AICE USB identity and transport
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$AICE_USB_ALLOWED" = "NO"
+          O=/tmp/v96/openocd-src
+          E=/tmp/v96/evidence
+
+          CFG="$O/tcl/interface/nds32-aice.cfg"
+          USB="$O/src/jtag/aice/aice_usb.c"
+          IFACE="$O/src/jtag/aice/aice_interface.c"
+          PORT="$O/src/jtag/aice/aice_port.h"
+
+          test -f "$CFG"
+          test -f "$USB"
+          test -f "$IFACE"
+          test -f "$PORT"
+
+          grep -nE 'adapter driver aice|aice vid_pid|aice port|adapter speed|retry_times' "$CFG" \
+            > "$E/AICE_CONFIG_EVIDENCE.txt"
+          grep -nE 'jtag_libusb_open|libusb_claim_interface|jtag_libusb_choose_interface|LIBUSB_TRANSFER_TYPE_BULK|usb_read_ep|usb_write_ep' "$USB" \
+            > "$E/AICE_USB_OPEN_EVIDENCE.txt"
+          grep -nE 'open usb|Cannot find AICE Interface|AICE JTAG Interface ready' "$IFACE" \
+            > "$E/AICE_INTERFACE_EVIDENCE.txt"
+
+          grep -q 'aice vid_pid 0x1CFC 0x0000' "$CFG"
+          grep -q 'aice port aice_usb' "$CFG"
+          grep -q 'libusb_claim_interface(devh, 0)' "$USB"
+          grep -q 'LIBUSB_TRANSFER_TYPE_BULK' "$USB"
+
+      - name: Prove OpenOCD AICE memory-read command map
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$AICE_USB_ALLOWED" = "NO"
+          O=/tmp/v96/openocd-src
+          E=/tmp/v96/evidence
+          USB="$O/src/jtag/aice/aice_usb.c"
+
+          grep -nE 'AICE_CMD_T_READ_MEM_B|AICE_CMD_T_READ_MEM_H|AICE_CMD_T_READ_MEM =|AICE_CMD_T_FASTREAD_MEM|AICE_CMD_T_WRITE_MEM|AICE_CMD_T_FASTWRITE_MEM' "$USB" \
+            > "$E/AICE_MEMORY_COMMANDS.txt"
+          grep -nE 'static int aice_fastread_mem|aice_pack_htdmb\(AICE_CMD_T_FASTREAD_MEM|aice_usb_write\(|aice_usb_read\(|cmd_ack_code == AICE_CMD_T_FASTREAD_MEM' "$USB" \
+            > "$E/AICE_FASTREAD_EVIDENCE.txt"
+          grep -nE 'static int aice_bulk_read_mem|packet_size = \(count >= 0x100\)|aice_write_misc\(|aice_fastread_mem\(|static int aice_usb_bulk_read_mem' "$USB" \
+            > "$E/AICE_BULK_READ_EVIDENCE.txt"
+
+          grep -q 'AICE_CMD_T_READ_MEM = 0x26' "$USB"
+          grep -q 'AICE_CMD_T_FASTREAD_MEM = 0x27' "$USB"
+          grep -q 'packet_size = (count >= 0x100) ? 0x100 : count;' "$USB"
+
+      - name: Prove NDS32 target is coupled to AICE API
+        shell: bash
+        run: |
+          set -euo pipefail
+          O=/tmp/v96/openocd-src
+          E=/tmp/v96/evidence
+
+          grep -RInE 'target_to_aice\(|struct aice_port_s|aice_read_|aice_write_' \
+            "$O/src/target/nds32"*.c "$O/src/target/nds32"*.h \
+            > "$E/NDS32_AICE_COUPLING.txt" || true
+
+          grep -RInE 'target_to_aice\(' "$O/src/target/nds32"*.c \
+            > "$E/NDS32_TARGET_TO_AICE_CALLS.txt" || true
+
+          test -s "$E/NDS32_TARGET_TO_AICE_CALLS.txt"
+
+      - name: Correlate V9.5 ICEman readback with OpenOCD AICE
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, pathlib, re
+          E=pathlib.Path('/tmp/v96/evidence')
+          cfg=(E/'AICE_CONFIG_EVIDENCE.txt').read_text(errors='replace')
+          cmds=(E/'AICE_MEMORY_COMMANDS.txt').read_text(errors='replace')
+          bulk=(E/'AICE_BULK_READ_EVIDENCE.txt').read_text(errors='replace')
+          coupling=(E/'NDS32_TARGET_TO_AICE_CALLS.txt').read_text(errors='replace')
+
+          result={
+            'openocd_commit':'f342aac0845a69d591ad39a025d74e9c765f6420',
+            'openocd_version_basis':'v0.11.0 release commit',
+            'aice_usb_vid':'0x1CFC',
+            'aice_usb_pid':'0x0000',
+            'aice_usb_interface':0,
+            'aice_usb_transfer_type':'bulk',
+            'aice_read_mem_cmd':'0x26',
+            'aice_fastread_mem_cmd':'0x27',
+            'aice_fastread_max_words_per_packet':256,
+            'aice_fastread_max_bytes_per_packet':1024,
+            'v95_mxic_read_window_bytes':1024,
+            'v95_iceman_fastin_chunk_bytes':512,
+            'size_alignment_observation':'OpenOCD AICE fastread max packet is 1024 bytes, equal to the proven V9.5 mxic_read window size. This is a size correlation only, not proof that ICEman TCP frames are AICE USB frames.',
+            'nds32_openocd_backend_coupled_to_aice':bool(coupling.strip()),
+            'stock_bp1048_runtime_usb_is_aice':False,
+            'stock_bp1048_recovery_usb_is_aice':False,
+            'direct_android_usb_dump_path_proven':False,
+            'aice_compatible_debug_adapter_required_by_this_openocd_backend':True,
+            'safe_next_step':'Map AICE USB packet format and identify BP1048 board debug pins / EDM access path before any hardware experiment.',
+            'FLASH_ALLOWED':False,
+            'AICE_USB_ALLOWED':False,
+          }
+          (E/'V9_6_RESULT.json').write_text(json.dumps(result,indent=2)+'\n')
+
+          md=[
+            '# BP1048P4 V9.6 — OpenOCD AICE/NDS32 static proof','',
+            '- OpenOCD v0.11.0 contains an open-source NDS32 + AICE backend.',
+            '- `nds32-aice.cfg` identifies the AICE adapter as USB `VID:PID 1CFC:0000` and selects `aice_usb`.',
+            '- The AICE backend opens USB with libusb, claims interface 0, and selects bulk endpoints.',
+            '- AICE single-word memory read command is `0x26`; fast bulk memory read is `0x27`.',
+            '- Bulk reads are capped at `0x100` 32-bit words = **1024 bytes** per AICE fast-read packet.',
+            '- V9.5 independently proved a **1024-byte** `mxic_read` window over ICEman. The equal size is a correlation, not proof that the TCP and USB framing are identical.',
+            '- OpenOCD NDS32 code calls through `target_to_aice()` / AICE APIs, so this upstream backend is coupled to an AICE-compatible debug adapter.',
+            '- This does **not** turn the BP1048 runtime USB `6324:1719` or recovery USB `0000:2244` into an AICE interface.',
+            '- No OpenOCD, ICEman, USB, target read, erase, or write operation was executed.',
+            '- `FLASH_ALLOWED=NO`, `AICE_USB_ALLOWED=NO`.'
+          ]
+          (E/'V9_6_REPORT.md').write_text('\n'.join(md)+'\n')
+          PY
+          cat /tmp/v96/evidence/V9_6_REPORT.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Final fail-closed assertions
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$FLASH_ALLOWED" = "NO"
+          test "$AICE_USB_ALLOWED" = "NO"
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          E=Path('/tmp/v96/evidence')
+          s=(E/'SAFETY.txt').read_text()
+          for x in [
+              'TARGET_BP1048_CONNECTED=NO','AICE_CONNECTED=NO','OPENOCD_EXECUTED=NO',
+              'USB_OPENED=NO','TARGET_MEMORY_READ_EXECUTED=NO','FLASH_READ_EXECUTED=NO',
+              'FLASH_ERASE_EXECUTED=NO','FLASH_WRITE_EXECUTED=NO','FLASH_ALLOWED=NO',
+              'AICE_USB_ALLOWED=NO']:
+              assert x in s, x
+          assert (E/'SDK_COMMIT.txt').read_text().strip() == '8105bd864b04995d81c9f9ae77cb158259f39015'
+          assert (E/'OPENOCD_COMMIT.txt').read_text().strip() == 'f342aac0845a69d591ad39a025d74e9c765f6420'
+          r=json.loads((E/'V9_6_RESULT.json').read_text())
+          assert r['aice_usb_vid'] == '0x1CFC'
+          assert r['aice_usb_pid'] == '0x0000'
+          assert r['aice_read_mem_cmd'] == '0x26'
+          assert r['aice_fastread_mem_cmd'] == '0x27'
+          assert r['aice_fastread_max_bytes_per_packet'] == 1024
+          assert r['nds32_openocd_backend_coupled_to_aice'] is True
+          assert r['stock_bp1048_runtime_usb_is_aice'] is False
+          assert r['direct_android_usb_dump_path_proven'] is False
+          assert r['FLASH_ALLOWED'] is False
+          assert r['AICE_USB_ALLOWED'] is False
+          print('V9_6_OPENOCD_AICE_STATIC_PROOF_COMPLETE=YES')
+          print('FLASH_ALLOWED=NO')
+          print('AICE_USB_ALLOWED=NO')
+          PY
+
+      - name: Package V9.6 evidence
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$FLASH_ALLOWED" = "NO"
+          cd /tmp/v96/evidence
+          zip -9 -r /tmp/OKN_BP1048P4_V9_6_OPENOCD_AICE_STATIC_EVIDENCE.zip . >/dev/null
+          sha256sum /tmp/OKN_BP1048P4_V9_6_OPENOCD_AICE_STATIC_EVIDENCE.zip \
+            > /tmp/OKN_BP1048P4_V9_6_OPENOCD_AICE_STATIC_EVIDENCE.zip.sha256
+
+      - name: Upload V9.6 evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: OKN-BP1048P4-V9_6-OPENOCD-AICE-STATIC-EVIDENCE
+          path: |
+            /tmp/OKN_BP1048P4_V9_6_OPENOCD_AICE_STATIC_EVIDENCE.zip
+            /tmp/OKN_BP1048P4_V9_6_OPENOCD_AICE_STATIC_EVIDENCE.zip.sha256
+            /tmp/v96/evidence/V9_6_REPORT.md
+            /tmp/v96/evidence/V9_6_RESULT.json
+            /tmp/v96/evidence/AICE_CONFIG_EVIDENCE.txt
+            /tmp/v96/evidence/AICE_USB_OPEN_EVIDENCE.txt
+            /tmp/v96/evidence/AICE_INTERFACE_EVIDENCE.txt
+            /tmp/v96/evidence/AICE_MEMORY_COMMANDS.txt
+            /tmp/v96/evidence/AICE_FASTREAD_EVIDENCE.txt
+            /tmp/v96/evidence/AICE_BULK_READ_EVIDENCE.txt
+            /tmp/v96/evidence/NDS32_AICE_COUPLING.txt
+            /tmp/v96/evidence/NDS32_TARGET_TO_AICE_CALLS.txt
+            /tmp/v96/evidence/SDK_COMMIT.txt
+            /tmp/v96/evidence/OPENOCD_COMMIT.txt
+            /tmp/v96/evidence/SAFETY.txt
+          if-no-files-found: warn
+          retention-days: 90
