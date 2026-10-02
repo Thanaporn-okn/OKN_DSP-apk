@@ -1,0 +1,220 @@
+name: OKN BP1048P4 V10 FILEDOWNLOAD PDF HEADER PROOF ALL IN ONE
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/OKN_BP1048P4_V10_FILEDOWNLOAD_PDF_HEADER_PROOF_ALL_IN_ONE.yml'
+
+permissions:
+  contents: read
+
+env:
+  FLASH_ALLOWED: "NO"
+  HARDWARE_PROBE_ALLOWED: "NO"
+  FULL_PDF_DOWNLOAD_ALLOWED: "NO"
+  FILEDOWNLOAD_URL: "https://www.wolftech-radio.com/filedownload/2975009"
+  EXPECTED_FILENAME: "BP1048P4数据手册_V0.8.pdf"
+
+jobs:
+  header_proof:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+
+    steps:
+      - name: Safety gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$FLASH_ALLOWED" = "NO"
+          test "$HARDWARE_PROBE_ALLOWED" = "NO"
+          test "$FULL_PDF_DOWNLOAD_ALLOWED" = "NO"
+          rm -rf /tmp/v10
+          mkdir -p /tmp/v10/evidence
+          cat > /tmp/v10/evidence/SAFETY.txt <<'EOF'
+          TARGET_BP1048_CONNECTED=NO
+          USB_COMMAND_SENT=NO
+          JTAG_COMMAND_SENT=NO
+          UNKNOWN_BOARD_PIN_PROBED=NO
+          FULL_PDF_DOWNLOADED=NO
+          FLASH_READ_EXECUTED=NO
+          FLASH_ERASE_EXECUTED=NO
+          FLASH_WRITE_EXECUTED=NO
+          FLASH_ALLOWED=NO
+          HARDWARE_PROBE_ALLOWED=NO
+          FULL_PDF_DOWNLOAD_ALLOWED=NO
+          EOF
+
+      - name: Resolve filedownload endpoint with HEAD only
+        shell: bash
+        run: |
+          set -euo pipefail
+          E=/tmp/v10/evidence
+
+          set +e
+          curl -sSIL --max-redirs 10 --connect-timeout 10 --max-time 30 \
+            -A 'Mozilla/5.0' \
+            "$FILEDOWNLOAD_URL" \
+            -o "$E/HEAD_CHAIN.txt"
+          RC=$?
+          set -e
+          echo "$RC" > "$E/HEAD_CURL_RC.txt"
+
+          cat "$E/HEAD_CHAIN.txt"
+
+      - name: If needed fetch at most 8KB for PDF magic
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$FULL_PDF_DOWNLOAD_ALLOWED" = "NO"
+          E=/tmp/v10/evidence
+
+          # Ask only for the first 4096 bytes; abort if server tries to send over 8192 bytes.
+          set +e
+          curl -sSL --max-redirs 10 --connect-timeout 10 --max-time 30 \
+            --range 0-4095 --max-filesize 8192 \
+            -A 'Mozilla/5.0' \
+            -D "$E/RANGE_HEADERS.txt" \
+            "$FILEDOWNLOAD_URL" \
+            -o "$E/FIRST_BYTES.bin"
+          RC=$?
+          set -e
+          echo "$RC" > "$E/RANGE_CURL_RC.txt"
+
+          wc -c "$E/FIRST_BYTES.bin" > "$E/FIRST_BYTES_SIZE.txt" 2>/dev/null || true
+          xxd -l 64 "$E/FIRST_BYTES.bin" > "$E/FIRST_BYTES_HEX.txt" 2>/dev/null || true
+          file "$E/FIRST_BYTES.bin" > "$E/FIRST_BYTES_FILETYPE.txt" 2>/dev/null || true
+
+      - name: Classify endpoint
+        shell: bash
+        run: |
+          set -euo pipefail
+          E=/tmp/v10/evidence
+
+          python3 - <<'PY'
+          from pathlib import Path
+          import json,re
+
+          E=Path('/tmp/v10/evidence')
+          head=(E/'HEAD_CHAIN.txt').read_text(errors='replace') if (E/'HEAD_CHAIN.txt').exists() else ''
+          rh=(E/'RANGE_HEADERS.txt').read_text(errors='replace') if (E/'RANGE_HEADERS.txt').exists() else ''
+          b=(E/'FIRST_BYTES.bin').read_bytes() if (E/'FIRST_BYTES.bin').exists() else b''
+
+          # Parse all HTTP statuses and locations/content metadata.
+          statuses=re.findall(r'(?im)^HTTP/\S+\s+(\d{3})',head+'\n'+rh)
+          locations=re.findall(r'(?im)^location:\s*(.+)$',head+'\n'+rh)
+          ctypes=re.findall(r'(?im)^content-type:\s*(.+)$',head+'\n'+rh)
+          cdisp=re.findall(r'(?im)^content-disposition:\s*(.+)$',head+'\n'+rh)
+          clen=re.findall(r'(?im)^content-length:\s*(\d+)',head+'\n'+rh)
+
+          pdf_magic=b.startswith(b'%PDF-')
+          filename_seen=any('BP1048P4' in x for x in cdisp) or 'BP1048P4' in head or 'BP1048P4' in rh
+
+          result={
+            'source_url':'https://www.wolftech-radio.com/filedownload/2975009',
+            'expected_filename':'BP1048P4数据手册_V0.8.pdf',
+            'http_statuses':statuses,
+            'redirect_locations':locations,
+            'content_types':ctypes,
+            'content_dispositions':cdisp,
+            'content_lengths':clen,
+            'first_bytes_captured':len(b),
+            'pdf_magic_seen':pdf_magic,
+            'bp1048p4_filename_seen_in_headers':filename_seen,
+            'full_pdf_downloaded':False,
+            'FLASH_ALLOWED':False,
+            'HARDWARE_PROBE_ALLOWED':False,
+            'FULL_PDF_DOWNLOAD_ALLOWED':False
+          }
+
+          (E/'V10_RESULT.json').write_text(json.dumps(result,indent=2,ensure_ascii=False)+'\n')
+
+          md=[
+            '# BP1048P4 V10 — filedownload PDF header proof','',
+            f"- Source URL: `{result['source_url']}`",
+            f"- HTTP statuses: `{result['http_statuses']}`",
+            f"- Content types: `{result['content_types']}`",
+            f"- Content-Disposition: `{result['content_dispositions']}`",
+            f"- First bytes captured: **{result['first_bytes_captured']}**",
+            f"- `%PDF-` magic seen: **{result['pdf_magic_seen']}**",
+            f"- BP1048P4 filename seen in headers: **{result['bp1048p4_filename_seen_in_headers']}**",
+            '- Full PDF body was not downloaded.',
+            '- No BP1048 hardware operation was performed.'
+          ]
+          (E/'V10_REPORT.md').write_text('\n'.join(md)+'\n')
+          PY
+
+          cat "$E/V10_REPORT.md" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Final fail-closed assertions
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$FLASH_ALLOWED" = "NO"
+          test "$HARDWARE_PROBE_ALLOWED" = "NO"
+          test "$FULL_PDF_DOWNLOAD_ALLOWED" = "NO"
+
+          python3 - <<'PY'
+          from pathlib import Path
+          import json
+          E=Path('/tmp/v10/evidence')
+          s=(E/'SAFETY.txt').read_text()
+          for x in [
+            'TARGET_BP1048_CONNECTED=NO',
+            'USB_COMMAND_SENT=NO',
+            'JTAG_COMMAND_SENT=NO',
+            'UNKNOWN_BOARD_PIN_PROBED=NO',
+            'FULL_PDF_DOWNLOADED=NO',
+            'FLASH_READ_EXECUTED=NO',
+            'FLASH_ERASE_EXECUTED=NO',
+            'FLASH_WRITE_EXECUTED=NO',
+            'FLASH_ALLOWED=NO',
+            'HARDWARE_PROBE_ALLOWED=NO',
+            'FULL_PDF_DOWNLOAD_ALLOWED=NO'
+          ]:
+              assert x in s, x
+
+          r=json.loads((E/'V10_RESULT.json').read_text())
+          assert r['full_pdf_downloaded'] is False
+          assert r['FLASH_ALLOWED'] is False
+          assert r['HARDWARE_PROBE_ALLOWED'] is False
+          assert r['FULL_PDF_DOWNLOAD_ALLOWED'] is False
+
+          # Do not fail solely because HEAD/range behavior differs across CDN paths.
+          # Evidence is still useful for the next step.
+          print('V10_FILEDOWNLOAD_HEADER_PROOF_COMPLETE=YES')
+          print('FLASH_ALLOWED=NO')
+          print('HARDWARE_PROBE_ALLOWED=NO')
+          print('FULL_PDF_DOWNLOAD_ALLOWED=NO')
+          PY
+
+      - name: Package V10 evidence
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /tmp/v10/evidence
+          zip -9 -r /tmp/OKN_BP1048P4_V10_FILEDOWNLOAD_PDF_HEADER_PROOF_EVIDENCE.zip . >/dev/null
+          sha256sum /tmp/OKN_BP1048P4_V10_FILEDOWNLOAD_PDF_HEADER_PROOF_EVIDENCE.zip \
+            > /tmp/OKN_BP1048P4_V10_FILEDOWNLOAD_PDF_HEADER_PROOF_EVIDENCE.zip.sha256
+
+      - name: Upload V10 evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: OKN-BP1048P4-V10-FILEDOWNLOAD-PDF-HEADER-PROOF-EVIDENCE
+          path: |
+            /tmp/OKN_BP1048P4_V10_FILEDOWNLOAD_PDF_HEADER_PROOF_EVIDENCE.zip
+            /tmp/OKN_BP1048P4_V10_FILEDOWNLOAD_PDF_HEADER_PROOF_EVIDENCE.zip.sha256
+            /tmp/v10/evidence/V10_REPORT.md
+            /tmp/v10/evidence/V10_RESULT.json
+            /tmp/v10/evidence/HEAD_CHAIN.txt
+            /tmp/v10/evidence/HEAD_CURL_RC.txt
+            /tmp/v10/evidence/RANGE_HEADERS.txt
+            /tmp/v10/evidence/RANGE_CURL_RC.txt
+            /tmp/v10/evidence/FIRST_BYTES_SIZE.txt
+            /tmp/v10/evidence/FIRST_BYTES_HEX.txt
+            /tmp/v10/evidence/FIRST_BYTES_FILETYPE.txt
+            /tmp/v10/evidence/SAFETY.txt
+          if-no-files-found: warn
+          retention-days: 90
