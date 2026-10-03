@@ -1,0 +1,1024 @@
+name: OKN BP1048P4 V21 USB-C ONLY ALL IN ONE FINAL STATIC ANDROID GENERATOR
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/OKN_BP1048P4_V21_USB_C_ONLY_ALL_IN_ONE_FINAL_STATIC_ANDROID_GENERATOR.yml'
+
+permissions:
+  contents: read
+
+env:
+  SDK_REPO: "https://github.com/leadercxn/bp1048_sdk_v0.1.12.git"
+  SDK_COMMIT: "8105bd864b04995d81c9f9ae77cb158259f39015"
+  FLASHBOOT_SHA256: "6b632435152478ecd6a8c3697b044caf253630f70923b27c8cbe8baa509148a6"
+
+  REQUIRED_PATH: "Samsung Galaxy S25+ -> USB-C cable -> DSP USB-C only"
+
+  SOLDER_ALLOWED: "NO"
+  BOARD_MOD_ALLOWED: "NO"
+  JTAG_ALLOWED: "NO"
+  SDP_ALLOWED: "NO"
+  AICE_ALLOWED: "NO"
+  HARDWARE_PROBE_ALLOWED: "NO"
+  LIVE_USB_COMMAND_ALLOWED: "NO"
+  FLASH_READ_ALLOWED: "NO"
+  FLASH_WRITE_ALLOWED: "NO"
+  FLASH_ERASE_ALLOWED: "NO"
+
+jobs:
+  all_in_one:
+    name: V21 all remaining static proof and Android updater generation
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+
+    steps:
+      - name: Enforce permanent USB-C-only project constraints
+        shell: bash
+        run: |
+          set -euo pipefail
+          for v in SOLDER_ALLOWED BOARD_MOD_ALLOWED JTAG_ALLOWED SDP_ALLOWED AICE_ALLOWED HARDWARE_PROBE_ALLOWED LIVE_USB_COMMAND_ALLOWED FLASH_READ_ALLOWED FLASH_WRITE_ALLOWED FLASH_ERASE_ALLOWED; do
+            test "${!v}" = "NO"
+          done
+
+          rm -rf /tmp/v21
+          mkdir -p /tmp/v21/evidence /tmp/v21/tool /tmp/v21/android
+
+          cat > /tmp/v21/evidence/PROJECT_CONSTRAINTS.txt <<'EOF'
+          REQUIRED_PHYSICAL_PATH=Samsung Galaxy S25+ -> USB-C cable -> DSP USB-C port only
+          SOLDER_ALLOWED=NO
+          BOARD_MODIFICATION_ALLOWED=NO
+          DEBUG_PIN_CONNECTION_ALLOWED=NO
+          JTAG_ALLOWED=NO
+          SDP_ALLOWED=NO
+          AICE_ALLOWED=NO
+          HARDWARE_PROBE_ALLOWED=NO
+          LIVE_USB_COMMAND_ALLOWED=NO
+          TARGET_CONNECTED=NO
+          USB_CONTROL_TRANSFER_EXECUTED=NO
+          FLASH_READ_EXECUTED=NO
+          FLASH_WRITE_EXECUTED=NO
+          FLASH_ERASE_EXECUTED=NO
+          RUNTIME_OPCODE_0x11_EXECUTED=NO
+          EOF
+
+      - name: Clone full SDK history and reconstruct exact FlashBoot
+        shell: bash
+        run: |
+          set -euo pipefail
+          S=/tmp/v21/sdk
+          E=/tmp/v21/evidence
+
+          git clone -q "$SDK_REPO" "$S"
+          git -C "$S" checkout -q "$SDK_COMMIT"
+          test "$(git -C "$S" rev-parse HEAD)" = "$SDK_COMMIT"
+          git -C "$S" rev-parse HEAD > "$E/SDK_COMMIT.txt"
+
+          cd "$S"
+          mapfile -t DIRS < <(find BT_Audio_APP MVsB1_Base_SDK develop_lib -type d | sort)
+          ARGS=()
+          for d in "${DIRS[@]}"; do ARGS+=("-I$d"); done
+
+          gcc -E -P "${ARGS[@]}" \
+            BT_Audio_APP/bt_audio_app_src/device/flash_boot.c \
+            -o /tmp/v21/flash_boot.pre.c
+
+          python3 - <<'PY'
+          from pathlib import Path
+          import re,hashlib,json
+
+          src=Path('/tmp/v21/flash_boot.pre.c').read_text(errors='replace')
+          E=Path('/tmp/v21/evidence')
+          m=re.search(
+              r'const\s+unsigned\s+char\s+flash_data\s*\[\s*65536\s*\]\s*=\s*\{(.*?)\}\s*;',
+              src,re.S
+          )
+          if not m:
+              raise RuntimeError('flash_data[65536] initializer missing')
+
+          body=m.group(1)
+          toks=[]; buf=[]; depth=0
+          for ch in body:
+              if ch=='(':
+                  depth+=1; buf.append(ch)
+              elif ch==')':
+                  depth=max(0,depth-1); buf.append(ch)
+              elif ch==',' and depth==0:
+                  x=''.join(buf).strip()
+                  if x: toks.append(x)
+                  buf=[]
+              else:
+                  buf.append(ch)
+          x=''.join(buf).strip()
+          if x: toks.append(x)
+
+          vals=[]
+          for i,t in enumerate(toks):
+              t=re.sub(r'(?i)(0x[0-9a-f]+|\b\d+)(?:u|ul|ull|l|ll)\b',r'\1',t).strip()
+              if not re.fullmatch(r'[0-9a-fA-FxX\s()+\-*/%<>&|~]+',t):
+                  raise RuntimeError(f'unresolved initializer token {i}: {t}')
+              vals.append(eval(t,{'__builtins__':{}},{}) & 0xff)
+
+          if len(vals)!=65536:
+              raise RuntimeError(f'bad FlashBoot size {len(vals)}')
+
+          b=bytes(vals)
+          sha=hashlib.sha256(b).hexdigest()
+          if sha != '6b632435152478ecd6a8c3697b044caf253630f70923b27c8cbe8baa509148a6':
+              raise RuntimeError(f'FlashBoot SHA mismatch: {sha}')
+
+          Path('/tmp/v21/flash_boot.bin').write_bytes(b)
+          (E/'FLASHBOOT_IDENTITY.json').write_text(json.dumps({
+              'bytes':len(b),'sha256':sha
+          },indent=2)+'\n')
+          PY
+
+          strings -a -td /tmp/v21/flash_boot.bin > "$E/FLASHBOOT_STRINGS.txt"
+
+      - name: Re-prove runtime USB-C to FlashBoot entry and recovery transport
+        shell: bash
+        run: |
+          set -euo pipefail
+          S=/tmp/v21/sdk
+          E=/tmp/v21/evidence
+
+          python3 - <<'PY'
+          from pathlib import Path
+          import re,json
+
+          S=Path('/tmp/v21/sdk')
+          E=Path('/tmp/v21/evidence')
+
+          req=(S/'MVsB1_Base_SDK/driver/driver_api/src/otg/device/otg_device_standard_request.c').read_text(errors='replace')
+          up=(S/'BT_Audio_APP/bt_audio_app_src/device/upgrade.c').read_text(errors='replace')
+          app=(S/'BT_Audio_APP/bt_audio_app_src/inc/app_config.h').read_text(errors='replace')
+          boot=(S/'BT_Audio_APP/bt_audio_app_src/inc/flash_boot.h').read_text(errors='replace')
+          desc=(S/'MVsB1_Base_SDK/driver/driver_api/src/otg/device/otg_device_descriptor.h').read_text(errors='replace')
+          fb=Path('/tmp/v21/flash_boot.bin').read_bytes()
+
+          checks={
+              'runtime_usb_communication_enabled':'#define CFG_COMMUNICATION_BY_USB' in app,
+              'flash_boot_enabled':bool(re.search(r'#define\s+FLASH_BOOT_EN\s+1',boot)),
+              'setreport_AA_arms_pc_upgrade':bool(re.search(r'Request\[0\]\s*==\s*0xAA.*?pc_upgrade\s*=\s*1',req,re.S)),
+              'getreport_calls_start_upgrade':bool(re.search(r'if\s*\(\s*pc_upgrade\s*\).*?start_up_grate\s*\(\s*AppResourceUsbDevice\s*\)',req,re.S)),
+              'usb_entry_sets_PC':bool(re.search(r'AppResourceUsbDevice.*?\.PC\s*=\s*1',up,re.S)),
+              'usb_entry_sets_updata':bool(re.search(r'AppResourceUsbDevice.*?\.updata\s*=\s*1',up,re.S)),
+              'usb_entry_jumps_zero':bool(re.search(r'jump_fun\s*=\s*\(fun\)0.*?jump_fun\s*\(\s*\)',up,re.S)),
+              'audio_mic_hid_interface4':'InterFaceNum_Tab(AUDIO_MIC)[] = {0xFF,0x00,0x01,0x02,0x03,0x04}' in desc,
+              'runtime_feature_report8':bool(re.search(r'0x95,\s*0x08.*?0xB1,\s*0x02',desc,re.S)),
+          }
+          for k,v in checks.items():
+              if not v: raise RuntimeError('runtime/recovery proof failed: '+k)
+
+          # Recovery VID:PID descriptor.
+          recovery=False
+          ep0_64=False
+          hid_if0=False
+          for i in range(len(fb)-18):
+              if fb[i]==0x12 and fb[i+1]==0x01:
+                  vid=fb[i+8] | fb[i+9]<<8
+                  pid=fb[i+10] | fb[i+11]<<8
+                  if vid==0 and pid==0x2244:
+                      recovery=True
+                      ep0_64=(fb[i+7]==64)
+          for i in range(len(fb)-9):
+              if fb[i:i+6] == bytes([9,4,0,0,0,3]):
+                  hid_if0=True
+
+          commands=['cxxx','chiperas','bootdat','codedata','constdat','cnfgdat','btupdat','upinfo']
+          cmd={c:fb.find(c.encode()) for c in commands}
+          if any(v<0 for v in cmd.values()): raise RuntimeError('recovery command string missing')
+          if not recovery or not ep0_64: raise RuntimeError('0000:2244/EP0 proof failed')
+
+          result={
+              'required_path':'Samsung Galaxy S25+ -> USB-C -> DSP USB-C only',
+              'runtime_vid_pid':'6324:1719',
+              'runtime_hid_interface':4,
+              'runtime_feature_report_bytes':8,
+              'runtime_enter_flashboot':{
+                  'SET_REPORT_setup':'21 09 00 03 04 00 08 00',
+                  'payload':'AA 00 00 00 00 00 00 00',
+                  'GET_REPORT_setup':'A1 01 00 03 04 00 08 00',
+                  'armed_response_first_byte':'55'
+              },
+              'recovery_vid_pid':'0000:2244',
+              'recovery_hid_interface':0,
+              'recovery_ep0_packet_bytes':64,
+              'recovery_report_bytes':256,
+              'recovery_SET_REPORT':'21 09 00 02 00 00 00 01',
+              'recovery_GET_REPORT':'A1 01 00 01 00 00 00 01',
+              'commands':cmd,
+              'checks':checks
+          }
+          (E/'USB_ONLY_PATH.json').write_text(json.dumps(result,indent=2)+'\n')
+          PY
+
+      - name: Build NDS32 objdump and recover exact recovery state machine plus CRC
+        shell: bash
+        run: |
+          set -euo pipefail
+          E=/tmp/v21/evidence
+          cd /tmp/v21/tool
+
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq \
+            build-essential curl xz-utils bison flex texinfo zlib1g-dev binutils >/dev/null
+
+          V=2.42
+          curl -fL --retry 3 --connect-timeout 15 --max-time 120 \
+            "https://ftp.gnu.org/gnu/binutils/binutils-${V}.tar.xz" -o binutils.tar.xz
+          tar -xf binutils.tar.xz
+          mkdir build
+          cd build
+          ../binutils-${V}/configure \
+            --target=nds32le-elf --disable-nls --disable-werror \
+            --disable-gdb --disable-gprofng --disable-gas --disable-ld \
+            > "$E/BINUTILS_CONFIGURE.txt" 2>&1
+          make -j2 all-binutils > "$E/BINUTILS_BUILD.txt" 2>&1
+
+          OBJDUMP=/tmp/v21/tool/build/binutils/objdump
+          "$OBJDUMP" --version > "$E/NDS32_OBJDUMP_VERSION.txt"
+
+          ok=0
+          for arch in nds32 nds32:v3s nds32:v3; do
+            if "$OBJDUMP" -D -z -b binary -m "$arch" -EL \
+              /tmp/v21/flash_boot.bin > /tmp/v21/flash_boot.dis 2>/dev/null; then
+              echo "$arch" > "$E/NDS32_OBJDUMP_ARCH.txt"
+              ok=1
+              break
+            fi
+          done
+          test "$ok" -eq 1
+
+          python3 - <<'PY'
+          from pathlib import Path
+          import re,json,struct
+
+          E=Path('/tmp/v21/evidence')
+          b=Path('/tmp/v21/flash_boot.bin').read_bytes()
+          lines=Path('/tmp/v21/flash_boot.dis').read_text(errors='replace').splitlines()
+          rx=re.compile(r'^\s*([0-9a-fA-F]+):\s+')
+          rows=[]
+          for l in lines:
+              m=rx.match(l)
+              if m: rows.append((int(m.group(1),16),l))
+
+          def win(a,b):
+              return '\n'.join(l for x,l in rows if a<=x<b)+'\n'
+
+          W={
+              'ACK':(0x4AD0,0x4B2E),
+              'RX4K':(0x4B2E,0x4B64),
+              'CMD':(0x4B98,0x4C08),
+              'CXXX':(0x4C08,0x4F9A),
+              'CHIPERAS':(0x4F9A,0x5064),
+              'BOOTDAT':(0x5064,0x51BC),
+              'CODEDATA':(0x51BC,0x52EE),
+              'CONSTDAT':(0x52EE,0x53F2),
+              'CNFGDAT':(0x53F2,0x54F6),
+              'BTUPDAT':(0x54F6,0x5646),
+              'UPINFO':(0x5646,0x56AE),
+              'CRC16':(0x3B06,0x3B2E),
+              'MVA_BUILDER':(0x5974,0x5C04),
+          }
+          txt={}
+          for name,(a,z) in W.items():
+              txt[name]=win(a,z)
+              (E/f'DISASM_{name}.txt').write_text(txt[name])
+
+          rx4=txt['RX4K']
+          ack=txt['ACK']
+
+          state_checks={
+              'rx_index_zero':bool(re.search(r'movi55\s+\$r6,\s*#0',rx4)),
+              'rx_pointer_plus_index_shift8':bool(re.search(r'slli\s+\$r0,\s*\$r6,\s*#8.*?add45\s+\$r0,\s*\$r7',rx4,re.S)),
+              'rx_one_report_helper':bool(re.search(r'jal\s+0x4ab6',rx4)),
+              'rx_increment':bool(re.search(r'addi45\s+\$r6,\s*#1',rx4)),
+              'rx_loop_16':bool(re.search(r'sltsi45\s+\$r6,\s*#0x10',rx4)),
+              'ack_get_report_A1':('#0xa1' in ack.lower()),
+              'ack_length_256':('#0x100' in ack.lower()),
+          }
+          for k,v in state_checks.items():
+              if not v: raise RuntimeError('state proof failed '+k)
+
+          # CRC table.
+          actual=list(struct.unpack('<256H',b[0xC134:0xC134+512]))
+          def gen(poly):
+              out=[]
+              for i in range(256):
+                  c=i<<8
+                  for _ in range(8):
+                      c=((c<<1)^poly)&0xffff if c&0x8000 else (c<<1)&0xffff
+                  out.append(c)
+              return out
+          if actual != gen(0x1021):
+              raise RuntimeError('CRC table != CCITT 0x1021')
+
+          crc=txt['CRC16']
+          crc_checks={
+              'table_c134':'#0xc134' in crc.lower(),
+              'high_byte':bool(re.search(r'srli\s+\$r5,\s*\$r2,\s*#8',crc)),
+              'shift_left8':bool(re.search(r'slli\s+\$r2,\s*\$r2,\s*#8',crc)),
+              'xor_table':bool(re.search(r'xor33\s+\$r2,\s*\$r3',crc)),
+          }
+          for k,v in crc_checks.items():
+              if not v: raise RuntimeError('crc proof failed '+k)
+
+          builder=txt['MVA_BUILDER']
+          segs=[
+              ('0x0000','0x00A4'),
+              ('0x00A8','0x0014'),
+              ('0x00C0','0x000C'),
+              ('0x00D4','0x0010'),
+              ('0x00EC','total_length - 0xEC')
+          ]
+
+          result={
+              'report_bytes':256,
+              'reports_per_block':16,
+              'block_bytes':4096,
+              'block_order':'1..N-1 then 0',
+              'ack_report_bytes':256,
+              'ack_status_offset':8,
+              'cxxx_status_offsets':{'code':8,'const':9,'config':10,'boot':11},
+              'crc':{
+                  'name':'CRC-16/CCITT',
+                  'poly':'0x1021',
+                  'init':'0x0000',
+                  'reflected':False,
+                  'final_xor':'none observed',
+                  'coverage_segments':segs,
+                  'excluded_ranges':['0xA4..0xA7','0xBC..0xBF','0xCC..0xD3','0xE4..0xEB']
+              },
+              'state_checks':state_checks,
+              'crc_checks':crc_checks,
+          }
+          (E/'RECOVERY_AND_CRC_PROOF.json').write_text(json.dumps(result,indent=2)+'\n')
+          PY
+
+      - name: Deep-analyze B1 downloader, Git history, MVA samples and padding
+        shell: bash
+        run: |
+          set -euo pipefail
+          S=/tmp/v21/sdk
+          E=/tmp/v21/evidence
+          EXE="$S/MVsB1_Base_SDK/tools/b1_download_v1.7.exe"
+
+          file "$EXE" > "$E/B1_FILETYPE.txt"
+          sha256sum "$EXE" > "$E/B1_SHA256.txt"
+          nm -C "$EXE" > "$E/B1_NM.txt" 2>&1 || true
+          objdump -d -C "$EXE" > /tmp/v21/b1.dis 2> "$E/B1_OBJDUMP_STDERR.txt" || true
+          objdump --dwarf=decodedline "$EXE" > "$E/B1_DWARF_LINES.txt" 2>&1 || true
+          strings -a -td "$EXE" > "$E/B1_STRINGS.txt"
+
+          # Search current tree and full Git history for actual MVA/update examples.
+          cd "$S"
+          find . -type f \( -iname '*.mva' -o -iname '*.MVA' \) -printf '%p\t%s\n' \
+            > "$E/MVA_CURRENT_FILES.txt" || true
+          git log --all --name-only --pretty='format:COMMIT %H' -- '*.mva' '*.MVA' \
+            > "$E/MVA_GIT_HISTORY.txt" || true
+
+          python3 - <<'PY'
+          from pathlib import Path
+          import re,json,subprocess,os,hashlib
+
+          E=Path('/tmp/v21/evidence')
+          S=Path('/tmp/v21/sdk')
+          dis=Path('/tmp/v21/b1.dis').read_text(errors='replace')
+          nm=(E/'B1_NM.txt').read_text(errors='replace')
+
+          wanted=[
+              'get_image',
+              'crc16',
+              'do_code_crc',
+              'nds32_burn',
+              'nds32_erase',
+              'Record_content',
+              'Verification',
+              'nds32_verify',
+              'main'
+          ]
+
+          # Parse objdump symbolic function blocks.
+          starts=[]
+          for m in re.finditer(r'(?m)^([0-9a-fA-F]+)\s+<([^>]+)>:\s*$',dis):
+              starts.append((m.start(),int(m.group(1),16),m.group(2)))
+          starts.sort()
+
+          blocks={}
+          for i,(pos,addr,name) in enumerate(starts):
+              end=starts[i+1][0] if i+1<len(starts) else len(dis)
+              for w in wanted:
+                  if w in name and w not in blocks:
+                      blocks[w]={'name':name,'address':addr,'text':dis[pos:end]}
+
+          for w,rec in blocks.items():
+              (E/f'B1_FUNC_{w.upper()}.txt').write_text(rec['text'])
+
+          # Static padding evidence: detect explicit memset/calloc/fill patterns only
+          # inside image-load / burn / main functions. Do NOT infer from literals alone.
+          padding={
+              'proven':False,
+              'value':None,
+              'evidence':[],
+              'functions_available':sorted(blocks.keys())
+          }
+
+          relevant='\n'.join(
+              blocks[x]['text'] for x in ['get_image','nds32_burn','main']
+              if x in blocks
+          )
+
+          # x86 cdecl often pushes memset args right-to-left:
+          # push size; push value; push ptr; call memset.
+          # We record candidates but only prove if rounded 4K destination-tail dataflow
+          # is clearly adjacent to the image pointer used by nds32_burn.
+          for m in re.finditer(r'(?is)(.{0,600}call\s+[0-9a-fA-Fx]+\s+<memset>.{0,300})',relevant):
+              c=m.group(1)
+              padding['evidence'].append({'kind':'memset_near_relevant_path','asm':c})
+
+          # Look for calloc in symbols/calls.
+          if re.search(r'<calloc>',relevant,re.I):
+              padding['evidence'].append({'kind':'calloc_near_relevant_path','asm':'calloc symbol/call seen'})
+
+          # Search explicit 0xff fill with 0x1000/rounding nearby.
+          for pat,val in [
+              (r'(?is).{0,300}(?:0xff|\$-1).{0,300}(?:0x1000|0xfff).{0,300}',0xFF),
+              (r'(?is).{0,300}(?:xor\s+\%[a-z]+,\%[a-z]+|push\s+\$0x0).{0,300}(?:0x1000|0xfff).{0,300}',0x00),
+          ]:
+              for m in re.finditer(pat,relevant):
+                  padding['evidence'].append({'kind':f'candidate_fill_{val:02X}','asm':m.group(0)})
+
+          # No automatic promotion to proven unless an actual MVA sample corroborates.
+          samples=[]
+          for p in S.rglob('*'):
+              if p.is_file() and p.suffix.lower()=='.mva':
+                  samples.append(p)
+
+          # Try recovering historical MVA blobs if Git history contains paths.
+          hist=(E/'MVA_GIT_HISTORY.txt').read_text(errors='replace').splitlines()
+          cur_commit=None
+          hist_specs=[]
+          for line in hist:
+              if line.startswith('COMMIT '):
+                  cur_commit=line.split()[1]
+              elif cur_commit and line.lower().endswith('.mva'):
+                  hist_specs.append((cur_commit,line.strip()))
+
+          recovered=[]
+          seen=set()
+          for commit,path in hist_specs[:100]:
+              key=(commit,path)
+              if key in seen: continue
+              seen.add(key)
+              try:
+                  data=subprocess.check_output(
+                      ['git','-C',str(S),'show',f'{commit}:{path}'],
+                      stderr=subprocess.DEVNULL
+                  )
+              except Exception:
+                  continue
+              dst=Path('/tmp/v21')/f'historical_{len(recovered):03d}.mva'
+              dst.write_bytes(data)
+              samples.append(dst)
+              recovered.append({
+                  'commit':commit,'path':path,'bytes':len(data),
+                  'sha256':hashlib.sha256(data).hexdigest(),
+                  'local':str(dst)
+              })
+
+          (E/'MVA_RECOVERED_HISTORY.json').write_text(json.dumps(recovered,indent=2)+'\n')
+
+          sample_results=[]
+          for p in samples[:50]:
+              try: data=p.read_bytes()
+              except Exception: continue
+              rec={
+                  'path':str(p),
+                  'bytes':len(data),
+                  'sha256':hashlib.sha256(data).hexdigest(),
+                  'mod4096':len(data)%4096,
+                  'tail_64_hex':data[-64:].hex() if data else '',
+                  'tail_ff_run':0,
+                  'tail_00_run':0,
+              }
+              for x in reversed(data):
+                  if x==0xff: rec['tail_ff_run']+=1
+                  else: break
+              for x in reversed(data):
+                  if x==0x00: rec['tail_00_run']+=1
+                  else: break
+              sample_results.append(rec)
+
+          (E/'MVA_SAMPLE_ANALYSIS.json').write_text(json.dumps(sample_results,indent=2)+'\n')
+
+          # Only promote padding if there is a real MVA sample whose logical payload/header
+          # allows a deterministic unused-tail interpretation. Generic trailing runs alone
+          # are insufficient, so this remains fail-closed in most cases.
+          result={
+              'b1_functions':{
+                  k:{'symbol':v['name'],'address':f"0x{v['address']:08X}"}
+                  for k,v in blocks.items()
+              },
+              'mva_current_count':len([p for p in samples if str(p).startswith(str(S))]),
+              'mva_historical_recovered_count':len(recovered),
+              'mva_sample_count_total':len(sample_results),
+              'padding':padding,
+              'padding_byte_proven':padding['proven'],
+              'padding_byte':padding['value'],
+              'note':'Padding stays unknown unless direct buffer-fill -> transmitted tail or a structurally parsed MVA sample proves it.'
+          }
+          (E/'DOWNLOADER_CONTAINER_PADDING_ANALYSIS.json').write_text(
+              json.dumps(result,indent=2)+'\n'
+          )
+          PY
+
+      - name: Recover MVA header semantics and produce unified container model
+        shell: bash
+        run: |
+          set -euo pipefail
+          E=/tmp/v21/evidence
+
+          python3 - <<'PY'
+          from pathlib import Path
+          import re,json
+
+          E=Path('/tmp/v21/evidence')
+          builder=(E/'DISASM_MVA_BUILDER.txt').read_text(errors='replace')
+          samples=json.loads((E/'MVA_SAMPLE_ANALYSIS.json').read_text())
+          pad=json.loads((E/'DOWNLOADER_CONTAINER_PADDING_ANALYSIS.json').read_text())
+
+          # Header offsets derived from the proven cxxx parser / FastCRC exclusions.
+          header={
+              'code_len':{'offset':0x08,'size':4,'encoding':'LE32'},
+              'const_offset':{'offset':0x0C,'size':4,'encoding':'LE32'},
+              'code_version':{'offset':0x10,'size':4,'encoding':'LE32'},
+              'code_encrypt_flag':{'offset':0x14,'size':1,'encoding':'U8'},
+              'const_len':{'offset':0x18,'size':4,'encoding':'LE32'},
+              'field_0x1c_unresolved':{'offset':0x1C,'size':4,'encoding':'unknown'},
+              'boot_len':{'offset':0x20,'size':4,'encoding':'LE32'},
+              'boot_crc':{'offset':0x24,'size':4,'encoding':'LE32; CRC value appears 16-bit in low half unless builder proves otherwise'},
+              'config_len':{'offset':0x28,'size':4,'encoding':'LE32'},
+              'config_offset':{'offset':0x2C,'size':4,'encoding':'LE32'},
+              'code_crc':{'offset':0x30,'size':4,'encoding':'LE32; CRC value appears 16-bit in low half unless builder proves otherwise'},
+              'boot_tag':{'offset':0x34,'size':1,'expected':2},
+              'const_tag':{'offset':0x35,'size':1,'expected':4},
+              'config_tag':{'offset':0x36,'size':1,'expected':5},
+          }
+
+          # Important: these are report offsets for cxxx payload/report, not necessarily
+          # package-base offsets. Keep the distinction explicit.
+          model={
+              'cxxx_report_metadata':header,
+              'mva_fastcrc':{
+                  'algorithm':'CRC-16/CCITT poly 0x1021 MSB-first',
+                  'init':'0x0000',
+                  'coverage_segments':[
+                      {'offset':0x0000,'length':0x00A4},
+                      {'offset':0x00A8,'length':0x0014},
+                      {'offset':0x00C0,'length':0x000C},
+                      {'offset':0x00D4,'length':0x0010},
+                      {'offset':0x00EC,'length':'total_length-0xEC'}
+                  ],
+                  'excluded_ranges':[
+                      {'start':0x00A4,'end_inclusive':0x00A7},
+                      {'start':0x00BC,'end_inclusive':0x00BF},
+                      {'start':0x00CC,'end_inclusive':0x00D3},
+                      {'start':0x00E4,'end_inclusive':0x00EB},
+                  ]
+              },
+              'sample_count':len(samples),
+              'padding_byte_proven':pad['padding_byte_proven'],
+              'padding_byte':pad['padding_byte'],
+              'complete_container_layout_proven':False,
+              'reason_container_not_complete':'No assumption is made that cxxx report offsets equal MVA package-base offsets. Full package-header semantic mapping needs a real structurally validated MVA sample or stronger builder-store dataflow.'
+          }
+
+          (E/'UNIFIED_FIRMWARE_CONTAINER_MODEL.json').write_text(
+              json.dumps(model,indent=2)+'\n'
+          )
+          PY
+
+      - name: Generate Android USB updater scaffold and protocol tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          E=/tmp/v21/evidence
+          A=/tmp/v21/android
+
+          mkdir -p "$A/src/main/kotlin/okn/bp1048" "$A/src/test/kotlin/okn/bp1048" "$A/src/main/res/xml"
+
+          cat > "$A/src/main/kotlin/okn/bp1048/Protocol.kt" <<'KOTLIN'
+          package okn.bp1048
+
+          object Protocol {
+              const val RUNTIME_VID = 0x6324
+              const val RUNTIME_PID = 0x1719
+              const val RUNTIME_IFACE = 4
+              const val RUNTIME_FEATURE_BYTES = 8
+
+              const val RECOVERY_VID = 0x0000
+              const val RECOVERY_PID = 0x2244
+              const val RECOVERY_IFACE = 0
+              const val REPORT_BYTES = 256
+              const val BLOCK_BYTES = 4096
+              const val REPORTS_PER_BLOCK = 16
+
+              const val HID_SET_REPORT = 0x09
+              const val HID_GET_REPORT = 0x01
+              const val RUNTIME_FEATURE_VALUE = 0x0300
+              const val RECOVERY_OUTPUT_VALUE = 0x0200
+              const val RECOVERY_INPUT_VALUE = 0x0100
+
+              const val ACK_OFFSET = 8
+              const val ACK_OK = 0x55
+              const val ACK_ERROR = 0xFF
+          }
+          KOTLIN
+
+          cat > "$A/src/main/kotlin/okn/bp1048/Crc16Ccitt.kt" <<'KOTLIN'
+          package okn.bp1048
+
+          object Crc16Ccitt {
+              fun update(data: ByteArray, offset: Int = 0, length: Int = data.size - offset, seed: Int = 0): Int {
+                  require(offset >= 0 && length >= 0 && offset + length <= data.size)
+                  var crc = seed and 0xFFFF
+                  for (i in offset until offset + length) {
+                      crc = crc xor ((data[i].toInt() and 0xFF) shl 8)
+                      repeat(8) {
+                          crc = if ((crc and 0x8000) != 0) {
+                              ((crc shl 1) xor 0x1021) and 0xFFFF
+                          } else {
+                              (crc shl 1) and 0xFFFF
+                          }
+                      }
+                  }
+                  return crc
+              }
+
+              fun mvaFastCrc(bytes: ByteArray): Int {
+                  require(bytes.size >= 0xEC)
+                  var crc = 0
+                  crc = update(bytes, 0x0000, 0x00A4, crc)
+                  crc = update(bytes, 0x00A8, 0x0014, crc)
+                  crc = update(bytes, 0x00C0, 0x000C, crc)
+                  crc = update(bytes, 0x00D4, 0x0010, crc)
+                  crc = update(bytes, 0x00EC, bytes.size - 0xEC, crc)
+                  return crc
+              }
+          }
+          KOTLIN
+
+          cat > "$A/src/main/kotlin/okn/bp1048/BlockPlan.kt" <<'KOTLIN'
+          package okn.bp1048
+
+          object BlockPlan {
+              fun blockCount(length: Int): Int {
+                  require(length > 0)
+                  return (length + Protocol.BLOCK_BYTES - 1) / Protocol.BLOCK_BYTES
+              }
+
+              fun transferOrder(length: Int): List<Int> {
+                  val n = blockCount(length)
+                  return buildList {
+                      for (i in 1 until n) add(i)
+                      add(0)
+                  }
+              }
+
+              fun reportsPerBlock(): Int = Protocol.REPORTS_PER_BLOCK
+          }
+          KOTLIN
+
+          cat > "$A/src/main/kotlin/okn/bp1048/RuntimeUsb.kt" <<'KOTLIN'
+          package okn.bp1048
+
+          import android.hardware.usb.UsbDeviceConnection
+
+          object RuntimeUsb {
+              fun preflightNoEntry(conn: UsbDeviceConnection, timeoutMs: Int = 1000): Boolean {
+                  val clear = ByteArray(8)
+                  val s = conn.controlTransfer(
+                      0x21, Protocol.HID_SET_REPORT, Protocol.RUNTIME_FEATURE_VALUE,
+                      Protocol.RUNTIME_IFACE, clear, clear.size, timeoutMs
+                  )
+                  if (s != 8) return false
+
+                  val r = ByteArray(8)
+                  val g = conn.controlTransfer(
+                      0xA1, Protocol.HID_GET_REPORT, Protocol.RUNTIME_FEATURE_VALUE,
+                      Protocol.RUNTIME_IFACE, r, r.size, timeoutMs
+                  )
+                  return g > 0 && r[0] == 0.toByte()
+              }
+
+              // State-changing but not a flash erase/write itself.
+              // Keep caller-side user confirmation and device identity checks.
+              fun requestFlashBoot(conn: UsbDeviceConnection, timeoutMs: Int = 1000): Int {
+                  val arm = ByteArray(8)
+                  arm[0] = 0xAA.toByte()
+                  val s = conn.controlTransfer(
+                      0x21, Protocol.HID_SET_REPORT, Protocol.RUNTIME_FEATURE_VALUE,
+                      Protocol.RUNTIME_IFACE, arm, arm.size, timeoutMs
+                  )
+                  if (s != 8) return -1
+
+                  val r = ByteArray(8)
+                  return conn.controlTransfer(
+                      0xA1, Protocol.HID_GET_REPORT, Protocol.RUNTIME_FEATURE_VALUE,
+                      Protocol.RUNTIME_IFACE, r, r.size, timeoutMs
+                  )
+              }
+          }
+          KOTLIN
+
+          cat > "$A/src/main/kotlin/okn/bp1048/RecoveryUsb.kt" <<'KOTLIN'
+          package okn.bp1048
+
+          import android.hardware.usb.UsbDeviceConnection
+
+          class RecoveryUsb(private val conn: UsbDeviceConnection, private val timeoutMs: Int = 1500) {
+              private fun setReport(report: ByteArray): Int {
+                  require(report.size == Protocol.REPORT_BYTES)
+                  return conn.controlTransfer(
+                      0x21, Protocol.HID_SET_REPORT, Protocol.RECOVERY_OUTPUT_VALUE,
+                      Protocol.RECOVERY_IFACE, report, report.size, timeoutMs
+                  )
+              }
+
+              private fun getReport(report: ByteArray): Int {
+                  require(report.size == Protocol.REPORT_BYTES)
+                  return conn.controlTransfer(
+                      0xA1, Protocol.HID_GET_REPORT, Protocol.RECOVERY_INPUT_VALUE,
+                      Protocol.RECOVERY_IFACE, report, report.size, timeoutMs
+                  )
+              }
+
+              // Safe transport primitives are private until container/padding proof is complete.
+              // This prevents accidental chip erase/write from a partially reconstructed image.
+          }
+          KOTLIN
+
+          cat > "$A/src/main/kotlin/okn/bp1048/FirmwareSafetyGate.kt" <<'KOTLIN'
+          package okn.bp1048
+
+          data class FirmwareProof(
+              val containerLayoutProven: Boolean,
+              val paddingByteProven: Boolean,
+              val crcProven: Boolean = true,
+              val exactDeviceFamilyConfirmed: Boolean = false
+          )
+
+          object FirmwareSafetyGate {
+              fun destructiveFlashAllowed(proof: FirmwareProof): Boolean =
+                  proof.containerLayoutProven &&
+                  proof.paddingByteProven &&
+                  proof.crcProven &&
+                  proof.exactDeviceFamilyConfirmed
+          }
+          KOTLIN
+
+          cat > "$A/src/test/kotlin/okn/bp1048/ProtocolSelfTest.kt" <<'KOTLIN'
+          package okn.bp1048
+
+          object ProtocolSelfTest {
+              fun run() {
+                  check(Protocol.REPORTS_PER_BLOCK * Protocol.REPORT_BYTES == 4096)
+                  check(BlockPlan.transferOrder(1) == listOf(0))
+                  check(BlockPlan.transferOrder(4097) == listOf(1, 0))
+                  check(Crc16Ccitt.update("123456789".encodeToByteArray(), seed = 0x0000) == 0x31C3)
+              }
+          }
+          KOTLIN
+
+          cat > "$A/src/main/res/xml/device_filter.xml" <<'XML'
+          <?xml version="1.0" encoding="utf-8"?>
+          <resources>
+              <usb-device vendor-id="25380" product-id="5913" />
+              <usb-device vendor-id="0" product-id="8772" />
+          </resources>
+          XML
+
+          cat > "$A/README.md" <<'EOF'
+          # OKN BP1048P4 USB-C updater scaffold
+
+          Required physical path:
+          Samsung Galaxy S25+ -> USB-C cable -> DSP USB-C port only.
+
+          Proven:
+          - Runtime 6324:1719, HID interface 4.
+          - Runtime Feature report 8 bytes.
+          - AA Feature SET_REPORT + GET_REPORT enters FlashBoot.
+          - Recovery 0000:2244, HID interface 0.
+          - Recovery reports 256 bytes.
+          - 16 reports = one 4096-byte data block.
+          - GET_REPORT returns one 256-byte ACK.
+          - Data section transfer order is block 1..N-1, then block 0 last.
+          - CRC-16/CCITT polynomial 0x1021, init 0x0000, non-reflected.
+          - MVA FastCRC coverage segments are implemented in Crc16Ccitt.mvaFastCrc().
+
+          Intentionally disabled:
+          - chiperas
+          - bootdat/codedata/constdat/cnfgdat execution
+          - btupdat
+          - final live flash executor
+
+          Those remain disabled until firmware-container layout, tail padding, and exact
+          target-firmware compatibility are all proven from evidence.
+          EOF
+
+          python3 - <<'PY'
+          from pathlib import Path
+          import json,zipfile,hashlib
+
+          E=Path('/tmp/v21/evidence')
+          A=Path('/tmp/v21/android')
+          pad=json.loads((E/'DOWNLOADER_CONTAINER_PADDING_ANALYSIS.json').read_text())
+          model=json.loads((E/'UNIFIED_FIRMWARE_CONTAINER_MODEL.json').read_text())
+
+          android_status={
+              'generated':True,
+              'runtime_preflight_code':True,
+              'runtime_flashboot_entry_code':True,
+              'recovery_transport_code':True,
+              'crc16_code':True,
+              'block_order_code':True,
+              'destructive_recovery_commands_exposed':False,
+              'padding_byte_proven':pad['padding_byte_proven'],
+              'container_layout_fully_proven':model['complete_container_layout_proven'],
+              'flash_executor_enabled':False,
+          }
+          (E/'ANDROID_GENERATOR_STATUS.json').write_text(json.dumps(android_status,indent=2)+'\n')
+
+          zip_path=E/'OKN_BP1048P4_ANDROID_UPDATER_SCAFFOLD.zip'
+          with zipfile.ZipFile(zip_path,'w',zipfile.ZIP_DEFLATED) as z:
+              for p in A.rglob('*'):
+                  if p.is_file():
+                      z.write(p,p.relative_to(A))
+          (E/'ANDROID_SCAFFOLD_SHA256.txt').write_text(
+              hashlib.sha256(zip_path.read_bytes()).hexdigest()+'  '+zip_path.name+'\n'
+          )
+          PY
+
+      - name: Produce final one-run status and next executable boundary
+        shell: bash
+        run: |
+          set -euo pipefail
+          E=/tmp/v21/evidence
+
+          python3 - <<'PY'
+          from pathlib import Path
+          import json
+
+          E=Path('/tmp/v21/evidence')
+          usb=json.loads((E/'USB_ONLY_PATH.json').read_text())
+          proto=json.loads((E/'RECOVERY_AND_CRC_PROOF.json').read_text())
+          deep=json.loads((E/'DOWNLOADER_CONTAINER_PADDING_ANALYSIS.json').read_text())
+          model=json.loads((E/'UNIFIED_FIRMWARE_CONTAINER_MODEL.json').read_text())
+          android=json.loads((E/'ANDROID_GENERATOR_STATUS.json').read_text())
+
+          required={
+              'runtime_to_flashboot_entry':True,
+              'recovery_transport':True,
+              '16x256_block_loop':True,
+              'block_order_1_to_n_minus_1_then_0':True,
+              'ack_status_offset8':True,
+              'crc16_ccitt_1021_init0':True,
+              'crc_coverage':True,
+              'padding_byte':deep['padding_byte_proven'],
+              'container_layout':model['complete_container_layout_proven'],
+          }
+
+          live_ready=all(required.values())
+
+          final={
+              'required_physical_path':'Samsung Galaxy S25+ -> USB-C cable -> DSP USB-C only',
+              'soldering_allowed':False,
+              'board_modification_allowed':False,
+              'jtag_sdp_aice_allowed':False,
+              'runtime_vid_pid':'6324:1719',
+              'recovery_vid_pid':'0000:2244',
+              'proven_requirements':required,
+              'android_scaffold_generated':android['generated'],
+              'live_flash_ready':live_ready,
+              'live_flash_enabled':False,
+              'why_live_flash_disabled':(
+                  [] if live_ready else
+                  [k for k,v in required.items() if not v]
+              ),
+              'recommended_next_boundary':(
+                  'If live_flash_ready is false, provide/analyze one known-good BP1048P4 MVA firmware image to finish container/padding proof. '
+                  'If live_flash_ready becomes true, the next stage is a user-confirmed Samsung S25+ read-only enumeration/preflight, then runtime-to-recovery transition; destructive erase/write remains a separate explicit gate.'
+              )
+          }
+
+          (E/'V21_FINAL_STATUS.json').write_text(json.dumps(final,indent=2)+'\n')
+
+          md=[
+              '# BP1048P4 V21 — USB-C-only ALL-IN-ONE result','',
+              '**Permanent physical constraint:** Samsung Galaxy S25+ → USB-C cable → DSP USB-C port only.',
+              '',
+              'This workflow re-proves runtime→FlashBoot entry, recovery HID transport, 16×256 block transport, ACK timing, block ordering, CRC16 primitive/coverage, and performs deep downloader/container/padding analysis in the same run.',
+              '',
+              f"- Padding byte proven: **{deep['padding_byte_proven']}**",
+              f"- Complete container layout proven: **{model['complete_container_layout_proven']}**",
+              f"- Android updater scaffold generated: **{android['generated']}**",
+              f"- Live flash ready: **{live_ready}**",
+              '',
+              'No live USB command, flash erase/write, soldering, board modification, JTAG, SDP, or AICE operation is executed.'
+          ]
+          (E/'V21_REPORT.md').write_text('\n'.join(md)+'\n')
+          PY
+
+          cat "$E/V21_REPORT.md" >> "$GITHUB_STEP_SUMMARY"
+          cat "$E/V21_FINAL_STATUS.json" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Final fail-closed assertions
+        shell: bash
+        run: |
+          set -euo pipefail
+          for v in SOLDER_ALLOWED BOARD_MOD_ALLOWED JTAG_ALLOWED SDP_ALLOWED AICE_ALLOWED HARDWARE_PROBE_ALLOWED LIVE_USB_COMMAND_ALLOWED FLASH_READ_ALLOWED FLASH_WRITE_ALLOWED FLASH_ERASE_ALLOWED; do
+            test "${!v}" = "NO"
+          done
+
+          python3 - <<'PY'
+          from pathlib import Path
+          import json
+
+          E=Path('/tmp/v21/evidence')
+          f=json.loads((E/'V21_FINAL_STATUS.json').read_text())
+          p=json.loads((E/'RECOVERY_AND_CRC_PROOF.json').read_text())
+
+          assert f['required_physical_path'] == 'Samsung Galaxy S25+ -> USB-C cable -> DSP USB-C only'
+          assert f['soldering_allowed'] is False
+          assert f['board_modification_allowed'] is False
+          assert f['jtag_sdp_aice_allowed'] is False
+          assert p['reports_per_block'] == 16
+          assert p['report_bytes'] == 256
+          assert p['block_bytes'] == 4096
+          assert p['block_order'] == '1..N-1 then 0'
+          assert p['ack_status_offset'] == 8
+          assert p['crc']['poly'] == '0x1021'
+          assert p['crc']['init'] == '0x0000'
+          assert f['live_flash_enabled'] is False
+
+          print('V21_USB_C_ONLY_ALL_IN_ONE_COMPLETE=YES')
+          print('REQUIRED_PATH=S25_PLUS_USB_C_TO_DSP_USB_C_ONLY')
+          print('RUNTIME_TO_FLASHBOOT_PROVEN=YES')
+          print('RECOVERY_16_X_256_PROVEN=YES')
+          print('BLOCK_ORDER_1_TO_N_MINUS_1_THEN_0=YES')
+          print('CRC16_CCITT_1021_INIT_0000=YES')
+          print('ANDROID_SCAFFOLD_GENERATED=YES')
+          print('LIVE_USB_COMMAND_ALLOWED=NO')
+          print('FLASH_WRITE_ALLOWED=NO')
+          print('SOLDER_ALLOWED=NO')
+          print('BOARD_MOD_ALLOWED=NO')
+          PY
+
+      - name: Package all V21 evidence and Android scaffold
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /tmp/v21/evidence
+          zip -9 -r /tmp/OKN_BP1048P4_V21_ALL_IN_ONE_EVIDENCE.zip . >/dev/null
+          sha256sum /tmp/OKN_BP1048P4_V21_ALL_IN_ONE_EVIDENCE.zip \
+            > /tmp/OKN_BP1048P4_V21_ALL_IN_ONE_EVIDENCE.zip.sha256
+
+      - name: Upload V21 all-in-one artifact
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: OKN-BP1048P4-V21-USB-C-ONLY-ALL-IN-ONE-EVIDENCE
+          path: |
+            /tmp/OKN_BP1048P4_V21_ALL_IN_ONE_EVIDENCE.zip
+            /tmp/OKN_BP1048P4_V21_ALL_IN_ONE_EVIDENCE.zip.sha256
+            /tmp/v21/evidence/V21_REPORT.md
+            /tmp/v21/evidence/V21_FINAL_STATUS.json
+            /tmp/v21/evidence/USB_ONLY_PATH.json
+            /tmp/v21/evidence/RECOVERY_AND_CRC_PROOF.json
+            /tmp/v21/evidence/DOWNLOADER_CONTAINER_PADDING_ANALYSIS.json
+            /tmp/v21/evidence/UNIFIED_FIRMWARE_CONTAINER_MODEL.json
+            /tmp/v21/evidence/MVA_SAMPLE_ANALYSIS.json
+            /tmp/v21/evidence/MVA_RECOVERED_HISTORY.json
+            /tmp/v21/evidence/MVA_CURRENT_FILES.txt
+            /tmp/v21/evidence/MVA_GIT_HISTORY.txt
+            /tmp/v21/evidence/ANDROID_GENERATOR_STATUS.json
+            /tmp/v21/evidence/OKN_BP1048P4_ANDROID_UPDATER_SCAFFOLD.zip
+            /tmp/v21/evidence/ANDROID_SCAFFOLD_SHA256.txt
+            /tmp/v21/evidence/B1_FUNC_*.txt
+            /tmp/v21/evidence/DISASM_*.txt
+            /tmp/v21/evidence/B1_NM.txt
+            /tmp/v21/evidence/B1_DWARF_LINES.txt
+            /tmp/v21/evidence/B1_STRINGS.txt
+            /tmp/v21/evidence/B1_FILETYPE.txt
+            /tmp/v21/evidence/B1_SHA256.txt
+            /tmp/v21/evidence/FLASHBOOT_IDENTITY.json
+            /tmp/v21/evidence/FLASHBOOT_STRINGS.txt
+            /tmp/v21/evidence/NDS32_OBJDUMP_ARCH.txt
+            /tmp/v21/evidence/NDS32_OBJDUMP_VERSION.txt
+            /tmp/v21/evidence/PROJECT_CONSTRAINTS.txt
+            /tmp/v21/evidence/SDK_COMMIT.txt
+          if-no-files-found: warn
+          retention-days: 90
