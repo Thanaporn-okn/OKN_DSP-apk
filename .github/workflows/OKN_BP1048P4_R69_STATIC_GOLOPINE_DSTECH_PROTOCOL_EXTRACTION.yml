@@ -1,0 +1,340 @@
+name: OKN BP1048P4 R69 STATIC GOLOPINE DSTech PROTOCOL EXTRACTION
+
+"on":
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  TARGET_SOC: "MVSilicon BP1048P4"
+  TARGET_BOARD: "GoloPine/DSTech 7-channel DSP"
+  EXPECTED_RUNTIME_VID_HEX: "6324"
+  EXPECTED_RUNTIME_PID_HEX: "1719"
+  EXPECTED_RUNTIME_VID_DEC: "25380"
+  EXPECTED_RUNTIME_PID_DEC: "5913"
+  ANDROID_VENDOR_URL: "https://golodsp.com/wp-content/uploads/2026/05/golopine_audio_turning_release_2026-04-01.apk_.zip"
+  WINDOWS_VENDOR_URL: "https://golodsp.com/wp-content/uploads/2026/05/golopine_audio_turning_release_2026-04-08.exe_.zip"
+  LIVE_DEVICE_IO: "NO"
+  HOST_TO_DEVICE_IO: "NO"
+  FLASH_ALLOWED: "NO"
+  ERASE_ALLOWED: "NO"
+  WRITE_ALLOWED: "NO"
+
+jobs:
+  r69-static-vendor-protocol:
+    name: R69 static vendor protocol extraction only
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+
+    steps:
+      - name: Immutable no-device safety gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$LIVE_DEVICE_IO" = "NO"
+          test "$HOST_TO_DEVICE_IO" = "NO"
+          test "$FLASH_ALLOWED" = "NO"
+          test "$ERASE_ALLOWED" = "NO"
+          test "$WRITE_ALLOWED" = "NO"
+          rm -rf /tmp/r69
+          mkdir -p /tmp/r69/{downloads,android,windows,evidence,out}
+          cat > /tmp/r69/evidence/R69_SAFETY.txt <<'EOF'
+          R69_PURPOSE=STATIC_VENDOR_PROTOCOL_EXTRACTION
+          LIVE_DEVICE_IO=NO
+          USB_DEVICE_ACCESS=NO
+          HOST_TO_DEVICE_IO=NO
+          FLASH_ALLOWED=NO
+          ERASE_ALLOWED=NO
+          WRITE_ALLOWED=NO
+          BOARD_MODIFICATION=NO
+          SOLDERING=NO
+          EOF
+
+      - name: Download official GoloPine vendor packages
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fL --retry 5 --retry-delay 2 --connect-timeout 20 \
+            "$ANDROID_VENDOR_URL" -o /tmp/r69/downloads/golopine_android.zip
+          curl -fL --retry 5 --retry-delay 2 --connect-timeout 20 \
+            "$WINDOWS_VENDOR_URL" -o /tmp/r69/downloads/golopine_windows.zip
+          test -s /tmp/r69/downloads/golopine_android.zip
+          test -s /tmp/r69/downloads/golopine_windows.zip
+          file /tmp/r69/downloads/* | tee /tmp/r69/evidence/R69_VENDOR_DOWNLOAD_FILE_TYPES.txt
+          sha256sum /tmp/r69/downloads/* | tee /tmp/r69/evidence/R69_VENDOR_DOWNLOAD_SHA256.txt
+
+      - name: Extract vendor packages
+        shell: bash
+        run: |
+          set -euo pipefail
+          unzip -q /tmp/r69/downloads/golopine_android.zip -d /tmp/r69/android/pkg
+          unzip -q /tmp/r69/downloads/golopine_windows.zip -d /tmp/r69/windows/pkg
+
+          find /tmp/r69/android/pkg -maxdepth 4 -type f -printf '%p\n' | sort \
+            > /tmp/r69/evidence/R69_ANDROID_PACKAGE_FILES.txt
+          find /tmp/r69/windows/pkg -maxdepth 5 -type f -printf '%p\n' | sort \
+            > /tmp/r69/evidence/R69_WINDOWS_PACKAGE_FILES.txt
+
+          APK="$(find /tmp/r69/android/pkg -type f -iname '*.apk' -print -quit)"
+          EXE="$(find /tmp/r69/windows/pkg -type f -iname '*.exe' -print -quit)"
+          test -n "$APK"
+          test -n "$EXE"
+          cp "$APK" /tmp/r69/android/vendor.apk
+          cp "$EXE" /tmp/r69/windows/vendor.exe
+          sha256sum /tmp/r69/android/vendor.apk /tmp/r69/windows/vendor.exe \
+            | tee /tmp/r69/evidence/R69_VENDOR_BINARY_SHA256.txt
+
+      - name: Unpack Android APK and record manifest metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/r69/android/unpacked
+          unzip -q /tmp/r69/android/vendor.apk -d /tmp/r69/android/unpacked
+
+          {
+            echo "APK_FILE=$(basename /tmp/r69/android/vendor.apk)"
+            echo "APK_BYTES=$(stat -c '%s' /tmp/r69/android/vendor.apk)"
+            echo "DEX_FILES=$(find /tmp/r69/android/unpacked -maxdepth 1 -name 'classes*.dex' | wc -l)"
+            echo "NATIVE_LIBS=$(find /tmp/r69/android/unpacked -type f -name '*.so' | wc -l)"
+          } | tee /tmp/r69/evidence/R69_ANDROID_STRUCTURE.txt
+
+          if command -v apkanalyzer >/dev/null 2>&1; then
+            apkanalyzer manifest application-id /tmp/r69/android/vendor.apk \
+              > /tmp/r69/evidence/R69_ANDROID_APPLICATION_ID.txt || true
+            apkanalyzer manifest permissions /tmp/r69/android/vendor.apk \
+              > /tmp/r69/evidence/R69_ANDROID_PERMISSIONS.txt || true
+          fi
+
+      - name: Install pinned JADX for static decompilation
+        shell: bash
+        run: |
+          set -euo pipefail
+          JADX_VERSION="1.5.2"
+          curl -fL --retry 5 --retry-delay 2 --connect-timeout 20 \
+            "https://github.com/skylot/jadx/releases/download/v${JADX_VERSION}/jadx-${JADX_VERSION}.zip" \
+            -o /tmp/r69/jadx.zip
+          sha256sum /tmp/r69/jadx.zip | tee /tmp/r69/evidence/R69_JADX_SHA256.txt
+          mkdir -p /tmp/r69/jadx
+          unzip -q /tmp/r69/jadx.zip -d /tmp/r69/jadx
+          chmod +x /tmp/r69/jadx/bin/jadx
+          /tmp/r69/jadx/bin/jadx --version | tee /tmp/r69/evidence/R69_JADX_VERSION.txt
+
+      - name: Decompile Android vendor app
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/r69/android/jadx
+          /tmp/r69/jadx/bin/jadx \
+            --no-res \
+            --show-bad-code \
+            -d /tmp/r69/android/jadx \
+            /tmp/r69/android/vendor.apk \
+            > /tmp/r69/evidence/R69_JADX_STDOUT.txt 2> /tmp/r69/evidence/R69_JADX_STDERR.txt || true
+
+          test -d /tmp/r69/android/jadx/sources
+          find /tmp/r69/android/jadx/sources -type f | wc -l \
+            | tee /tmp/r69/evidence/R69_JADX_SOURCE_FILE_COUNT.txt
+
+      - name: Extract Android USB protocol evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          SRC=/tmp/r69/android/jadx/sources
+          OUT=/tmp/r69/evidence/R69_ANDROID_USB_PROTOCOL_HITS.txt
+          : > "$OUT"
+
+          PATTERN='UsbManager|UsbDeviceConnection|UsbDevice|UsbInterface|controlTransfer|bulkTransfer|UsbRequest|claimInterface|releaseInterface|25380|5913|6324|1719|0x6324|0x1719|2463|1917|A5.?5A|0xA5|0x5A|55AA|0x55AA|GET_REPORT|SET_REPORT|HID|BP1048|GoloPine|DSTech'
+
+          grep -RInE "$PATTERN" "$SRC" 2>/dev/null \
+            | head -n 12000 > "$OUT" || true
+
+          # Binary/native strings too, because protocol code may live in JNI.
+          find /tmp/r69/android/unpacked -type f \( -name '*.so' -o -name 'classes*.dex' \) -print0 \
+            | while IFS= read -r -d '' f; do
+                echo "===== $f : ASCII ====="
+                strings -a -n 4 "$f" | grep -Ei "$PATTERN" | head -n 2000 || true
+              done >> /tmp/r69/evidence/R69_ANDROID_BINARY_PROTOCOL_STRINGS.txt
+
+          {
+            echo "ANDROID_USB_HIT_LINES=$(wc -l < "$OUT")"
+            echo "CONTROLTRANSFER_HITS=$(grep -c 'controlTransfer' "$OUT" || true)"
+            echo "BULKTRANSFER_HITS=$(grep -c 'bulkTransfer' "$OUT" || true)"
+            echo "USBREQUEST_HITS=$(grep -c 'UsbRequest' "$OUT" || true)"
+            echo "VID_HEX_HITS=$(grep -Eic '6324|0x6324|2463' "$OUT" || true)"
+            echo "PID_HEX_HITS=$(grep -Eic '1719|0x1719|1917' "$OUT" || true)"
+            echo "VID_DEC_HITS=$(grep -c '25380' "$OUT" || true)"
+            echo "PID_DEC_HITS=$(grep -c '5913' "$OUT" || true)"
+          } | tee /tmp/r69/evidence/R69_ANDROID_PROTOCOL_COUNTS.txt
+
+      - name: Extract Windows client strings and USB evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          EXE=/tmp/r69/windows/vendor.exe
+          PATTERN='USB|HID|VID|PID|6324|1719|25380|5913|2463|1917|A5|5A|55AA|BP1048|GoloPine|DSTech|AudioDSP|WinUSB|hid.dll|SetupDi|CreateFile|WriteFile|ReadFile|DeviceIoControl'
+
+          {
+            echo "===== ASCII STRINGS ====="
+            strings -a -n 4 "$EXE" | grep -Ei "$PATTERN" | head -n 12000 || true
+            echo "===== UTF16-LE STRINGS ====="
+            strings -a -el -n 4 "$EXE" | grep -Ei "$PATTERN" | head -n 12000 || true
+          } > /tmp/r69/evidence/R69_WINDOWS_PROTOCOL_STRINGS.txt
+
+          file "$EXE" | tee /tmp/r69/evidence/R69_WINDOWS_EXE_FILE_TYPE.txt
+
+      - name: Scan vendor binaries for known USB and framing byte patterns
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import json, hashlib
+
+          roots = [
+              Path('/tmp/r69/android/vendor.apk'),
+              Path('/tmp/r69/windows/vendor.exe'),
+          ]
+          patterns = {
+              'VID_PID_LE_6324_1719': bytes.fromhex('24631917'),
+              'VID_LE_6324': bytes.fromhex('2463'),
+              'PID_LE_1719': bytes.fromhex('1917'),
+              'A5_5A': bytes.fromhex('A55A'),
+              'A5_5A_00_00_16': bytes.fromhex('A55A000016'),
+              'USAGE_55AA_LE': bytes.fromhex('AA55'),
+          }
+          result={}
+          for p in roots:
+              b=p.read_bytes()
+              result[p.name]={
+                  'bytes':len(b),
+                  'sha256':hashlib.sha256(b).hexdigest(),
+                  'patterns':{k:b.count(v) for k,v in patterns.items()}
+              }
+          out=Path('/tmp/r69/evidence/R69_BINARY_PATTERN_SCAN.json')
+          out.write_text(json.dumps(result,indent=2)+'\n')
+          print(out.read_text())
+          PY
+
+      - name: Build focused Java/Kotlin protocol excerpts
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          src=Path('/tmp/r69/android/jadx/sources')
+          out=Path('/tmp/r69/evidence/R69_FOCUSED_PROTOCOL_EXCERPTS.txt')
+          needles=[
+              'controlTransfer','bulkTransfer','UsbRequest','claimInterface',
+              'UsbManager','25380','5913','6324','1719','0xA5','0x5A',
+              'HID','send','receive','write','read'
+          ]
+          blocks=[]
+          for p in src.rglob('*'):
+              if not p.is_file() or p.suffix.lower() not in {'.java','.kt'}:
+                  continue
+              try:
+                  lines=p.read_text(errors='ignore').splitlines()
+              except Exception:
+                  continue
+              for i,line in enumerate(lines):
+                  if any(n.lower() in line.lower() for n in needles):
+                      lo=max(0,i-8); hi=min(len(lines),i+13)
+                      blocks.append(f'\n===== {p.relative_to(src)}:{i+1} =====\n')
+                      blocks.extend(x+'\n' for x in lines[lo:hi])
+                      if len(blocks)>30000:
+                          break
+              if len(blocks)>30000:
+                  break
+          out.write_text(''.join(blocks))
+          print('focused_excerpt_bytes=',out.stat().st_size)
+          PY
+
+      - name: Produce R69 static protocol decision
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import json, re
+
+          e=Path('/tmp/r69/evidence')
+          hits=(e/'R69_ANDROID_USB_PROTOCOL_HITS.txt').read_text(errors='ignore')
+          win=(e/'R69_WINDOWS_PROTOCOL_STRINGS.txt').read_text(errors='ignore')
+          pats=json.loads((e/'R69_BINARY_PATTERN_SCAN.json').read_text())
+
+          decision={
+            'revision':'R69',
+            'mode':'STATIC_VENDOR_PROTOCOL_EXTRACTION_ONLY',
+            'official_android_source_url':'https://golodsp.com/wp-content/uploads/2026/05/golopine_audio_turning_release_2026-04-01.apk_.zip',
+            'official_windows_source_url':'https://golodsp.com/wp-content/uploads/2026/05/golopine_audio_turning_release_2026-04-08.exe_.zip',
+            'expected_runtime_vid_pid':'6324:1719',
+            'android_controlTransfer_seen':'controlTransfer' in hits,
+            'android_bulkTransfer_seen':'bulkTransfer' in hits,
+            'android_UsbRequest_seen':'UsbRequest' in hits,
+            'android_vid_or_pid_text_seen':bool(re.search(r'6324|1719|25380|5913|2463|1917',hits,re.I)),
+            'windows_usb_or_hid_text_seen':bool(re.search(r'USB|HID|WinUSB|hid\.dll|SetupDi',win,re.I)),
+            'binary_pattern_scan':pats,
+            'live_device_io':False,
+            'host_to_device_io':False,
+            'flash_allowed':False,
+            'artifact_classification':'STATIC_ANALYSIS_ONLY_NOT_FOR_FLASH',
+            'next_step':'Review focused vendor protocol excerpts and derive exact transport/framing before any new live-board command.'
+          }
+          (e/'R69_FINAL_DECISION.json').write_text(json.dumps(decision,indent=2)+'\n')
+          md=[
+            '# R69 STATIC GOLOPINE/DSTech PROTOCOL EXTRACTION\n',
+            '- Live device I/O: **NO**\n',
+            '- Host-to-device I/O: **NO**\n',
+            '- Flash/write/erase: **NO**\n',
+            '- Source: official GoloPine 7-channel download packages\n',
+            '- Purpose: recover the production vendor transport/framing before any further live probe\n',
+            f"- Android `controlTransfer` seen: **{decision['android_controlTransfer_seen']}**\n",
+            f"- Android `bulkTransfer` seen: **{decision['android_bulkTransfer_seen']}**\n",
+            f"- Android `UsbRequest` seen: **{decision['android_UsbRequest_seen']}**\n",
+            f"- Windows USB/HID strings seen: **{decision['windows_usb_or_hid_text_seen']}**\n",
+            '- Classification: **STATIC_ANALYSIS_ONLY_NOT_FOR_FLASH**\n',
+          ]
+          (e/'R69_FINAL_DECISION.md').write_text(''.join(md))
+          PY
+          cat /tmp/r69/evidence/R69_FINAL_DECISION.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Package static evidence only
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp /tmp/r69/evidence/* /tmp/r69/out/
+          (cd /tmp/r69/out && sha256sum * > SHA256SUMS.txt)
+
+          # Explicitly prove vendor binaries are NOT being redistributed in the artifact.
+          test ! -e /tmp/r69/out/vendor.apk
+          test ! -e /tmp/r69/out/vendor.exe
+          test ! -e /tmp/r69/out/golopine_android.zip
+          test ! -e /tmp/r69/out/golopine_windows.zip
+
+      - name: Upload R69 static vendor protocol evidence
+        uses: actions/upload-artifact@v7
+        with:
+          name: OKN-BP1048P4-R69-STATIC-GOLOPINE-DSTECH-PROTOCOL-EVIDENCE
+          path: /tmp/r69/out/*
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Final fail-closed assertion
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$LIVE_DEVICE_IO" = "NO"
+          test "$HOST_TO_DEVICE_IO" = "NO"
+          test "$FLASH_ALLOWED" = "NO"
+          test "$ERASE_ALLOWED" = "NO"
+          test "$WRITE_ALLOWED" = "NO"
+          grep -q '"live_device_io": false' /tmp/r69/evidence/R69_FINAL_DECISION.json
+          grep -q '"host_to_device_io": false' /tmp/r69/evidence/R69_FINAL_DECISION.json
+          grep -q '"flash_allowed": false' /tmp/r69/evidence/R69_FINAL_DECISION.json
+          grep -q 'STATIC_ANALYSIS_ONLY_NOT_FOR_FLASH' /tmp/r69/evidence/R69_FINAL_DECISION.json
+          echo "R69_STATIC_VENDOR_PROTOCOL_EXTRACTION=PASS"
+          echo "LIVE_DEVICE_IO=NO"
+          echo "FLASH_ALLOWED=NO"
