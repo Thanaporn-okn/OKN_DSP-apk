@@ -1,0 +1,586 @@
+name: OKN BP1048P4 MASTER V13 CONNECT SEQUENCE + HID BUFFER SEMANTICS
+
+"on":
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  GOLOPINE_WINDOWS_URL: "https://golodsp.com/wp-content/uploads/2026/05/golopine_audio_turning_release_2026-04-08.exe_.zip"
+  LIVE_DSP_CONNECTED: "NO"
+  USB_TARGET_ACCESS: "NO"
+  HOST_TO_DSP_IO: "NO"
+  HID_CONNECT_ALLOWED: "NO"
+  HID_SEND_ALLOWED: "NO"
+  HID_READ_ALLOWED: "NO"
+  HID_WRITE_ALLOWED: "NO"
+  FEATURE_REPORT_ALLOWED: "NO"
+  FLASH_ALLOWED: "NO"
+  ERASE_ALLOWED: "NO"
+  WRITE_ALLOWED: "NO"
+
+jobs:
+  master-v13:
+    name: MASTER V13 connect sequence and HID buffer semantics offline
+    runs-on: windows-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Safety gate and workspace
+        shell: pwsh
+        run: |
+          $ErrorActionPreference="Stop"
+          foreach($n in @(
+            "LIVE_DSP_CONNECTED","USB_TARGET_ACCESS","HOST_TO_DSP_IO",
+            "HID_CONNECT_ALLOWED","HID_SEND_ALLOWED","HID_READ_ALLOWED","HID_WRITE_ALLOWED",
+            "FEATURE_REPORT_ALLOWED","FLASH_ALLOWED","ERASE_ALLOWED","WRITE_ALLOWED"
+          )){
+            if((Get-Item "Env:$n").Value -ne "NO"){throw "$n must be NO"}
+          }
+
+          $root="C:\okn_v13"
+          if(Test-Path $root){Remove-Item -Recurse -Force $root}
+          New-Item -ItemType Directory -Force -Path `
+            "$root\download","$root\pkg","$root\harness","$root\evidence","$root\out" | Out-Null
+
+          @"
+          MODE=OFFLINE_CONNECT_SEQUENCE_AND_HID_BUFFER_SEMANTICS
+          LIVE_DSP_CONNECTED=NO
+          USB_TARGET_ACCESS=NO
+          HOST_TO_DSP_IO=NO
+          FEATURE_REPORT_ALLOWED=NO
+          FLASH_ALLOWED=NO
+          "@ | Set-Content "$root\evidence\00_SAFETY.txt"
+
+      - name: Download untouched official vendor EXE
+        shell: pwsh
+        run: |
+          $ErrorActionPreference="Stop"
+          $root="C:\okn_v13"
+
+          curl.exe -fL --retry 6 --retry-all-errors --retry-delay 2 `
+            --connect-timeout 20 --max-time 300 `
+            $env:GOLOPINE_WINDOWS_URL -o "$root\download\vendor.zip"
+          if($LASTEXITCODE -ne 0){throw "download failed"}
+
+          Expand-Archive -Force "$root\download\vendor.zip" "$root\pkg"
+
+          $exe=Get-ChildItem "$root\pkg" -Recurse -File -Filter *.exe |
+            Where-Object {$_.FullName -notmatch '\\__MACOSX\\' -and $_.Name -notlike '._*'} |
+            Sort-Object Length -Descending | Select-Object -First 1
+
+          if(-not $exe){throw "vendor EXE missing"}
+          Copy-Item $exe.FullName "$root\vendor.exe" -Force
+
+          $b=[IO.File]::ReadAllBytes("$root\vendor.exe")
+          if($b.Length -lt 100000 -or $b[0] -ne 0x4D -or $b[1] -ne 0x5A){
+            throw "bad vendor PE"
+          }
+
+          @"
+          BYTES=$($b.Length)
+          SHA256=$((Get-FileHash "$root\vendor.exe" -Algorithm SHA256).Hash)
+          ORIGINAL_BINARY_MODIFIED=NO
+          "@ | Set-Content "$root\evidence\01_VENDOR_IDENTITY.txt"
+
+      - name: Build x86 metadata and JIT probe
+        shell: pwsh
+        run: |
+          $ErrorActionPreference="Stop"
+          $root="C:\okn_v13"
+
+          @'
+          using System;
+          using System.IO;
+          using System.Linq;
+          using System.Reflection;
+          using System.Runtime.CompilerServices;
+          using System.Runtime.InteropServices;
+          using System.Threading;
+          using System.Collections.Generic;
+
+          class Probe
+          {
+              static List<string> L=new List<string>();
+
+              static bool InterestingType(Type t)
+              {
+                  if(t==null)return false;
+                  string n=t.FullName ?? "";
+                  if(n=="BHWnxZ6spmGFPV1vs95.neOkHj6BdZDIamOJWhM")return true;
+                  if(!n.StartsWith("DSTech_AudioDSP_Client."))return false;
+                  string x=n.ToLowerInvariant();
+                  return x.Contains("hid") ||
+                         x.Contains("usb") ||
+                         x.Contains("ufe") ||
+                         x.Contains("devicecommunicationstream") ||
+                         x.Contains("generaldevice") ||
+                         x.Contains("report");
+              }
+
+              static void DumpDllImports(Type t)
+              {
+                  foreach(MethodInfo m in t.GetMethods(
+                      BindingFlags.Public|BindingFlags.NonPublic|
+                      BindingFlags.Static|BindingFlags.Instance|
+                      BindingFlags.DeclaredOnly))
+                  {
+                      object[] a=m.GetCustomAttributes(typeof(DllImportAttribute),false);
+                      foreach(object o in a)
+                      {
+                          var d=(DllImportAttribute)o;
+                          L.Add("DLLIMPORT|"+t.FullName+"::"+m.Name+
+                                "|DLL="+d.Value+
+                                "|ENTRY="+(d.EntryPoint ?? "")+
+                                "|TOKEN="+m.MetadataToken.ToString("X8")+
+                                "|SIG="+m.ToString());
+                      }
+                  }
+              }
+
+              static void Prepare(Type t)
+              {
+                  foreach(MethodInfo m in t.GetMethods(
+                      BindingFlags.Public|BindingFlags.NonPublic|
+                      BindingFlags.Static|BindingFlags.Instance|
+                      BindingFlags.DeclaredOnly))
+                  {
+                      if(m.IsAbstract || m.ContainsGenericParameters)continue;
+                      try
+                      {
+                          RuntimeHelpers.PrepareMethod(m.MethodHandle);
+                          IntPtr p=m.MethodHandle.GetFunctionPointer();
+                          L.Add("METHOD|"+t.FullName+"::"+m.Name+
+                                "|"+m.MetadataToken.ToString("X8")+
+                                "|0x"+p.ToInt64().ToString("X")+
+                                "|"+m.ToString());
+                      }
+                      catch(Exception ex)
+                      {
+                          L.Add("PREPARE_EXCEPTION|"+t.FullName+"::"+m.Name+
+                                "|"+m.MetadataToken.ToString("X8")+
+                                "|"+ex.GetBaseException().GetType().FullName+
+                                "|"+ex.GetBaseException().Message);
+                      }
+                  }
+              }
+
+              static void Main(string[] a)
+              {
+                  string exe=Path.GetFullPath(a[0]);
+                  string outp=Path.GetFullPath(a[1]);
+                  Directory.SetCurrentDirectory(Path.GetDirectoryName(exe));
+
+                  L.Add("PID|"+System.Diagnostics.Process.GetCurrentProcess().Id);
+                  L.Add("REAL_HID_INVOKED|NO");
+                  L.Add("HOST_TO_DSP_IO|NO");
+
+                  Assembly asm=Assembly.LoadFile(exe);
+                  RuntimeHelpers.RunModuleConstructor(asm.ManifestModule.ModuleHandle);
+                  L.Add("MODULE_INITIALIZER|SUCCESS");
+
+                  Type[] ts=asm.GetTypes().Where(InterestingType).OrderBy(x=>x.FullName).ToArray();
+                  L.Add("INTERESTING_TYPE_COUNT|"+ts.Length);
+
+                  foreach(Type t in ts)
+                  {
+                      L.Add("TYPE|"+t.FullName);
+                      DumpDllImports(t);
+                  }
+
+                  foreach(Type t in ts)Prepare(t);
+
+                  File.WriteAllLines(outp,L.ToArray());
+                  Console.WriteLine("READY");
+                  Console.Out.Flush();
+                  Thread.Sleep(25000);
+              }
+          }
+          '@ | Set-Content "$root\harness\Probe.cs"
+
+          $csc="$env:WINDIR\Microsoft.NET\Framework\v4.0.30319\csc.exe"
+          if(-not(Test-Path $csc)){throw "x86 csc missing"}
+
+          & $csc /nologo /platform:x86 /target:exe `
+            /out:"$root\harness\Probe.exe" "$root\harness\Probe.cs"
+          if($LASTEXITCODE -ne 0){throw "Probe compile failed"}
+
+      - name: Static audit probe cannot invoke HID
+        shell: pwsh
+        run: |
+          $ErrorActionPreference="Stop"
+          $src=Get-Content "C:\okn_v13\harness\Probe.cs" -Raw
+
+          if($src -match '\.Invoke\('){throw "reflection Invoke forbidden"}
+          if($src -match 'HidD_SetOutputReport\('){throw "native HID invocation forbidden"}
+          if($src -match 'HidD_GetInputReport\('){throw "native HID invocation forbidden"}
+          if($src -match 'ReadFile\('){throw "ReadFile invocation forbidden"}
+          if($src -match 'WriteFile\('){throw "WriteFile invocation forbidden"}
+
+          "STATIC_AUDIT=PASS" |
+            Set-Content "C:\okn_v13\evidence\02_STATIC_AUDIT.txt"
+
+      - name: Capture metadata JIT and exact call graph in one step
+        shell: pwsh
+        run: |
+          $ErrorActionPreference="Stop"
+          $root="C:\okn_v13"
+          $map="$root\evidence\03_RUNTIME_MAP.txt"
+
+          python -m pip install --disable-pip-version-check --quiet capstone
+
+          @'
+          from pathlib import Path
+          import ctypes,json,struct,sys,re
+          from capstone import Cs,CS_ARCH_X86,CS_MODE_32,CS_OP_IMM,CS_OP_MEM
+          from capstone.x86_const import X86_REG_INVALID
+
+          pid=int(sys.argv[1])
+          mp=Path(sys.argv[2])
+          ev=Path(sys.argv[3])
+          rows=mp.read_text(errors="ignore").splitlines()
+
+          methods=[]
+          ptr_to_name={}
+          dllimports=[]
+
+          for l in rows:
+              if l.startswith("METHOD|"):
+                  _,name,tok,phex,sig=l.split("|",4)
+                  p=int(phex,16)
+                  methods.append(dict(name=name,token=tok,ptr=p,sig=sig))
+                  ptr_to_name[p]=name
+              elif l.startswith("DLLIMPORT|"):
+                  dllimports.append(l)
+
+          k=ctypes.WinDLL("kernel32",use_last_error=True)
+          k.OpenProcess.argtypes=[ctypes.c_uint32,ctypes.c_int,ctypes.c_uint32]
+          k.OpenProcess.restype=ctypes.c_void_p
+          k.ReadProcessMemory.argtypes=[
+              ctypes.c_void_p,ctypes.c_void_p,ctypes.c_void_p,
+              ctypes.c_size_t,ctypes.POINTER(ctypes.c_size_t)
+          ]
+          k.ReadProcessMemory.restype=ctypes.c_int
+          k.CloseHandle.argtypes=[ctypes.c_void_p]
+
+          h=k.OpenProcess(0x0010|0x0400,False,pid)
+          if not h:
+              raise SystemExit("OpenProcess failed "+str(ctypes.get_last_error()))
+
+          def rpm(addr,n):
+              b=(ctypes.c_ubyte*n)()
+              got=ctypes.c_size_t()
+              ok=k.ReadProcessMemory(h,ctypes.c_void_p(addr),ctypes.byref(b),n,ctypes.byref(got))
+              return bool(ok),bytes(b[:got.value])
+
+          def u32(addr):
+              ok,b=rpm(addr,4)
+              return struct.unpack("<I",b)[0] if ok and len(b)==4 else None
+
+          def follow(cur):
+              chain=[]
+              for _ in range(12):
+                  ok,b=rpm(cur,32)
+                  if not ok or len(b)<2:break
+                  chain.append({"addr":cur,"first16":b[:16].hex().upper()})
+                  if b[0]==0xE9 and len(b)>=5:
+                      cur=cur+5+struct.unpack_from("<i",b,1)[0];continue
+                  if b[0]==0xEB and len(b)>=2:
+                      cur=cur+2+struct.unpack_from("<b",b,1)[0];continue
+                  if b[:2]==b"\xFF\x25" and len(b)>=6:
+                      slot=struct.unpack_from("<I",b,2)[0]
+                      nxt=u32(slot)
+                      if nxt:cur=nxt;continue
+                  if b[0]==0x68 and len(b)>=6 and b[5]==0xC3:
+                      cur=struct.unpack_from("<I",b,1)[0];continue
+                  if b[0]==0xB8 and len(b)>=7 and b[5:7]==b"\xFF\xE0":
+                      cur=struct.unpack_from("<I",b,1)[0];continue
+                  break
+              return cur,chain
+
+          def sym(target):
+              if target in ptr_to_name:return ptr_to_name[target]
+              near=[]
+              for a,n in ptr_to_name.items():
+                  d=target-a
+                  if 0<=d<=8:near.append((d,n))
+              if near:
+                  d,n=min(near)
+                  return n+(f"+0x{d:X}" if d else "")
+              return None
+
+          md=Cs(CS_ARCH_X86,CS_MODE_32)
+          md.detail=True
+          edges=[]
+          sections={}
+          captures=[]
+
+          for m in methods:
+              resolved,chain=follow(m["ptr"])
+              ok,b=rpm(resolved,4096)
+              captures.append({
+                  **m,"resolved":resolved,"resolved_hex":f"0x{resolved:X}",
+                  "read_ok":ok,"bytes":len(b),"jump_chain":chain
+              })
+              if not ok or not b:continue
+
+              out=[]
+              for ins in md.disasm(b,resolved):
+                  ann=""
+                  if ins.mnemonic=="call" and ins.operands:
+                      target=None;kind=None
+                      op=ins.operands[0]
+                      if op.type==CS_OP_IMM:
+                          target=op.imm & 0xffffffff;kind="direct"
+                      elif op.type==CS_OP_MEM:
+                          mem=op.mem
+                          if mem.base==X86_REG_INVALID and mem.index==X86_REG_INVALID:
+                              slot=mem.disp & 0xffffffff
+                              val=u32(slot)
+                              if val:
+                                  target=val & 0xffffffff
+                                  kind=f"indirect@[0x{slot:X}]"
+                      if target is not None:
+                          s=sym(target)
+                          edges.append({
+                              "from":m["name"],"from_token":m["token"],
+                              "at":f"0x{ins.address:X}",
+                              "target":f"0x{target:X}",
+                              "kind":kind,"symbol":s
+                          })
+                          ann=" ; CALL "+kind+" "+f"0x{target:X}"+((" => "+s) if s else "")
+                  out.append(f"{ins.address:08X}: {ins.mnemonic} {ins.op_str}".rstrip()+ann)
+                  if len(out)>=700:break
+              sections[m["name"]+"|"+m["token"]]="\n".join(out)
+
+          k.CloseHandle(h)
+
+          (ev/"04_JIT_CAPTURES.json").write_text(json.dumps(captures,indent=2)+"\n")
+          (ev/"05_CALL_EDGES.json").write_text(json.dumps(edges,indent=2)+"\n")
+          (ev/"06_DLLIMPORTS.txt").write_text("\n".join(dllimports)+"\n")
+
+          focus_names=[
+              "BHWnxZ6spmGFPV1vs95.neOkHj6BdZDIamOJWhM::Connect",
+              "BHWnxZ6spmGFPV1vs95.neOkHj6BdZDIamOJWhM::Write",
+              "BHWnxZ6spmGFPV1vs95.neOkHj6BdZDIamOJWhM::ReadBytes",
+              "DSTech_AudioDSP_Client.HIDInterface::Connect",
+              "DSTech_AudioDSP_Client.HIDInterface::Send",
+              "DSTech_AudioDSP_Client.HIDInterface::HidRead",
+              "DSTech_AudioDSP_Client.Hid::OpenDevice",
+              "DSTech_AudioDSP_Client.Hid::Read",
+              "DSTech_AudioDSP_Client.Hid::Write",
+              "DSTech_AudioDSP_Client.UFEcommandBridge::SendDeviceDescriptionRequest",
+              "DSTech_AudioDSP_Client.UFEcommandBridge::sendCommandFromQueue"
+          ]
+
+          focused=[]
+          for key,sec in sections.items():
+              if any(key.startswith(x+"|") for x in focus_names):
+                  focused.append("\n===== "+key+" =====\n"+sec+"\n")
+          (ev/"07_FOCUSED_DISASSEMBLY.txt").write_text("".join(focused))
+
+          focus_edges=[
+              e for e in edges
+              if any(e["from"].startswith(x) for x in focus_names)
+          ]
+          (ev/"08_FOCUSED_CALL_EDGES.json").write_text(json.dumps(focus_edges,indent=2)+"\n")
+
+          # Transitive graph among known prepared methods only.
+          graph={}
+          for e in edges:
+              if e.get("symbol"):
+                  graph.setdefault(e["from"],set()).add(e["symbol"].split("+0x")[0])
+
+          def reachable(start,keywords,maxdepth=6):
+              seen={start};front=[start];hits=[]
+              for d in range(maxdepth):
+                  nxt=[]
+                  for a in front:
+                      for b in graph.get(a,()):
+                          if any(k.lower() in b.lower() for k in keywords):
+                              hits.append({"depth":d+1,"from":a,"to":b})
+                          if b not in seen:
+                              seen.add(b);nxt.append(b)
+                  front=nxt
+              return hits
+
+          conn="BHWnxZ6spmGFPV1vs95.neOkHj6BdZDIamOJWhM::Connect"
+          conn_hits=reachable(conn,["::Send","::Write","SetOutput","SetFeature","getFeature"])
+          (ev/"09_CONNECT_REACHABILITY.json").write_text(json.dumps(conn_hits,indent=2)+"\n")
+
+          print("PREPARED_METHODS",len(methods))
+          print("DLLIMPORTS",len(dllimports))
+          print("CALL_EDGES",len(edges))
+          print("CONNECT_OUTPUT_REACHABILITY",len(conn_hits))
+          '@ | Set-Content "$root\analyze.py"
+
+          $p=Start-Process `
+            -FilePath "$root\harness\Probe.exe" `
+            -ArgumentList @("$root\vendor.exe",$map) `
+            -WorkingDirectory $root `
+            -RedirectStandardOutput "$root\evidence\03A_PROBE_STDOUT.txt" `
+            -RedirectStandardError "$root\evidence\03B_PROBE_STDERR.txt" `
+            -PassThru
+
+          $ready=$false
+          for($i=0;$i -lt 120;$i++){
+            Start-Sleep -Milliseconds 100
+            if(Test-Path $map){$ready=$true;break}
+            if($p.HasExited){break}
+          }
+          if(-not $ready){
+            if(-not $p.HasExited){Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue}
+            throw "runtime map missing"
+          }
+
+          try{
+            python "$root\analyze.py" $p.Id $map "$root\evidence"
+            if($LASTEXITCODE -ne 0){throw "analyzer failed"}
+          } finally {
+            if(-not $p.HasExited){Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue}
+          }
+
+      - name: Derive V13 decision
+        shell: pwsh
+        run: |
+          $ErrorActionPreference="Stop"
+          $root="C:\okn_v13"
+
+          @'
+          from pathlib import Path
+          import json,re
+
+          ev=Path(r"C:\okn_v13\evidence")
+          imports=(ev/"06_DLLIMPORTS.txt").read_text(errors="ignore")
+          dis=(ev/"07_FOCUSED_DISASSEMBLY.txt").read_text(errors="ignore")
+          reach=json.loads((ev/"09_CONNECT_REACHABILITY.json").read_text())
+
+          def imported(entry):
+              return ("ENTRY="+entry) in imports
+
+          facts={
+              "revision":"MASTER-V13",
+              "dllimport_HidD_SetOutputReport":imported("HidD_SetOutputReport"),
+              "dllimport_HidD_GetInputReport":imported("HidD_GetInputReport"),
+              "dllimport_HidD_SetFeature":imported("HidD_SetFeature"),
+              "dllimport_HidD_GetFeature":imported("HidD_GetFeature"),
+
+              "usb_write_calls_hidinterface_send":
+                  "BHWnxZ6spmGFPV1vs95.neOkHj6BdZDIamOJWhM::Write" in dis and
+                  "=> DSTech_AudioDSP_Client.HIDInterface::Send" in dis,
+
+              "hidinterface_send_calls_hid_write":
+                  "DSTech_AudioDSP_Client.HIDInterface::Send" in dis and
+                  "=> DSTech_AudioDSP_Client.Hid::Write" in dis,
+
+              "hid_read_calls_getinput_wrapper":
+                  "DSTech_AudioDSP_Client.Hid::Read" in dis and
+                  "=> DSTech_AudioDSP_Client.Hid::Hl8q09gqNT" in dis,
+
+              "hid_write_calls_setoutput_wrapper":
+                  "DSTech_AudioDSP_Client.Hid::Write" in dis and
+                  "=> DSTech_AudioDSP_Client.Hid::HLvqy7J7nC" in dis,
+
+              "connect_known_output_reachability":reach,
+              "connect_known_output_reachability_count":len(reach),
+
+              "v12_physical_result":"SET_REPORT_256_ACCEPTED_BUT_64_INPUT_REPORTS_ZERO",
+              "live_dsp_connected":False,
+              "host_to_dsp_io":False,
+              "hid_api_invoked":False,
+              "feature_report_invoked":False,
+              "flash_allowed":False
+          }
+
+          # Strong static+JIT mapping only if exact DllImport names exist.
+          facts["read_path_static_plus_jit_confirmed"] = (
+              facts["dllimport_HidD_GetInputReport"] and
+              facts["hid_read_calls_getinput_wrapper"]
+          )
+          facts["write_path_static_plus_jit_confirmed"] = (
+              facts["dllimport_HidD_SetOutputReport"] and
+              facts["hid_write_calls_setoutput_wrapper"]
+          )
+
+          if facts["connect_known_output_reachability_count"]>0:
+              facts["status"]="CONNECT_PATH_HAS_KNOWN_OUTPUT_OR_FEATURE_EDGE_REVIEW_BEFORE_NEXT_LIVE_TEST"
+          elif facts["read_path_static_plus_jit_confirmed"] and facts["write_path_static_plus_jit_confirmed"]:
+              facts["status"]="HID_BUFFER_PATH_CONFIRMED_NO_KNOWN_CONNECT_OUTPUT_EDGE_NEXT_LIVE_TEST_MUST_NOT_GUESS"
+          else:
+              facts["status"]="MANUAL_REVIEW_REQUIRED_BEFORE_NEXT_LIVE_TEST"
+
+          (ev/"10_V13_FINAL_DECISION.json").write_text(json.dumps(facts,indent=2)+"\n")
+
+          md=f"""# MASTER V13 FINAL DECISION
+
+          - HidD_SetOutputReport import present: **{facts['dllimport_HidD_SetOutputReport']}**
+          - HidD_GetInputReport import present: **{facts['dllimport_HidD_GetInputReport']}**
+          - USBHID.Write -> HIDInterface.Send: **{facts['usb_write_calls_hidinterface_send']}**
+          - HIDInterface.Send -> Hid.Write: **{facts['hidinterface_send_calls_hid_write']}**
+          - Hid.Read -> GetInputReport wrapper: **{facts['hid_read_calls_getinput_wrapper']}**
+          - Hid.Write -> SetOutputReport wrapper: **{facts['hid_write_calls_setoutput_wrapper']}**
+          - Known Connect -> output/feature reachability hits: **{facts['connect_known_output_reachability_count']}**
+          - Real HID invoked: **NO**
+          - Host-to-DSP I/O: **NO**
+          - Feature report invoked: **NO**
+          - Flash allowed: **NO**
+
+          Status: **{facts['status']}**
+
+          Classification: **OFFLINE_CONNECT_AND_HID_BUFFER_SEMANTICS_NOT_FOR_FLASH**
+          """
+          (ev/"11_V13_FINAL_DECISION.md").write_text(md)
+          print(md)
+          '@ | Set-Content "$root\derive.py"
+
+          python "$root\derive.py"
+          Get-Content "$root\evidence\11_V13_FINAL_DECISION.md" >> $env:GITHUB_STEP_SUMMARY
+
+      - name: Package V13 evidence
+        shell: pwsh
+        run: |
+          $ErrorActionPreference="Stop"
+          $root="C:\okn_v13"
+          Copy-Item "$root\evidence\*" "$root\out\" -Force
+
+          if(Test-Path "$root\out\vendor.exe"){throw "vendor EXE leak"}
+          if(Test-Path "$root\out\Probe.exe"){throw "probe EXE leak"}
+
+          Get-ChildItem "$root\out" -File | ForEach-Object {
+            "$((Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower())  $($_.Name)"
+          } | Set-Content "$root\out\SHA256SUMS.txt"
+
+      - name: Upload V13 evidence
+        uses: actions/upload-artifact@v7
+        with:
+          name: OKN-BP1048P4-MASTER-V13-CONNECT-SEQUENCE-HID-BUFFER-EVIDENCE
+          path: C:\okn_v13\out\*
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Final fail-closed assertion
+        shell: pwsh
+        run: |
+          $ErrorActionPreference="Stop"
+          $root="C:\okn_v13"
+
+          foreach($n in @(
+            "LIVE_DSP_CONNECTED","USB_TARGET_ACCESS","HOST_TO_DSP_IO",
+            "HID_CONNECT_ALLOWED","HID_SEND_ALLOWED","HID_READ_ALLOWED","HID_WRITE_ALLOWED",
+            "FEATURE_REPORT_ALLOWED","FLASH_ALLOWED","ERASE_ALLOWED","WRITE_ALLOWED"
+          )){
+            if((Get-Item "Env:$n").Value -ne "NO"){throw "$n changed"}
+          }
+
+          $d=Get-Content "$root\evidence\10_V13_FINAL_DECISION.json" -Raw | ConvertFrom-Json
+          if($d.live_dsp_connected -ne $false){throw "bad live DSP state"}
+          if($d.host_to_dsp_io -ne $false){throw "bad host I/O state"}
+          if($d.hid_api_invoked -ne $false){throw "bad HID API state"}
+          if($d.feature_report_invoked -ne $false){throw "bad feature state"}
+          if($d.flash_allowed -ne $false){throw "bad flash state"}
+
+          "MASTER_V13=PASS"
+          "HOST_TO_DSP_IO=NO"
+          "FEATURE_REPORT=NO"
+          "FLASH_ALLOWED=NO"
