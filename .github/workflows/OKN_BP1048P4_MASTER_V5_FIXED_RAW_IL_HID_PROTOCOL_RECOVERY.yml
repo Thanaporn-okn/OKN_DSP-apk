@@ -1,0 +1,518 @@
+name: OKN BP1048P4 MASTER V5 FIXED RAW IL HID PROTOCOL RECOVERY
+
+"on":
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  GOLOPINE_WINDOWS_URL: "https://golodsp.com/wp-content/uploads/2026/05/golopine_audio_turning_release_2026-04-08.exe_.zip"
+  EXPECTED_RUNTIME_VID_PID: "6324:1719"
+  LIVE_DEVICE_IO: "NO"
+  USB_DEVICE_ACCESS: "NO"
+  HOST_TO_DEVICE_IO: "NO"
+  FLASH_ALLOWED: "NO"
+  WRITE_ALLOWED: "NO"
+  ERASE_ALLOWED: "NO"
+  RECOVERY_COMMAND_ALLOWED: "NO"
+
+jobs:
+  master-v5-fixed:
+    name: MASTER V5 FIXED raw IL HID protocol recovery
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+
+    steps:
+      - name: Safety gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$LIVE_DEVICE_IO" = "NO"
+          test "$USB_DEVICE_ACCESS" = "NO"
+          test "$HOST_TO_DEVICE_IO" = "NO"
+          test "$FLASH_ALLOWED" = "NO"
+          test "$WRITE_ALLOWED" = "NO"
+          test "$ERASE_ALLOWED" = "NO"
+          test "$RECOVERY_COMMAND_ALLOWED" = "NO"
+          rm -rf /tmp/v5f
+          mkdir -p /tmp/v5f/{download,pkg,tools,ilspy,evidence,out,extract}
+
+      - name: Download and select real official Windows vendor client
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fL --retry 6 --retry-all-errors --retry-delay 2 \
+            --connect-timeout 20 --max-time 300 \
+            "$GOLOPINE_WINDOWS_URL" -o /tmp/v5f/download/vendor.zip
+
+          unzip -q /tmp/v5f/download/vendor.zip -d /tmp/v5f/pkg
+
+          EXE="$(
+            find /tmp/v5f/pkg -type f -iname '*.exe' \
+              ! -path '*/__MACOSX/*' ! -name '._*' -printf '%s\t%p\n' \
+              | sort -nr | head -n1 | cut -f2-
+          )"
+          test -n "$EXE"
+          test "$(stat -c '%s' "$EXE")" -gt 100000
+          test "$(xxd -p -l 2 "$EXE" | tr '[:lower:]' '[:upper:]')" = "4D5A"
+          cp "$EXE" /tmp/v5f/vendor.exe
+
+          {
+            echo "SELECTED_EXE=$EXE"
+            file /tmp/v5f/vendor.exe
+            stat -c 'BYTES=%s' /tmp/v5f/vendor.exe
+            sha256sum /tmp/v5f/vendor.exe
+            echo "FIRST_128_BYTES="
+            xxd -g1 -l 128 /tmp/v5f/vendor.exe
+          } | tee /tmp/v5f/evidence/01_VENDOR_EXE_IDENTITY.txt
+
+      - name: Install ILSpy only
+        shell: bash
+        run: |
+          set -euo pipefail
+          dotnet tool install --tool-path /tmp/v5f/tools ilspycmd \
+            > /tmp/v5f/evidence/02_ILSPY_INSTALL.txt 2>&1
+          /tmp/v5f/tools/ilspycmd --version \
+            | tee /tmp/v5f/evidence/03_ILSPY_VERSION.txt
+
+      - name: Export decompiled C sharp and raw IL
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/v5f/ilspy/{cs,il}
+
+          /tmp/v5f/tools/ilspycmd -p -o /tmp/v5f/ilspy/cs /tmp/v5f/vendor.exe \
+            > /tmp/v5f/evidence/04_ILSPY_CS_STDOUT.txt \
+            2> /tmp/v5f/evidence/05_ILSPY_CS_STDERR.txt || true
+
+          /tmp/v5f/tools/ilspycmd -il -o /tmp/v5f/ilspy/il /tmp/v5f/vendor.exe \
+            > /tmp/v5f/evidence/06_ILSPY_IL_STDOUT.txt \
+            2> /tmp/v5f/evidence/07_ILSPY_IL_STDERR.txt || true
+
+          CS_COUNT="$(find /tmp/v5f/ilspy/cs -type f -name '*.cs' | wc -l)"
+          IL_COUNT="$(find /tmp/v5f/ilspy/il -type f | wc -l)"
+          IL_BYTES="$(find /tmp/v5f/ilspy/il -type f -printf '%s\n' | awk '{s+=$1} END{print s+0}')"
+
+          {
+            echo "CS_FILES=$CS_COUNT"
+            echo "IL_FILES=$IL_COUNT"
+            echo "IL_BYTES=$IL_BYTES"
+          } | tee /tmp/v5f/evidence/08_ILSPY_STRUCTURE.txt
+
+          test "$CS_COUNT" -gt 100
+          test "$IL_COUNT" -gt 0
+          test "$IL_BYTES" -gt 100000
+
+          # Keep only hash/index of full raw IL. Full vendor-derived IL is not repackaged.
+          find /tmp/v5f/ilspy/il -type f -print0 \
+            | sort -z \
+            | xargs -0 sha256sum \
+            > /tmp/v5f/evidence/09_RAW_IL_SHA256.txt
+
+      - name: Parse raw IL for exact HID call chain method bodies and constants
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import re, json, hashlib
+          from collections import Counter, defaultdict
+
+          ilroot=Path('/tmp/v5f/ilspy/il')
+          ev=Path('/tmp/v5f/evidence')
+
+          texts=[]
+          for p in sorted(ilroot.rglob('*')):
+              if not p.is_file():
+                  continue
+              try:
+                  s=p.read_text(errors='ignore')
+              except Exception:
+                  continue
+              texts.append((str(p.relative_to(ilroot)),s))
+
+          combined='\n'.join(s for _,s in texts)
+
+          focus=[
+              'HidD_SetOutputReport','HidD_SetFeature','HidD_GetInputReport',
+              'ReadFile','WriteFile','CreateFile',
+              'USBHID','HIDInterface','HidDevice','HidReporterDeviceInfo',
+              'UsbHidReporterDeviceInfo','DSTechAcutatorCommand',
+              'HardwareCommandConverter','GetOutputData',
+              'CreateSigmaDSPsingleVariableUpdateCommand',
+              'CreateSigmaDSPfiltrUpdateCommand',
+              'UFE_WRITE_ACTUATOR_COMMAND','UFE_READ_SENSOR',
+              'OutputReportLength','InputReportLength',
+              'q71r2Rj8SiD9GF1BI50','N9jju8llVi','ziUjWiyQoN',
+              'GlNjyV3Xag','yedj03pwm9',
+              'VirtualProtect','WriteProcessMemory','CryptoStream',
+              'GetFunctionPointer','GetDelegateForFunctionPointer'
+          ]
+
+          # ILSpy raw IL normally terminates each method with:
+          #   } // end of method Namespace.Type::Method
+          methods=[]
+          for fname,txt in texts:
+              lines=txt.splitlines()
+              starts=[i for i,l in enumerate(lines) if re.match(r'^\s*\.method\b',l)]
+              for si,start in enumerate(starts):
+                  end=starts[si+1] if si+1<len(starts) else len(lines)
+                  # Prefer the explicit method-end marker inside this interval.
+                  for j in range(start,min(end,len(lines))):
+                      if re.search(r'\}\s*//\s*end of method',lines[j]):
+                          end=j+1
+                          break
+                  block='\n'.join(lines[start:end])
+                  if not block.strip():
+                      continue
+                  instr=sum(1 for l in lines[start:end] if re.search(r'\bIL_[0-9A-Fa-f]{4,8}:',l))
+                  interesting=any(x.lower() in block.lower() for x in focus)
+                  if interesting:
+                      methods.append({
+                          'file':fname,
+                          'start_line':start+1,
+                          'instruction_count':instr,
+                          'is_probable_stub': instr <= 6,
+                          'block':block
+                      })
+
+          # Keep focused method blocks only, capped per method.
+          focused_out=[]
+          summary=[]
+          calls=[]
+          constants=[]
+          pinvokes=[]
+          for m in methods:
+              b=m['block']
+              blines=b.splitlines()
+              if len(blines)>260:
+                  b='\n'.join(blines[:260])+'\n...[TRUNCATED METHOD BLOCK]...'
+              focused_out.append(
+                  f"\n===== {m['file']}:{m['start_line']} "
+                  f"instr={m['instruction_count']} stub={m['is_probable_stub']} =====\n{b}\n"
+              )
+              sig=''
+              for l in blines[:12]:
+                  if '.method' in l or sig:
+                      sig += ' ' + l.strip()
+                      if '{' in l:
+                          break
+              summary.append({
+                  'file':m['file'],
+                  'start_line':m['start_line'],
+                  'instruction_count':m['instruction_count'],
+                  'probable_stub':m['is_probable_stub'],
+                  'signature':sig[:1000]
+              })
+              for l in blines:
+                  if re.search(r'\b(call|callvirt|newobj)\b',l):
+                      calls.append({
+                          'method_file':m['file'],
+                          'method_start_line':m['start_line'],
+                          'line':l.strip()
+                      })
+                  if re.search(r'\b(ldc\.i4|ldc\.i8|ldstr|newarr|stelem|stind|ldtoken)\b',l):
+                      constants.append({
+                          'method_file':m['file'],
+                          'method_start_line':m['start_line'],
+                          'line':l.strip()
+                      })
+                  if 'pinvokeimpl' in l.lower() or any(x in l for x in
+                      ['HidD_SetOutputReport','HidD_SetFeature','HidD_GetInputReport','ReadFile','WriteFile','CreateFile']):
+                      pinvokes.append({
+                          'method_file':m['file'],
+                          'method_start_line':m['start_line'],
+                          'line':l.strip()
+                      })
+
+          (ev/'10_FOCUSED_RAW_IL_METHODS.txt').write_text(''.join(focused_out))
+          (ev/'11_FOCUSED_METHOD_SUMMARY.json').write_text(json.dumps(summary,indent=2)+'\n')
+          (ev/'12_FOCUSED_CALL_GRAPH.json').write_text(json.dumps(calls,indent=2)+'\n')
+          (ev/'13_FOCUSED_CONSTANTS.json').write_text(json.dumps(constants,indent=2)+'\n')
+          (ev/'14_PINVOKE_AND_HID_APIS.json').write_text(json.dumps(pinvokes,indent=2)+'\n')
+
+          # Global context windows for names that may occur outside selected method blocks.
+          global_lines=combined.splitlines()
+          windows=[]
+          for i,l in enumerate(global_lines):
+              if any(x.lower() in l.lower() for x in focus):
+                  lo=max(0,i-10); hi=min(len(global_lines),i+16)
+                  windows.append(
+                      f"\n===== GLOBAL:{i+1} =====\n" +
+                      '\n'.join(global_lines[lo:hi]) + '\n'
+                  )
+                  if len(windows)>=3000:
+                      break
+          (ev/'15_GLOBAL_RAW_IL_WINDOWS.txt').write_text(''.join(windows))
+
+          # Method names / calls most associated with HID APIs.
+          relevant_calls=[
+              x for x in calls if any(k.lower() in x['line'].lower() for k in
+                  ['hidd_setoutputreport','hidd_setfeature','hidd_getinputreport',
+                   'readfile','writefile','getoutputdata','dstechacutatorcommand',
+                   'createsigmadsp','hidinterface','usb'])
+          ]
+          (ev/'16_EXACT_HID_CALLS_ONLY.json').write_text(json.dumps(relevant_calls,indent=2)+'\n')
+
+          # Integer constants appearing in focused IL.
+          freq=Counter()
+          for x in constants:
+              line=x['line']
+              for hx in re.findall(r'0x([0-9A-Fa-f]+)',line):
+                  try:
+                      v=int(hx,16)
+                      if 0 <= v <= 0xFFFFFFFF: freq[f'0x{v:X}']+=1
+                  except: pass
+              m=re.search(r'\bldc\.i4(?:\.s)?\s+(-?\d+)',line)
+              if m:
+                  try:
+                      v=int(m.group(1))
+                      freq[str(v)]+=1
+                  except: pass
+          (ev/'17_FOCUSED_INTEGER_FREQUENCY.json').write_text(json.dumps(freq.most_common(2000),indent=2)+'\n')
+
+          print("RAW_IL_FILES=",len(texts))
+          print("FOCUSED_METHODS=",len(summary))
+          print("FOCUSED_CALLS=",len(calls))
+          print("FOCUSED_CONSTANT_LINES=",len(constants))
+          print("HID_CALL_LINES=",len(relevant_calls))
+          PY
+
+      - name: Extract focused protected C sharp source around command and anti tamper code
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          root=Path('/tmp/v5f/ilspy/cs')
+          ev=Path('/tmp/v5f/evidence')
+          needles=[
+              'DSTechAcutatorCommand','HardwareCommandConverter','HIDInterface',
+              'HidD_SetOutputReport','HidD_SetFeature','HidD_GetInputReport',
+              'GetOutputData','CreateSigmaDSP','q71r2Rj8SiD9GF1BI50',
+              'N9jju8llVi','ziUjWiyQoN','GlNjyV3Xag','yedj03pwm9',
+              'VirtualProtect','WriteProcessMemory','CryptoStream',
+              'GetFunctionPointer','GetDelegateForFunctionPointer'
+          ]
+          out=[]
+          files=set()
+          for p in root.rglob('*.cs'):
+              try:
+                  lines=p.read_text(errors='ignore').splitlines()
+              except Exception:
+                  continue
+              for i,l in enumerate(lines):
+                  if any(n.lower() in l.lower() for n in needles):
+                      files.add(str(p.relative_to(root)))
+                      lo=max(0,i-14); hi=min(len(lines),i+28)
+                      out.append(
+                          f"\n===== {p.relative_to(root)}:{i+1} =====\n" +
+                          '\n'.join(f"{j+1:05d}: {lines[j]}" for j in range(lo,hi)) + '\n'
+                      )
+                      if len(out)>=3500:
+                          break
+              if len(out)>=3500:
+                  break
+          (ev/'18_FOCUSED_CSHARP_EXCERPTS.txt').write_text(''.join(out))
+          (ev/'19_RELEVANT_CSHARP_FILES.txt').write_text('\n'.join(sorted(files))+'\n')
+          print("RELEVANT_CSHARP_FILES=",len(files))
+          PY
+
+      - name: Inspect PE sections resources and binary protocol patterns
+        shell: bash
+        run: |
+          set -euo pipefail
+          file /tmp/v5f/vendor.exe > /tmp/v5f/evidence/20_PE_FILETYPE.txt
+          objdump -p /tmp/v5f/vendor.exe > /tmp/v5f/evidence/21_PE_OBJDUMP.txt 2>&1 || true
+          7z l /tmp/v5f/vendor.exe > /tmp/v5f/evidence/22_PE_7Z_LIST.txt 2>&1 || true
+          7z x -y /tmp/v5f/vendor.exe -o/tmp/v5f/extract \
+            > /tmp/v5f/evidence/23_PE_7Z_EXTRACT.txt 2>&1 || true
+
+          python3 - <<'PY'
+          from pathlib import Path
+          import hashlib, json, re, math
+
+          roots=[Path('/tmp/v5f/vendor.exe')]
+          roots += [p for p in Path('/tmp/v5f/extract').rglob('*') if p.is_file()]
+
+          pats={
+              'VID_PID_LE_6324_1719':bytes.fromhex('24631917'),
+              'VID_LE_6324':bytes.fromhex('2463'),
+              'PID_LE_1719':bytes.fromhex('1917'),
+              'VID_ASCII_6324':b'6324',
+              'PID_ASCII_1719':b'1719',
+              'VID_DEC_ASCII_25380':b'25380',
+              'PID_DEC_ASCII_5913':b'5913',
+              'A5_5A':bytes.fromhex('A55A'),
+              'A5_5A_00_00_16':bytes.fromhex('A55A000016'),
+              'AA_55':bytes.fromhex('AA55'),
+              '55_AA':bytes.fromhex('55AA'),
+              'MZ':b'MZ',
+              'BSJB':b'BSJB'
+          }
+          rows=[]
+          for p in roots[:1000]:
+              try:b=p.read_bytes()
+              except:continue
+              hits={}
+              for k,v in pats.items():
+                  offs=[]
+                  pos=0
+                  while True:
+                      i=b.find(v,pos)
+                      if i<0: break
+                      offs.append(i)
+                      pos=i+1
+                      if len(offs)>=100: break
+                  hits[k]=offs
+              if p.name=='vendor.exe' or any(hits[k] for k in hits):
+                  rows.append({
+                      'file':str(p),
+                      'bytes':len(b),
+                      'sha256':hashlib.sha256(b).hexdigest(),
+                      'hits':hits
+                  })
+          Path('/tmp/v5f/evidence/24_BINARY_PATTERN_OFFSETS.json').write_text(
+              json.dumps(rows,indent=2)+'\n'
+          )
+          PY
+
+          {
+            echo "===== ASCII FOCUSED ====="
+            strings -a -n 4 /tmp/v5f/vendor.exe | \
+              grep -Ei 'USB|HID|6324|1719|25380|5913|A5|5A|55AA|DSTech|BP1048|SetOutputReport|SetFeature|GetInputReport|WriteFile|ReadFile|VirtualProtect|WriteProcessMemory|CryptoStream|GetFunctionPointer|firmware|upgrade|flash|erase|backup|restore|recovery' \
+              | head -n 30000 || true
+            echo "===== UTF16 FOCUSED ====="
+            strings -a -el -n 4 /tmp/v5f/vendor.exe | \
+              grep -Ei 'USB|HID|6324|1719|25380|5913|A5|5A|55AA|DSTech|BP1048|SetOutputReport|SetFeature|GetInputReport|WriteFile|ReadFile|VirtualProtect|WriteProcessMemory|CryptoStream|GetFunctionPointer|firmware|upgrade|flash|erase|backup|restore|recovery' \
+              | head -n 30000 || true
+          } > /tmp/v5f/evidence/25_FOCUSED_BINARY_STRINGS.txt
+
+      - name: Build V5 FIXED decision
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import json, re
+
+          e=Path('/tmp/v5f/evidence')
+          il=(e/'10_FOCUSED_RAW_IL_METHODS.txt').read_text(errors='ignore')
+          glob=(e/'15_GLOBAL_RAW_IL_WINDOWS.txt').read_text(errors='ignore')
+          cs=(e/'18_FOCUSED_CSHARP_EXCERPTS.txt').read_text(errors='ignore')
+          calls=json.loads((e/'16_EXACT_HID_CALLS_ONLY.json').read_text())
+          summaries=json.loads((e/'11_FOCUSED_METHOD_SUMMARY.json').read_text())
+
+          def seen(p,*texts):
+              return any(re.search(p,t,re.I|re.S) for t in texts)
+
+          command_related=[m for m in summaries if seen(
+              r'DSTechAcutatorCommand|HardwareCommandConverter|GetOutputData|CreateSigmaDSP',
+              m.get('signature','')
+          )]
+          non_stub_command=[m for m in command_related if not m.get('probable_stub')]
+
+          decision={
+              'revision':'MASTER-V5-FIXED',
+              'source':'official GoloPine/DSTech Windows client static raw IL',
+              'expected_runtime_vid_pid':'6324:1719',
+              'raw_il_parsed':True,
+              'hid_set_output_report_seen':seen(r'HidD_SetOutputReport',il,glob,cs),
+              'hid_set_feature_seen':seen(r'HidD_SetFeature',il,glob,cs),
+              'hid_get_input_report_seen':seen(r'HidD_GetInputReport',il,glob,cs),
+              'writefile_seen':seen(r'\bWriteFile\b',il,glob,cs),
+              'readfile_seen':seen(r'\bReadFile\b',il,glob,cs),
+              'dstech_command_seen':seen(r'DSTechAcutatorCommand',il,glob,cs),
+              'sigma_command_seen':seen(r'CreateSigmaDSP',il,glob,cs),
+              'protector_runtime_seen':seen(
+                  r'q71r2Rj8SiD9GF1BI50|VirtualProtect|WriteProcessMemory|CryptoStream|GetFunctionPointer',
+                  il,glob,cs
+              ),
+              'focused_hid_call_records':len(calls),
+              'command_related_method_records':len(command_related),
+              'command_related_non_stub_records':len(non_stub_command),
+              'exact_live_frame_proven':False,
+              'safe_stock_backup_proven':False,
+              'rollback_proven':False,
+              'exact_board_flash_layout_proven':False,
+              'live_device_io':False,
+              'host_to_device_io':False,
+              'flash_allowed':False
+          }
+
+          # Exact frame is intentionally not auto-claimed merely from constants.
+          if len(non_stub_command)>0 and len(calls)>0:
+              decision['status']='RAW_IL_HAS_NON_STUB_COMMAND_PATH_MANUAL_FRAME_REVIEW_REQUIRED'
+          elif decision['protector_runtime_seen']:
+              decision['status']='RUNTIME_PROTECTED_COMMAND_BODIES_CONFIRMED_STATIC_FRAME_NOT_YET_PROVEN'
+          else:
+              decision['status']='STATIC_FRAME_NOT_YET_PROVEN'
+
+          (e/'26_V5_FIXED_FINAL_DECISION.json').write_text(json.dumps(decision,indent=2)+'\n')
+          md=f"""# MASTER V5 FIXED FINAL DECISION
+
+          - Raw IL parsed: **YES**
+          - HidD_SetOutputReport: **{decision['hid_set_output_report_seen']}**
+          - HidD_SetFeature: **{decision['hid_set_feature_seen']}**
+          - HidD_GetInputReport: **{decision['hid_get_input_report_seen']}**
+          - WriteFile / ReadFile: **{decision['writefile_seen']} / {decision['readfile_seen']}**
+          - DSTech command objects: **{decision['dstech_command_seen']}**
+          - Sigma command builders: **{decision['sigma_command_seen']}**
+          - Protector/runtime patching evidence: **{decision['protector_runtime_seen']}**
+          - Focused HID call records: **{decision['focused_hid_call_records']}**
+          - Command-related method records: **{decision['command_related_method_records']}**
+          - Command-related non-stub records: **{decision['command_related_non_stub_records']}**
+          - Exact live report frame proven: **NO**
+          - Safe stock backup proven: **NO**
+          - Rollback proven: **NO**
+          - Flash allowed: **NO**
+
+          Status: **{decision['status']}**
+
+          Classification: **STATIC_ANALYSIS_ONLY_NOT_FOR_FLASH**
+          """
+          (e/'27_V5_FIXED_FINAL_DECISION.md').write_text(md)
+          print(md)
+          PY
+          cat /tmp/v5f/evidence/27_V5_FIXED_FINAL_DECISION.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Package one focused evidence artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp /tmp/v5f/evidence/* /tmp/v5f/out/
+          (cd /tmp/v5f/out && sha256sum * > SHA256SUMS.txt)
+
+          # Do not redistribute the vendor executable/package or full decompiled source/raw IL.
+          test ! -e /tmp/v5f/out/vendor.exe
+          test ! -e /tmp/v5f/out/vendor.zip
+          test ! -e /tmp/v5f/out/full_raw_il.zip
+          test ! -e /tmp/v5f/out/full_decompiled_source.zip
+
+      - name: Upload V5 FIXED focused static evidence
+        uses: actions/upload-artifact@v7
+        with:
+          name: OKN-BP1048P4-MASTER-V5-FIXED-RAW-IL-HID-PROTOCOL-EVIDENCE
+          path: /tmp/v5f/out/*
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Final fail-closed assertion
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$LIVE_DEVICE_IO" = "NO"
+          test "$USB_DEVICE_ACCESS" = "NO"
+          test "$HOST_TO_DEVICE_IO" = "NO"
+          test "$FLASH_ALLOWED" = "NO"
+          test "$WRITE_ALLOWED" = "NO"
+          test "$ERASE_ALLOWED" = "NO"
+          test "$RECOVERY_COMMAND_ALLOWED" = "NO"
+          grep -q '"live_device_io": false' /tmp/v5f/evidence/26_V5_FIXED_FINAL_DECISION.json
+          grep -q '"host_to_device_io": false' /tmp/v5f/evidence/26_V5_FIXED_FINAL_DECISION.json
+          grep -q '"flash_allowed": false' /tmp/v5f/evidence/26_V5_FIXED_FINAL_DECISION.json
+          grep -q 'STATIC_ANALYSIS_ONLY_NOT_FOR_FLASH' /tmp/v5f/evidence/27_V5_FIXED_FINAL_DECISION.md
+          echo "MASTER_V5_FIXED_STATIC_ANALYSIS=PASS"
+          echo "FLASH_ALLOWED=NO"
