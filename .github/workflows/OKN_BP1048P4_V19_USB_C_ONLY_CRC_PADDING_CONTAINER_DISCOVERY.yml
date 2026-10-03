@@ -1,0 +1,542 @@
+name: OKN BP1048P4 V19 USB-C ONLY CRC PADDING CONTAINER DISCOVERY
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/OKN_BP1048P4_V19_USB_C_ONLY_CRC_PADDING_CONTAINER_DISCOVERY.yml'
+
+permissions:
+  contents: read
+
+env:
+  SDK_REPO: "https://github.com/leadercxn/bp1048_sdk_v0.1.12.git"
+  SDK_COMMIT: "8105bd864b04995d81c9f9ae77cb158259f39015"
+  EXPECTED_FLASHBOOT_SHA256: "6b632435152478ecd6a8c3697b044caf253630f70923b27c8cbe8baa509148a6"
+
+  REQUIRED_PATH: "Samsung Galaxy S25+ -> USB-C cable -> DSP USB-C only"
+
+  SOLDER_ALLOWED: "NO"
+  BOARD_MOD_ALLOWED: "NO"
+  JTAG_ALLOWED: "NO"
+  SDP_ALLOWED: "NO"
+  AICE_ALLOWED: "NO"
+  HARDWARE_PROBE_ALLOWED: "NO"
+  LIVE_USB_COMMAND_ALLOWED: "NO"
+  FLASH_READ_ALLOWED: "NO"
+  FLASH_WRITE_ALLOWED: "NO"
+  FLASH_ERASE_ALLOWED: "NO"
+
+jobs:
+  static_discovery:
+    name: V19 recover CRC padding and firmware-container evidence
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+
+    steps:
+      - name: Enforce USB-C-only constraints
+        shell: bash
+        run: |
+          set -euo pipefail
+          for v in SOLDER_ALLOWED BOARD_MOD_ALLOWED JTAG_ALLOWED SDP_ALLOWED AICE_ALLOWED HARDWARE_PROBE_ALLOWED LIVE_USB_COMMAND_ALLOWED FLASH_READ_ALLOWED FLASH_WRITE_ALLOWED FLASH_ERASE_ALLOWED; do
+            test "${!v}" = "NO"
+          done
+          rm -rf /tmp/v19
+          mkdir -p /tmp/v19/evidence /tmp/v19/tool
+
+          cat > /tmp/v19/evidence/SAFETY.txt <<'EOF'
+          REQUIRED_PATH=Samsung Galaxy S25+ -> USB-C cable -> DSP USB-C only
+          SOLDER_ALLOWED=NO
+          BOARD_MOD_ALLOWED=NO
+          JTAG_ALLOWED=NO
+          SDP_ALLOWED=NO
+          AICE_ALLOWED=NO
+          HARDWARE_PROBE_ALLOWED=NO
+          LIVE_USB_COMMAND_ALLOWED=NO
+          TARGET_CONNECTED=NO
+          USB_CONTROL_TRANSFER_EXECUTED=NO
+          FLASH_READ_EXECUTED=NO
+          FLASH_WRITE_EXECUTED=NO
+          FLASH_ERASE_EXECUTED=NO
+          RUNTIME_OPCODE_0x11_EXECUTED=NO
+          EOF
+
+      - name: Fetch SDK and reconstruct exact FlashBoot
+        shell: bash
+        run: |
+          set -euo pipefail
+          S=/tmp/v19/sdk
+          E=/tmp/v19/evidence
+
+          git clone -q "$SDK_REPO" "$S"
+          git -C "$S" checkout -q "$SDK_COMMIT"
+          test "$(git -C "$S" rev-parse HEAD)" = "$SDK_COMMIT"
+          git -C "$S" rev-parse HEAD > "$E/SDK_COMMIT.txt"
+
+          cd "$S"
+          mapfile -t DIRS < <(find BT_Audio_APP MVsB1_Base_SDK develop_lib -type d | sort)
+          ARGS=()
+          for d in "${DIRS[@]}"; do ARGS+=("-I$d"); done
+
+          gcc -E -P "${ARGS[@]}" \
+            BT_Audio_APP/bt_audio_app_src/device/flash_boot.c \
+            -o /tmp/v19/flash_boot.pre.c
+
+          python3 - <<'PY'
+          from pathlib import Path
+          import re,hashlib,json
+
+          src=Path('/tmp/v19/flash_boot.pre.c').read_text(errors='replace')
+          E=Path('/tmp/v19/evidence')
+          m=re.search(
+              r'const\s+unsigned\s+char\s+flash_data\s*\[\s*65536\s*\]\s*=\s*\{(.*?)\}\s*;',
+              src,re.S
+          )
+          if not m:
+              raise RuntimeError('flash_data[65536] initializer missing')
+
+          body=m.group(1)
+          toks=[]; buf=[]; depth=0
+          for ch in body:
+              if ch=='(':
+                  depth+=1; buf.append(ch)
+              elif ch==')':
+                  depth=max(0,depth-1); buf.append(ch)
+              elif ch==',' and depth==0:
+                  x=''.join(buf).strip()
+                  if x: toks.append(x)
+                  buf=[]
+              else:
+                  buf.append(ch)
+          x=''.join(buf).strip()
+          if x: toks.append(x)
+
+          vals=[]
+          for i,t in enumerate(toks):
+              t=re.sub(r'(?i)(0x[0-9a-f]+|\b\d+)(?:u|ul|ull|l|ll)\b',r'\1',t).strip()
+              if not re.fullmatch(r'[0-9a-fA-FxX\s()+\-*/%<>&|~]+',t):
+                  raise RuntimeError(f'unresolved token {i}: {t}')
+              vals.append(eval(t,{'__builtins__':{}},{}) & 0xff)
+
+          if len(vals)!=65536:
+              raise RuntimeError(f'bad FlashBoot size {len(vals)}')
+
+          b=bytes(vals)
+          sha=hashlib.sha256(b).hexdigest()
+          if sha != '6b632435152478ecd6a8c3697b044caf253630f70923b27c8cbe8baa509148a6':
+              raise RuntimeError('FlashBoot hash mismatch')
+
+          Path('/tmp/v19/flash_boot.bin').write_bytes(b)
+          (E/'V19_FLASHBOOT.json').write_text(
+              json.dumps({'bytes':len(b),'sha256':sha},indent=2)+'\n'
+          )
+          PY
+
+          strings -a -td /tmp/v19/flash_boot.bin > "$E/FLASHBOOT_STRINGS.txt"
+
+      - name: Build NDS32 objdump and disassemble
+        shell: bash
+        run: |
+          set -euo pipefail
+          E=/tmp/v19/evidence
+          cd /tmp/v19/tool
+
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq \
+            build-essential curl xz-utils bison flex texinfo zlib1g-dev >/dev/null
+
+          V=2.42
+          curl -fL --retry 3 --connect-timeout 15 --max-time 120 \
+            "https://ftp.gnu.org/gnu/binutils/binutils-${V}.tar.xz" \
+            -o binutils.tar.xz
+          tar -xf binutils.tar.xz
+          mkdir build
+          cd build
+
+          ../binutils-${V}/configure \
+            --target=nds32le-elf \
+            --disable-nls --disable-werror \
+            --disable-gdb --disable-gprofng --disable-gas --disable-ld \
+            > "$E/BINUTILS_CONFIGURE.txt" 2>&1
+          make -j2 all-binutils > "$E/BINUTILS_BUILD.txt" 2>&1
+
+          OBJDUMP=/tmp/v19/tool/build/binutils/objdump
+          "$OBJDUMP" --version > "$E/OBJDUMP_VERSION.txt"
+
+          ok=0
+          for arch in nds32 nds32:v3s nds32:v3; do
+            if "$OBJDUMP" -D -z -b binary -m "$arch" -EL \
+                /tmp/v19/flash_boot.bin \
+                > /tmp/v19/flash_boot.dis 2>/dev/null; then
+              echo "$arch" > "$E/OBJDUMP_ARCH.txt"
+              ok=1
+              break
+            fi
+          done
+          test "$ok" -eq 1
+          test -s /tmp/v19/flash_boot.dis
+
+      - name: Recover CRC and MVA package string xrefs
+        shell: bash
+        run: |
+          set -euo pipefail
+          E=/tmp/v19/evidence
+
+          python3 - <<'PY'
+          from pathlib import Path
+          import re,json
+
+          b=Path('/tmp/v19/flash_boot.bin').read_bytes()
+          dis=Path('/tmp/v19/flash_boot.dis').read_text(errors='replace')
+          lines=dis.splitlines()
+          E=Path('/tmp/v19/evidence')
+
+          phrases=[
+              'Make mva upgrade package!',
+              'flash boot Len CRC err!',
+              'FastCRC = %08X!',
+              'crc= %08x',
+              'Make ActualCode  CRC&SIZE write OK!',
+              'FLASHBOOT CRC = %08X!',
+              'codeCRC different, need to upgrade',
+              'now boot crc =%08X',
+          ]
+
+          def addr_of(s):
+              return b.find(s.encode())
+
+          refs={}
+          for s in phrases:
+              off=addr_of(s)
+              if off < 0:
+                  raise RuntimeError('missing FlashBoot phrase: '+s)
+
+              # Most string references in this image are loaded with movi <reg>, #0xADDR.
+              pats=[
+                  re.compile(rf'\bmovi\b.*#0x{off:x}\b',re.I),
+                  re.compile(rf'#(?:0x)?{off:x}\b',re.I),
+              ]
+              idx=[]
+              for i,line in enumerate(lines):
+                  if any(p.search(line) for p in pats):
+                      idx.append(i)
+
+              contexts=[]
+              calls=[]
+              for i in idx:
+                  lo=max(0,i-70); hi=min(len(lines),i+90)
+                  context='\n'.join(lines[lo:hi])
+                  contexts.append(context)
+                  for j in range(max(lo,i-35),min(hi,i+36)):
+                      m=re.search(r'\bjal\s+0x([0-9a-fA-F]+)\b',lines[j])
+                      if m:
+                          calls.append({
+                              'line':lines[j],
+                              'target':f"0x{int(m.group(1),16):04X}"
+                          })
+
+              refs[s]={
+                  'string_offset':f'0x{off:04X}',
+                  'xref_count':len(idx),
+                  'xref_lines':[lines[i] for i in idx],
+                  'nearby_jal_targets':calls,
+              }
+
+              safe=re.sub(r'[^A-Za-z0-9]+','_',s).strip('_')[:50]
+              (E/f'XREF_{safe}.txt').write_text(
+                  '\n\n===== XREF CONTEXT =====\n'.join(contexts)+'\n'
+              )
+
+          (E/'V19_STRING_XREFS.json').write_text(
+              json.dumps(refs,indent=2)+'\n'
+          )
+          PY
+
+      - name: Extract CRC candidate functions and cxxx validation call
+        shell: bash
+        run: |
+          set -euo pipefail
+          E=/tmp/v19/evidence
+
+          python3 - <<'PY'
+          from pathlib import Path
+          import re,json,collections
+
+          lines=Path('/tmp/v19/flash_boot.dis').read_text(errors='replace').splitlines()
+          E=Path('/tmp/v19/evidence')
+
+          rows=[]
+          rx=re.compile(r'^\s*([0-9a-fA-F]+):\s+')
+          for line in lines:
+              m=rx.match(line)
+              if m:
+                  rows.append((int(m.group(1),16),line))
+
+          def window(a,b):
+              return '\n'.join(line for addr,line in rows if a<=addr<b)+'\n'
+
+          # cxxx's late validation path calls 0x1600 after section-status decisions.
+          (E/'FUNC_1600.txt').write_text(window(0x1500,0x1700))
+          (E/'CXXX_LATE_VALIDATION_4F40.txt').write_text(window(0x4F40,0x4F9A))
+
+          refs=json.loads((E/'V19_STRING_XREFS.json').read_text())
+
+          targets=[]
+          for phrase,rec in refs.items():
+              for call in rec['nearby_jal_targets']:
+                  targets.append(call['target'])
+
+          count=collections.Counter(targets)
+          uniq=sorted(set(targets),key=lambda x:int(x,16))
+
+          extracted={}
+          for t in uniq:
+              a=int(t,16)
+              # Broad window around called function entry. Do not infer function end yet.
+              txt=window(max(0,a-0x40),min(0x10000,a+0x180))
+              if txt.strip():
+                  name=f'CALLTARGET_{a:04X}.txt'
+                  (E/name).write_text(txt)
+                  extracted[t]={
+                      'references_near_crc_strings':count[t],
+                      'window_file':name
+                  }
+
+          (E/'V19_CRC_CALL_TARGETS.json').write_text(
+              json.dumps(extracted,indent=2)+'\n'
+          )
+          PY
+
+      - name: Scan CRC polynomial tables and candidate algorithms
+        shell: bash
+        run: |
+          set -euo pipefail
+          E=/tmp/v19/evidence
+
+          python3 - <<'PY'
+          from pathlib import Path
+          import json,struct,zlib,binascii
+
+          b=Path('/tmp/v19/flash_boot.bin').read_bytes()
+          E=Path('/tmp/v19/evidence')
+
+          polys={
+              'CRC32_IEEE_normal':0x04C11DB7,
+              'CRC32_IEEE_reflected':0xEDB88320,
+              'CRC32C_normal':0x1EDC6F41,
+              'CRC32C_reflected':0x82F63B78,
+              'CRC16_CCITT':0x1021,
+              'CRC16_IBM':0xA001,
+          }
+
+          found={}
+          for name,val in polys.items():
+              widths=[4] if val>0xffff else [2,4]
+              locs=[]
+              for w in widths:
+                  mask=(1<<(8*w))-1
+                  v=val & mask
+                  for endian in ['little','big']:
+                      raw=v.to_bytes(w,endian)
+                      pos=0
+                      while True:
+                          p=b.find(raw,pos)
+                          if p<0: break
+                          locs.append({'offset':f'0x{p:04X}','width':w,'endian':endian})
+                          pos=p+1
+              found[name]=locs
+
+          # Useful candidate checksums for later comparison with stored metadata.
+          candidate_crc={
+              'crc32_full_64k':f'0x{zlib.crc32(b)&0xffffffff:08X}',
+              'crc32_first_0x10000':f'0x{zlib.crc32(b[:0x10000])&0xffffffff:08X}',
+              'crc32_first_0xFFFC':f'0x{zlib.crc32(b[:0xfffc])&0xffffffff:08X}',
+          }
+
+          (E/'V19_CRC_CONSTANT_SCAN.json').write_text(
+              json.dumps({
+                  'common_polynomial_constants':found,
+                  'candidate_standard_crc32_values':candidate_crc,
+                  'note':'Presence/absence of a polynomial literal does not by itself identify the firmware CRC algorithm; hardware/table-free CRC remains possible.'
+              },indent=2)+'\n'
+          )
+          PY
+
+      - name: Inventory firmware-container tooling and padding clues
+        shell: bash
+        run: |
+          set -euo pipefail
+          S=/tmp/v19/sdk
+          E=/tmp/v19/evidence
+
+          cd "$S"
+
+          find . -type f \( \
+              -iname '*.mva' -o -iname '*.bin' -o -iname '*.img' -o \
+              -iname '*.fw' -o -iname '*.dat' -o -iname '*.hex' -o \
+              -iname '*.adx' -o -iname '*.exe' -o -iname '*.bat' -o \
+              -iname '*.py' -o -iname '*.sh' \
+            \) -printf '%p\t%s\n' | sort > "$E/CONTAINER_TOOL_INVENTORY.txt"
+
+          {
+            echo '=== build hooks / package terms ==='
+            git grep -n -I -E \
+              'postbuild|prebuild|script\.bat|mva|MVA|upgrade package|CRC|crc|padding|pad|0xFF|memset' \
+              -- BT_Audio_APP MVsB1_Base_SDK/tools 2>/dev/null || true
+
+            echo
+            echo '=== exact BT_Audio_APP prebuild script ==='
+            cat BT_Audio_APP/script.bat 2>/dev/null || true
+          } > "$E/CONTAINER_TOOL_SOURCE_HITS.txt"
+
+          : > "$E/TOOL_BINARY_STRINGS.txt"
+          find MVsB1_Base_SDK/tools -type f -iname '*.exe' -size -20M -print0 | \
+          while IFS= read -r -d '' f; do
+            echo "===== $f =====" >> "$E/TOOL_BINARY_STRINGS.txt"
+            strings -a -n 4 "$f" 2>/dev/null | \
+              grep -iE \
+              'mva|upgrade|crc|checksum|padding|pad|bootdat|codedata|constdat|cnfgdat|chiperas|upinfo|4096|0x1000|firmware' \
+              >> "$E/TOOL_BINARY_STRINGS.txt" || true
+          done
+
+      - name: Analyze package-builder padding evidence conservatively
+        shell: bash
+        run: |
+          set -euo pipefail
+          E=/tmp/v19/evidence
+
+          python3 - <<'PY'
+          from pathlib import Path
+          import re,json
+
+          E=Path('/tmp/v19/evidence')
+          refs=json.loads((E/'V19_STRING_XREFS.json').read_text())
+
+          mva=refs['Make mva upgrade package!']
+          fast=refs['FastCRC = %08X!']
+          fbcrc=refs['FLASHBOOT CRC = %08X!']
+
+          xref_files=list(E.glob('XREF_*.txt'))
+          text='\n'.join(p.read_text(errors='replace') for p in xref_files)
+
+          clues={
+              'mva_builder_string_xref_found':mva['xref_count']>0,
+              'fastcrc_string_xref_found':fast['xref_count']>0,
+              'flashboot_crc_string_xref_found':fbcrc['xref_count']>0,
+              '4k_constant_near_crc_or_builder':bool(re.search(r'#0x1000\b',text,re.I)),
+              'ff_constant_near_crc_or_builder':bool(re.search(r'#(?:0x)?ff\b|#-1\b',text,re.I)),
+              'zero_constant_near_crc_or_builder':bool(re.search(r'#0\b',text,re.I)),
+              'memset_symbol_proven':False,
+              'padding_byte_proven':False,
+              'crc_algorithm_proven':False,
+              'crc_coverage_proven':False
+          }
+
+          result={
+              'required_path':'Samsung Galaxy S25+ -> USB-C -> DSP USB-C only',
+              'known_flashboot_sha256':'6b632435152478ecd6a8c3697b044caf253630f70923b27c8cbe8baa509148a6',
+              'mva_package_builder_present_in_flashboot':clues['mva_builder_string_xref_found'],
+              'fastcrc_path_present':clues['fastcrc_string_xref_found'],
+              'flashboot_crc_path_present':clues['flashboot_crc_string_xref_found'],
+              'padding_byte_proven':False,
+              'crc_algorithm_proven':False,
+              'crc_coverage_proven':False,
+              'container_layout_fully_proven':False,
+              'live_usb_command_permitted':False,
+              'flash_erase_write_permitted':False,
+              'next_static_target':'Read the generated CRC/package-builder xref windows and called-function windows to identify the exact CRC primitive, its initial/final XOR/reflection semantics, data coverage, and the byte used to fill the unused tail of a 4096-byte transport block.'
+          }
+
+          (E/'V19_PADDING_CLUES.json').write_text(json.dumps(clues,indent=2)+'\n')
+          (E/'V19_RESULT.json').write_text(json.dumps(result,indent=2)+'\n')
+
+          md=[
+              '# BP1048P4 V19 — CRC / padding / container discovery','',
+              '- Required path remains **Samsung Galaxy S25+ → USB-C → DSP USB-C only**.',
+              '- FlashBoot contains and references `Make mva upgrade package!`, `FastCRC = %08X!`, and `FLASHBOOT CRC = %08X!`.',
+              '- V19 extracts every direct string xref plus nearby NDS32 call targets for those paths.',
+              '- It scans common CRC polynomial constants and inventories SDK package/tool binaries for MVA/CRC/padding clues.',
+              '- CRC algorithm, CRC coverage, and final-block padding stay fail-closed until the generated assembly windows prove them.',
+              '- No live USB command, erase/write, soldering, board modification, JTAG/SDP/AICE is performed.'
+          ]
+          (E/'V19_REPORT.md').write_text('\n'.join(md)+'\n')
+          PY
+
+          cat "$E/V19_REPORT.md" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Final fail-closed assertions
+        shell: bash
+        run: |
+          set -euo pipefail
+          for v in SOLDER_ALLOWED BOARD_MOD_ALLOWED JTAG_ALLOWED SDP_ALLOWED AICE_ALLOWED HARDWARE_PROBE_ALLOWED LIVE_USB_COMMAND_ALLOWED FLASH_READ_ALLOWED FLASH_WRITE_ALLOWED FLASH_ERASE_ALLOWED; do
+            test "${!v}" = "NO"
+          done
+
+          python3 - <<'PY'
+          from pathlib import Path
+          import json
+
+          E=Path('/tmp/v19/evidence')
+          r=json.loads((E/'V19_RESULT.json').read_text())
+
+          assert r['required_path'] == 'Samsung Galaxy S25+ -> USB-C -> DSP USB-C only'
+          assert r['mva_package_builder_present_in_flashboot'] is True
+          assert r['fastcrc_path_present'] is True
+          assert r['flashboot_crc_path_present'] is True
+          assert r['padding_byte_proven'] is False
+          assert r['crc_algorithm_proven'] is False
+          assert r['crc_coverage_proven'] is False
+          assert r['live_usb_command_permitted'] is False
+          assert r['flash_erase_write_permitted'] is False
+
+          print('V19_CRC_PADDING_CONTAINER_DISCOVERY_COMPLETE=YES')
+          print('MVA_PACKAGE_BUILDER_XREF_FOUND=YES')
+          print('FASTCRC_XREF_FOUND=YES')
+          print('FLASHBOOT_CRC_XREF_FOUND=YES')
+          print('CRC_ALGORITHM_PROVEN=NO')
+          print('PADDING_BYTE_PROVEN=NO')
+          print('LIVE_USB_COMMAND_ALLOWED=NO')
+          print('FLASH_WRITE_ALLOWED=NO')
+          print('SOLDER_ALLOWED=NO')
+          print('BOARD_MOD_ALLOWED=NO')
+          PY
+
+      - name: Package V19 evidence
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /tmp/v19/evidence
+          zip -9 -r /tmp/OKN_BP1048P4_V19_CRC_PADDING_CONTAINER_EVIDENCE.zip . >/dev/null
+          sha256sum /tmp/OKN_BP1048P4_V19_CRC_PADDING_CONTAINER_EVIDENCE.zip \
+            > /tmp/OKN_BP1048P4_V19_CRC_PADDING_CONTAINER_EVIDENCE.zip.sha256
+
+      - name: Upload V19 evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: OKN-BP1048P4-V19-CRC-PADDING-CONTAINER-EVIDENCE
+          path: |
+            /tmp/OKN_BP1048P4_V19_CRC_PADDING_CONTAINER_EVIDENCE.zip
+            /tmp/OKN_BP1048P4_V19_CRC_PADDING_CONTAINER_EVIDENCE.zip.sha256
+            /tmp/v19/evidence/V19_REPORT.md
+            /tmp/v19/evidence/V19_RESULT.json
+            /tmp/v19/evidence/V19_STRING_XREFS.json
+            /tmp/v19/evidence/V19_CRC_CALL_TARGETS.json
+            /tmp/v19/evidence/V19_CRC_CONSTANT_SCAN.json
+            /tmp/v19/evidence/V19_PADDING_CLUES.json
+            /tmp/v19/evidence/FUNC_1600.txt
+            /tmp/v19/evidence/CXXX_LATE_VALIDATION_4F40.txt
+            /tmp/v19/evidence/XREF_*.txt
+            /tmp/v19/evidence/CALLTARGET_*.txt
+            /tmp/v19/evidence/CONTAINER_TOOL_INVENTORY.txt
+            /tmp/v19/evidence/CONTAINER_TOOL_SOURCE_HITS.txt
+            /tmp/v19/evidence/TOOL_BINARY_STRINGS.txt
+            /tmp/v19/evidence/FLASHBOOT_STRINGS.txt
+            /tmp/v19/evidence/V19_FLASHBOOT.json
+            /tmp/v19/evidence/OBJDUMP_ARCH.txt
+            /tmp/v19/evidence/OBJDUMP_VERSION.txt
+            /tmp/v19/evidence/SDK_COMMIT.txt
+            /tmp/v19/evidence/SAFETY.txt
+          if-no-files-found: warn
+          retention-days: 90
