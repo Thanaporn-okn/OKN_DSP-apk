@@ -1,0 +1,669 @@
+name: OKN BP1048P4 MASTER OFFLINE VENDOR PROTOCOL + RECOVERY EVIDENCE
+
+"on":
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  TARGET_SOC: "MVSilicon BP1048P4"
+  TARGET_BOARD: "GoloPine/DSTech 7-channel DSP"
+  EXPECTED_RUNTIME_VID_HEX: "6324"
+  EXPECTED_RUNTIME_PID_HEX: "1719"
+  EXPECTED_RUNTIME_VID_DEC: "25380"
+  EXPECTED_RUNTIME_PID_DEC: "5913"
+
+  GOLOPINE_ANDROID_URL: "https://golodsp.com/wp-content/uploads/2026/05/golopine_audio_turning_release_2026-04-01.apk_.zip"
+  GOLOPINE_WINDOWS_URL: "https://golodsp.com/wp-content/uploads/2026/05/golopine_audio_turning_release_2026-04-08.exe_.zip"
+  GOLOPINE_ANDROID_MANUAL_URL: "https://golodsp.com/wp-content/uploads/2026/02/2Android-APP-Instructions-for-using-GoloPine-tuning-software-for-mobile-phones-Android.docx"
+  GOLOPINE_WINDOWS_MANUAL_URL: "https://golodsp.com/wp-content/uploads/2026/02/5Windows-PC-Instructions-for-using-GoloPine-tuning-software-for-over-Win10.docx"
+
+  SDK_REPO: "https://github.com/leadercxn/bp1048_sdk_v0.1.12.git"
+  SDK_COMMIT: "8105bd864b04995d81c9f9ae77cb158259f39015"
+
+  LIVE_DEVICE_IO: "NO"
+  USB_DEVICE_ACCESS: "NO"
+  HOST_TO_DEVICE_IO: "NO"
+  FLASH_ALLOWED: "NO"
+  ERASE_ALLOWED: "NO"
+  WRITE_ALLOWED: "NO"
+  RECOVERY_COMMAND_ALLOWED: "NO"
+
+jobs:
+  master-offline-analysis:
+    name: MASTER offline vendor protocol + updater/recovery evidence
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+
+    steps:
+      - name: Safety gate and workspace
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$LIVE_DEVICE_IO" = "NO"
+          test "$USB_DEVICE_ACCESS" = "NO"
+          test "$HOST_TO_DEVICE_IO" = "NO"
+          test "$FLASH_ALLOWED" = "NO"
+          test "$ERASE_ALLOWED" = "NO"
+          test "$WRITE_ALLOWED" = "NO"
+          test "$RECOVERY_COMMAND_ALLOWED" = "NO"
+
+          rm -rf /tmp/okn_master
+          mkdir -p /tmp/okn_master/{downloads,android,windows,manuals,sdk,evidence,out}
+
+          cat > /tmp/okn_master/evidence/00_SAFETY_GATE.txt <<'EOF'
+          MODE=MASTER_OFFLINE_STATIC_ANALYSIS_ONLY
+          LIVE_DEVICE_IO=NO
+          USB_DEVICE_ACCESS=NO
+          HOST_TO_DEVICE_IO=NO
+          FLASH_ALLOWED=NO
+          ERASE_ALLOWED=NO
+          WRITE_ALLOWED=NO
+          RECOVERY_COMMAND_ALLOWED=NO
+          SOLDERING=NO
+          BOARD_MODIFICATION=NO
+          EXTERNAL_PROGRAMMER=NO
+          JTAG=NO
+          AICE=NO
+          SDP=NO
+          EOF
+
+      - name: Download all official GoloPine reference packages and manuals
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          fetch() {
+            local url="$1"
+            local out="$2"
+            curl -fL --retry 6 --retry-all-errors --retry-delay 2 \
+              --connect-timeout 20 --max-time 300 \
+              "$url" -o "$out"
+            test -s "$out"
+          }
+
+          fetch "$GOLOPINE_ANDROID_URL" /tmp/okn_master/downloads/golopine_android.zip
+          fetch "$GOLOPINE_WINDOWS_URL" /tmp/okn_master/downloads/golopine_windows.zip
+          fetch "$GOLOPINE_ANDROID_MANUAL_URL" /tmp/okn_master/manuals/android_manual.docx
+          fetch "$GOLOPINE_WINDOWS_MANUAL_URL" /tmp/okn_master/manuals/windows_manual.docx
+
+          file /tmp/okn_master/downloads/* /tmp/okn_master/manuals/* \
+            | tee /tmp/okn_master/evidence/01_OFFICIAL_FILE_TYPES.txt
+          sha256sum /tmp/okn_master/downloads/* /tmp/okn_master/manuals/* \
+            | tee /tmp/okn_master/evidence/02_OFFICIAL_SHA256.txt
+
+      - name: Extract vendor APK EXE and manuals
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          unzip -q /tmp/okn_master/downloads/golopine_android.zip -d /tmp/okn_master/android/pkg
+          unzip -q /tmp/okn_master/downloads/golopine_windows.zip -d /tmp/okn_master/windows/pkg
+
+          APK="$(find /tmp/okn_master/android/pkg -type f -iname '*.apk' -print -quit)"
+          EXE="$(find /tmp/okn_master/windows/pkg -type f -iname '*.exe' -print -quit)"
+          test -n "$APK"
+          test -n "$EXE"
+          cp "$APK" /tmp/okn_master/android/vendor.apk
+          cp "$EXE" /tmp/okn_master/windows/vendor.exe
+
+          python3 - <<'PY'
+          from pathlib import Path
+          import zipfile, re, html
+
+          def docx_text(src, dst):
+              with zipfile.ZipFile(src) as z:
+                  xml=z.read('word/document.xml').decode('utf-8','replace')
+              xml=re.sub(r'</w:p[^>]*>', '\n', xml)
+              xml=re.sub(r'<w:tab[^>]*/>', '\t', xml)
+              text=re.sub(r'<[^>]+>', '', xml)
+              text=html.unescape(text)
+              Path(dst).write_text(text, encoding='utf-8')
+
+          docx_text('/tmp/okn_master/manuals/android_manual.docx',
+                    '/tmp/okn_master/evidence/03_ANDROID_VENDOR_MANUAL.txt')
+          docx_text('/tmp/okn_master/manuals/windows_manual.docx',
+                    '/tmp/okn_master/evidence/04_WINDOWS_VENDOR_MANUAL.txt')
+          PY
+
+          find /tmp/okn_master/android/pkg -type f -printf '%p\n' | sort \
+            > /tmp/okn_master/evidence/05_ANDROID_PACKAGE_FILES.txt
+          find /tmp/okn_master/windows/pkg -type f -printf '%p\n' | sort \
+            > /tmp/okn_master/evidence/06_WINDOWS_PACKAGE_FILES.txt
+          sha256sum /tmp/okn_master/android/vendor.apk /tmp/okn_master/windows/vendor.exe \
+            | tee /tmp/okn_master/evidence/07_VENDOR_BINARY_SHA256.txt
+
+      - name: Install static-analysis dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m pip install --disable-pip-version-check --quiet pefile dnfile
+
+          JADX_VERSION="1.5.2"
+          curl -fL --retry 5 --retry-all-errors --connect-timeout 20 \
+            "https://github.com/skylot/jadx/releases/download/v${JADX_VERSION}/jadx-${JADX_VERSION}.zip" \
+            -o /tmp/okn_master/jadx.zip
+          mkdir -p /tmp/okn_master/jadx
+          unzip -q /tmp/okn_master/jadx.zip -d /tmp/okn_master/jadx
+          chmod +x /tmp/okn_master/jadx/bin/jadx
+
+          {
+            echo "JADX=$(/tmp/okn_master/jadx/bin/jadx --version)"
+            echo "PYTHON=$(python3 --version)"
+            echo "OBJDUMP=$(objdump --version | head -n1)"
+            echo "STRINGS=$(strings --version | head -n1)"
+            echo "7Z=$(7z 2>/dev/null | head -n2 | tail -n1 || true)"
+          } | tee /tmp/okn_master/evidence/08_TOOL_VERSIONS.txt
+
+      - name: Decompile Android vendor app completely
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/okn_master/android/jadx
+          /tmp/okn_master/jadx/bin/jadx \
+            --show-bad-code \
+            -d /tmp/okn_master/android/jadx \
+            /tmp/okn_master/android/vendor.apk \
+            > /tmp/okn_master/evidence/09_JADX_STDOUT.txt \
+            2> /tmp/okn_master/evidence/10_JADX_STDERR.txt || true
+
+          test -d /tmp/okn_master/android/jadx/sources
+
+          {
+            echo "SOURCE_FILES=$(find /tmp/okn_master/android/jadx/sources -type f | wc -l)"
+            echo "RESOURCE_FILES=$(find /tmp/okn_master/android/jadx/resources -type f 2>/dev/null | wc -l)"
+            echo "DEX_FILES=$(unzip -l /tmp/okn_master/android/vendor.apk | grep -Ec 'classes[0-9]*\.dex$' || true)"
+            echo "NATIVE_LIBS=$(unzip -l /tmp/okn_master/android/vendor.apk | grep -Ec '\.so$' || true)"
+          } | tee /tmp/okn_master/evidence/11_ANDROID_STRUCTURE.txt
+
+          find /tmp/okn_master/android/jadx/resources -type f 2>/dev/null | sort \
+            > /tmp/okn_master/evidence/12_ANDROID_RESOURCE_FILES.txt || true
+
+      - name: Extract Android manifest USB filters permissions and components
+        shell: bash
+        run: |
+          set -euo pipefail
+          RES=/tmp/okn_master/android/jadx/resources
+          {
+            for f in \
+              "$RES/AndroidManifest.xml" \
+              "$RES/resources/AndroidManifest.xml"; do
+              if [ -f "$f" ]; then
+                echo "===== $f ====="
+                cat "$f"
+              fi
+            done
+
+            find "$RES" -type f \( -iname '*usb*.xml' -o -iname '*device*filter*.xml' -o -iname '*filter*.xml' \) \
+              -print 2>/dev/null | while read -r f; do
+                echo "===== $f ====="
+                cat "$f" 2>/dev/null || true
+              done
+          } > /tmp/okn_master/evidence/13_ANDROID_MANIFEST_USB_FILTERS.txt || true
+
+          grep -RInE \
+            'android.hardware.usb|USB_DEVICE_ATTACHED|USB_DEVICE_DETACHED|UsbManager|vendor-id|product-id|6324|1719|25380|5913|2463|1917' \
+            "$RES" 2>/dev/null \
+            > /tmp/okn_master/evidence/14_ANDROID_RESOURCE_USB_HITS.txt || true
+
+      - name: Mine all Android USB HID transport and protocol source
+        shell: bash
+        run: |
+          set -euo pipefail
+          SRC=/tmp/okn_master/android/jadx/sources
+
+          grep -RInE \
+            'UsbManager|UsbDeviceConnection|UsbDevice|UsbInterface|UsbEndpoint|controlTransfer|bulkTransfer|UsbRequest|claimInterface|releaseInterface|requestPermission|25380|5913|6324|1719|2463|1917|0x6324|0x1719|0xA5|0x5A|A5.?5A|55AA|AA55|GET_REPORT|SET_REPORT|HID|BP1048|GoloPine|DSTech|AudioDSP|firmware|upgrade|update|bootloader|flash|erase|readback|backup|restore|recovery|MVA' \
+            "$SRC" 2>/dev/null \
+            > /tmp/okn_master/evidence/15_ANDROID_ALL_PROTOCOL_HITS.txt || true
+
+          python3 - <<'PY'
+          from pathlib import Path
+          import re, json
+
+          src=Path('/tmp/okn_master/android/jadx/sources')
+          evidence=Path('/tmp/okn_master/evidence')
+
+          api_needles=[
+              'controlTransfer','bulkTransfer','UsbRequest','claimInterface',
+              'UsbManager','UsbDeviceConnection','UsbEndpoint',
+              'requestPermission','setInterface','setConfiguration'
+          ]
+          protocol_needles=[
+              '6324','1719','25380','5913','2463','1917',
+              '0xA5','0x5A','A5','5A','55AA','AA55',
+              'GET_REPORT','SET_REPORT','HID',
+              'firmware','upgrade','bootloader','flash','erase',
+              'readback','backup','restore','recovery','MVA'
+          ]
+
+          excerpts=[]
+          calls=[]
+          relevant_files=set()
+          arrays=[]
+
+          for p in src.rglob('*'):
+              if not p.is_file() or p.suffix.lower() not in {'.java','.kt'}:
+                  continue
+              try:
+                  lines=p.read_text(errors='ignore').splitlines()
+              except Exception:
+                  continue
+
+              joined='\n'.join(lines)
+              if not any(n.lower() in joined.lower() for n in api_needles+protocol_needles):
+                  continue
+
+              for i,line in enumerate(lines):
+                  if any(n.lower() in line.lower() for n in api_needles+protocol_needles):
+                      relevant_files.add(str(p.relative_to(src)))
+                      lo=max(0,i-12); hi=min(len(lines),i+18)
+                      excerpts.append(
+                          f"\n===== {p.relative_to(src)}:{i+1} =====\n" +
+                          '\n'.join(f"{j+1:05d}: {lines[j]}" for j in range(lo,hi)) + '\n'
+                      )
+
+                  if any(x in line for x in ('controlTransfer','bulkTransfer','UsbRequest')):
+                      calls.append({
+                          'file':str(p.relative_to(src)),
+                          'line':i+1,
+                          'text':line.strip()
+                      })
+
+              # Capture byte/int array initializers likely to hold protocol frames.
+              for m in re.finditer(r'(?:byte|int)\s*\[\s*\]\s+\w+\s*=\s*(?:new\s+(?:byte|int)\s*\[\s*\]\s*)?\{([^}]{1,1500})\}', joined):
+                  body=m.group(1)
+                  if re.search(r'0x[A-Fa-f0-9]+|\b\d+\b', body):
+                      arrays.append({
+                          'file':str(p.relative_to(src)),
+                          'initializer':body[:1500]
+                      })
+                      if len(arrays) >= 500:
+                          break
+
+          (evidence/'16_ANDROID_FOCUSED_EXCERPTS.txt').write_text(''.join(excerpts[:2500]), errors='ignore')
+          (evidence/'17_ANDROID_USB_CALLS.json').write_text(json.dumps(calls,indent=2))
+          (evidence/'18_ANDROID_RELEVANT_FILES.txt').write_text('\n'.join(sorted(relevant_files))+'\n')
+          (evidence/'19_ANDROID_PROTOCOL_ARRAYS.json').write_text(json.dumps(arrays,indent=2))
+
+          print('relevant_files',len(relevant_files))
+          print('usb_calls',len(calls))
+          print('arrays',len(arrays))
+          PY
+
+      - name: Scan Android native libraries and binary constants
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/okn_master/android/raw
+          mkdir -p /tmp/okn_master/android/raw
+          unzip -q /tmp/okn_master/android/vendor.apk -d /tmp/okn_master/android/raw
+
+          : > /tmp/okn_master/evidence/20_ANDROID_NATIVE_STRINGS.txt
+          : > /tmp/okn_master/evidence/21_ANDROID_NATIVE_SYMBOLS_IMPORTS.txt
+
+          find /tmp/okn_master/android/raw -type f -name '*.so' -print0 \
+            | while IFS= read -r -d '' f; do
+                echo "===== $f STRINGS =====" >> /tmp/okn_master/evidence/20_ANDROID_NATIVE_STRINGS.txt
+                strings -a -n 4 "$f" \
+                  | grep -Ei 'usb|hid|6324|1719|25380|5913|a5|5a|55aa|bp1048|dstech|golopine|flash|erase|upgrade|firmware|boot|mva|readback|backup|recovery' \
+                  | head -n 5000 >> /tmp/okn_master/evidence/20_ANDROID_NATIVE_STRINGS.txt || true
+
+                echo "===== $f SYMBOLS/IMPORTS =====" >> /tmp/okn_master/evidence/21_ANDROID_NATIVE_SYMBOLS_IMPORTS.txt
+                readelf -Ws "$f" 2>/dev/null \
+                  | grep -Ei 'usb|hid|read|write|send|recv|flash|upgrade|firmware|boot' \
+                  | head -n 5000 >> /tmp/okn_master/evidence/21_ANDROID_NATIVE_SYMBOLS_IMPORTS.txt || true
+              done
+
+          python3 - <<'PY'
+          from pathlib import Path
+          import json, hashlib
+
+          candidates=[]
+          for p in Path('/tmp/okn_master/android/raw').rglob('*'):
+              if p.is_file() and (p.suffix in {'.dex','.so'} or p.name.startswith('classes')):
+                  candidates.append(p)
+          patterns={
+            'VID_PID_LE_6324_1719':bytes.fromhex('24631917'),
+            'VID_LE_6324':bytes.fromhex('2463'),
+            'PID_LE_1719':bytes.fromhex('1917'),
+            'A5_5A':bytes.fromhex('A55A'),
+            'A5_5A_00_00_16':bytes.fromhex('A55A000016'),
+            'AA_55':bytes.fromhex('AA55'),
+            '55_AA':bytes.fromhex('55AA'),
+          }
+          out={}
+          for p in candidates:
+              try:b=p.read_bytes()
+              except:continue
+              found={k:b.count(v) for k,v in patterns.items()}
+              if any(found.values()):
+                  out[str(p.relative_to('/tmp/okn_master/android/raw'))]={
+                    'bytes':len(b),'sha256':hashlib.sha256(b).hexdigest(),'patterns':found
+                  }
+          Path('/tmp/okn_master/evidence/22_ANDROID_BINARY_PATTERN_SCAN.json').write_text(json.dumps(out,indent=2)+'\n')
+          PY
+
+      - name: Deep inspect Windows client package installer and imports
+        shell: bash
+        run: |
+          set -euo pipefail
+          EXE=/tmp/okn_master/windows/vendor.exe
+          mkdir -p /tmp/okn_master/windows/extracted
+
+          file "$EXE" | tee /tmp/okn_master/evidence/23_WINDOWS_EXE_FILE_TYPE.txt
+          objdump -p "$EXE" > /tmp/okn_master/evidence/24_WINDOWS_EXE_OBJDUMP.txt 2>&1 || true
+
+          7z l "$EXE" > /tmp/okn_master/evidence/25_WINDOWS_7Z_LIST.txt 2>&1 || true
+          7z x -y "$EXE" -o/tmp/okn_master/windows/extracted \
+            > /tmp/okn_master/evidence/26_WINDOWS_7Z_EXTRACT.txt 2>&1 || true
+
+          find /tmp/okn_master/windows/extracted -type f -printf '%p\n' | sort \
+            > /tmp/okn_master/evidence/27_WINDOWS_EXTRACTED_FILES.txt || true
+
+          python3 - <<'PY'
+          from pathlib import Path
+          import pefile, json
+
+          roots=[Path('/tmp/okn_master/windows/vendor.exe')]
+          roots += [p for p in Path('/tmp/okn_master/windows/extracted').rglob('*')
+                    if p.is_file() and p.suffix.lower() in {'.exe','.dll'}]
+
+          results=[]
+          for p in roots[:500]:
+              try:
+                  pe=pefile.PE(str(p), fast_load=True)
+                  pe.parse_data_directories(
+                      directories=[pefile.DIRECTORY_ENTRY['IMAGE_DIRECTORY_ENTRY_IMPORT']]
+                  )
+                  imports=[]
+                  for entry in getattr(pe,'DIRECTORY_ENTRY_IMPORT',[]):
+                      dll=entry.dll.decode('utf-8','replace')
+                      funcs=[]
+                      for imp in entry.imports:
+                          if imp.name:
+                              funcs.append(imp.name.decode('utf-8','replace'))
+                          else:
+                              funcs.append(f'ordinal:{imp.ordinal}')
+                      imports.append({'dll':dll,'functions':funcs})
+                  results.append({'file':str(p),'imports':imports})
+              except Exception:
+                  pass
+
+          Path('/tmp/okn_master/evidence/28_WINDOWS_PE_IMPORTS.json').write_text(
+              json.dumps(results,indent=2)+'\n'
+          )
+          PY
+
+      - name: Mine Windows USB HID protocol strings from all extracted payloads
+        shell: bash
+        run: |
+          set -euo pipefail
+          OUT=/tmp/okn_master/evidence/29_WINDOWS_PROTOCOL_STRINGS.txt
+          : > "$OUT"
+
+          {
+            echo "===== INSTALLER ASCII ====="
+            strings -a -n 4 /tmp/okn_master/windows/vendor.exe
+            echo "===== INSTALLER UTF16 ====="
+            strings -a -el -n 4 /tmp/okn_master/windows/vendor.exe
+          } | grep -Ei \
+            'USB|HID|VID|PID|6324|1719|25380|5913|2463|1917|A5|5A|55AA|AA55|BP1048|GoloPine|DSTech|AudioDSP|WinUSB|hid\.dll|SetupDi|CreateFile|WriteFile|ReadFile|DeviceIoControl|firmware|upgrade|update|bootloader|flash|erase|readback|backup|restore|recovery|MVA' \
+            | head -n 30000 >> "$OUT" || true
+
+          find /tmp/okn_master/windows/extracted -type f -size -100M -print0 \
+            | while IFS= read -r -d '' f; do
+                {
+                  strings -a -n 4 "$f" 2>/dev/null
+                  strings -a -el -n 4 "$f" 2>/dev/null
+                } | grep -Ei \
+                  'USB|HID|VID|PID|6324|1719|25380|5913|2463|1917|A5|5A|55AA|AA55|BP1048|GoloPine|DSTech|AudioDSP|WinUSB|hid\.dll|SetupDi|CreateFile|WriteFile|ReadFile|DeviceIoControl|firmware|upgrade|update|bootloader|flash|erase|readback|backup|restore|recovery|MVA' \
+                  | head -n 3000 | sed "s#^#[$f] #" >> "$OUT" || true
+              done
+
+      - name: Pin BP1048 SDK and cross-reference tuning updater and recovery paths
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone -q "$SDK_REPO" /tmp/okn_master/sdk/repo
+          cd /tmp/okn_master/sdk/repo
+          git checkout -q "$SDK_COMMIT"
+          test "$(git rev-parse HEAD)" = "$SDK_COMMIT"
+
+          {
+            echo "SDK_COMMIT=$(git rev-parse HEAD)"
+            echo
+            echo "===== USB/HID/TUNING ====="
+            grep -RInE \
+              'HIDUsb_Rx|HIDUsb_Tx|hid_tx_buf|hid_send_data|hid_recive_data|UsbLoadAudioMode|Communication_Effect_Config|Communication_Effect_0x00|CFG_COMMUNICATION_BY_USB|CFG_COMMUNICATION_CRYPTO|CFG_COMMUNICATION_PASSWORD' \
+              BT_Audio_APP MVsB1_Base_SDK 2>/dev/null | head -n 12000 || true
+
+            echo
+            echo "===== UPDATE/FLASH/RECOVERY ====="
+            grep -RInE \
+              'start_up_grate|pc_upgrade|MVA|SpiFlashWrite|FlashChipErase|FlashSectorErase|bootloader|upgrade|firmware|readback|backup|restore|recovery|AppResourceUsbDevice' \
+              BT_Audio_APP MVsB1_Base_SDK 2>/dev/null | head -n 12000 || true
+          } > /tmp/okn_master/evidence/30_PINNED_SDK_PROTOCOL_UPDATE_HITS.txt
+
+      - name: Search current project repository for firmware and updater evidence
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Inventory project firmware updater and recovery candidates
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            echo "===== CANDIDATE FILES ====="
+            find . -type f \
+              \( -iname '*.mva' -o -iname '*.bin' -o -iname '*.img' -o -iname '*.fw' \
+                 -o -iname '*.rom' -o -iname '*.ota' -o -iname '*.dfu' -o -iname '*.upd' \
+                 -o -iname '*.apk' -o -iname '*.exe' \) \
+              -print | sort
+
+            echo
+            echo "===== UPDATE/RECOVERY TEXT HITS ====="
+            grep -RInE \
+              'BP1048|6324|1719|25380|5913|MVA|flash|erase|upgrade|update|bootloader|readback|backup|rollback|restore|recovery|SpiFlashWrite|FlashChipErase|start_up_grate' \
+              . --exclude-dir=.git 2>/dev/null | head -n 20000 || true
+          } > /tmp/okn_master/evidence/31_PROJECT_FIRMWARE_RECOVERY_INVENTORY.txt
+
+          python3 - <<'PY'
+          from pathlib import Path
+          import hashlib, json
+
+          exts={'.mva','.bin','.img','.fw','.rom','.ota','.dfu','.upd','.apk','.exe'}
+          rows=[]
+          for p in Path('.').rglob('*'):
+              if p.is_file() and p.suffix.lower() in exts and '.git' not in p.parts:
+                  try:b=p.read_bytes()
+                  except:continue
+                  rows.append({
+                    'path':str(p),
+                    'bytes':len(b),
+                    'sha256':hashlib.sha256(b).hexdigest()
+                  })
+          Path('/tmp/okn_master/evidence/32_PROJECT_BINARY_INVENTORY.json').write_text(
+              json.dumps(rows,indent=2)+'\n'
+          )
+          PY
+
+      - name: Build machine-readable vendor protocol candidate map
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import json, re
+
+          e=Path('/tmp/okn_master/evidence')
+          android=(e/'15_ANDROID_ALL_PROTOCOL_HITS.txt').read_text(errors='ignore')
+          focused=(e/'16_ANDROID_FOCUSED_EXCERPTS.txt').read_text(errors='ignore')
+          calls=json.loads((e/'17_ANDROID_USB_CALLS.json').read_text())
+          win=(e/'29_WINDOWS_PROTOCOL_STRINGS.txt').read_text(errors='ignore')
+          sdk=(e/'30_PINNED_SDK_PROTOCOL_UPDATE_HITS.txt').read_text(errors='ignore')
+          aman=(e/'03_ANDROID_VENDOR_MANUAL.txt').read_text(errors='ignore')
+          wman=(e/'04_WINDOWS_VENDOR_MANUAL.txt').read_text(errors='ignore')
+
+          def present(pattern, *texts):
+              return any(re.search(pattern,t,re.I|re.S) for t in texts)
+
+          usb_calls=[x for x in calls if any(k in x['text'] for k in
+                     ('controlTransfer','bulkTransfer','UsbRequest'))]
+
+          candidate={
+            'revision':'MASTER-R69',
+            'mode':'OFFLINE_STATIC_ANALYSIS_ONLY',
+            'expected_runtime_vid_pid':'6324:1719',
+            'android_usb_api_calls':usb_calls,
+            'android_controlTransfer_seen':present(r'controlTransfer',android,focused),
+            'android_bulkTransfer_seen':present(r'bulkTransfer',android,focused),
+            'android_UsbRequest_seen':present(r'UsbRequest',android,focused),
+            'android_expected_vid_pid_text_seen':present(r'6324|1719|25380|5913|2463|1917',android,focused),
+            'windows_usb_hid_evidence_seen':present(r'USB|HID|WinUSB|hid\.dll|SetupDi',win),
+            'vendor_manual_usb_text_seen':present(r'USB|OTG|Type.?C|USB.?C',aman,wman),
+            'a5_5a_evidence_seen':present(r'A5.?5A|0xA5|0x5A',android,focused,win,sdk),
+            'vendor_update_keywords_seen':present(r'firmware|upgrade|update|bootloader|flash|erase|MVA|recovery',android,focused,win),
+            'sdk_update_keywords_seen':present(r'start_up_grate|SpiFlashWrite|FlashChipErase|MVA|AppResourceUsbDevice',sdk),
+            'live_device_io':False,
+            'host_to_device_io':False,
+            'flash_allowed':False,
+            'safe_stock_backup_proven':False,
+            'rollback_proven':False,
+            'exact_board_flash_layout_proven':False,
+          }
+
+          if not usb_calls:
+              status='NO_EXACT_ANDROID_USB_CALL_EXTRACTED'
+          elif candidate['vendor_update_keywords_seen']:
+              status='VENDOR_USB_FOUND_WITH_UPDATER_KEYWORDS_REQUIRES_MANUAL_REVIEW'
+          else:
+              status='VENDOR_USB_CALLS_EXTRACTED_REQUIRES_MANUAL_SEMANTIC_REVIEW'
+
+          candidate['automatic_next_action']=status
+          candidate['live_probe_generation_allowed']=False
+          candidate['flash_generation_allowed']=False
+
+          (e/'33_MASTER_PROTOCOL_CANDIDATES.json').write_text(
+              json.dumps(candidate,indent=2,ensure_ascii=False)+'\n'
+          )
+          PY
+
+      - name: Build compact master review dossier
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import json
+
+          e=Path('/tmp/okn_master/evidence')
+          c=json.loads((e/'33_MASTER_PROTOCOL_CANDIDATES.json').read_text())
+
+          md = f"""# OKN BP1048P4 MASTER OFFLINE DOSSIER
+
+          ## Hard safety state
+          - Live DSP access: **NO**
+          - Host-to-device I/O: **NO**
+          - Flash/write/erase/recovery commands: **NO**
+          - Exact-board stock backup proven: **NO**
+          - Rollback proven: **NO**
+          - Exact production flash layout proven: **NO**
+          - `FLASH_ALLOWED=NO`
+
+          ## Sources analyzed in this one workflow
+          - Official GoloPine Android Audio Turning package (1 Apr 2026)
+          - Official GoloPine Windows DSTech_AudioDSP_Client package (8 Apr 2026)
+          - Official GoloPine Android instructions
+          - Official GoloPine Windows instructions
+          - Pinned public BP1048 SDK commit `{__import__('os').environ.get('SDK_COMMIT','')}`
+          - Current project repository firmware/updater candidates
+
+          ## Automatically extracted signals
+          - Android controlTransfer seen: **{c['android_controlTransfer_seen']}**
+          - Android bulkTransfer seen: **{c['android_bulkTransfer_seen']}**
+          - Android UsbRequest seen: **{c['android_UsbRequest_seen']}**
+          - Expected VID/PID text seen in Android analysis: **{c['android_expected_vid_pid_text_seen']}**
+          - Windows USB/HID evidence seen: **{c['windows_usb_hid_evidence_seen']}**
+          - A5/5A evidence seen somewhere: **{c['a5_5a_evidence_seen']}**
+          - Vendor updater/flash keywords seen: **{c['vendor_update_keywords_seen']}**
+          - SDK updater/flash evidence seen: **{c['sdk_update_keywords_seen']}**
+
+          ## Automatic status
+          `{c['automatic_next_action']}`
+
+          ## Important
+          This workflow intentionally does **not** auto-generate or execute a new live USB command.
+          The focused protocol excerpts and exact call sites are packaged so the next review can
+          derive one exact minimal command from vendor evidence instead of guessing.
+
+          Classification: **STATIC_ANALYSIS_ONLY_NOT_FOR_FLASH**
+          """
+          (e/'34_MASTER_DOSSIER.md').write_text(md)
+          print(md)
+          PY
+          cat /tmp/okn_master/evidence/34_MASTER_DOSSIER.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Produce review index and checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            echo "READ THESE FIRST:"
+            echo "34_MASTER_DOSSIER.md"
+            echo "33_MASTER_PROTOCOL_CANDIDATES.json"
+            echo "17_ANDROID_USB_CALLS.json"
+            echo "16_ANDROID_FOCUSED_EXCERPTS.txt"
+            echo "13_ANDROID_MANIFEST_USB_FILTERS.txt"
+            echo "29_WINDOWS_PROTOCOL_STRINGS.txt"
+            echo "28_WINDOWS_PE_IMPORTS.json"
+            echo "03_ANDROID_VENDOR_MANUAL.txt"
+            echo "04_WINDOWS_VENDOR_MANUAL.txt"
+            echo "30_PINNED_SDK_PROTOCOL_UPDATE_HITS.txt"
+            echo "31_PROJECT_FIRMWARE_RECOVERY_INVENTORY.txt"
+          } > /tmp/okn_master/evidence/00_READ_FIRST.txt
+
+          cp /tmp/okn_master/evidence/* /tmp/okn_master/out/
+          (cd /tmp/okn_master/out && sha256sum * > SHA256SUMS.txt)
+
+          # Never redistribute official vendor binaries/packages in the artifact.
+          test ! -e /tmp/okn_master/out/vendor.apk
+          test ! -e /tmp/okn_master/out/vendor.exe
+          test ! -e /tmp/okn_master/out/golopine_android.zip
+          test ! -e /tmp/okn_master/out/golopine_windows.zip
+          test ! -e /tmp/okn_master/out/android_manual.docx
+          test ! -e /tmp/okn_master/out/windows_manual.docx
+
+      - name: Upload one complete MASTER analysis artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: OKN-BP1048P4-MASTER-OFFLINE-VENDOR-PROTOCOL-RECOVERY-EVIDENCE
+          path: /tmp/okn_master/out/*
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Final fail-closed assertion
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$LIVE_DEVICE_IO" = "NO"
+          test "$USB_DEVICE_ACCESS" = "NO"
+          test "$HOST_TO_DEVICE_IO" = "NO"
+          test "$FLASH_ALLOWED" = "NO"
+          test "$ERASE_ALLOWED" = "NO"
+          test "$WRITE_ALLOWED" = "NO"
+          test "$RECOVERY_COMMAND_ALLOWED" = "NO"
+
+          grep -q '"live_device_io": false' /tmp/okn_master/evidence/33_MASTER_PROTOCOL_CANDIDATES.json
+          grep -q '"host_to_device_io": false' /tmp/okn_master/evidence/33_MASTER_PROTOCOL_CANDIDATES.json
+          grep -q '"flash_allowed": false' /tmp/okn_master/evidence/33_MASTER_PROTOCOL_CANDIDATES.json
+          grep -q '"live_probe_generation_allowed": false' /tmp/okn_master/evidence/33_MASTER_PROTOCOL_CANDIDATES.json
+          grep -q '"flash_generation_allowed": false' /tmp/okn_master/evidence/33_MASTER_PROTOCOL_CANDIDATES.json
+          grep -q 'STATIC_ANALYSIS_ONLY_NOT_FOR_FLASH' /tmp/okn_master/evidence/34_MASTER_DOSSIER.md
+
+          echo "MASTER_OFFLINE_VENDOR_PROTOCOL_PIPELINE=PASS"
+          echo "HOST_TO_DEVICE_IO=NO"
+          echo "FLASH_ALLOWED=NO"
