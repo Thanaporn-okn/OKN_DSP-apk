@@ -1,0 +1,638 @@
+name: OKN BP1048P4 MASTER V6 WINDOWS RUNTIME PROTOCOL RECOVERY
+
+"on":
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  GOLOPINE_WINDOWS_URL: "https://golodsp.com/wp-content/uploads/2026/05/golopine_audio_turning_release_2026-04-08.exe_.zip"
+  EXPECTED_RUNTIME_VID_PID: "6324:1719"
+  LIVE_DSP_CONNECTED: "NO"
+  USB_TARGET_ACCESS: "NO"
+  HOST_TO_DSP_IO: "NO"
+  HID_SEND_ALLOWED: "NO"
+  FLASH_ALLOWED: "NO"
+  WRITE_ALLOWED: "NO"
+  ERASE_ALLOWED: "NO"
+  RECOVERY_COMMAND_ALLOWED: "NO"
+
+jobs:
+  master-v6:
+    name: MASTER V6 runtime memory recovery without DSP
+    runs-on: windows-latest
+    timeout-minutes: 40
+
+    steps:
+      - name: Safety gate and workspace
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          if ($env:LIVE_DSP_CONNECTED -ne "NO") { throw "LIVE_DSP_CONNECTED must be NO" }
+          if ($env:USB_TARGET_ACCESS -ne "NO") { throw "USB_TARGET_ACCESS must be NO" }
+          if ($env:HOST_TO_DSP_IO -ne "NO") { throw "HOST_TO_DSP_IO must be NO" }
+          if ($env:HID_SEND_ALLOWED -ne "NO") { throw "HID_SEND_ALLOWED must be NO" }
+          if ($env:FLASH_ALLOWED -ne "NO") { throw "FLASH_ALLOWED must be NO" }
+          if ($env:WRITE_ALLOWED -ne "NO") { throw "WRITE_ALLOWED must be NO" }
+          if ($env:ERASE_ALLOWED -ne "NO") { throw "ERASE_ALLOWED must be NO" }
+          if ($env:RECOVERY_COMMAND_ALLOWED -ne "NO") { throw "RECOVERY_COMMAND_ALLOWED must be NO" }
+
+          $root = "C:\okn_v6"
+          if (Test-Path $root) { Remove-Item -Recurse -Force $root }
+          New-Item -ItemType Directory -Force -Path `
+            "$root\download","$root\pkg","$root\tools","$root\baseline",`
+            "$root\runtime","$root\evidence","$root\out" | Out-Null
+
+          @"
+          MODE=WINDOWS_RUNTIME_MEMORY_RECOVERY_WITHOUT_DSP
+          LIVE_DSP_CONNECTED=NO
+          USB_TARGET_ACCESS=NO
+          HOST_TO_DSP_IO=NO
+          HID_SEND_ALLOWED=NO
+          FLASH_ALLOWED=NO
+          WRITE_ALLOWED=NO
+          ERASE_ALLOWED=NO
+          RECOVERY_COMMAND_ALLOWED=NO
+          "@ | Set-Content "$root\evidence\00_SAFETY.txt"
+
+      - name: Download and select real official GoloPine Windows client
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $root = "C:\okn_v6"
+          curl.exe -fL --retry 6 --retry-all-errors --retry-delay 2 `
+            --connect-timeout 20 --max-time 300 `
+            $env:GOLOPINE_WINDOWS_URL -o "$root\download\vendor.zip"
+          if ($LASTEXITCODE -ne 0) { throw "vendor download failed" }
+
+          Expand-Archive -Force "$root\download\vendor.zip" "$root\pkg"
+          $exe = Get-ChildItem "$root\pkg" -Recurse -File -Filter *.exe |
+            Where-Object {
+              $_.FullName -notmatch '\\__MACOSX\\' -and
+              $_.Name -notlike '._*'
+            } |
+            Sort-Object Length -Descending |
+            Select-Object -First 1
+
+          if (-not $exe) { throw "real vendor EXE not found" }
+          if ($exe.Length -lt 100000) { throw "selected EXE too small" }
+
+          Copy-Item $exe.FullName "$root\vendor.exe" -Force
+          $first = [IO.File]::ReadAllBytes("$root\vendor.exe")[0..1]
+          if ($first[0] -ne 0x4D -or $first[1] -ne 0x5A) { throw "not MZ" }
+
+          $sha = (Get-FileHash "$root\vendor.exe" -Algorithm SHA256).Hash
+          @"
+          SELECTED_EXE=$($exe.FullName)
+          BYTES=$($exe.Length)
+          SHA256=$sha
+          "@ | Set-Content "$root\evidence\01_VENDOR_IDENTITY.txt"
+
+      - name: Install ILSpy and create baseline IL
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $root = "C:\okn_v6"
+          dotnet tool install --tool-path "$root\tools" ilspycmd *> "$root\evidence\02_ILSPY_INSTALL.txt"
+          & "$root\tools\ilspycmd.exe" --version | Set-Content "$root\evidence\03_ILSPY_VERSION.txt"
+
+          New-Item -ItemType Directory -Force -Path "$root\baseline\il","$root\baseline\cs" | Out-Null
+          & "$root\tools\ilspycmd.exe" -il -o "$root\baseline\il" "$root\vendor.exe" `
+            *> "$root\evidence\04_BASELINE_IL_LOG.txt"
+          & "$root\tools\ilspycmd.exe" -p -o "$root\baseline\cs" "$root\vendor.exe" `
+            *> "$root\evidence\05_BASELINE_CS_LOG.txt"
+
+          $ilFiles = Get-ChildItem "$root\baseline\il" -Recurse -File
+          if ($ilFiles.Count -lt 1) { throw "baseline IL empty" }
+
+      - name: Extract protected target method RVAs from baseline
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $root = "C:\okn_v6"
+          @'
+          from pathlib import Path
+          import re, json
+
+          root=Path(r"C:\okn_v6\baseline\il")
+          targets=[
+            "DSTechAcutatorCommand::GetOutputData",
+            "DSTechAcutatorCommand::.ctor",
+            "HardwareCommandConverter::ConvertSigmaDSPCoefficient",
+            "HardwareCommandConverter::SpitToByte",
+            "HardwareCommandConverter::CreateFilterUpdateCommand",
+            "HardwareCommandConverter::CreateSigmaDSPsingleVariableUpdateCommand",
+            "HardwareCommandConverter::CreateSigmaDSPfiltrUpdateCommand",
+            "HIDInterface::Connect",
+            "HIDInterface::Write",
+            "HIDInterface::Send",
+          ]
+
+          rows=[]
+          for p in root.rglob("*"):
+              if not p.is_file(): continue
+              s=p.read_text(errors="ignore")
+              lines=s.splitlines()
+              for i,l in enumerate(lines):
+                  if "} // end of method " not in l: continue
+                  name=l.split("} // end of method ",1)[1].strip()
+                  if not any(t.lower() in name.lower() for t in targets):
+                      continue
+                  start=max(0,i-120)
+                  block="\n".join(lines[start:i+1])
+                  rv=re.findall(r"Method begins at RVA 0x([0-9A-Fa-f]+)",block)
+                  code=re.findall(r"Code size:\s*(\d+)",block)
+                  ins=len(re.findall(r"\bIL_[0-9A-Fa-f]{4,8}:",block))
+                  rows.append({
+                    "method":name,
+                    "rva":int(rv[-1],16) if rv else None,
+                    "rva_hex":("0x"+rv[-1].upper()) if rv else None,
+                    "baseline_code_size":int(code[-1]) if code else None,
+                    "baseline_instruction_count":ins,
+                  })
+
+          Path(r"C:\okn_v6\evidence\06_TARGET_METHOD_RVAS.json").write_text(
+              json.dumps(rows,indent=2)+"\n"
+          )
+          print(json.dumps(rows,indent=2))
+          '@ | Set-Content "$root\extract_rvas.py"
+          python "$root\extract_rvas.py"
+
+      - name: Launch vendor client with no target DSP and capture mapped process image
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $root = "C:\okn_v6"
+
+          # The GitHub-hosted Windows runner has no user's DSP attached.
+          # We launch only to allow the commercial protector to initialize/decrypt its own code.
+          $p = Start-Process -FilePath "$root\vendor.exe" `
+            -WorkingDirectory $root -PassThru
+
+          $captured = $false
+          foreach ($delay in @(1,2,4,6)) {
+            Start-Sleep -Seconds $delay
+            $p.Refresh()
+            if ($p.HasExited) { break }
+
+            try {
+              $base = $p.MainModule.BaseAddress.ToInt64()
+              $size = $p.MainModule.ModuleMemorySize
+              "$($p.Id)|$base|$size" | Set-Content "$root\runtime\process_info.txt"
+              $captured = $true
+              break
+            } catch {
+              Start-Sleep -Milliseconds 500
+            }
+          }
+
+          if (-not $captured) {
+            "PROCESS_EXITED_BEFORE_CAPTURE=$($p.HasExited)" |
+              Set-Content "$root\evidence\07_PROCESS_LAUNCH.txt"
+            throw "could not capture process module"
+          }
+
+          @"
+          PID=$($p.Id)
+          BASE=0x$("{0:X}" -f $base)
+          MODULE_SIZE=$size
+          HAS_EXITED=$($p.HasExited)
+          "@ | Set-Content "$root\evidence\07_PROCESS_LAUNCH.txt"
+
+          @'
+          import ctypes, pathlib
+
+          root=pathlib.Path(r"C:\okn_v6")
+          pid_s,base_s,size_s=(root/"runtime/process_info.txt").read_text().strip().split("|")
+          pid=int(pid_s); base=int(base_s); size=int(size_s)
+
+          PROCESS_VM_READ=0x0010
+          PROCESS_QUERY_INFORMATION=0x0400
+          k=ctypes.windll.kernel32
+          h=k.OpenProcess(PROCESS_VM_READ|PROCESS_QUERY_INFORMATION,False,pid)
+          if not h:
+              raise OSError("OpenProcess failed")
+
+          out=bytearray()
+          chunk=1024*1024
+          pos=0
+          while pos<size:
+              n=min(chunk,size-pos)
+              buf=(ctypes.c_ubyte*n)()
+              got=ctypes.c_size_t()
+              ok=k.ReadProcessMemory(
+                  h,ctypes.c_void_p(base+pos),
+                  ctypes.byref(buf),n,ctypes.byref(got)
+              )
+              if not ok or got.value==0:
+                  out.extend(b"\x00"*n)
+              else:
+                  data=bytes(buf[:got.value])
+                  out.extend(data)
+                  if got.value<n:
+                      out.extend(b"\x00"*(n-got.value))
+              pos+=n
+          k.CloseHandle(h)
+          (root/"runtime/runtime_mapped_image.bin").write_bytes(out)
+          print("MAPPED_IMAGE_BYTES",len(out))
+          '@ | Set-Content "$root\read_process.py"
+          python "$root\read_process.py"
+
+          if (-not $p.HasExited) {
+            Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
+          }
+
+          $mapped = Get-Item "$root\runtime\runtime_mapped_image.bin"
+          if ($mapped.Length -lt 1000000) { throw "mapped image capture too small" }
+          (Get-FileHash $mapped.FullName -Algorithm SHA256).Hash |
+            Set-Content "$root\evidence\08_MAPPED_IMAGE_SHA256.txt"
+
+      - name: Rebuild runtime mapped PE into analyzable file
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $root = "C:\okn_v6"
+
+          @'
+          from pathlib import Path
+          import struct, hashlib, json
+
+          root=Path(r"C:\okn_v6")
+          mem=(root/"runtime/runtime_mapped_image.bin").read_bytes()
+          if mem[:2] != b"MZ":
+              raise SystemExit("mapped image missing MZ")
+
+          pe=struct.unpack_from("<I",mem,0x3C)[0]
+          if mem[pe:pe+4] != b"PE\0\0":
+              raise SystemExit("mapped image missing PE")
+
+          coff=pe+4
+          nsec=struct.unpack_from("<H",mem,coff+2)[0]
+          opt_size=struct.unpack_from("<H",mem,coff+16)[0]
+          opt=coff+20
+          magic=struct.unpack_from("<H",mem,opt)[0]
+          if magic not in (0x10B,0x20B):
+              raise SystemExit("unknown optional header")
+
+          size_headers=struct.unpack_from("<I",mem,opt+60)[0]
+          sect=opt+opt_size
+          sections=[]
+          max_raw=size_headers
+          for i in range(nsec):
+              o=sect+i*40
+              name=mem[o:o+8].split(b"\0",1)[0].decode("ascii","replace")
+              vsize,va,raw_size,raw_ptr=struct.unpack_from("<IIII",mem,o+8)
+              sections.append({
+                  "name":name,"virtual_size":vsize,"virtual_address":va,
+                  "raw_size":raw_size,"raw_pointer":raw_ptr
+              })
+              max_raw=max(max_raw,raw_ptr+raw_size)
+
+          out=bytearray(max_raw)
+          out[:min(size_headers,len(mem))]=mem[:min(size_headers,len(mem))]
+          for s in sections:
+              va=s["virtual_address"]; rs=s["raw_size"]; rp=s["raw_pointer"]
+              if rs<=0 or rp<=0 or va>=len(mem): continue
+              n=min(rs,len(mem)-va,len(out)-rp)
+              if n>0:
+                  out[rp:rp+n]=mem[va:va+n]
+
+          dst=root/"runtime/runtime_rebuilt.exe"
+          dst.write_bytes(out)
+          report={
+              "mapped_bytes":len(mem),
+              "rebuilt_bytes":len(out),
+              "rebuilt_sha256":hashlib.sha256(out).hexdigest(),
+              "sections":sections
+          }
+          (root/"evidence/09_RUNTIME_REBUILD.json").write_text(json.dumps(report,indent=2)+"\n")
+          print(json.dumps(report,indent=2))
+          '@ | Set-Content "$root\rebuild_pe.py"
+          python "$root\rebuild_pe.py"
+
+          $first = [IO.File]::ReadAllBytes("$root\runtime\runtime_rebuilt.exe")[0..1]
+          if ($first[0] -ne 0x4D -or $first[1] -ne 0x5A) { throw "rebuilt image invalid" }
+
+      - name: Decompile runtime rebuilt image and compare command methods
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $root = "C:\okn_v6"
+          New-Item -ItemType Directory -Force -Path "$root\runtime\il","$root\runtime\cs" | Out-Null
+
+          & "$root\tools\ilspycmd.exe" -il -o "$root\runtime\il" "$root\runtime\runtime_rebuilt.exe" `
+            *> "$root\evidence\10_RUNTIME_ILSPY_IL_LOG.txt"
+          & "$root\tools\ilspycmd.exe" -p -o "$root\runtime\cs" "$root\runtime\runtime_rebuilt.exe" `
+            *> "$root\evidence\11_RUNTIME_ILSPY_CS_LOG.txt"
+
+          @'
+          from pathlib import Path
+          import re,json,hashlib
+
+          root=Path(r"C:\okn_v6")
+          targets=[
+            "DSTechAcutatorCommand::GetOutputData",
+            "DSTechAcutatorCommand::.ctor",
+            "HardwareCommandConverter::ConvertSigmaDSPCoefficient",
+            "HardwareCommandConverter::SpitToByte",
+            "HardwareCommandConverter::CreateFilterUpdateCommand",
+            "HardwareCommandConverter::CreateSigmaDSPsingleVariableUpdateCommand",
+            "HardwareCommandConverter::CreateSigmaDSPfiltrUpdateCommand",
+            "HIDInterface::Connect","HIDInterface::Write","HIDInterface::Send",
+          ]
+
+          def extract(folder):
+              rows={}
+              for p in folder.rglob("*"):
+                  if not p.is_file(): continue
+                  lines=p.read_text(errors="ignore").splitlines()
+                  starts=[i for i,l in enumerate(lines) if re.match(r"^\s*\.method\b",l)]
+                  for si,st in enumerate(starts):
+                      en=starts[si+1] if si+1<len(starts) else len(lines)
+                      for j in range(st,en):
+                          if re.search(r"\}\s*//\s*end of method",lines[j]):
+                              en=j+1; break
+                      block="\n".join(lines[st:en])
+                      endm=re.findall(r"\}\s*//\s*end of method\s+(.+)",block)
+                      name=endm[-1].strip() if endm else ""
+                      if not any(t.lower() in name.lower() for t in targets):
+                          continue
+                      ins=len(re.findall(r"\bIL_[0-9A-Fa-f]{4,8}:",block))
+                      code=re.findall(r"Code size:\s*(\d+)",block)
+                      rv=re.findall(r"Method begins at RVA 0x([0-9A-Fa-f]+)",block)
+                      rows[name]={
+                          "instruction_count":ins,
+                          "code_size":int(code[-1]) if code else None,
+                          "rva_hex":"0x"+rv[-1].upper() if rv else None,
+                          "sha256":hashlib.sha256(block.encode()).hexdigest(),
+                          "block":block
+                      }
+              return rows
+
+          base=extract(root/"baseline/il")
+          run=extract(root/"runtime/il")
+          comparison=[]
+          excerpts=[]
+          for name in sorted(set(base)|set(run)):
+              b=base.get(name,{})
+              r=run.get(name,{})
+              changed=(b.get("sha256") != r.get("sha256"))
+              restored=(r.get("instruction_count",0)>6 and r.get("instruction_count",0)>b.get("instruction_count",0))
+              comparison.append({
+                  "method":name,
+                  "baseline_instruction_count":b.get("instruction_count"),
+                  "runtime_instruction_count":r.get("instruction_count"),
+                  "baseline_code_size":b.get("code_size"),
+                  "runtime_code_size":r.get("code_size"),
+                  "changed":changed,
+                  "appears_restored":restored,
+                  "rva_hex":r.get("rva_hex") or b.get("rva_hex")
+              })
+              if r:
+                  rb=r["block"].splitlines()
+                  excerpts.append(
+                      f"\n===== {name} runtime_instr={r.get('instruction_count')} "
+                      f"changed={changed} restored={restored} =====\n"+
+                      "\n".join(rb[:400])+"\n"
+                  )
+
+          (root/"evidence/12_RUNTIME_METHOD_COMPARISON.json").write_text(
+              json.dumps(comparison,indent=2)+"\n"
+          )
+          (root/"evidence/13_RUNTIME_FOCUSED_IL.txt").write_text("".join(excerpts))
+          print(json.dumps(comparison,indent=2))
+          '@ | Set-Content "$root\compare_runtime.py"
+          python "$root\compare_runtime.py"
+
+      - name: Offline reflection probe pure command builders only
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          $ErrorActionPreference = "Continue"
+          $root = "C:\okn_v6"
+
+          @'
+          param([string]$AssemblyPath,[string]$OutPath)
+          $ErrorActionPreference = "Stop"
+
+          function Hex($x) {
+            if ($null -eq $x) { return "<NULL>" }
+            if ($x -is [byte[]]) { return (($x | ForEach-Object { $_.ToString("X2") }) -join "") }
+            return [string]$x
+          }
+
+          $lines = New-Object System.Collections.Generic.List[string]
+          $lines.Add("MODE=PURE_COMMAND_BUILDERS_ONLY")
+          $lines.Add("HID_TYPES_INVOKED=NO")
+          $lines.Add("SEND_WRITE_CONNECT_INVOKED=NO")
+
+          try {
+            $asm=[Reflection.Assembly]::LoadFile($AssemblyPath)
+            $lines.Add("ASSEMBLY_LOADED=$($asm.FullName)")
+
+            $hc=$asm.GetType("DSTech_AudioDSP_Client.HardwareCommandConverter",$false)
+            if ($hc) {
+              foreach ($name in @("ConvertSigmaDSPCoefficient","SpitToByte")) {
+                $m=$hc.GetMethod($name,[Reflection.BindingFlags]"Public,Static")
+                if ($m) {
+                  foreach ($v in @(0,1,-1,4660)) {
+                    try {
+                      if ($name -eq "ConvertSigmaDSPCoefficient") {
+                        $r=$m.Invoke($null,@([double]$v))
+                      } else {
+                        $r=$m.Invoke($null,@([int]$v))
+                      }
+                      $lines.Add("$name($v)=$(Hex $r)")
+                    } catch {
+                      $lines.Add("$name($v)=EXCEPTION:$($_.Exception.GetBaseException().Message)")
+                    }
+                  }
+                }
+              }
+
+              $m=$hc.GetMethod("CreateSigmaDSPsingleVariableUpdateCommand",[Reflection.BindingFlags]"Public,Static")
+              if ($m) {
+                foreach ($addr in @([int16]0,[int16]1,[int16]4660)) {
+                  foreach ($dat in @([double]0,[double]1,[double]-1,[double]0.5)) {
+                    try {
+                      $r=$m.Invoke($null,@($addr,$dat))
+                      $lines.Add("CreateSigmaDSPsingleVariableUpdateCommand($addr,$dat)=$(Hex $r)")
+                    } catch {
+                      $lines.Add("CreateSigmaDSPsingleVariableUpdateCommand($addr,$dat)=EXCEPTION:$($_.Exception.GetBaseException().Message)")
+                    }
+                  }
+                }
+              }
+            } else {
+              $lines.Add("HardwareCommandConverter=NOT_FOUND")
+            }
+
+            $ct=$asm.GetType("DSTech_AudioDSP_Client.DSTechAcutatorCommand",$false)
+            if ($ct) {
+              try {
+                $obj=[Activator]::CreateInstance($ct)
+                $ap=$ct.GetProperty("Address")
+                $dp=$ct.GetProperty("Data")
+                $gm=$ct.GetMethod("GetOutputData",[Reflection.BindingFlags]"Public,Instance")
+                foreach ($addr in @(0,1,4660)) {
+                  foreach ($data in @(
+                    [byte[]]@(),
+                    [byte[]]@(0),
+                    [byte[]]@(1,2,3,4),
+                    [byte[]]@(0xA5,0x5A,0,0,0x16)
+                  )) {
+                    try {
+                      $ap.SetValue($obj,[int]$addr,$null)
+                      $dp.SetValue($obj,$data,$null)
+                      $r=$gm.Invoke($obj,$null)
+                      $lines.Add("DSTechAcutatorCommand addr=$addr data=$(Hex $data) output=$(Hex $r)")
+                    } catch {
+                      $lines.Add("DSTechAcutatorCommand addr=$addr=EXCEPTION:$($_.Exception.GetBaseException().Message)")
+                    }
+                  }
+                }
+              } catch {
+                $lines.Add("DSTechAcutatorCommand_PROBE=EXCEPTION:$($_.Exception.GetBaseException().Message)")
+              }
+            } else {
+              $lines.Add("DSTechAcutatorCommand=NOT_FOUND")
+            }
+          } catch {
+            $lines.Add("ASSEMBLY_LOAD_OR_PROBE_EXCEPTION=$($_.Exception.GetBaseException().ToString())")
+          }
+
+          $lines | Set-Content $OutPath
+          '@ | Set-Content "$root\pure_probe.ps1"
+
+          $x86ps="$env:WINDIR\SysWOW64\WindowsPowerShell\v1.0\powershell.exe"
+          if (Test-Path $x86ps) {
+            & $x86ps -NoProfile -ExecutionPolicy Bypass `
+              -File "$root\pure_probe.ps1" `
+              -AssemblyPath "$root\runtime\runtime_rebuilt.exe" `
+              -OutPath "$root\evidence\14_PURE_COMMAND_BUILDER_OUTPUTS.txt"
+          } else {
+            "X86_POWERSHELL_NOT_FOUND=true" |
+              Set-Content "$root\evidence\14_PURE_COMMAND_BUILDER_OUTPUTS.txt"
+          }
+
+      - name: Build V6 final decision
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $root = "C:\okn_v6"
+
+          @'
+          from pathlib import Path
+          import json,re
+
+          root=Path(r"C:\okn_v6")
+          ev=root/"evidence"
+          cmp=json.loads((ev/"12_RUNTIME_METHOD_COMPARISON.json").read_text())
+          pure=(ev/"14_PURE_COMMAND_BUILDER_OUTPUTS.txt").read_text(errors="ignore") if (ev/"14_PURE_COMMAND_BUILDER_OUTPUTS.txt").exists() else ""
+
+          restored=[x for x in cmp if x.get("appears_restored")]
+          changed=[x for x in cmp if x.get("changed")]
+          actual_outputs=[
+              l for l in pure.splitlines()
+              if ("=" in l and "<NULL>" not in l and "EXCEPTION:" not in l and
+                  not l.endswith("=NO") and not l.startswith("ASSEMBLY_"))
+          ]
+
+          decision={
+              "revision":"MASTER-V6",
+              "mode":"WINDOWS_RUNTIME_MEMORY_RECOVERY_WITHOUT_DSP",
+              "runtime_methods_changed_count":len(changed),
+              "runtime_methods_restored_count":len(restored),
+              "restored_methods":[x["method"] for x in restored],
+              "pure_builder_nonnull_output_lines":len(actual_outputs),
+              "pure_builder_outputs_observed":actual_outputs[:200],
+              "exact_vendor_hid_frame_proven":False,
+              "safe_stock_backup_proven":False,
+              "rollback_proven":False,
+              "exact_board_flash_layout_proven":False,
+              "live_dsp_connected":False,
+              "usb_target_access":False,
+              "host_to_dsp_io":False,
+              "hid_send_allowed":False,
+              "flash_allowed":False
+          }
+
+          if restored and actual_outputs:
+              decision["status"]="RUNTIME_CODE_RECOVERED_AND_OFFLINE_COMMAND_OUTPUTS_OBSERVED_REVIEW_FOR_EXACT_FRAME"
+          elif restored:
+              decision["status"]="RUNTIME_CODE_RECOVERED_COMMAND_OUTPUT_PROBE_INCONCLUSIVE"
+          else:
+              decision["status"]="RUNTIME_MAPPED_IMAGE_STILL_PROTECTED_NO_LIVE_FRAME_AUTHORIZED"
+
+          # Fail closed: exact frame becomes true only after human review of command output
+          # and transport linkage, never automatically.
+          (ev/"15_V6_FINAL_DECISION.json").write_text(json.dumps(decision,indent=2)+"\n")
+
+          md=f"""# MASTER V6 FINAL DECISION
+
+          - Runtime command methods changed: **{len(changed)}**
+          - Runtime command methods apparently restored: **{len(restored)}**
+          - Pure command-builder non-null outputs: **{len(actual_outputs)}**
+          - Exact vendor HID frame proven automatically: **NO**
+          - DSP physically connected in CI: **NO**
+          - Host-to-DSP I/O: **NO**
+          - HID Send/Write invoked: **NO**
+          - Safe stock backup proven: **NO**
+          - Rollback proven: **NO**
+          - Flash allowed: **NO**
+
+          Status: **{decision['status']}**
+
+          Classification: **RUNTIME_OFFLINE_ANALYSIS_ONLY_NOT_FOR_FLASH**
+          """
+          (ev/"16_V6_FINAL_DECISION.md").write_text(md)
+          print(md)
+          '@ | Set-Content "$root\decision.py"
+          python "$root\decision.py"
+          Get-Content "$root\evidence\16_V6_FINAL_DECISION.md" >> $env:GITHUB_STEP_SUMMARY
+
+      - name: Package focused V6 evidence only
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $root = "C:\okn_v6"
+          Copy-Item "$root\evidence\*" "$root\out\" -Force
+
+          # Never redistribute vendor EXE, runtime memory image, or rebuilt EXE.
+          if (Test-Path "$root\out\vendor.exe") { throw "vendor exe leak" }
+          if (Test-Path "$root\out\runtime_mapped_image.bin") { throw "memory image leak" }
+          if (Test-Path "$root\out\runtime_rebuilt.exe") { throw "rebuilt exe leak" }
+
+          Get-ChildItem "$root\out" -File | ForEach-Object {
+            "$((Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower())  $($_.Name)"
+          } | Set-Content "$root\out\SHA256SUMS.txt"
+
+      - name: Upload V6 runtime recovery evidence
+        uses: actions/upload-artifact@v7
+        with:
+          name: OKN-BP1048P4-MASTER-V6-WINDOWS-RUNTIME-PROTOCOL-RECOVERY
+          path: C:\okn_v6\out\*
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Final fail-closed assertion
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $root = "C:\okn_v6"
+          if ($env:LIVE_DSP_CONNECTED -ne "NO") { throw "live DSP must remain NO" }
+          if ($env:USB_TARGET_ACCESS -ne "NO") { throw "USB target access must remain NO" }
+          if ($env:HOST_TO_DSP_IO -ne "NO") { throw "host-to-DSP must remain NO" }
+          if ($env:HID_SEND_ALLOWED -ne "NO") { throw "HID send must remain NO" }
+          if ($env:FLASH_ALLOWED -ne "NO") { throw "flash must remain NO" }
+
+          $d = Get-Content "$root\evidence\15_V6_FINAL_DECISION.json" -Raw | ConvertFrom-Json
+          if ($d.live_dsp_connected -ne $false) { throw "bad live DSP state" }
+          if ($d.host_to_dsp_io -ne $false) { throw "bad host-to-DSP state" }
+          if ($d.hid_send_allowed -ne $false) { throw "bad HID send state" }
+          if ($d.flash_allowed -ne $false) { throw "bad flash state" }
+
+          "MASTER_V6_RUNTIME_RECOVERY=PASS"
+          "HOST_TO_DSP_IO=NO"
+          "FLASH_ALLOWED=NO"
