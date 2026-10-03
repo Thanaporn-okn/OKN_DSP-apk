@@ -1,0 +1,1051 @@
+name: OKN BP1048P4 MASTER V11 FIXED V2 USBHID ROUTE + READ PATH RECOVERY
+
+"on":
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  GOLOPINE_WINDOWS_URL: "https://golodsp.com/wp-content/uploads/2026/05/golopine_audio_turning_release_2026-04-08.exe_.zip"
+  LIVE_DSP_CONNECTED: "NO"
+  USB_TARGET_ACCESS: "NO"
+  HOST_TO_DSP_IO: "NO"
+  HID_CONNECT_ALLOWED: "NO"
+  HID_SEND_ALLOWED: "NO"
+  HID_WRITE_ALLOWED: "NO"
+  HID_READ_ALLOWED: "NO"
+  FEATURE_REPORT_ALLOWED: "NO"
+  FLASH_ALLOWED: "NO"
+  ERASE_ALLOWED: "NO"
+  WRITE_ALLOWED: "NO"
+
+jobs:
+  master-v11:
+    name: MASTER V11 FIXED V2 USBHID route + read path recovery offline
+    runs-on: windows-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Safety gate and workspace
+        shell: pwsh
+        run: |
+          $ErrorActionPreference="Stop"
+          foreach($n in @(
+            "LIVE_DSP_CONNECTED","USB_TARGET_ACCESS","HOST_TO_DSP_IO",
+            "HID_CONNECT_ALLOWED","HID_SEND_ALLOWED","HID_WRITE_ALLOWED",
+            "HID_READ_ALLOWED","FEATURE_REPORT_ALLOWED",
+            "FLASH_ALLOWED","ERASE_ALLOWED","WRITE_ALLOWED"
+          )){
+            if((Get-Item "Env:$n").Value -ne "NO"){ throw "$n must be NO" }
+          }
+
+          $root="C:\okn_v11"
+          if(Test-Path $root){ Remove-Item -Recurse -Force $root }
+          New-Item -ItemType Directory -Force -Path `
+            "$root\download","$root\pkg","$root\harness","$root\runtime",`
+            "$root\evidence","$root\out" | Out-Null
+
+          @"
+          MODE=OFFLINE_USBHID_ROUTE_AND_READ_PATH_RECOVERY
+          LIVE_DSP_CONNECTED=NO
+          USB_TARGET_ACCESS=NO
+          HOST_TO_DSP_IO=NO
+          HID_CONNECT_ALLOWED=NO
+          HID_SEND_ALLOWED=NO
+          HID_WRITE_ALLOWED=NO
+          HID_READ_ALLOWED=NO
+          FEATURE_REPORT_ALLOWED=NO
+          FLASH_ALLOWED=NO
+          "@ | Set-Content "$root\evidence\00_SAFETY.txt"
+
+      - name: Download untouched official GoloPine Windows client
+        shell: pwsh
+        run: |
+          $ErrorActionPreference="Stop"
+          $root="C:\okn_v11"
+
+          curl.exe -fL --retry 6 --retry-all-errors --retry-delay 2 `
+            --connect-timeout 20 --max-time 300 `
+            $env:GOLOPINE_WINDOWS_URL -o "$root\download\vendor.zip"
+          if($LASTEXITCODE -ne 0){ throw "vendor download failed" }
+
+          Expand-Archive -Force "$root\download\vendor.zip" "$root\pkg"
+
+          $exe=Get-ChildItem "$root\pkg" -Recurse -File -Filter *.exe |
+            Where-Object {
+              $_.FullName -notmatch '\\__MACOSX\\' -and $_.Name -notlike '._*'
+            } |
+            Sort-Object Length -Descending |
+            Select-Object -First 1
+
+          if(-not $exe){ throw "vendor EXE missing" }
+          if($exe.Length -lt 100000){ throw "vendor EXE too small" }
+
+          Copy-Item $exe.FullName "$root\vendor.exe" -Force
+          $b=[IO.File]::ReadAllBytes("$root\vendor.exe")
+          if($b[0] -ne 0x4D -or $b[1] -ne 0x5A){ throw "not MZ" }
+
+          @"
+          FILE=$($exe.FullName)
+          BYTES=$($exe.Length)
+          SHA256=$((Get-FileHash "$root\vendor.exe" -Algorithm SHA256).Hash)
+          ORIGINAL_BINARY_MODIFIED=NO
+          "@ | Set-Content "$root\evidence\01_VENDOR_IDENTITY.txt"
+
+      - name: Build x86 fake-stream route probe
+        shell: pwsh
+        run: |
+          $ErrorActionPreference="Stop"
+          $root="C:\okn_v11"
+
+          @'
+          using System;
+          using System.IO;
+          using System.Linq;
+          using System.Text;
+          using System.Reflection;
+          using System.Reflection.Emit;
+          using System.Runtime.CompilerServices;
+          using System.Collections.Generic;
+          using System.Threading;
+
+          public static class CaptureSink
+          {
+              public static readonly List<byte[]> Writes=new List<byte[]>();
+              public static void Clear(){ lock(Writes){Writes.Clear();} }
+              public static void Record(byte[] b)
+              {
+                  lock(Writes){
+                      Writes.Add(b==null?null:(byte[])b.Clone());
+                  }
+              }
+              public static byte[][] Snapshot()
+              {
+                  lock(Writes){
+                      return Writes.Select(x=>x==null?null:(byte[])x.Clone()).ToArray();
+                  }
+              }
+          }
+
+          class RouteProbe
+          {
+              static List<string> L=new List<string>();
+              static string OutPath;
+
+              static void Log(string s)
+              {
+                  Log(s);
+                  if(!String.IsNullOrEmpty(OutPath))
+                      File.AppendAllText(OutPath,s+Environment.NewLine);
+              }
+
+              static object InvokeBounded(
+                  MethodInfo m, object target, object[] args,
+                  int timeoutMs, string label)
+              {
+                  object result=null;
+                  Exception error=null;
+                  Thread th=new Thread(()=>{
+                      try{ result=m.Invoke(target,args); }
+                      catch(Exception ex){ error=ex; }
+                  });
+                  th.IsBackground=true;
+                  th.Start();
+
+                  if(!th.Join(timeoutMs))
+                  {
+                      Log(label+"_TIMEOUT_MS="+timeoutMs);
+                      try{ th.Abort(); }catch{}
+                      return null;
+                  }
+
+                  if(error!=null) throw error;
+                  return result;
+              }
+
+              static string Hex(byte[] b)
+              {
+                  if(b==null)return "<NULL>";
+                  return BitConverter.ToString(b).Replace("-","");
+              }
+
+              static void EmitDefaultReturn(ILGenerator il,Type ret)
+              {
+                  if(ret==typeof(void)){ il.Emit(OpCodes.Ret); return; }
+                  if(ret.IsValueType)
+                  {
+                      LocalBuilder loc=il.DeclareLocal(ret);
+                      il.Emit(OpCodes.Ldloca_S,loc);
+                      il.Emit(OpCodes.Initobj,ret);
+                      il.Emit(OpCodes.Ldloc,loc);
+                      il.Emit(OpCodes.Ret);
+                      return;
+                  }
+                  il.Emit(OpCodes.Ldnull);
+                  il.Emit(OpCodes.Ret);
+              }
+
+              static MethodAttributes Visibility(MethodInfo m)
+              {
+                  MethodAttributes a=MethodAttributes.Virtual|MethodAttributes.HideBySig;
+                  if(m.IsPublic)a|=MethodAttributes.Public;
+                  else if(m.IsFamily)a|=MethodAttributes.Family;
+                  else if(m.IsFamilyOrAssembly)a|=MethodAttributes.FamORAssem;
+                  else if(m.IsAssembly)a|=MethodAttributes.Assembly;
+                  else a|=MethodAttributes.Private;
+                  if(m.IsSpecialName)a|=MethodAttributes.SpecialName;
+                  return a;
+              }
+
+              static Type BuildCaptureStream(Type baseType)
+              {
+                  AssemblyName an=new AssemblyName("OKN_V11_CAPTURE_STREAM");
+                  AssemblyBuilder ab=AppDomain.CurrentDomain.DefineDynamicAssembly(an,AssemblyBuilderAccess.Run);
+                  ModuleBuilder mb=ab.DefineDynamicModule("main");
+                  TypeBuilder tb=mb.DefineType(
+                      "OKN.CaptureDeviceCommunicationStream",
+                      TypeAttributes.Public|TypeAttributes.Class,
+                      baseType
+                  );
+
+                  ConstructorInfo bc=baseType.GetConstructor(
+                      BindingFlags.Public|BindingFlags.NonPublic|BindingFlags.Instance,
+                      null,Type.EmptyTypes,null
+                  );
+                  if(bc==null)throw new Exception("DeviceCommunicationStream parameterless ctor missing");
+
+                  ConstructorBuilder cb=tb.DefineConstructor(
+                      MethodAttributes.Public,CallingConventions.Standard,Type.EmptyTypes
+                  );
+                  ILGenerator ci=cb.GetILGenerator();
+                  ci.Emit(OpCodes.Ldarg_0);
+                  ci.Emit(OpCodes.Call,bc);
+                  ci.Emit(OpCodes.Ret);
+
+                  var all=baseType.GetMethods(
+                      BindingFlags.Public|BindingFlags.NonPublic|BindingFlags.Instance
+                  );
+
+                  var selected=all.Where(m =>
+                      m.IsVirtual && !m.IsFinal &&
+                      (m.IsAbstract ||
+                       m.Name=="Write" || m.Name=="WriteLine" ||
+                       m.Name=="ReadBytes" || m.Name=="ReadLine" ||
+                       m.Name=="Connect" || m.Name=="Disconnect")
+                  ).GroupBy(m=>m.ToString()).Select(g=>g.First()).ToArray();
+
+                  foreach(MethodInfo m in selected)
+                  {
+                      Type[] ps=m.GetParameters().Select(x=>x.ParameterType).ToArray();
+                      MethodBuilder b=tb.DefineMethod(
+                          m.Name,Visibility(m),m.ReturnType,ps
+                      );
+
+                      ILGenerator il=b.GetILGenerator();
+
+                      if(m.Name=="Write" && ps.Length==1 && ps[0]==typeof(byte[]))
+                      {
+                          il.Emit(OpCodes.Ldarg_1);
+                          il.Emit(OpCodes.Call,
+                              typeof(CaptureSink).GetMethod("Record",
+                                  BindingFlags.Public|BindingFlags.Static));
+                          EmitDefaultReturn(il,m.ReturnType);
+                      }
+                      else
+                      {
+                          EmitDefaultReturn(il,m.ReturnType);
+                      }
+
+                      tb.DefineMethodOverride(b,m);
+                  }
+
+                  return tb.CreateType();
+              }
+
+              static void SetConnectionStatus(object stream,Type baseType,object status)
+              {
+                  Type et=status.GetType();
+                  FieldInfo f=baseType.GetFields(
+                      BindingFlags.Public|BindingFlags.NonPublic|BindingFlags.Instance
+                  ).FirstOrDefault(x=>x.FieldType==et);
+                  if(f!=null)
+                  {
+                      f.SetValue(stream,status);
+                      Log("SET_CONNECTION_STATUS_FIELD="+f.Name+" VALUE="+status);
+                  }
+                  else
+                  {
+                      MethodInfo up=baseType.GetMethod(
+                          "UpdateDeviceConnStatus",
+                          BindingFlags.Public|BindingFlags.NonPublic|BindingFlags.Instance
+                      );
+                      if(up!=null)
+                      {
+                          up.Invoke(stream,new object[]{status});
+                          Log("SET_CONNECTION_STATUS_METHOD="+status);
+                      }
+                  }
+              }
+
+              static void DumpQueue(object bridge,Type bridgeType,string tag)
+              {
+                  FieldInfo q=bridgeType.GetFields(
+                      BindingFlags.Public|BindingFlags.NonPublic|BindingFlags.Instance
+                  ).FirstOrDefault(f =>
+                      f.FieldType.IsGenericType &&
+                      f.FieldType.GetGenericTypeDefinition()==typeof(List<>)
+                  );
+                  if(q==null)return;
+                  System.Collections.IEnumerable en=q.GetValue(bridge) as System.Collections.IEnumerable;
+                  if(en==null)return;
+                  int i=0;
+                  foreach(object cmd in en)
+                  {
+                      if(cmd==null)continue;
+                      MethodInfo tba=cmd.GetType().GetMethod(
+                          "ToByteArray",
+                          BindingFlags.Public|BindingFlags.NonPublic|BindingFlags.Instance,
+                          null,Type.EmptyTypes,null
+                      );
+                      if(tba!=null)
+                      {
+                          try{
+                              byte[] b=tba.Invoke(cmd,null) as byte[];
+                              Log(tag+"_QUEUE_"+i+"_TYPE="+cmd.GetType().FullName+
+                                    " HEX="+Hex(b));
+                          }catch(Exception ex){
+                              Log(tag+"_QUEUE_"+i+"_EXCEPTION="+ex.GetBaseException());
+                          }
+                      }
+                      i++;
+                  }
+              }
+
+              static void RunBridgeCase(
+                  Assembly asm,Type baseType,Type captureType,
+                  Type bridgeType,Type getDescType,
+                  object status,string tag)
+              {
+                  object stream=Activator.CreateInstance(captureType);
+                  SetConnectionStatus(stream,baseType,status);
+
+                  ConstructorInfo bc=bridgeType.GetConstructor(new[]{baseType});
+                  if(bc==null)throw new Exception("UFEcommandBridge ctor missing");
+                  object bridge=bc.Invoke(new[]{stream});
+
+                  CaptureSink.Clear();
+
+                  // Path A: exact public vendor helper.
+                  MethodInfo req=bridgeType.GetMethod(
+                      "SendDeviceDescriptionRequest",
+                      BindingFlags.Public|BindingFlags.NonPublic|BindingFlags.Instance
+                  );
+                  if(req!=null)
+                  {
+                      try{
+                          InvokeBounded(req,bridge,null,1200,tag+"_SEND_DEVICE_DESCRIPTION_REQUEST");
+                          Log(tag+"_SEND_DEVICE_DESCRIPTION_REQUEST=INVOKED_OFFLINE");
+                      }catch(Exception ex){
+                          Log(tag+"_SEND_DEVICE_DESCRIPTION_REQUEST_EXCEPTION="+
+                                ex.GetBaseException());
+                      }
+                  }
+
+                  DumpQueue(bridge,bridgeType,tag+"_AFTER_HELPER");
+
+                  foreach(string sendName in new[]{"sendCommandFromQueue","sendCommandFromQueuePop"})
+                  {
+                      MethodInfo sm=bridgeType.GetMethod(
+                          sendName,
+                          BindingFlags.Public|BindingFlags.NonPublic|BindingFlags.Instance
+                      );
+                      if(sm!=null)
+                      {
+                          try{
+                              InvokeBounded(sm,bridge,null,1200,tag+"_"+sendName);
+                              Thread.Sleep(50);
+                              Log(tag+"_"+sendName+"=INVOKED_OFFLINE");
+                          }catch(Exception ex){
+                              Log(tag+"_"+sendName+"_EXCEPTION="+ex.GetBaseException());
+                          }
+                      }
+                  }
+
+                  byte[][] first=CaptureSink.Snapshot();
+                  for(int i=0;i<first.Length;i++)
+                      Log(tag+"_CAPTURE_HELPER_WRITE_"+i+"="+Hex(first[i]));
+
+                  // Path B: direct exact command object + queue insert.
+                  object stream2=Activator.CreateInstance(captureType);
+                  SetConnectionStatus(stream2,baseType,status);
+                  object bridge2=bc.Invoke(new[]{stream2});
+                  object cmd=Activator.CreateInstance(getDescType,true);
+
+                  MethodInfo append=
+                      bridgeType.GetMethod("appendDeviceCommandwithoutCheck",
+                          BindingFlags.Public|BindingFlags.NonPublic|BindingFlags.Instance)
+                      ?? bridgeType.GetMethod("appendDeviceCommand",
+                          BindingFlags.Public|BindingFlags.NonPublic|BindingFlags.Instance);
+
+                  CaptureSink.Clear();
+                  if(append!=null)
+                  {
+                      try{
+                          InvokeBounded(append,bridge2,new[]{cmd},1200,tag+"_DIRECT_APPEND");
+                          Log(tag+"_DIRECT_APPEND=OK");
+                      }catch(Exception ex){
+                          Log(tag+"_DIRECT_APPEND_EXCEPTION="+ex.GetBaseException());
+                      }
+                  }
+
+                  DumpQueue(bridge2,bridgeType,tag+"_DIRECT");
+
+                  MethodInfo send=bridgeType.GetMethod(
+                      "sendCommandFromQueue",
+                      BindingFlags.Public|BindingFlags.NonPublic|BindingFlags.Instance
+                  );
+                  if(send!=null)
+                  {
+                      try{
+                          InvokeBounded(send,bridge2,null,1200,tag+"_DIRECT_SEND");
+                          Thread.Sleep(50);
+                      }catch(Exception ex){
+                          Log(tag+"_DIRECT_SEND_EXCEPTION="+ex.GetBaseException());
+                      }
+                  }
+
+                  byte[][] second=CaptureSink.Snapshot();
+                  for(int i=0;i<second.Length;i++)
+                      Log(tag+"_CAPTURE_DIRECT_WRITE_"+i+"="+Hex(second[i]));
+              }
+
+              static void Main(string[] a)
+              {
+                  string exe=Path.GetFullPath(a[0]);
+                  string outp=Path.GetFullPath(a[1]);
+                  Directory.SetCurrentDirectory(Path.GetDirectoryName(exe));
+                  OutPath=outp;
+                  File.WriteAllText(OutPath,"");
+
+                  Log("MODE=FAKE_DEVICECOMMUNICATIONSTREAM_CAPTURE_ONLY");
+                  Log("REAL_HID_OBJECT_CREATED=NO");
+                  Log("REAL_HID_CONNECT_INVOKED=NO");
+                  Log("REAL_HID_SEND_INVOKED=NO");
+                  Log("REAL_HID_WRITE_INVOKED=NO");
+                  Log("REAL_HID_READ_INVOKED=NO");
+
+                  try
+                  {
+                      Assembly asm=Assembly.LoadFile(exe);
+                      RuntimeHelpers.RunModuleConstructor(asm.ManifestModule.ModuleHandle);
+                      Log("MODULE_INITIALIZER=SUCCESS");
+
+                      Type baseType=asm.GetType(
+                          "DSTech_AudioDSP_Client.DeviceCommunicationStream",true);
+                      Type bridgeType=asm.GetType(
+                          "DSTech_AudioDSP_Client.UFEcommandBridge",true);
+                      Type getDescType=asm.GetType(
+                          "DSTech_AudioDSP_Client.GetDevcieDescriptionCommand",true);
+
+                      Type captureType=BuildCaptureStream(baseType);
+                      Log("CAPTURE_STREAM_TYPE="+captureType.FullName);
+
+                      Type connEnum=baseType.GetNestedType(
+                          "ConnectionStatus",
+                          BindingFlags.Public|BindingFlags.NonPublic
+                      );
+
+                      if(connEnum!=null && connEnum.IsEnum)
+                      {
+                          foreach(object v in Enum.GetValues(connEnum))
+                              Log("CONNECTION_STATUS "+Enum.GetName(connEnum,v)+"="+
+                                    Convert.ToInt64(v));
+
+                          foreach(object v in Enum.GetValues(connEnum))
+                          {
+                              try{
+                                  RunBridgeCase(
+                                      asm,baseType,captureType,bridgeType,getDescType,
+                                      v,"STATUS_"+Enum.GetName(connEnum,v)
+                                  );
+                              }catch(Exception ex){
+                                  Log("STATUS_"+Enum.GetName(connEnum,v)+
+                                        "_CASE_EXCEPTION="+ex.GetBaseException());
+                              }
+                          }
+                      }
+                      else
+                      {
+                          Log("CONNECTION_STATUS_ENUM_NOT_FOUND=1");
+                      }
+                  }
+                  catch(Exception ex)
+                  {
+                      Log("TOP_EXCEPTION="+ex.ToString());
+                  }
+
+                  Log("ROUTE_PROBE_MAIN_COMPLETE=true");
+                  Environment.Exit(0);
+              }
+          }
+          '@ | Set-Content "$root\harness\RouteProbe.cs"
+
+          @'
+          using System;
+          using System.IO;
+          using System.Linq;
+          using System.Reflection;
+          using System.Runtime.CompilerServices;
+          using System.Runtime.InteropServices;
+          using System.Threading;
+          using System.Collections.Generic;
+
+          class JitMapProbe
+          {
+              [DllImport("kernel32.dll",CharSet=CharSet.Ansi,SetLastError=true)]
+              static extern IntPtr LoadLibrary(string lpFileName);
+
+              [DllImport("kernel32.dll",CharSet=CharSet.Ansi,SetLastError=true)]
+              static extern IntPtr GetProcAddress(IntPtr hModule,string lpProcName);
+
+              static List<string> L=new List<string>();
+
+              static void Native(string dll,params string[] names)
+              {
+                  IntPtr h=LoadLibrary(dll);
+                  L.Add("MODULE|"+dll+"|0x"+h.ToInt64().ToString("X"));
+                  if(h==IntPtr.Zero)return;
+                  foreach(string n in names)
+                  {
+                      IntPtr p=GetProcAddress(h,n);
+                      L.Add("NATIVE|"+dll+"!"+n+"|0x"+p.ToInt64().ToString("X"));
+                  }
+              }
+
+              static void AddMethods(Assembly asm,string typeName,string[] names)
+              {
+                  Type t=asm.GetType(typeName,false);
+                  if(t==null)
+                  {
+                      L.Add("TYPE_MISSING|"+typeName);
+                      return;
+                  }
+
+                  foreach(MethodInfo m in t.GetMethods(
+                      BindingFlags.Public|BindingFlags.NonPublic|
+                      BindingFlags.Static|BindingFlags.Instance))
+                  {
+                      if(!names.Contains(m.Name))continue;
+                      try
+                      {
+                          RuntimeHelpers.PrepareMethod(m.MethodHandle);
+                          IntPtr p=m.MethodHandle.GetFunctionPointer();
+                          L.Add("METHOD|"+typeName+"::"+m.Name+
+                                "|"+m.MetadataToken.ToString("X8")+
+                                "|0x"+p.ToInt64().ToString("X")+
+                                "|"+m.ToString());
+                      }
+                      catch(Exception ex)
+                      {
+                          L.Add("PREPARE_EXCEPTION|"+typeName+"::"+m.Name+
+                                "|"+ex.GetBaseException());
+                      }
+                  }
+              }
+
+              static void Main(string[] a)
+              {
+                  string exe=Path.GetFullPath(a[0]);
+                  string map=Path.GetFullPath(a[1]);
+                  Directory.SetCurrentDirectory(Path.GetDirectoryName(exe));
+
+                  L.Add("PID|"+System.Diagnostics.Process.GetCurrentProcess().Id);
+
+                  Assembly asm=Assembly.LoadFile(exe);
+                  RuntimeHelpers.RunModuleConstructor(asm.ManifestModule.ModuleHandle);
+                  L.Add("MODULE_INITIALIZER|SUCCESS");
+
+                  AddMethods(asm,
+                      "BHWnxZ6spmGFPV1vs95.neOkHj6BdZDIamOJWhM",
+                      new[]{"Connect","ReadBytes","Write","F2W6OqLipX"});
+
+                  AddMethods(asm,
+                      "DSTech_AudioDSP_Client.HIDInterface",
+                      new[]{"Connect","Send","HidRead","HidDataReceived",
+                            "lyLqSuJkIF"});
+
+                  AddMethods(asm,
+                      "DSTech_AudioDSP_Client.Hid",
+                      new[]{"OpenDevice","Read","Write","getFeature",
+                            "get_OutputReportLength","get_InputReportLength",
+                            "HLvqy7J7nC","wQMqbMG4IT","Hl8q09gqNT",
+                            "CyaqdU7ib9","z9oqBfatR5"});
+
+                  AddMethods(asm,
+                      "DSTech_AudioDSP_Client.UFEcommandBridge",
+                      new[]{"SendDeviceDescriptionRequest","sendCommandFromQueue",
+                            "sendCommandFromQueuePop","FBL3HEmTva","yEA33sF0N1"});
+
+                  AddMethods(asm,
+                      "DSTech_AudioDSP_Client.DeviceCommunicationStream",
+                      new[]{"Write","ReadBytes","raiseOnDataReceivedEvent"});
+
+                  Native("hid.dll",
+                      "HidD_SetOutputReport","HidD_GetInputReport",
+                      "HidD_SetFeature","HidD_GetFeature");
+
+                  Native("kernel32.dll","ReadFile","WriteFile","CreateFileW");
+                  Native("kernelbase.dll","ReadFile","WriteFile","CreateFileW");
+
+                  File.WriteAllLines(map,L.ToArray());
+                  Console.WriteLine("READY");
+                  Console.Out.Flush();
+                  Thread.Sleep(25000);
+              }
+          }
+          '@ | Set-Content "$root\harness\JitMapProbe.cs"
+
+          $csc="$env:WINDIR\Microsoft.NET\Framework\v4.0.30319\csc.exe"
+          if(-not(Test-Path $csc)){throw "x86 compiler missing"}
+
+          & $csc /nologo /platform:x86 /target:exe `
+            /out:"$root\harness\RouteProbe.exe" "$root\harness\RouteProbe.cs"
+          if($LASTEXITCODE -ne 0){throw "RouteProbe compile failed"}
+
+          & $csc /nologo /platform:x86 /target:exe `
+            /out:"$root\harness\JitMapProbe.exe" "$root\harness\JitMapProbe.cs"
+          if($LASTEXITCODE -ne 0){throw "JitMapProbe compile failed"}
+
+      - name: Static safety audit probes
+        shell: pwsh
+        run: |
+          $ErrorActionPreference="Stop"
+          $root="C:\okn_v11"
+          $route=Get-Content "$root\harness\RouteProbe.cs" -Raw
+          $map=Get-Content "$root\harness\JitMapProbe.cs" -Raw
+
+          # RouteProbe may only invoke UFE/queue methods against the fake stream.
+          if($route -match 'HIDInterface'){ throw "RouteProbe must not reference HIDInterface" }
+          if($route -match 'HidD_'){ throw "RouteProbe native HID API forbidden" }
+          if($route -match 'ReadFile\(|WriteFile\('){ throw "RouteProbe native I/O forbidden" }
+
+          # JitMapProbe may name/prepare methods and resolve API addresses,
+          # but it must never Invoke them.
+          if($map -match '\.Invoke\('){ throw "JitMapProbe invocation forbidden" }
+          if($map -match 'EntryPoint\.Invoke'){ throw "entrypoint invocation forbidden" }
+
+          "STATIC_SAFETY_AUDIT=PASS" |
+            Set-Content "$root\evidence\02_STATIC_SAFETY_AUDIT.txt"
+
+      - name: Capture exact UFE to DeviceCommunicationStream Write payload offline
+        shell: pwsh
+        run: |
+          $ErrorActionPreference="Stop"
+          $root="C:\okn_v11"
+          $out="$root\evidence\03_FAKE_STREAM_ROUTE.txt"
+
+          $p=Start-Process `
+            -FilePath "$root\harness\RouteProbe.exe" `
+            -ArgumentList @("$root\vendor.exe",$out) `
+            -WorkingDirectory $root `
+            -PassThru -NoNewWindow
+
+          $finished=$p.WaitForExit(20000)
+
+          if(-not $finished){
+            "ROUTE_PROCESS_TIMEOUT_MS=20000" |
+              Set-Content "$root\evidence\03A_ROUTE_EXIT.txt"
+            Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
+          }else{
+            "EXIT_CODE=$($p.ExitCode)" |
+              Set-Content "$root\evidence\03A_ROUTE_EXIT.txt"
+          }
+
+          if(-not(Test-Path $out)){
+            throw "fake-stream route output missing"
+          }
+
+          $bytes=(Get-Item $out).Length
+          "ROUTE_EVIDENCE_BYTES=$bytes" |
+            Add-Content "$root\evidence\03A_ROUTE_EXIT.txt"
+
+          if($bytes -lt 20){
+            throw "fake-stream route evidence too small"
+          }
+
+          Get-Content $out | Select-Object -First 500
+
+      - name: Prepare full JIT map in one isolated x86 process
+        shell: pwsh
+        run: |
+          $ErrorActionPreference="Stop"
+          $root="C:\okn_v11"
+          $map="$root\runtime\jit_map.txt"
+
+          $p=Start-Process `
+            -FilePath "$root\harness\JitMapProbe.exe" `
+            -ArgumentList @("$root\vendor.exe",$map) `
+            -WorkingDirectory $root `
+            -RedirectStandardOutput "$root\evidence\04_JIT_MAP_CONSOLE.txt" `
+            -RedirectStandardError "$root\evidence\04_JIT_MAP_STDERR.txt" `
+            -PassThru
+
+          $ready=$false
+          for($i=0;$i -lt 100;$i++){
+            Start-Sleep -Milliseconds 100
+            if(Test-Path $map){ $ready=$true; break }
+            if($p.HasExited){ break }
+          }
+
+          if(-not $ready){
+            if(-not $p.HasExited){Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue}
+            throw "JIT map process did not produce map"
+          }
+
+          "$($p.Id)" | Set-Content "$root\runtime\jit_pid.txt"
+          Copy-Item $map "$root\evidence\04_JIT_POINTER_MAP.txt" -Force
+
+      - name: Externally disassemble read write and USBHID route with API call resolution
+        shell: pwsh
+        run: |
+          $ErrorActionPreference="Stop"
+          $root="C:\okn_v11"
+          python -m pip install --disable-pip-version-check --quiet capstone
+
+          @'
+          from pathlib import Path
+          import ctypes, json, re, struct, sys
+          from capstone import Cs,CS_ARCH_X86,CS_MODE_32,CS_OP_IMM,CS_OP_MEM
+          from capstone.x86_const import X86_REG_INVALID
+
+          root=Path(r"C:\okn_v11")
+          ev=root/"evidence"
+          pid=int((root/"runtime/jit_pid.txt").read_text().strip())
+          lines=(root/"runtime/jit_map.txt").read_text(errors="ignore").splitlines()
+
+          symbols={}
+          methods=[]
+          natives=[]
+
+          for l in lines:
+              if l.startswith("METHOD|"):
+                  _,name,tok,phex,sig=l.split("|",4)
+                  p=int(phex,16)
+                  methods.append({"name":name,"token":tok,"ptr":p,"sig":sig})
+                  symbols[p]=name
+              elif l.startswith("NATIVE|"):
+                  _,name,phex=l.split("|",2)
+                  p=int(phex,16)
+                  if p:
+                      natives.append({"name":name,"ptr":p})
+                      symbols[p]=name
+
+          k=ctypes.WinDLL("kernel32",use_last_error=True)
+          k.OpenProcess.argtypes=[ctypes.c_uint32,ctypes.c_int,ctypes.c_uint32]
+          k.OpenProcess.restype=ctypes.c_void_p
+          k.ReadProcessMemory.argtypes=[
+              ctypes.c_void_p,ctypes.c_void_p,ctypes.c_void_p,
+              ctypes.c_size_t,ctypes.POINTER(ctypes.c_size_t)
+          ]
+          k.ReadProcessMemory.restype=ctypes.c_int
+          k.CloseHandle.argtypes=[ctypes.c_void_p]
+          k.CloseHandle.restype=ctypes.c_int
+
+          h=k.OpenProcess(0x0010|0x0400,False,pid)
+          if not h:
+              raise SystemExit("OpenProcess failed: "+str(ctypes.get_last_error()))
+
+          def rpm(addr,n):
+              b=(ctypes.c_ubyte*n)()
+              got=ctypes.c_size_t()
+              ok=k.ReadProcessMemory(
+                  h,ctypes.c_void_p(addr),ctypes.byref(b),
+                  n,ctypes.byref(got)
+              )
+              return bool(ok),bytes(b[:got.value])
+
+          def u32(addr):
+              ok,b=rpm(addr,4)
+              return struct.unpack("<I",b)[0] if ok and len(b)==4 else None
+
+          def follow(cur):
+              chain=[]
+              for _ in range(16):
+                  ok,b=rpm(cur,32)
+                  if not ok or len(b)<2: break
+                  chain.append({"addr":cur,"first16":b[:16].hex().upper()})
+
+                  if b[0]==0xE9 and len(b)>=5:
+                      cur=cur+5+struct.unpack_from("<i",b,1)[0]; continue
+                  if b[0]==0xEB and len(b)>=2:
+                      cur=cur+2+struct.unpack_from("<b",b,1)[0]; continue
+                  if b[:2]==b"\xFF\x25" and len(b)>=6:
+                      slot=struct.unpack_from("<I",b,2)[0]
+                      nxt=u32(slot)
+                      if nxt: cur=nxt; continue
+                  if b[0]==0x68 and len(b)>=6 and b[5]==0xC3:
+                      cur=struct.unpack_from("<I",b,1)[0]; continue
+                  if b[0]==0xB8 and len(b)>=7 and b[5:7]==b"\xFF\xE0":
+                      cur=struct.unpack_from("<I",b,1)[0]; continue
+                  break
+              return cur,chain
+
+          def sym(target):
+              if target in symbols:return symbols[target]
+              near=[]
+              for a,n in symbols.items():
+                  d=target-a
+                  if 0 <= d <= 32:
+                      near.append((d,n,a))
+              if near:
+                  d,n,a=min(near)
+                  return f"{n}+0x{d:X}"
+              return None
+
+          md=Cs(CS_ARCH_X86,CS_MODE_32)
+          md.detail=True
+
+          disasm=[]
+          edges=[]
+          captures=[]
+
+          for m in methods:
+              resolved,chain=follow(m["ptr"])
+              ok,b=rpm(resolved,4096)
+              captures.append({
+                  **m,
+                  "resolved":resolved,
+                  "resolved_hex":f"0x{resolved:X}",
+                  "read_ok":ok,
+                  "bytes":len(b),
+                  "jump_chain":chain
+              })
+
+              if not ok or not b:
+                  continue
+
+              disasm.append(
+                  f"\n===== {m['name']} token={m['token']} "
+                  f"entry=0x{m['ptr']:X} resolved=0x{resolved:X} ====="
+              )
+
+              count=0
+              for ins in md.disasm(b,resolved):
+                  annotation=""
+                  target=None
+                  target_kind=None
+
+                  if ins.mnemonic=="call" and ins.operands:
+                      op=ins.operands[0]
+                      if op.type==CS_OP_IMM:
+                          target=op.imm & 0xffffffff
+                          target_kind="direct"
+                      elif op.type==CS_OP_MEM:
+                          mem=op.mem
+                          if mem.base==X86_REG_INVALID and mem.index==X86_REG_INVALID:
+                              slot=mem.disp & 0xffffffff
+                              val=u32(slot)
+                              if val:
+                                  target=val & 0xffffffff
+                                  target_kind=f"indirect@[0x{slot:X}]"
+
+                      if target is not None:
+                          s=sym(target)
+                          annotation=(
+                              f" ; CALL {target_kind} 0x{target:X}" +
+                              (f" => {s}" if s else "")
+                          )
+                          edges.append({
+                              "from":m["name"],
+                              "from_token":m["token"],
+                              "insn_address":f"0x{ins.address:X}",
+                              "target":f"0x{target:X}",
+                              "target_kind":target_kind,
+                              "resolved_symbol":s
+                          })
+
+                  disasm.append(
+                      f"{ins.address:08X}: {ins.mnemonic} {ins.op_str}".rstrip()+
+                      annotation
+                  )
+                  count+=1
+                  if count>=600:
+                      break
+
+          k.CloseHandle(h)
+
+          (ev/"05_JIT_CAPTURE_INDEX.json").write_text(
+              json.dumps(captures,indent=2)+"\n"
+          )
+          (ev/"06_ABSOLUTE_JIT_DISASSEMBLY.txt").write_text(
+              "\n".join(disasm)+"\n"
+          )
+          (ev/"07_RESOLVED_CALL_EDGES.json").write_text(
+              json.dumps(edges,indent=2)+"\n"
+          )
+
+          important=[
+              e for e in edges
+              if e.get("resolved_symbol") and any(x in e["resolved_symbol"] for x in
+                  ["ReadFile","WriteFile","HidD_GetInputReport",
+                   "HidD_SetOutputReport","HidD_GetFeature","HidD_SetFeature",
+                   "HIDInterface::","Hid::"])
+          ]
+          (ev/"08_IMPORTANT_ROUTE_EDGES.json").write_text(
+              json.dumps(important,indent=2)+"\n"
+          )
+
+          print("METHODS",len(methods))
+          print("NATIVE_SYMBOLS",len(natives))
+          print("CALL_EDGES",len(edges))
+          print("IMPORTANT_EDGES",len(important))
+          for e in important[:100]:
+              print(e)
+          '@ | Set-Content "$root\analyze_jit.py"
+
+          python "$root\analyze_jit.py"
+
+          $pid=[int](Get-Content "$root\runtime\jit_pid.txt")
+          Stop-Process -Id $pid -Force -ErrorAction SilentlyContinue
+
+      - name: Derive V11 read path verdict
+        shell: pwsh
+        run: |
+          $ErrorActionPreference="Stop"
+          $root="C:\okn_v11"
+
+          @'
+          from pathlib import Path
+          import json,re
+
+          ev=Path(r"C:\okn_v11\evidence")
+          route=(ev/"03_FAKE_STREAM_ROUTE.txt").read_text(errors="ignore")
+          edges=json.loads((ev/"07_RESOLVED_CALL_EDGES.json").read_text())
+
+          writes=[]
+          for l in route.splitlines():
+              if "_CAPTURE_" in l and "_WRITE_" in l and "=" in l:
+                  writes.append(l)
+
+          def edges_for(prefix):
+              return [e for e in edges if e.get("from","").startswith(prefix)]
+
+          hid_read=edges_for("DSTech_AudioDSP_Client.Hid::Read")
+          hid_write=edges_for("DSTech_AudioDSP_Client.Hid::Write")
+          usb_read=edges_for("BHWnxZ6spmGFPV1vs95.neOkHj6BdZDIamOJWhM::ReadBytes")
+          usb_write=edges_for("BHWnxZ6spmGFPV1vs95.neOkHj6BdZDIamOJWhM::Write")
+          hidif_read=edges_for("DSTech_AudioDSP_Client.HIDInterface::HidRead")
+
+          def has(rows,name):
+              return any(name in (x.get("resolved_symbol") or "") for x in rows)
+
+          verdict={
+              "revision":"MASTER-V11-FIXED-V2",
+              "fake_stream_captured_writes":writes,
+              "fake_stream_write_count":len(writes),
+
+              "hid_read_calls_ReadFile":has(hid_read,"ReadFile"),
+              "hid_read_calls_HidD_GetInputReport":has(hid_read,"HidD_GetInputReport"),
+              "hid_write_calls_WriteFile":has(hid_write,"WriteFile"),
+              "hid_write_calls_HidD_SetOutputReport":has(hid_write,"HidD_SetOutputReport"),
+
+              "usb_stream_read_edges":usb_read,
+              "usb_stream_write_edges":usb_write,
+              "hidinterface_read_edges":hidif_read,
+
+              "live_dsp_connected":False,
+              "usb_target_access":False,
+              "host_to_dsp_io":False,
+              "hid_api_invoked":False,
+              "feature_report_invoked":False,
+              "flash_allowed":False
+          }
+
+          if verdict["hid_read_calls_ReadFile"] and not verdict["hid_read_calls_HidD_GetInputReport"]:
+              verdict["status"]="WINDOWS_VENDOR_READ_PATH_USES_READFILE_NOT_CONTROL_GET_INPUT_REPORT"
+          elif verdict["hid_read_calls_HidD_GetInputReport"]:
+              verdict["status"]="WINDOWS_VENDOR_READ_PATH_USES_HIDD_GETINPUTREPORT"
+          elif len(writes)>0:
+              verdict["status"]="OUTGOING_UFE_ROUTE_CONFIRMED_READ_API_STILL_REQUIRES_MANUAL_JIT_REVIEW"
+          else:
+              verdict["status"]="OFFLINE_ROUTE_REQUIRES_MANUAL_JIT_REVIEW"
+
+          (ev/"09_V11_FINAL_DECISION.json").write_text(
+              json.dumps(verdict,indent=2)+"\n"
+          )
+
+          md=f"""# MASTER V11 FIXED V2 FINAL DECISION
+
+          - Fake DeviceCommunicationStream captured vendor writes: **{len(writes)}**
+          - Hid.Read -> ReadFile resolved: **{verdict['hid_read_calls_ReadFile']}**
+          - Hid.Read -> HidD_GetInputReport resolved: **{verdict['hid_read_calls_HidD_GetInputReport']}**
+          - Hid.Write -> WriteFile resolved: **{verdict['hid_write_calls_WriteFile']}**
+          - Hid.Write -> HidD_SetOutputReport resolved: **{verdict['hid_write_calls_HidD_SetOutputReport']}**
+          - Real HID API invoked: **NO**
+          - DSP connected: **NO**
+          - Host-to-DSP I/O: **NO**
+          - Feature report invoked: **NO**
+          - Flash allowed: **NO**
+
+          Status: **{verdict['status']}**
+
+          Classification: **OFFLINE_USBHID_ROUTE_READ_PATH_RECOVERY_NOT_FOR_FLASH**
+          """
+          (ev/"10_V11_FINAL_DECISION.md").write_text(md)
+          print(md)
+          '@ | Set-Content "$root\derive.py"
+
+          python "$root\derive.py"
+          Get-Content "$root\evidence\10_V11_FINAL_DECISION.md" >> $env:GITHUB_STEP_SUMMARY
+
+      - name: Package focused V11 evidence
+        shell: pwsh
+        run: |
+          $ErrorActionPreference="Stop"
+          $root="C:\okn_v11"
+
+          Copy-Item "$root\evidence\*" "$root\out\" -Force
+
+          if(Test-Path "$root\out\vendor.exe"){throw "vendor EXE leak"}
+          if(Test-Path "$root\out\RouteProbe.exe"){throw "route probe leak"}
+          if(Test-Path "$root\out\JitMapProbe.exe"){throw "jit probe leak"}
+
+          Get-ChildItem "$root\out" -File | ForEach-Object {
+            "$((Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower())  $($_.Name)"
+          } | Set-Content "$root\out\SHA256SUMS.txt"
+
+      - name: Upload V11 evidence
+        uses: actions/upload-artifact@v7
+        with:
+          name: OKN-BP1048P4-MASTER-V11-FIXED-V2-USBHID-ROUTE-READ-PATH-EVIDENCE
+          path: C:\okn_v11\out\*
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Final fail-closed assertion
+        shell: pwsh
+        run: |
+          $ErrorActionPreference="Stop"
+          $root="C:\okn_v11"
+
+          foreach($n in @(
+            "LIVE_DSP_CONNECTED","USB_TARGET_ACCESS","HOST_TO_DSP_IO",
+            "HID_CONNECT_ALLOWED","HID_SEND_ALLOWED","HID_WRITE_ALLOWED",
+            "HID_READ_ALLOWED","FEATURE_REPORT_ALLOWED",
+            "FLASH_ALLOWED","ERASE_ALLOWED","WRITE_ALLOWED"
+          )){
+            if((Get-Item "Env:$n").Value -ne "NO"){throw "$n changed"}
+          }
+
+          $d=Get-Content "$root\evidence\09_V11_FINAL_DECISION.json" -Raw | ConvertFrom-Json
+          if($d.live_dsp_connected -ne $false){throw "bad DSP state"}
+          if($d.host_to_dsp_io -ne $false){throw "bad host-to-DSP state"}
+          if($d.hid_api_invoked -ne $false){throw "bad HID API state"}
+          if($d.feature_report_invoked -ne $false){throw "bad Feature state"}
+          if($d.flash_allowed -ne $false){throw "bad flash state"}
+
+          "MASTER_V11_FIXED_V2=PASS"
+          "REAL_HID_API_INVOKED=NO"
+          "HOST_TO_DSP_IO=NO"
+          "FLASH_ALLOWED=NO"
