@@ -1,0 +1,658 @@
+name: OKN BP1048P4 MASTER V8 PURE PROTOCOL + JIT DISASSEMBLY
+
+"on":
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  GOLOPINE_WINDOWS_URL: "https://golodsp.com/wp-content/uploads/2026/05/golopine_audio_turning_release_2026-04-08.exe_.zip"
+  LIVE_DSP_CONNECTED: "NO"
+  USB_TARGET_ACCESS: "NO"
+  HOST_TO_DSP_IO: "NO"
+  HID_CONNECT_ALLOWED: "NO"
+  HID_SEND_ALLOWED: "NO"
+  HID_WRITE_ALLOWED: "NO"
+  FEATURE_REPORT_ALLOWED: "NO"
+  FLASH_ALLOWED: "NO"
+  ERASE_ALLOWED: "NO"
+  WRITE_ALLOWED: "NO"
+
+jobs:
+  master-v8:
+    name: MASTER V8 pure protocol + JIT disassembly
+    runs-on: windows-latest
+    timeout-minutes: 35
+
+    steps:
+      - name: Safety gate
+        shell: pwsh
+        run: |
+          $ErrorActionPreference="Stop"
+          foreach($n in @(
+            "LIVE_DSP_CONNECTED","USB_TARGET_ACCESS","HOST_TO_DSP_IO",
+            "HID_CONNECT_ALLOWED","HID_SEND_ALLOWED","HID_WRITE_ALLOWED",
+            "FEATURE_REPORT_ALLOWED","FLASH_ALLOWED","ERASE_ALLOWED","WRITE_ALLOWED"
+          )){
+            if((Get-Item "Env:$n").Value -ne "NO"){ throw "$n must remain NO" }
+          }
+
+          $root="C:\okn_v8"
+          if(Test-Path $root){ Remove-Item -Recurse -Force $root }
+          New-Item -ItemType Directory -Force -Path `
+            "$root\download","$root\pkg","$root\harness","$root\evidence","$root\out" | Out-Null
+
+          @"
+          MODE=PURE_OFFLINE_PROTOCOL_AND_JIT_ANALYSIS
+          LIVE_DSP_CONNECTED=NO
+          USB_TARGET_ACCESS=NO
+          HOST_TO_DSP_IO=NO
+          HID_CONNECT_ALLOWED=NO
+          HID_SEND_ALLOWED=NO
+          HID_WRITE_ALLOWED=NO
+          FEATURE_REPORT_ALLOWED=NO
+          FLASH_ALLOWED=NO
+          "@ | Set-Content "$root\evidence\00_SAFETY.txt"
+
+      - name: Download untouched official vendor EXE
+        shell: pwsh
+        run: |
+          $ErrorActionPreference="Stop"
+          $root="C:\okn_v8"
+
+          curl.exe -fL --retry 6 --retry-all-errors --retry-delay 2 `
+            --connect-timeout 20 --max-time 300 `
+            $env:GOLOPINE_WINDOWS_URL -o "$root\download\vendor.zip"
+          if($LASTEXITCODE -ne 0){ throw "download failed" }
+
+          Expand-Archive -Force "$root\download\vendor.zip" "$root\pkg"
+
+          $exe=Get-ChildItem "$root\pkg" -Recurse -File -Filter *.exe |
+            Where-Object {
+              $_.FullName -notmatch '\\__MACOSX\\' -and $_.Name -notlike '._*'
+            } |
+            Sort-Object Length -Descending |
+            Select-Object -First 1
+
+          if(-not $exe){ throw "vendor EXE missing" }
+          if($exe.Length -lt 100000){ throw "vendor EXE too small" }
+
+          Copy-Item $exe.FullName "$root\vendor.exe" -Force
+          $b=[IO.File]::ReadAllBytes("$root\vendor.exe")
+          if($b[0] -ne 0x4D -or $b[1] -ne 0x5A){ throw "not PE/MZ" }
+
+          @"
+          FILE=$($exe.FullName)
+          BYTES=$($exe.Length)
+          SHA256=$((Get-FileHash "$root\vendor.exe" -Algorithm SHA256).Hash)
+          ORIGINAL_BINARY_MODIFIED=NO
+          "@ | Set-Content "$root\evidence\01_VENDOR_IDENTITY.txt"
+
+      - name: Build x86 pure-analysis harness
+        shell: pwsh
+        run: |
+          $ErrorActionPreference="Stop"
+          $root="C:\okn_v8"
+
+          @'
+          using System;
+          using System.IO;
+          using System.Linq;
+          using System.Text;
+          using System.Reflection;
+          using System.Runtime.CompilerServices;
+          using System.Runtime.InteropServices;
+          using System.Collections;
+          using System.Collections.Generic;
+
+          class Program
+          {
+              static List<string> L=new List<string>();
+
+              static string Hex(byte[] b)
+              {
+                  if(b==null)return "<NULL>";
+                  return BitConverter.ToString(b).Replace("-","");
+              }
+
+              static string Render(object o)
+              {
+                  if(o==null)return "<NULL>";
+                  if(o is byte[])return Hex((byte[])o);
+                  var en=o as IEnumerable<byte>;
+                  if(en!=null)
+                  {
+                      try{return Hex(en.ToArray());}
+                      catch(Exception ex){return "<ENUM_EXCEPTION:"+ex.GetBaseException().Message+">";}
+                  }
+                  return Convert.ToString(o,System.Globalization.CultureInfo.InvariantCulture);
+              }
+
+              static bool ForbiddenType(Type t)
+              {
+                  string n=(t.FullName??"").ToLowerInvariant();
+                  return n.Contains("hidinterface") ||
+                         n.EndsWith(".hid") ||
+                         n.Contains("firmware") ||
+                         n.Contains("upgrade") ||
+                         n.Contains("bootloader") ||
+                         n.Contains("flash") ||
+                         n.Contains("serialport") ||
+                         n.Contains("socket") ||
+                         n.Contains("network");
+              }
+
+              static bool SafeParam(Type t)
+              {
+                  return t==typeof(byte) || t==typeof(short) || t==typeof(ushort) ||
+                         t==typeof(int) || t==typeof(uint) || t==typeof(long) ||
+                         t==typeof(bool) || t==typeof(float) || t==typeof(double) ||
+                         t==typeof(byte[]) || t.IsEnum;
+              }
+
+              static object Sample(Type t,int which)
+              {
+                  if(t==typeof(byte)) return (byte)(which==0?0:which==1?1:0x57);
+                  if(t==typeof(short)) return (short)(which==0?0:which==1?1:0x1234);
+                  if(t==typeof(ushort)) return (ushort)(which==0?0:which==1?1:0x1234);
+                  if(t==typeof(int)) return which==0?0:which==1?1:0x1234;
+                  if(t==typeof(uint)) return (uint)(which==0?0:which==1?1:0x1234);
+                  if(t==typeof(long)) return (long)(which==0?0:which==1?1:0x1234);
+                  if(t==typeof(bool)) return which!=0;
+                  if(t==typeof(float)) return which==0?0f:which==1?0.5f:-0.5f;
+                  if(t==typeof(double)) return which==0?0d:which==1?0.5d:-0.5d;
+                  if(t==typeof(byte[]))
+                  {
+                      if(which==0)return new byte[0];
+                      if(which==1)return new byte[]{1,2,3,4};
+                      return new byte[]{0xA5,0x5A,0,0,0x16};
+                  }
+                  if(t.IsEnum)
+                  {
+                      Array a=Enum.GetValues(t);
+                      return a.Length==0?Activator.CreateInstance(t):a.GetValue(Math.Min(which,a.Length-1));
+                  }
+                  return null;
+              }
+
+              static bool Interesting(Type t,MethodInfo m)
+              {
+                  string s=((t.FullName??"")+" "+m.Name).ToLowerInvariant();
+                  return s.Contains("command") || s.Contains("converter") ||
+                         s.Contains("packet") || s.Contains("report") ||
+                         s.Contains("actuator") || s.Contains("sigma") ||
+                         s.Contains("ufe") || s.Contains("dsp");
+              }
+
+              static byte[] ReadNative(IntPtr p,int count)
+              {
+                  if(p==IntPtr.Zero)return new byte[0];
+                  byte[] b=new byte[count];
+                  Marshal.Copy(p,b,0,count);
+                  return b;
+              }
+
+              static IntPtr FollowX86Jumps(IntPtr p,List<string> notes)
+              {
+                  IntPtr cur=p;
+                  for(int step=0;step<8;step++)
+                  {
+                      byte[] b=ReadNative(cur,16);
+                      if(b.Length<6)break;
+
+                      if(b[0]==0xE9)
+                      {
+                          int rel=BitConverter.ToInt32(b,1);
+                          IntPtr next=new IntPtr(cur.ToInt64()+5+rel);
+                          notes.Add("E9 "+cur.ToString("X")+" -> "+next.ToString("X"));
+                          cur=next;
+                          continue;
+                      }
+                      if(b[0]==0xEB)
+                      {
+                          sbyte rel=unchecked((sbyte)b[1]);
+                          IntPtr next=new IntPtr(cur.ToInt64()+2+rel);
+                          notes.Add("EB "+cur.ToString("X")+" -> "+next.ToString("X"));
+                          cur=next;
+                          continue;
+                      }
+                      break;
+                  }
+                  return cur;
+              }
+
+              static void DumpJit(MethodInfo m,string dir)
+              {
+                  try
+                  {
+                      RuntimeHelpers.PrepareMethod(m.MethodHandle);
+                      IntPtr p=m.MethodHandle.GetFunctionPointer();
+                      var notes=new List<string>();
+                      IntPtr q=FollowX86Jumps(p,notes);
+                      byte[] a=ReadNative(p,256);
+                      byte[] b=ReadNative(q,1024);
+                      string safe=(m.DeclaringType.FullName+"__"+m.Name)
+                          .Replace('.','_').Replace('+','_').Replace('`','_');
+                      File.WriteAllBytes(Path.Combine(dir,safe+"_entry.bin"),a);
+                      File.WriteAllBytes(Path.Combine(dir,safe+"_resolved.bin"),b);
+                      L.Add("JIT "+m.DeclaringType.FullName+"::"+m.Name+
+                            " entry=0x"+p.ToString("X")+
+                            " resolved=0x"+q.ToString("X")+
+                            " jumps="+String.Join(" | ",notes.ToArray()));
+                  }
+                  catch(Exception ex)
+                  {
+                      L.Add("JIT_EXCEPTION "+m.DeclaringType.FullName+"::"+m.Name+" "+ex.GetBaseException());
+                  }
+              }
+
+              static void InventoryType(Type t)
+              {
+                  L.Add("TYPE "+t.FullName);
+                  foreach(var f in t.GetFields(BindingFlags.Public|BindingFlags.NonPublic|BindingFlags.Static|BindingFlags.Instance))
+                      L.Add(" FIELD "+f.FieldType.FullName+" "+f.Name);
+                  foreach(var p in t.GetProperties(BindingFlags.Public|BindingFlags.NonPublic|BindingFlags.Static|BindingFlags.Instance))
+                      L.Add(" PROPERTY "+p.PropertyType.FullName+" "+p.Name);
+                  foreach(var m in t.GetMethods(BindingFlags.Public|BindingFlags.NonPublic|BindingFlags.Static|BindingFlags.Instance|BindingFlags.DeclaredOnly))
+                      L.Add(" METHOD "+m.ToString()+" RETURN="+m.ReturnType.FullName);
+              }
+
+              static void Main(string[] args)
+              {
+                  string exe=Path.GetFullPath(args[0]);
+                  string evidence=Path.GetFullPath(args[1]);
+                  Directory.SetCurrentDirectory(Path.GetDirectoryName(exe));
+
+                  L.Add("MODE=PURE_OFFLINE_ONLY");
+                  L.Add("ENTRYPOINT_INVOKED=NO");
+                  L.Add("HID_CONNECT_INVOKED=NO");
+                  L.Add("HID_SEND_INVOKED=NO");
+                  L.Add("HID_WRITE_INVOKED=NO");
+
+                  Assembly asm=Assembly.LoadFile(exe);
+                  RuntimeHelpers.RunModuleConstructor(asm.ManifestModule.ModuleHandle);
+                  L.Add("MODULE_INITIALIZER=SUCCESS");
+
+                  Type[] types;
+                  try{types=asm.GetTypes();}
+                  catch(ReflectionTypeLoadException ex){types=ex.Types.Where(x=>x!=null).ToArray();}
+
+                  foreach(var t in types.Where(x =>
+                      {
+                          string n=(x.FullName??"").ToLowerInvariant();
+                          return n.Contains("dstechacutatorcommand") ||
+                                 n.Contains("hardwarecommandconverter") ||
+                                 n.Contains("ufeheader") ||
+                                 n.Contains("report");
+                      }))
+                      InventoryType(t);
+
+                  // Exact known pure methods from V7.
+                  Type hc=asm.GetType("DSTech_AudioDSP_Client.HardwareCommandConverter",false);
+                  if(hc!=null)
+                  {
+                      foreach(string name in new[]{
+                          "ConvertSigmaDSPCoefficient","SpitToByte",
+                          "CreateSigmaDSPsingleVariableUpdateCommand",
+                          "CreateSigmaDSPfiltrUpdateCommand"
+                      })
+                      {
+                          foreach(var m in hc.GetMethods(BindingFlags.Public|BindingFlags.NonPublic|BindingFlags.Static)
+                                             .Where(x=>x.Name==name))
+                          {
+                              DumpJit(m,evidence);
+                              var ps=m.GetParameters();
+                              if(ps.All(x=>SafeParam(x.ParameterType)) && ps.Length<=3)
+                              {
+                                  for(int v=0;v<3;v++)
+                                  {
+                                      object[] av=ps.Select(x=>Sample(x.ParameterType,v)).ToArray();
+                                      try
+                                      {
+                                          object r=m.Invoke(null,av);
+                                          L.Add("PURE "+m+" V="+v+" => "+Render(r));
+                                      }
+                                      catch(Exception ex)
+                                      {
+                                          L.Add("PURE_EXCEPTION "+m+" V="+v+" => "+ex.GetBaseException());
+                                      }
+                                  }
+                              }
+                          }
+                      }
+                  }
+
+                  // DSTech command object: test both property setter and direct backing-field paths.
+                  Type ct=asm.GetType("DSTech_AudioDSP_Client.DSTechAcutatorCommand",false);
+                  if(ct!=null)
+                  {
+                      InventoryType(ct);
+                      MethodInfo get=ct.GetMethod("GetOutputData",
+                          BindingFlags.Public|BindingFlags.NonPublic|BindingFlags.Instance);
+                      if(get!=null)DumpJit(get,evidence);
+
+                      var addrP=ct.GetProperty("Address");
+                      var dataP=ct.GetProperty("Data");
+                      var ints=ct.GetFields(BindingFlags.NonPublic|BindingFlags.Public|BindingFlags.Instance)
+                                 .Where(f=>f.FieldType==typeof(int)).ToArray();
+                      var bytes=ct.GetFields(BindingFlags.NonPublic|BindingFlags.Public|BindingFlags.Instance)
+                                  .Where(f=>f.FieldType==typeof(byte[])).ToArray();
+
+                      foreach(int mode in new[]{0,1})
+                      foreach(int addr in new[]{0,1,0x57,0x58,0x1234})
+                      foreach(byte[] data in new[]{
+                          new byte[0],
+                          new byte[]{0},
+                          new byte[]{1,2,3,4},
+                          new byte[]{0,0,0,0,0,0},
+                          new byte[]{0x12,0x34,0x40,0,0,0},
+                          new byte[]{0xA5,0x5A,0,0,0x16}
+                      })
+                      {
+                          try
+                          {
+                              object o=Activator.CreateInstance(ct);
+                              if(mode==0)
+                              {
+                                  if(addrP!=null)addrP.SetValue(o,addr,null);
+                                  if(dataP!=null)dataP.SetValue(o,data,null);
+                              }
+                              else
+                              {
+                                  foreach(var f in ints)f.SetValue(o,addr);
+                                  foreach(var f in bytes)f.SetValue(o,data);
+                              }
+
+                              object r=get.Invoke(o,null);
+                              L.Add("ACT mode="+mode+" addr="+addr+
+                                    " data="+Hex(data)+" => "+Render(r));
+                          }
+                          catch(Exception ex)
+                          {
+                              L.Add("ACT_EXCEPTION mode="+mode+" addr="+addr+
+                                    " data="+Hex(data)+" => "+ex.ToString());
+                              try
+                              {
+                                  Exception b=ex.GetBaseException();
+                                  L.Add("ACT_BASE_EXCEPTION => "+b.ToString());
+                              }catch{}
+                          }
+                      }
+                  }
+
+                  // Inventory and invoke only safe static command/converter builders.
+                  foreach(Type t in types)
+                  {
+                      if(t==null || ForbiddenType(t))continue;
+                      foreach(MethodInfo m in t.GetMethods(
+                          BindingFlags.Public|BindingFlags.NonPublic|BindingFlags.Static|BindingFlags.DeclaredOnly))
+                      {
+                          if(!Interesting(t,m))continue;
+                          var ps=m.GetParameters();
+                          if(ps.Length>3 || !ps.All(x=>SafeParam(x.ParameterType)))continue;
+
+                          bool safeRet=
+                              m.ReturnType==typeof(byte[]) ||
+                              m.ReturnType==typeof(int) ||
+                              m.ReturnType==typeof(uint) ||
+                              m.ReturnType==typeof(short) ||
+                              m.ReturnType==typeof(double) ||
+                              typeof(IEnumerable<byte>).IsAssignableFrom(m.ReturnType);
+
+                          if(!safeRet)continue;
+
+                          DumpJit(m,evidence);
+
+                          for(int v=0;v<3;v++)
+                          {
+                              object[] av=ps.Select(x=>Sample(x.ParameterType,v)).ToArray();
+                              try
+                              {
+                                  object r=m.Invoke(null,av);
+                                  L.Add("AUTO_PURE "+t.FullName+"::"+m.Name+
+                                        " V="+v+" => "+Render(r));
+                              }
+                              catch(Exception ex)
+                              {
+                                  L.Add("AUTO_PURE_EXCEPTION "+t.FullName+"::"+m.Name+
+                                        " V="+v+" => "+ex.GetBaseException());
+                              }
+                          }
+                      }
+                  }
+
+                  // Prepare/dump HID send path native code WITHOUT invoking it.
+                  Type hi=asm.GetType("DSTech_AudioDSP_Client.HIDInterface",false);
+                  if(hi!=null)
+                  {
+                      foreach(MethodInfo m in hi.GetMethods(BindingFlags.Public|BindingFlags.NonPublic|BindingFlags.Instance))
+                      {
+                          if(m.Name=="Send" || m.Name=="Connect" || m.Name=="HidRead")
+                              DumpJit(m,evidence);
+                      }
+                  }
+
+                  Type hid=asm.GetType("DSTech_AudioDSP_Client.Hid",false);
+                  if(hid!=null)
+                  {
+                      foreach(MethodInfo m in hid.GetMethods(BindingFlags.Public|BindingFlags.NonPublic|BindingFlags.Instance))
+                      {
+                          if(m.Name=="Write" || m.Name=="Read")
+                              DumpJit(m,evidence);
+                      }
+                  }
+
+                  File.WriteAllLines(Path.Combine(evidence,"02_HARNESS_OUTPUT.txt"),L.ToArray());
+              }
+          }
+          '@ | Set-Content "$root\harness\Program.cs"
+
+          $csc="$env:WINDIR\Microsoft.NET\Framework\v4.0.30319\csc.exe"
+          if(-not (Test-Path $csc)){ throw "x86 compiler missing" }
+
+          & $csc /nologo /platform:x86 /target:exe `
+            /out:"$root\harness\Probe.exe" "$root\harness\Program.cs"
+          if($LASTEXITCODE -ne 0){ throw "compile failed" }
+
+          "HARNESS_SHA256=$((Get-FileHash "$root\harness\Probe.exe" -Algorithm SHA256).Hash)" |
+            Set-Content "$root\evidence\02A_HARNESS_SHA256.txt"
+
+      - name: Static audit harness no HID execution
+        shell: pwsh
+        run: |
+          $ErrorActionPreference="Stop"
+          $root="C:\okn_v8"
+          $s=Get-Content "$root\harness\Program.cs" -Raw
+
+          if($s -match 'EntryPoint\.Invoke'){ throw "entrypoint invocation forbidden" }
+          if($s -match 'GetMethod\("Connect".*Invoke'){ throw "Connect invocation forbidden" }
+          if($s -match 'GetMethod\("Send".*Invoke'){ throw "Send invocation forbidden" }
+          if($s -match 'GetMethod\("Write".*Invoke'){ throw "Write invocation forbidden" }
+          if($s -match 'HidD_SetFeature'){ throw "Feature invocation forbidden" }
+
+          "STATIC_AUDIT=PASS" | Set-Content "$root\evidence\03_STATIC_AUDIT.txt"
+
+      - name: Run original vendor pure analysis only
+        shell: pwsh
+        run: |
+          $ErrorActionPreference="Stop"
+          $root="C:\okn_v8"
+
+          $env:COMPlus_JitDisasm="GetOutputData,CreateSigmaDSPsingleVariableUpdateCommand,Send,Write"
+
+          & "$root\harness\Probe.exe" "$root\vendor.exe" "$root\evidence" `
+            *> "$root\evidence\04_PROBE_CONSOLE.txt"
+
+          if(-not (Test-Path "$root\evidence\02_HARNESS_OUTPUT.txt")){
+            throw "harness output missing"
+          }
+
+          Get-Content "$root\evidence\02_HARNESS_OUTPUT.txt" |
+            Select-Object -First 250
+
+      - name: Install Capstone and disassemble captured JIT native code
+        shell: pwsh
+        run: |
+          $ErrorActionPreference="Stop"
+          $root="C:\okn_v8"
+          python -m pip install --disable-pip-version-check --quiet capstone
+
+          @'
+          from pathlib import Path
+          import json,re
+          from capstone import Cs,CS_ARCH_X86,CS_MODE_32
+
+          root=Path(r"C:\okn_v8")
+          ev=root/"evidence"
+          md=Cs(CS_ARCH_X86,CS_MODE_32)
+          md.detail=False
+
+          rows=[]
+          out=[]
+          for p in sorted(ev.glob("*_resolved.bin")):
+              b=p.read_bytes()
+              ins=[]
+              for x in md.disasm(b,0):
+                  text=f"{x.address:04X}: {x.mnemonic} {x.op_str}".rstrip()
+                  ins.append(text)
+                  if len(ins)>=300: break
+              rows.append({"file":p.name,"bytes":len(b),"instructions":len(ins)})
+              out.append("\n===== "+p.name+" =====\n"+"\n".join(ins)+"\n")
+
+          (ev/"05_JIT_DISASSEMBLY.txt").write_text("".join(out))
+          (ev/"06_JIT_DISASSEMBLY_INDEX.json").write_text(json.dumps(rows,indent=2)+"\n")
+          print(json.dumps(rows,indent=2))
+          '@ | Set-Content "$root\disasm.py"
+
+          python "$root\disasm.py"
+
+      - name: Derive V8 protocol evidence
+        shell: pwsh
+        run: |
+          $ErrorActionPreference="Stop"
+          $root="C:\okn_v8"
+
+          @'
+          from pathlib import Path
+          import re,json
+
+          ev=Path(r"C:\okn_v8\evidence")
+          h=(ev/"02_HARNESS_OUTPUT.txt").read_text(errors="ignore")
+          d=(ev/"05_JIT_DISASSEMBLY.txt").read_text(errors="ignore")
+
+          pure=[x for x in h.splitlines() if x.startswith("PURE ") or x.startswith("AUTO_PURE ")]
+          act=[x for x in h.splitlines() if x.startswith("ACT mode=")]
+          actex=[x for x in h.splitlines() if x.startswith("ACT_EXCEPTION")]
+
+          sigma=[]
+          for l in pure:
+              if "CreateSigmaDSPsingleVariableUpdateCommand" in l:
+                  sigma.append(l)
+
+          decision={
+            "revision":"MASTER-V8",
+            "module_initializer_success":"MODULE_INITIALIZER=SUCCESS" in h,
+            "pure_success_count":len(pure),
+            "sigma_command_success_count":len(sigma),
+            "actuator_success_count":len(act),
+            "actuator_exception_count":len(actex),
+            "invalid_concat_cast_seen":"ConcatIterator" in h and "Byte[]" in h,
+            "jit_native_dumps_present":any(ev.glob("*_resolved.bin")),
+            "jit_disassembly_nonempty":bool(d.strip()),
+            "hid_connect_invoked":False,
+            "hid_send_invoked":False,
+            "hid_write_invoked":False,
+            "feature_report_invoked":False,
+            "host_to_dsp_io":False,
+            "flash_allowed":False,
+            "exact_hid_transport_frame_proven":False
+          }
+
+          if decision["actuator_success_count"]>0:
+              decision["status"]="ACTUATOR_BYTES_RECOVERED_REVIEW_AND_LINK_TO_HID_REPORT"
+          elif decision["jit_disassembly_nonempty"]:
+              decision["status"]="ACTUATOR_RUNTIME_FAILURE_CAPTURED_JIT_AVAILABLE_FOR_FRAME_RECONSTRUCTION"
+          else:
+              decision["status"]="PURE_COMMANDS_RECOVERED_ACTUATOR_WRAPPER_UNRESOLVED"
+
+          (ev/"07_V8_FINAL_DECISION.json").write_text(json.dumps(decision,indent=2)+"\n")
+
+          md=f"""# MASTER V8 FINAL DECISION
+
+          - Module initializer: **{decision['module_initializer_success']}**
+          - Pure method successes: **{decision['pure_success_count']}**
+          - Sigma command successes: **{decision['sigma_command_success_count']}**
+          - Actuator GetOutputData successes: **{decision['actuator_success_count']}**
+          - Actuator exceptions: **{decision['actuator_exception_count']}**
+          - ConcatIterator -> byte[] invalid cast observed: **{decision['invalid_concat_cast_seen']}**
+          - JIT native dumps captured: **{decision['jit_native_dumps_present']}**
+          - JIT disassembly produced: **{decision['jit_disassembly_nonempty']}**
+          - HID Connect/Send/Write invoked: **NO / NO / NO**
+          - Feature report invoked: **NO**
+          - Host-to-DSP I/O: **NO**
+          - Exact HID transport frame proven: **NO**
+          - Flash allowed: **NO**
+
+          Status: **{decision['status']}**
+
+          Classification: **OFFLINE_PROTOCOL_ANALYSIS_NOT_FOR_FLASH**
+          """
+          (ev/"08_V8_FINAL_DECISION.md").write_text(md)
+          print(md)
+          '@ | Set-Content "$root\decision.py"
+
+          python "$root\decision.py"
+          Get-Content "$root\evidence\08_V8_FINAL_DECISION.md" >> $env:GITHUB_STEP_SUMMARY
+
+      - name: Package focused evidence
+        shell: pwsh
+        run: |
+          $ErrorActionPreference="Stop"
+          $root="C:\okn_v8"
+
+          # Remove raw native code binaries before artifact; keep disassembly/text evidence only.
+          Get-ChildItem "$root\evidence" -Filter *.bin -File | Remove-Item -Force
+
+          Copy-Item "$root\evidence\*" "$root\out\" -Force
+
+          if(Test-Path "$root\out\vendor.exe"){ throw "vendor EXE leak" }
+          if(Test-Path "$root\out\Probe.exe"){ throw "harness binary leak" }
+
+          Get-ChildItem "$root\out" -File | ForEach-Object {
+            "$((Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower())  $($_.Name)"
+          } | Set-Content "$root\out\SHA256SUMS.txt"
+
+      - name: Upload V8 evidence
+        uses: actions/upload-artifact@v7
+        with:
+          name: OKN-BP1048P4-MASTER-V8-PURE-PROTOCOL-JIT-DISASSEMBLY-EVIDENCE
+          path: C:\okn_v8\out\*
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Final fail-closed assertion
+        shell: pwsh
+        run: |
+          $ErrorActionPreference="Stop"
+          $root="C:\okn_v8"
+
+          foreach($n in @(
+            "LIVE_DSP_CONNECTED","USB_TARGET_ACCESS","HOST_TO_DSP_IO",
+            "HID_CONNECT_ALLOWED","HID_SEND_ALLOWED","HID_WRITE_ALLOWED",
+            "FEATURE_REPORT_ALLOWED","FLASH_ALLOWED","ERASE_ALLOWED","WRITE_ALLOWED"
+          )){
+            if((Get-Item "Env:$n").Value -ne "NO"){ throw "$n changed" }
+          }
+
+          $d=Get-Content "$root\evidence\07_V8_FINAL_DECISION.json" -Raw | ConvertFrom-Json
+          if($d.hid_connect_invoked -ne $false){ throw "HID Connect state invalid" }
+          if($d.hid_send_invoked -ne $false){ throw "HID Send state invalid" }
+          if($d.hid_write_invoked -ne $false){ throw "HID Write state invalid" }
+          if($d.host_to_dsp_io -ne $false){ throw "host-to-DSP state invalid" }
+          if($d.flash_allowed -ne $false){ throw "flash state invalid" }
+
+          "MASTER_V8=PASS"
+          "HID_IO=NO"
+          "HOST_TO_DSP_IO=NO"
+          "FLASH_ALLOWED=NO"
