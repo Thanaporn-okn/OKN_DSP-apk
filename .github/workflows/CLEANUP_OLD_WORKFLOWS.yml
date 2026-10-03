@@ -1,0 +1,76 @@
+name: Cleanup old workflows
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Delete old workflow files
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          KEEP_1="OKN_BP1048P4_V21_FIXED_USB_C_ONLY_ALL_IN_ONE_FINAL_STATIC_ANDROID_GENERATOR.yml"
+          KEEP_2="OKN_DSP_AutoBuild.yml"
+
+          echo "Keeping:"
+          echo "  $KEEP_1"
+          echo "  $KEEP_2"
+          echo
+          echo "Deleting:"
+
+          find .github/workflows -maxdepth 1 -type f \( -name '*.yml' -o -name '*.yaml' \) -print0 |
+          while IFS= read -r -d '' file; do
+            name="$(basename "$file")"
+
+            if [[ "$name" == "$KEEP_1" || "$name" == "$KEEP_2" ]]; then
+              continue
+            fi
+
+            echo "  $file"
+            rm -f -- "$file"
+          done
+
+      - name: Verify only required workflows remain
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "Remaining workflow files:"
+          find .github/workflows -maxdepth 1 -type f \( -name '*.yml' -o -name '*.yaml' \) -print | sort
+
+          test -f ".github/workflows/OKN_BP1048P4_V21_FIXED_USB_C_ONLY_ALL_IN_ONE_FINAL_STATIC_ANDROID_GENERATOR.yml"
+          test -f ".github/workflows/OKN_DSP_AutoBuild.yml"
+
+          COUNT="$(find .github/workflows -maxdepth 1 -type f \( -name '*.yml' -o -name '*.yaml' \) | wc -l)"
+          test "$COUNT" -eq 2
+
+      - name: Commit and push cleanup
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add -A .github/workflows
+
+          if git diff --cached --quiet; then
+            echo "No workflow files to delete."
+            exit 0
+          fi
+
+          git commit -m "Clean up obsolete workflows"
+          git push origin HEAD:main
