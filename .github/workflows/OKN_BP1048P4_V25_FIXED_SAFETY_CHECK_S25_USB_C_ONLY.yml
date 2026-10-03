@@ -1,0 +1,1137 @@
+name: OKN BP1048P4 V25 FIXED SAFETY CHECK S25 USB-C ONLY
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/OKN_BP1048P4_V25_FIXED_SAFETY_CHECK_S25_USB_C_ONLY.yml'
+
+permissions:
+  contents: read
+
+env:
+  REQUIRED_PATH: "Samsung Galaxy S25+ -> USB-C cable -> DSP USB-C port only"
+  SOLDER_ALLOWED: "NO"
+  BOARD_MOD_ALLOWED: "NO"
+  JTAG_ALLOWED: "NO"
+  SDP_ALLOWED: "NO"
+  AICE_ALLOWED: "NO"
+  HARDWARE_PROBE_ALLOWED: "NO"
+  FLASH_ERASE_ALLOWED: "NO"
+  FLASH_WRITE_ALLOWED: "NO"
+  UNPROVEN_FLASH_READ_ALLOWED: "NO"
+
+jobs:
+  one_click:
+    name: Build V25 fixed BP1048P4 S25 USB-C Android tool
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+
+    steps:
+      - name: ONE CLICK - generate, safety-check, build APK, package
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          test "$REQUIRED_PATH" = "Samsung Galaxy S25+ -> USB-C cable -> DSP USB-C port only"
+          for v in SOLDER_ALLOWED BOARD_MOD_ALLOWED JTAG_ALLOWED SDP_ALLOWED AICE_ALLOWED HARDWARE_PROBE_ALLOWED FLASH_ERASE_ALLOWED FLASH_WRITE_ALLOWED UNPROVEN_FLASH_READ_ALLOWED; do
+            test "${!v}" = "NO"
+          done
+
+          rm -rf /tmp/v25
+          mkdir -p \
+            /tmp/v25/app/app/src/main/java/com/okn/bp1048p4 \
+            /tmp/v25/app/app/src/main/res/xml \
+            /tmp/v25/evidence \
+            /tmp/v25/out
+
+          cat > /tmp/v25/evidence/PROJECT_CONSTRAINTS.txt <<'EOF'
+          TARGET_DSP=MVSilicon BP1048P4
+          REQUIRED_PHONE=Samsung Galaxy S25+
+          REQUIRED_PHYSICAL_PATH=Samsung Galaxy S25+ -> USB-C cable -> DSP USB-C port only
+          STOCK_USB_C_ONLY=YES
+          SOLDERING=FORBIDDEN
+          BOARD_MODIFICATION=FORBIDDEN
+          JTAG=FORBIDDEN
+          SDP=FORBIDDEN
+          AICE=FORBIDDEN
+          HARDWARE_PROBE=FORBIDDEN
+          FLASH_ERASE=DISABLED
+          FLASH_WRITE=DISABLED
+          UNPROVEN_FLASH_READ=DISABLED
+          EOF
+
+          # Inventory only. No hardware is connected to GitHub Actions.
+          git clone -q --depth 1 "https://github.com/${GITHUB_REPOSITORY}.git" /tmp/v25/repo
+          find /tmp/v25/repo -type f \
+            \( -iname '*.mva' -o -iname '*.bin' -o -iname '*.fw' -o -iname '*.img' \) \
+            -printf '%p\t%s\n' | sort \
+            > /tmp/v25/evidence/LOCAL_FIRMWARE_CANDIDATES.txt || true
+
+          A=/tmp/v25/app
+
+          cat > "$A/settings.gradle" <<'EOF'
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+          rootProject.name = 'OKN_BP1048P4_V25_USB_C'
+          include ':app'
+          EOF
+
+          cat > "$A/build.gradle" <<'EOF'
+          plugins {
+              id 'com.android.application' version '8.7.3' apply false
+          }
+          EOF
+
+          cat > "$A/gradle.properties" <<'EOF'
+          org.gradle.jvmargs=-Xmx2048m -Dfile.encoding=UTF-8
+          android.useAndroidX=false
+          android.nonTransitiveRClass=true
+          EOF
+
+          cat > "$A/app/build.gradle" <<'EOF'
+          plugins {
+              id 'com.android.application'
+          }
+
+          android {
+              namespace 'com.okn.bp1048p4'
+              compileSdk 35
+
+              defaultConfig {
+                  applicationId 'com.okn.bp1048p4'
+                  minSdk 29
+                  targetSdk 35
+                  versionCode 25
+                  versionName '25.0'
+              }
+          }
+          EOF
+
+          cat > "$A/app/src/main/AndroidManifest.xml" <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <uses-feature
+                  android:name="android.hardware.usb.host"
+                  android:required="true" />
+
+              <application
+                  android:allowBackup="false"
+                  android:label="OKN BP1048P4 USB-C"
+                  android:supportsRtl="true">
+
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true"
+                      android:launchMode="singleTop">
+
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+
+                      <intent-filter>
+                          <action android:name="android.hardware.usb.action.USB_DEVICE_ATTACHED" />
+                      </intent-filter>
+
+                      <meta-data
+                          android:name="android.hardware.usb.action.USB_DEVICE_ATTACHED"
+                          android:resource="@xml/device_filter" />
+                  </activity>
+              </application>
+          </manifest>
+          EOF
+
+          cat > "$A/app/src/main/res/xml/device_filter.xml" <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <resources>
+              <!-- BP1048P4 runtime: 0x6324:0x1719 -->
+              <usb-device vendor-id="25380" product-id="5913" />
+
+              <!-- BP1048P4 FlashBoot recovery: 0x0000:0x2244 -->
+              <usb-device vendor-id="0" product-id="8772" />
+          </resources>
+          EOF
+
+          cat > "$A/app/src/main/java/com/okn/bp1048p4/MainActivity.java" <<'JAVA'
+          package com.okn.bp1048p4;
+
+          import android.app.Activity;
+          import android.app.AlertDialog;
+          import android.app.PendingIntent;
+          import android.content.BroadcastReceiver;
+          import android.content.Context;
+          import android.content.Intent;
+          import android.content.IntentFilter;
+          import android.database.Cursor;
+          import android.graphics.Typeface;
+          import android.hardware.usb.UsbDevice;
+          import android.hardware.usb.UsbDeviceConnection;
+          import android.hardware.usb.UsbInterface;
+          import android.hardware.usb.UsbManager;
+          import android.net.Uri;
+          import android.os.Build;
+          import android.os.Bundle;
+          import android.os.Handler;
+          import android.os.Looper;
+          import android.provider.OpenableColumns;
+          import android.view.View;
+          import android.widget.Button;
+          import android.widget.LinearLayout;
+          import android.widget.ScrollView;
+          import android.widget.TextView;
+          import android.widget.Toast;
+
+          import java.io.ByteArrayOutputStream;
+          import java.io.InputStream;
+          import java.security.MessageDigest;
+          import java.util.Locale;
+          import java.util.Map;
+
+          public class MainActivity extends Activity {
+              private static final String ACTION_USB_PERMISSION =
+                  "com.okn.bp1048p4.USB_PERMISSION";
+
+              private static final int RUNTIME_VID = 0x6324;
+              private static final int RUNTIME_PID = 0x1719;
+              private static final int RUNTIME_IFACE = 4;
+              private static final int RUNTIME_FEATURE_VALUE = 0x0300;
+              private static final int RUNTIME_FEATURE_BYTES = 8;
+
+              private static final int RECOVERY_VID = 0x0000;
+              private static final int RECOVERY_PID = 0x2244;
+              private static final int RECOVERY_IFACE = 0;
+
+              private static final int REPORT_BYTES = 256;
+              private static final int REPORTS_PER_BLOCK = 16;
+              private static final int BLOCK_BYTES = 4096;
+
+              private static final int HID_CLASS = 3;
+              private static final long MAX_FIRMWARE_BYTES = 64L * 1024L * 1024L;
+
+              private UsbManager usb;
+              private UsbDevice selected;
+              private TextView status;
+              private Uri firmwareUri;
+
+              private final Handler handler = new Handler(Looper.getMainLooper());
+
+              private final BroadcastReceiver permissionReceiver = new BroadcastReceiver() {
+                  @Override public void onReceive(Context context, Intent intent) {
+                      if (!ACTION_USB_PERMISSION.equals(intent.getAction())) return;
+
+                      UsbDevice d;
+                      if (Build.VERSION.SDK_INT >= 33) {
+                          d = intent.getParcelableExtra(
+                              UsbManager.EXTRA_DEVICE, UsbDevice.class);
+                      } else {
+                          d = intent.getParcelableExtra(UsbManager.EXTRA_DEVICE);
+                      }
+
+                      boolean granted = intent.getBooleanExtra(
+                          UsbManager.EXTRA_PERMISSION_GRANTED, false);
+
+                      log("USB permission=" + granted + deviceText(d));
+
+                      if (granted && d != null) {
+                          selected = d;
+                          inspectUsbDescriptor(d);
+                      }
+                  }
+              };
+
+              private final BroadcastReceiver usbStateReceiver = new BroadcastReceiver() {
+                  @Override public void onReceive(Context context, Intent intent) {
+                      String a = intent.getAction();
+
+                      UsbDevice d;
+                      if (Build.VERSION.SDK_INT >= 33) {
+                          d = intent.getParcelableExtra(
+                              UsbManager.EXTRA_DEVICE, UsbDevice.class);
+                      } else {
+                          d = intent.getParcelableExtra(UsbManager.EXTRA_DEVICE);
+                      }
+
+                      if (UsbManager.ACTION_USB_DEVICE_ATTACHED.equals(a)) {
+                          log("USB ATTACHED" + deviceText(d));
+                          handler.postDelayed(() -> {
+                              scan();
+                              if (selected != null && !usb.hasPermission(selected)) {
+                                  requestPermissionFor(selected);
+                              }
+                          }, 250);
+                      } else if (UsbManager.ACTION_USB_DEVICE_DETACHED.equals(a)) {
+                          log("USB DETACHED" + deviceText(d));
+                          if (selected != null && d != null &&
+                              selected.getDeviceId() == d.getDeviceId()) {
+                              selected = null;
+                          }
+                      }
+                  }
+              };
+
+              @Override protected void onCreate(Bundle state) {
+                  super.onCreate(state);
+
+                  usb = (UsbManager) getSystemService(Context.USB_SERVICE);
+
+                  IntentFilter permissionFilter =
+                      new IntentFilter(ACTION_USB_PERMISSION);
+
+                  IntentFilter stateFilter = new IntentFilter();
+                  stateFilter.addAction(UsbManager.ACTION_USB_DEVICE_ATTACHED);
+                  stateFilter.addAction(UsbManager.ACTION_USB_DEVICE_DETACHED);
+
+                  if (Build.VERSION.SDK_INT >= 33) {
+                      registerReceiver(
+                          permissionReceiver,
+                          permissionFilter,
+                          Context.RECEIVER_NOT_EXPORTED);
+
+                      registerReceiver(
+                          usbStateReceiver,
+                          stateFilter,
+                          Context.RECEIVER_EXPORTED);
+                  } else {
+                      registerReceiver(permissionReceiver, permissionFilter);
+                      registerReceiver(usbStateReceiver, stateFilter);
+                  }
+
+                  LinearLayout root = new LinearLayout(this);
+                  root.setOrientation(LinearLayout.VERTICAL);
+                  root.setPadding(28, 28, 28, 28);
+
+                  TextView title = new TextView(this);
+                  title.setText("OKN • MVSilicon BP1048P4 • V25");
+                  title.setTextSize(22);
+                  title.setTypeface(Typeface.DEFAULT_BOLD);
+                  root.addView(title);
+
+                  TextView constraint = new TextView(this);
+                  constraint.setText(
+                      "\nใช้งานเฉพาะเส้นทางนี้เท่านั้น\n" +
+                      "Samsung Galaxy S25+ → สาย USB-C → พอร์ต USB-C บอร์ด DSP\n\n" +
+                      "ห้ามบัดกรี • ห้ามแก้ไขบอร์ด • ไม่ใช้ JTAG / SDP / AICE\n" +
+                      "Erase / Write / คำสั่ง Read ที่ยังไม่พิสูจน์ = ปิด\n"
+                  );
+                  root.addView(constraint);
+
+                  addButton(root, "1) สแกน DSP USB-C", v -> scan());
+                  addButton(root, "2) ขอสิทธิ์ USB", v -> requestPermission());
+                  addButton(root, "3) ตรวจ descriptor / interface", v -> inspectSelected());
+                  addButton(root, "4) Runtime preflight", v -> runtimePreflight());
+                  addButton(root, "5) เข้า FlashBoot ผ่าน USB-C", v -> confirmEnterFlashBoot());
+                  addButton(root, "6) เลือกไฟล์ Firmware", v -> chooseFirmware());
+                  addButton(root, "7) ตรวจ Firmware / SHA-256 / CRC", v -> inspectFirmware());
+
+                  Button dump = addButton(
+                      root,
+                      "อ่าน Firmware ทั้งชิป — LOCKED",
+                      v -> {});
+                  dump.setEnabled(false);
+
+                  Button flash = addButton(
+                      root,
+                      "ลง Firmware — LOCKED",
+                      v -> {});
+                  flash.setEnabled(false);
+
+                  TextView gate = new TextView(this);
+                  gate.setText(
+                      "\nFail-closed:\n" +
+                      "• ยังไม่พบ stock-USB full-flash readback command ที่พิสูจน์แล้ว\n" +
+                      "• FLASH_READ 0x03 ที่เคยพบเป็น SPI-NOR debugger/ICE path\n" +
+                      "• erase/write ยังไม่เปิดจนกว่าจะยืนยัน known-good firmware " +
+                      "ของ BP1048P4 บอร์ดตัวจริงและ padding/container ครบ\n"
+                  );
+                  root.addView(gate);
+
+                  status = new TextView(this);
+                  status.setTextIsSelectable(true);
+                  status.setTypeface(Typeface.MONOSPACE);
+                  status.setText("\nLog:\n");
+                  root.addView(status);
+
+                  ScrollView scroll = new ScrollView(this);
+                  scroll.addView(root);
+                  setContentView(scroll);
+
+                  scan();
+              }
+
+              @Override protected void onNewIntent(Intent intent) {
+                  super.onNewIntent(intent);
+                  setIntent(intent);
+                  handler.postDelayed(this::scan, 200);
+              }
+
+              private Button addButton(
+                  LinearLayout root,
+                  String text,
+                  View.OnClickListener listener) {
+
+                  Button b = new Button(this);
+                  b.setText(text);
+                  b.setAllCaps(false);
+                  b.setOnClickListener(listener);
+                  root.addView(b);
+                  return b;
+              }
+
+              private void log(String s) {
+                  status.append(s + "\n");
+              }
+
+              private void toast(String s) {
+                  Toast.makeText(this, s, Toast.LENGTH_SHORT).show();
+                  log(s);
+              }
+
+              private String deviceText(UsbDevice d) {
+                  if (d == null) return "";
+
+                  return String.format(
+                      Locale.US,
+                      " [%04X:%04X id=%d name=%s]",
+                      d.getVendorId(),
+                      d.getProductId(),
+                      d.getDeviceId(),
+                      d.getDeviceName());
+              }
+
+              private boolean isRuntime(UsbDevice d) {
+                  return d != null &&
+                      d.getVendorId() == RUNTIME_VID &&
+                      d.getProductId() == RUNTIME_PID;
+              }
+
+              private boolean isRecovery(UsbDevice d) {
+                  return d != null &&
+                      d.getVendorId() == RECOVERY_VID &&
+                      d.getProductId() == RECOVERY_PID;
+              }
+
+              private UsbInterface findInterface(UsbDevice d, int id) {
+                  if (d == null) return null;
+
+                  for (int i = 0; i < d.getInterfaceCount(); i++) {
+                      UsbInterface x = d.getInterface(i);
+                      if (x.getId() == id) return x;
+                  }
+
+                  return null;
+              }
+
+              private boolean runtimeDescriptorMatches(UsbDevice d) {
+                  if (!isRuntime(d)) return false;
+
+                  UsbInterface i = findInterface(d, RUNTIME_IFACE);
+
+                  return i != null && i.getInterfaceClass() == HID_CLASS;
+              }
+
+              private boolean recoveryDescriptorMatches(UsbDevice d) {
+                  if (!isRecovery(d)) return false;
+
+                  UsbInterface i = findInterface(d, RECOVERY_IFACE);
+
+                  // Static FlashBoot proof: HID interface 0 with control EP only,
+                  // therefore no interrupt endpoints are required.
+                  return i != null &&
+                      i.getInterfaceClass() == HID_CLASS &&
+                      i.getEndpointCount() == 0;
+              }
+
+              private void scan() {
+                  UsbDevice runtime = null;
+                  UsbDevice recovery = null;
+
+                  Map<String, UsbDevice> map = usb.getDeviceList();
+                  log("USB devices=" + map.size());
+
+                  for (UsbDevice d : map.values()) {
+                      log("พบ" + deviceText(d));
+
+                      if (isRecovery(d)) recovery = d;
+                      else if (isRuntime(d)) runtime = d;
+                  }
+
+                  // Prefer recovery during re-enumeration.
+                  selected = recovery != null ? recovery : runtime;
+
+                  if (selected == null) {
+                      log("สถานะ: ยังไม่พบ BP1048P4 runtime/recovery");
+                      return;
+                  }
+
+                  if (isRecovery(selected)) {
+                      boolean ok = recoveryDescriptorMatches(selected);
+                      log("สถานะ: FLASHBOOT RECOVERY 0000:2244 descriptor=" + ok);
+                      if (!ok) {
+                          log("REFUSE: recovery descriptor ไม่ตรงหลักฐานที่พิสูจน์ไว้");
+                          selected = null;
+                          return;
+                      }
+                  } else {
+                      boolean ok = runtimeDescriptorMatches(selected);
+                      log("สถานะ: RUNTIME 6324:1719 descriptor=" + ok);
+                      if (!ok) {
+                          log("REFUSE: runtime interface 4 ไม่ใช่ HID ตามหลักฐาน");
+                          selected = null;
+                          return;
+                      }
+                  }
+
+                  inspectUsbDescriptor(selected);
+              }
+
+              private void inspectUsbDescriptor(UsbDevice d) {
+                  if (d == null) return;
+
+                  log("interfaces=" + d.getInterfaceCount() +
+                      " permission=" + usb.hasPermission(d));
+
+                  for (int n = 0; n < d.getInterfaceCount(); n++) {
+                      UsbInterface i = d.getInterface(n);
+
+                      log(String.format(
+                          Locale.US,
+                          " IF id=%d class=%d sub=%d proto=%d eps=%d",
+                          i.getId(),
+                          i.getInterfaceClass(),
+                          i.getInterfaceSubclass(),
+                          i.getInterfaceProtocol(),
+                          i.getEndpointCount()));
+                  }
+              }
+
+              private void inspectSelected() {
+                  if (selected == null) scan();
+
+                  if (selected == null) {
+                      toast("ยังไม่พบ DSP ที่ descriptor ตรง");
+                      return;
+                  }
+
+                  inspectUsbDescriptor(selected);
+              }
+
+              private void requestPermission() {
+                  if (selected == null) scan();
+
+                  if (selected == null) {
+                      toast("ยังไม่พบ DSP");
+                      return;
+                  }
+
+                  requestPermissionFor(selected);
+              }
+
+              private void requestPermissionFor(UsbDevice d) {
+                  if (d == null) return;
+
+                  if (usb.hasPermission(d)) {
+                      log("มีสิทธิ์ USB แล้ว" + deviceText(d));
+                      return;
+                  }
+
+                  Intent i = new Intent(ACTION_USB_PERMISSION)
+                      .setPackage(getPackageName());
+
+                  PendingIntent pi = PendingIntent.getBroadcast(
+                      this,
+                      d.getDeviceId(),
+                      i,
+                      PendingIntent.FLAG_UPDATE_CURRENT |
+                          PendingIntent.FLAG_MUTABLE);
+
+                  log("request USB permission" + deviceText(d));
+                  usb.requestPermission(d, pi);
+              }
+
+              private UsbDeviceConnection openSelected(int ifaceId) {
+                  if (selected == null) scan();
+
+                  if (selected == null) {
+                      toast("ยังไม่พบ DSP");
+                      return null;
+                  }
+
+                  if (!usb.hasPermission(selected)) {
+                      requestPermissionFor(selected);
+                      toast("กรุณาอนุญาต USB ก่อน");
+                      return null;
+                  }
+
+                  UsbInterface intf = findInterface(selected, ifaceId);
+                  if (intf == null) {
+                      log("ไม่มี interface id=" + ifaceId);
+                      return null;
+                  }
+
+                  UsbDeviceConnection c = usb.openDevice(selected);
+                  if (c == null) {
+                      log("openDevice ไม่สำเร็จ");
+                      return null;
+                  }
+
+                  if (!c.claimInterface(intf, true)) {
+                      log("claim interface " + ifaceId + " ไม่สำเร็จ");
+                      c.close();
+                      return null;
+                  }
+
+                  return c;
+              }
+
+              private void runtimePreflight() {
+                  if (!runtimeDescriptorMatches(selected)) {
+                      toast("ต้องอยู่ Runtime 6324:1719 + HID interface 4");
+                      return;
+                  }
+
+                  UsbDeviceConnection c = openSelected(RUNTIME_IFACE);
+                  if (c == null) return;
+
+                  try {
+                      // Safe clear: only 0xAA arms pc_upgrade in the proven runtime path.
+                      byte[] clear = new byte[RUNTIME_FEATURE_BYTES];
+
+                      int s = c.controlTransfer(
+                          0x21,
+                          0x09,
+                          RUNTIME_FEATURE_VALUE,
+                          RUNTIME_IFACE,
+                          clear,
+                          clear.length,
+                          1500);
+
+                      if (s != RUNTIME_FEATURE_BYTES) {
+                          log("Runtime preflight SET failed=" + s);
+                          return;
+                      }
+
+                      byte[] r = new byte[RUNTIME_FEATURE_BYTES];
+
+                      int g = c.controlTransfer(
+                          0xA1,
+                          0x01,
+                          RUNTIME_FEATURE_VALUE,
+                          RUNTIME_IFACE,
+                          r,
+                          r.length,
+                          1500);
+
+                      log(
+                          "Runtime preflight SET=" + s +
+                          " GET=" + g +
+                          " first=" +
+                          (g > 0
+                              ? String.format(Locale.US, "%02X", r[0] & 0xff)
+                              : "--"));
+
+                      if (g == RUNTIME_FEATURE_BYTES && r[0] == 0) {
+                          log("PRECHECK=PASS");
+                      }
+                  } finally {
+                      c.close();
+                  }
+              }
+
+              private void confirmEnterFlashBoot() {
+                  if (!runtimeDescriptorMatches(selected)) {
+                      toast("ต้องอยู่ Runtime 6324:1719 + HID interface 4");
+                      return;
+                  }
+
+                  new AlertDialog.Builder(this)
+                      .setTitle("เข้า FlashBoot ผ่าน USB-C")
+                      .setMessage(
+                          "เส้นทางที่อนุญาต:\n" +
+                          "Samsung Galaxy S25+ → USB-C → DSP USB-C\n\n" +
+                          "ขั้นตอนนี้ส่ง Runtime Feature report ที่พิสูจน์แล้ว " +
+                          "เพื่อเข้า FlashBoot เท่านั้น\n" +
+                          "ไม่ erase และไม่เขียน firmware")
+                      .setNegativeButton("ยกเลิก", null)
+                      .setPositiveButton(
+                          "เข้า FlashBoot",
+                          (dialog, which) -> enterFlashBoot())
+                      .show();
+              }
+
+              private void enterFlashBoot() {
+                  if (!runtimeDescriptorMatches(selected)) {
+                      log("REFUSE: runtime identity/descriptor mismatch");
+                      return;
+                  }
+
+                  UsbDeviceConnection c = openSelected(RUNTIME_IFACE);
+                  if (c == null) return;
+
+                  try {
+                      byte[] arm = new byte[RUNTIME_FEATURE_BYTES];
+                      arm[0] = (byte) 0xAA;
+
+                      int s = c.controlTransfer(
+                          0x21,
+                          0x09,
+                          RUNTIME_FEATURE_VALUE,
+                          RUNTIME_IFACE,
+                          arm,
+                          arm.length,
+                          1500);
+
+                      log("FlashBoot ARM SET=" + s);
+
+                      if (s != RUNTIME_FEATURE_BYTES) {
+                          log("ABORT: ARM SET_REPORT ไม่ครบ 8 bytes");
+                          return;
+                      }
+
+                      byte[] r = new byte[RUNTIME_FEATURE_BYTES];
+
+                      int g = c.controlTransfer(
+                          0xA1,
+                          0x01,
+                          RUNTIME_FEATURE_VALUE,
+                          RUNTIME_IFACE,
+                          r,
+                          r.length,
+                          1500);
+
+                      log(
+                          "FlashBoot trigger GET=" + g +
+                          " response0=" +
+                          (g > 0
+                              ? String.format(Locale.US, "%02X", r[0] & 0xff)
+                              : "--"));
+
+                      // A disconnect/short GET can be expected when the device jumps
+                      // and re-enumerates. Identity is decided by the new USB device.
+                  } finally {
+                      c.close();
+                  }
+
+                  pollForRecovery(0);
+              }
+
+              private void pollForRecovery(int attempt) {
+                  if (attempt >= 12) {
+                      log("Recovery 0000:2244 ยังไม่พบหลัง re-enumeration window");
+                      return;
+                  }
+
+                  handler.postDelayed(() -> {
+                      scan();
+
+                      if (selected != null &&
+                          isRecovery(selected) &&
+                          recoveryDescriptorMatches(selected)) {
+
+                          log("RECOVERY=DETECTED_AND_VALIDATED");
+
+                          if (!usb.hasPermission(selected)) {
+                              requestPermissionFor(selected);
+                          }
+
+                          return;
+                      }
+
+                      pollForRecovery(attempt + 1);
+                  }, 750);
+              }
+
+              @SuppressWarnings("deprecation")
+              private void chooseFirmware() {
+                  Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+                  i.setType("*/*");
+                  i.addCategory(Intent.CATEGORY_OPENABLE);
+                  startActivityForResult(i, 1048);
+              }
+
+              @SuppressWarnings("deprecation")
+              @Override protected void onActivityResult(
+                  int requestCode,
+                  int resultCode,
+                  Intent data) {
+
+                  super.onActivityResult(requestCode, resultCode, data);
+
+                  if (requestCode == 1048 &&
+                      resultCode == RESULT_OK &&
+                      data != null) {
+
+                      firmwareUri = data.getData();
+
+                      if (firmwareUri != null) {
+                          try {
+                              getContentResolver().takePersistableUriPermission(
+                                  firmwareUri,
+                                  data.getFlags() &
+                                      (Intent.FLAG_GRANT_READ_URI_PERMISSION |
+                                       Intent.FLAG_GRANT_WRITE_URI_PERMISSION));
+                          } catch (Exception ignored) {}
+
+                          log("เลือก firmware: " + fileName(firmwareUri));
+                      }
+                  }
+              }
+
+              private String fileName(Uri uri) {
+                  if (uri == null) return "(none)";
+
+                  try (Cursor c = getContentResolver().query(
+                      uri, null, null, null, null)) {
+
+                      if (c != null && c.moveToFirst()) {
+                          int i = c.getColumnIndex(OpenableColumns.DISPLAY_NAME);
+                          if (i >= 0) return c.getString(i);
+                      }
+                  }
+
+                  return uri.toString();
+              }
+
+              private void inspectFirmware() {
+                  if (firmwareUri == null) {
+                      toast("เลือกไฟล์ Firmware ก่อน");
+                      return;
+                  }
+
+                  try (InputStream in =
+                           getContentResolver().openInputStream(firmwareUri);
+                       ByteArrayOutputStream out =
+                           new ByteArrayOutputStream()) {
+
+                      if (in == null) {
+                          log("เปิดไฟล์ไม่ได้");
+                          return;
+                      }
+
+                      byte[] buf = new byte[32768];
+                      int n;
+                      long total = 0;
+
+                      while ((n = in.read(buf)) > 0) {
+                          total += n;
+
+                          if (total > MAX_FIRMWARE_BYTES) {
+                              throw new IllegalArgumentException(
+                                  "Firmware > 64 MiB; refuse to load into memory");
+                          }
+
+                          out.write(buf, 0, n);
+                      }
+
+                      byte[] bytes = out.toByteArray();
+
+                      if (bytes.length == 0) {
+                          log("REFUSE: firmware file ว่าง");
+                          return;
+                      }
+
+                      MessageDigest md =
+                          MessageDigest.getInstance("SHA-256");
+
+                      String sha = hex(md.digest(bytes));
+
+                      int crc = crc16(
+                          bytes,
+                          0,
+                          bytes.length,
+                          0);
+
+                      String fast = bytes.length >= 0xEC
+                          ? String.format(
+                              Locale.US,
+                              "%04X",
+                              mvaFastCrc(bytes))
+                          : "N/A (<0xEC)";
+
+                      int blocks =
+                          (bytes.length + BLOCK_BYTES - 1) / BLOCK_BYTES;
+
+                      int tail =
+                          bytes.length % BLOCK_BYTES;
+
+                      int unprovenPadBytes =
+                          tail == 0 ? 0 : BLOCK_BYTES - tail;
+
+                      log("Firmware name=" + fileName(firmwareUri));
+                      log("bytes=" + bytes.length);
+                      log("blocks4096=" + blocks);
+                      log("tail.mod4096=" + tail);
+                      log("final.pad.bytes.required=" + unprovenPadBytes);
+                      log("final.pad.byte.value=UNPROVEN");
+                      log("SHA-256=" + sha);
+
+                      log(String.format(
+                          Locale.US,
+                          "CRC16 whole=%04X MVA-fast=%s",
+                          crc,
+                          fast));
+
+                      log(
+                          "transport arithmetic=" +
+                          REPORTS_PER_BLOCK +
+                          " x " +
+                          REPORT_BYTES +
+                          " = " +
+                          BLOCK_BYTES);
+
+                      log(
+                          "FLASH ERASE/WRITE remains LOCKED");
+                  } catch (Exception e) {
+                      log("inspect error: " + e);
+                  }
+              }
+
+              private static int crc16(
+                  byte[] b,
+                  int off,
+                  int len,
+                  int seed) {
+
+                  int crc = seed & 0xffff;
+
+                  for (int i = off; i < off + len; i++) {
+                      crc ^= (b[i] & 0xff) << 8;
+
+                      for (int j = 0; j < 8; j++) {
+                          crc = (crc & 0x8000) != 0
+                              ? ((crc << 1) ^ 0x1021) & 0xffff
+                              : (crc << 1) & 0xffff;
+                      }
+                  }
+
+                  return crc;
+              }
+
+              private static int mvaFastCrc(byte[] b) {
+                  int crc = 0;
+
+                  crc = crc16(b, 0x0000, 0x00A4, crc);
+                  crc = crc16(b, 0x00A8, 0x0014, crc);
+                  crc = crc16(b, 0x00C0, 0x000C, crc);
+                  crc = crc16(b, 0x00D4, 0x0010, crc);
+                  crc = crc16(b, 0x00EC, b.length - 0x00EC, crc);
+
+                  return crc;
+              }
+
+              private static String hex(byte[] b) {
+                  StringBuilder s = new StringBuilder();
+
+                  for (byte x : b) {
+                      s.append(String.format(
+                          Locale.US,
+                          "%02x",
+                          x & 0xff));
+                  }
+
+                  return s.toString();
+              }
+
+              @Override protected void onDestroy() {
+                  handler.removeCallbacksAndMessages(null);
+
+                  try {
+                      unregisterReceiver(permissionReceiver);
+                  } catch (Exception ignored) {}
+
+                  try {
+                      unregisterReceiver(usbStateReceiver);
+                  } catch (Exception ignored) {}
+
+                  super.onDestroy();
+              }
+          }
+          JAVA
+
+          cat > "$A/README.md" <<'EOF'
+          # OKN BP1048P4 V25 FIXED
+
+          Permanent physical path:
+          Samsung Galaxy S25+ -> USB-C cable -> DSP USB-C port only.
+
+          Never used:
+          - soldering
+          - board modification
+          - JTAG / SDP / AICE
+          - hardware/debug probe
+
+          Included:
+          - runtime identity: 6324:1719
+          - runtime HID interface 4 validation
+          - Android USB permission
+          - attach/detach tracking
+          - safe runtime preflight
+          - user-confirmed Runtime -> FlashBoot transition
+          - recovery identity: 0000:2244
+          - recovery HID interface 0 + zero interrupt endpoint validation
+          - recovery re-enumeration polling
+          - firmware local-file SHA-256 and CRC inspection
+          - 4096-byte block/tail arithmetic
+
+          Locked:
+          - arbitrary full-flash readback over stock USB
+          - chip erase
+          - firmware write/update
+
+          Why readback stays locked:
+          V9.4 static analysis classified FLASH_READ 0x03 as an SPI-NOR
+          debugger/ICE path primitive, not a proven stock BP1048 USB command.
+
+          Why erase/write stays locked:
+          exact-board known-good BP1048P4 container semantics and full
+          final-4096-byte padding are not yet proven.
+          EOF
+
+          cat > /tmp/v25/evidence/V25_STATUS.json <<'EOF'
+          {
+            "version": "25.0",
+            "target": "MVSilicon BP1048P4",
+            "required_phone": "Samsung Galaxy S25+",
+            "required_path": "Samsung Galaxy S25+ -> USB-C cable -> DSP USB-C port only",
+            "soldering_allowed": false,
+            "board_modification_allowed": false,
+            "jtag_sdp_aice_allowed": false,
+            "runtime_vid_pid": "6324:1719",
+            "runtime_hid_interface": 4,
+            "recovery_vid_pid": "0000:2244",
+            "recovery_hid_interface": 0,
+            "recovery_expected_interrupt_endpoints": 0,
+            "runtime_preflight": true,
+            "runtime_to_flashboot": true,
+            "recovery_reenumeration_polling": true,
+            "usb_attach_detach_tracking": true,
+            "descriptor_validation": true,
+            "report_bytes": 256,
+            "reports_per_block": 16,
+            "block_bytes": 4096,
+            "ack_status_offset": 8,
+            "block_order": "1..N-1 then 0",
+            "crc": "CRC-16/CCITT poly 0x1021 init 0x0000",
+            "firmware_file_inspector": true,
+            "stock_usb_full_firmware_readback_proven": false,
+            "full_firmware_dump_enabled": false,
+            "flash_erase_enabled": false,
+            "flash_write_enabled": false
+          }
+          EOF
+
+          # Permanent source-level fail-closed checks.
+          # V25 used grep -R -c, which returns "filename:count" and broke numeric test.
+          # V25 uses quiet-match semantics instead.
+          if ! grep -R -q -F 'Samsung Galaxy S25+' "$A/app/src/main/java"; then
+            echo "Required Samsung Galaxy S25+ USB-C-only constraint missing from Android source"
+            exit 1
+          fi
+
+          if grep -R -n -E \
+            'chiperas|bootdat|codedata|constdat|cnfgdat|btupdat' \
+            "$A/app/src/main/java"; then
+            echo "Forbidden destructive recovery command string found in Android source"
+            exit 1
+          fi
+
+          # Recovery Output-report constants must not be present in executable Java yet.
+          if grep -R -n -E \
+            'RECOVERY_OUTPUT|0x0200' \
+            "$A/app/src/main/java"; then
+            echo "Recovery write transport unexpectedly exposed"
+            exit 1
+          fi
+
+          # Android SDK setup.
+          SDKMAN="$(command -v sdkmanager || true)"
+
+          if [ -n "$SDKMAN" ]; then
+            set +o pipefail
+            yes | "$SDKMAN" --licenses >/dev/null 2>&1 || true
+            set -o pipefail
+
+            "$SDKMAN" \
+              "platforms;android-35" \
+              "build-tools;35.0.0" \
+              >/dev/null 2>&1 || true
+          fi
+
+          cd /tmp/v25
+
+          curl -fL \
+            --retry 3 \
+            --connect-timeout 15 \
+            https://services.gradle.org/distributions/gradle-8.9-bin.zip \
+            -o gradle.zip
+
+          unzip -q gradle.zip
+
+          export PATH="/tmp/v25/gradle-8.9/bin:$PATH"
+
+          java -version
+          gradle --version
+
+          cd "$A"
+          gradle --no-daemon :app:assembleDebug
+
+          cp \
+            "$A/app/build/outputs/apk/debug/app-debug.apk" \
+            /tmp/v25/out/OKN_BP1048P4_V25_FIXED_S25_USB_C_ONLY.apk
+
+          cd "$A"
+
+          zip -9 -r \
+            /tmp/v25/out/OKN_BP1048P4_V25_ANDROID_SOURCE.zip \
+            . >/dev/null
+
+          cp \
+            /tmp/v25/evidence/V25_STATUS.json \
+            /tmp/v25/out/
+
+          cp \
+            /tmp/v25/evidence/PROJECT_CONSTRAINTS.txt \
+            /tmp/v25/out/
+
+          cp \
+            /tmp/v25/evidence/LOCAL_FIRMWARE_CANDIDATES.txt \
+            /tmp/v25/out/
+
+          sha256sum /tmp/v25/out/* \
+            > /tmp/v25/out/SHA256SUMS.txt
+
+          {
+            echo "# BP1048P4 V25 FIXED"
+            echo
+            echo "**Permanent physical path:** Samsung Galaxy S25+ → USB-C cable → DSP USB-C port only."
+            echo
+            echo "- Build APK: **YES**"
+            echo "- USB attach/detach + permission handling: **FIXED**"
+            echo "- Runtime descriptor validation: **YES**"
+            echo "- Recovery descriptor validation: **YES**"
+            echo "- Runtime → FlashBoot re-enumeration polling: **YES**"
+            echo "- Firmware SHA/CRC/tail inspector: **YES**"
+            echo "- Full stock-USB firmware dump: **LOCKED — command not proven**"
+            echo "- Flash erase/write: **LOCKED**"
+            echo "- Soldering/board modification/JTAG/SDP/AICE: **FORBIDDEN**"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload V25 APK + source + evidence
+        uses: actions/upload-artifact@v7
+        with:
+          name: OKN-BP1048P4-V25-FIXED-S25-USB-C-ONLY
+          path: /tmp/v25/out/*
+          if-no-files-found: error
+          retention-days: 90
