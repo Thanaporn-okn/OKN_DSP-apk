@@ -1,0 +1,958 @@
+name: OKN BP1048P4 MASTER V35 FIXED V2 PASSIVE QUEUED INTERRUPT-IN S25 USB-C ONLY
+
+"on":
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/OKN_BP1048P4_MASTER_V35_FIXED_V2_PASSIVE_QUEUED_INTERRUPT_IN_S25_USB_C_ONLY.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  FLASH_ALLOWED: "NO"
+  ERASE_ALLOWED: "NO"
+  WRITE_ALLOWED: "NO"
+  FEATURE_REPORT_ALLOWED: "NO"
+  HOST_OUTPUT_ALLOWED: "NO"
+  STARTUP_COMMAND_ALLOWED: "NO"
+  AUTH_REPLY_ALLOWED: "NO"
+
+jobs:
+  build-v35:
+    name: Build zero-output passive queued interrupt-IN APK
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+
+    steps:
+      - name: Safety gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$FLASH_ALLOWED" = "NO"
+          test "$ERASE_ALLOWED" = "NO"
+          test "$WRITE_ALLOWED" = "NO"
+          test "$FEATURE_REPORT_ALLOWED" = "NO"
+          test "$HOST_OUTPUT_ALLOWED" = "NO"
+          test "$STARTUP_COMMAND_ALLOWED" = "NO"
+          test "$AUTH_REPLY_ALLOWED" = "NO"
+
+          rm -rf /tmp/v35
+          mkdir -p /tmp/v35/app/app/src/main/java/com/okn/bp1048p4v35v2
+          mkdir -p /tmp/v35/app/app/src/main/res/xml
+          mkdir -p /tmp/v35/evidence /tmp/v35/out
+
+          cat > /tmp/v35/evidence/00_SCOPE.txt <<'EOF'
+          REVISION=MASTER-V35-FIXED-V2
+          MODE=PASSIVE_QUEUED_INTERRUPT_IN_ONLY
+          REQUIRED_PHONE=Samsung Galaxy S25+
+          REQUIRED_PATH=Samsung Galaxy S25+ -> USB-C cable -> DSP board USB-C port only
+
+          HARD RULES:
+          - No application Output report.
+          - No startup command.
+          - No auth reply.
+          - No Feature report.
+          - No updater/recovery command.
+          - No firmware/flash/erase/write.
+          - The app only verifies the exact production runtime fingerprint,
+            claims HID interface 4, queues interrupt-IN reads, and saves evidence.
+
+          PURPOSE:
+          Test whether the production device emits any useful HID interrupt-IN
+          traffic without sending a host application command. This is the bounded
+          live experiment permitted after V34 because host application output is
+          exactly zero.
+
+          FLASH_ALLOWED=NO
+          EOF
+
+      - name: Setup Java 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Generate Android project
+        shell: bash
+        run: |
+          set -euo pipefail
+          A=/tmp/v35/app
+
+          cat > "$A/settings.gradle" <<'EOF'
+          pluginManagement {
+              repositories { google(); mavenCentral(); gradlePluginPortal() }
+          }
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories { google(); mavenCentral() }
+          }
+          rootProject.name='OKN_BP1048P4_V35_PASSIVE_IN'
+          include ':app'
+          EOF
+
+          cat > "$A/build.gradle" <<'EOF'
+          plugins {
+              id 'com.android.application' version '8.7.3' apply false
+          }
+          EOF
+
+          cat > "$A/gradle.properties" <<'EOF'
+          org.gradle.jvmargs=-Xmx2048m -Dfile.encoding=UTF-8
+          android.useAndroidX=false
+          android.nonTransitiveRClass=true
+          EOF
+
+          cat > "$A/app/build.gradle" <<'EOF'
+          plugins { id 'com.android.application' }
+
+          android {
+              namespace 'com.okn.bp1048p4v35v2'
+              compileSdk 35
+
+              defaultConfig {
+                  applicationId 'com.okn.bp1048p4v35v2'
+                  minSdk 29
+                  targetSdk 35
+                  versionCode 352
+                  versionName '35.2'
+              }
+          }
+          EOF
+
+          cat > "$A/app/src/main/AndroidManifest.xml" <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <uses-feature android:name="android.hardware.usb.host" android:required="true"/>
+
+              <application
+                  android:allowBackup="false"
+                  android:label="OKN BP1048P4 V35 Fixed V2 Passive IN">
+
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true"
+                      android:launchMode="singleTop">
+
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN"/>
+                          <category android:name="android.intent.category.LAUNCHER"/>
+                      </intent-filter>
+
+                      <intent-filter>
+                          <action android:name="android.hardware.usb.action.USB_DEVICE_ATTACHED"/>
+                      </intent-filter>
+
+                      <meta-data
+                          android:name="android.hardware.usb.action.USB_DEVICE_ATTACHED"
+                          android:resource="@xml/device_filter"/>
+                  </activity>
+              </application>
+          </manifest>
+          EOF
+
+          cat > "$A/app/src/main/res/xml/device_filter.xml" <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <resources>
+              <usb-device vendor-id="25380" product-id="5913"/>
+          </resources>
+          EOF
+
+          cat > "$A/app/src/main/java/com/okn/bp1048p4v35v2/MainActivity.java" <<'JAVA'
+          package com.okn.bp1048p4v35v2;
+
+          import android.app.Activity;
+          import android.app.PendingIntent;
+          import android.content.BroadcastReceiver;
+          import android.content.Context;
+          import android.content.Intent;
+          import android.content.IntentFilter;
+          import android.hardware.usb.UsbConstants;
+          import android.hardware.usb.UsbDevice;
+          import android.hardware.usb.UsbDeviceConnection;
+          import android.hardware.usb.UsbEndpoint;
+          import android.hardware.usb.UsbInterface;
+          import android.hardware.usb.UsbManager;
+          import android.hardware.usb.UsbRequest;
+          import android.os.Build;
+          import android.os.Bundle;
+          import android.os.SystemClock;
+          import android.view.WindowManager;
+          import android.widget.Button;
+          import android.widget.LinearLayout;
+          import android.widget.ScrollView;
+          import android.widget.TextView;
+
+          import java.io.OutputStream;
+          import java.nio.ByteBuffer;
+          import java.nio.charset.StandardCharsets;
+          import java.security.MessageDigest;
+          import java.util.Arrays;
+          import java.util.HashMap;
+          import java.util.IdentityHashMap;
+          import java.util.Locale;
+          import java.util.Map;
+
+          @SuppressWarnings("deprecation")
+          public class MainActivity extends Activity {
+              private static final int VID=0x6324;
+              private static final int PID=0x1719;
+              private static final int SAVE_EVIDENCE=135;
+              private static final String USB_PERMISSION=
+                  "com.okn.bp1048p4v35v2.USB_PERMISSION";
+
+              private static final String RAW_SHA=
+                  "C7E861A6F28EB832E16450D3A35B64C557BEA4E0CC15FF1EB94C45E348C84001";
+              private static final String IF3_SHA=
+                  "BAFE7C0E6A251EB36B11362B18106DFF3DC0010A831A3B8B6CD49DBF4A9AE2C3";
+              private static final String IF4_SHA=
+                  "78510751B31DCC204CD6CA2FE023F05CF84B75227A279E8E1FBAF7D6C3A21B6F";
+
+              private UsbManager usb;
+              private TextView log;
+              private Button passiveButton;
+              private final StringBuilder evidence=new StringBuilder();
+              private long t0;
+              private boolean exactFingerprint=false;
+              private volatile boolean captureRunning=false;
+
+              private final BroadcastReceiver permissionRx=new BroadcastReceiver() {
+                  @Override public void onReceive(Context c, Intent i) {
+                      if(!USB_PERMISSION.equals(i.getAction())) return;
+                      UsbDevice d=getDevice(i);
+                      boolean ok=i.getBooleanExtra(
+                          UsbManager.EXTRA_PERMISSION_GRANTED,false);
+                      line("USB_PERMISSION_RESULT="+ok+dev(d));
+                      if(ok && runtime(d)) verify(d);
+                  }
+              };
+
+              @Override protected void onCreate(Bundle b) {
+                  super.onCreate(b);
+                  getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+
+                  t0=SystemClock.elapsedRealtime();
+                  usb=(UsbManager)getSystemService(Context.USB_SERVICE);
+
+                  evidence.append("EVIDENCE_FORMAT=OKN_BP1048P4_V35_FIXED_V2_PASSIVE_QUEUED_INTERRUPT_IN\n");
+                  evidence.append("REQUIRED_PHONE=Samsung Galaxy S25+\n");
+                  evidence.append("REQUIRED_PATH=Samsung Galaxy S25+ -> USB-C cable -> DSP board USB-C port only\n");
+                  evidence.append("EXPECTED_RUNTIME_VID_PID=6324:1719\n");
+                  evidence.append("HOST_APPLICATION_OUTPUT_COUNT=0\n");
+                  evidence.append("STARTUP_COMMAND_SENT=false\n");
+                  evidence.append("AUTH_REPLY_SENT=false\n");
+                  evidence.append("FEATURE_REPORT_USED=false\n");
+                  evidence.append("FLASH_WRITE_ERASE_RECOVERY=false\n");
+
+                  IntentFilter pf=new IntentFilter(USB_PERMISSION);
+                  if(Build.VERSION.SDK_INT>=33) {
+                      registerReceiver(permissionRx,pf,Context.RECEIVER_NOT_EXPORTED);
+                  } else {
+                      registerReceiver(permissionRx,pf);
+                  }
+
+                  LinearLayout root=new LinearLayout(this);
+                  root.setOrientation(LinearLayout.VERTICAL);
+                  root.setPadding(28,28,28,28);
+
+                  TextView title=new TextView(this);
+                  title.setText("OKN BP1048P4 V35 Fixed V2 — Passive queued interrupt-IN");
+                  title.setTextSize(20);
+                  root.addView(title);
+
+                  TextView note=new TextView(this);
+                  note.setText(
+                      "\nรอบนี้อ่านอย่างเดียวจริง ๆ\n"+
+                      "• ไม่ส่ง startup\n"+
+                      "• ไม่ส่ง auth reply\n"+
+                      "• ไม่มี Output/Feature report\n"+
+                      "• ไม่ flash/erase/write\n\n"+
+                      "กด VERIFY ก่อน แล้วกด PASSIVE CAPTURE 20s\n");
+                  root.addView(note);
+
+                  add(root,"REQUEST USB PERMISSION + VERIFY EXACT BOARD",v->scan(true));
+
+                  passiveButton=add(
+                      root,
+                      "PASSIVE QUEUED INTERRUPT-IN CAPTURE 20s",
+                      v->startPassive());
+                  passiveButton.setEnabled(false);
+
+                  add(root,"SAVE FULL EVIDENCE REPORT",v->saveEvidence());
+
+                  log=new TextView(this);
+                  log.setTextIsSelectable(true);
+                  log.setText("\nLog:\n");
+                  root.addView(log);
+
+                  ScrollView sv=new ScrollView(this);
+                  sv.addView(root);
+                  setContentView(sv);
+
+                  scan(false);
+              }
+
+              private Button add(
+                  LinearLayout root,
+                  String text,
+                  android.view.View.OnClickListener listener) {
+
+                  Button b=new Button(this);
+                  b.setAllCaps(false);
+                  b.setText(text);
+                  b.setOnClickListener(listener);
+                  root.addView(b);
+                  return b;
+              }
+
+              private void line(String s) {
+                  long ms=SystemClock.elapsedRealtime()-t0;
+                  String row=String.format(Locale.US,"[%06dms] %s\n",ms,s);
+                  evidence.append(row);
+                  runOnUiThread(()->{
+                      if(log!=null)log.append(row);
+                  });
+              }
+
+              private UsbDevice getDevice(Intent i) {
+                  if(Build.VERSION.SDK_INT>=33)
+                      return i.getParcelableExtra(
+                          UsbManager.EXTRA_DEVICE,UsbDevice.class);
+                  return i.getParcelableExtra(UsbManager.EXTRA_DEVICE);
+              }
+
+              private boolean runtime(UsbDevice d) {
+                  return d!=null && d.getVendorId()==VID && d.getProductId()==PID;
+              }
+
+              private String dev(UsbDevice d) {
+                  if(d==null)return " device=<NULL>";
+                  return String.format(
+                      Locale.US,
+                      " vid=%04X pid=%04X id=%d ifaces=%d",
+                      d.getVendorId(),d.getProductId(),
+                      d.getDeviceId(),d.getInterfaceCount());
+              }
+
+              private void scan(boolean requestPermission) {
+                  UsbDevice target=null;
+
+                  for(UsbDevice d:usb.getDeviceList().values()) {
+                      line("USB_DEVICE="+dev(d)+" permission="+usb.hasPermission(d));
+                      if(runtime(d))target=d;
+                  }
+
+                  if(target==null) {
+                      exactFingerprint=false;
+                      passiveButton.setEnabled(false);
+                      line("RUNTIME_TARGET_FOUND=false");
+                      return;
+                  }
+
+                  line("RUNTIME_TARGET_FOUND=true");
+
+                  if(!usb.hasPermission(target)) {
+                      line("USB_PERMISSION=false");
+                      if(requestPermission) {
+                          Intent intent=new Intent(USB_PERMISSION)
+                              .setPackage(getPackageName());
+
+                          PendingIntent pi=PendingIntent.getBroadcast(
+                              this,target.getDeviceId(),intent,
+                              PendingIntent.FLAG_UPDATE_CURRENT|
+                              PendingIntent.FLAG_MUTABLE);
+
+                          usb.requestPermission(target,pi);
+                          line("USB_PERMISSION_REQUESTED=true");
+                      }
+                      return;
+                  }
+
+                  verify(target);
+              }
+
+              private Map<Integer,Integer> hidLengths(byte[] raw) {
+                  Map<Integer,Integer> out=new HashMap<>();
+                  int p=0,currentIf=-1,currentClass=-1;
+
+                  while(raw!=null && p+2<=raw.length) {
+                      int len=raw[p]&255;
+                      int type=raw[p+1]&255;
+                      if(len<2 || p+len>raw.length)break;
+
+                      if(type==0x04 && len>=9) {
+                          currentIf=raw[p+2]&255;
+                          currentClass=raw[p+5]&255;
+                      } else if(type==0x21 && currentClass==3 &&
+                                currentIf>=0 && len>=9) {
+                          int n=raw[p+5]&255;
+                          int q=p+6;
+                          for(int k=0;k<n && q+2<p+len;k++,q+=3) {
+                              int dtype=raw[q]&255;
+                              int dlen=(raw[q+1]&255)|((raw[q+2]&255)<<8);
+                              if(dtype==0x22 && dlen>0) {
+                                  out.put(currentIf,dlen);
+                                  break;
+                              }
+                          }
+                      }
+
+                      p+=len;
+                  }
+
+                  return out;
+              }
+
+              private String reportDescriptorSha(
+                  UsbDeviceConnection c,
+                  UsbInterface x,
+                  int expected) {
+
+                  byte[] b=new byte[expected];
+                  int r=c.controlTransfer(
+                      0x81,0x06,0x2200,x.getId(),
+                      b,b.length,1500);
+
+                  line("IF"+x.getId()+"_REPORT_DESCRIPTOR_RESULT="+r);
+
+                  if(r<=0)return "";
+                  String h=sha256(Arrays.copyOf(b,r));
+                  line("IF"+x.getId()+"_REPORT_SHA256="+h);
+                  return h;
+              }
+
+              private void verify(UsbDevice d) {
+                  exactFingerprint=false;
+
+                  UsbDeviceConnection c=usb.openDevice(d);
+                  if(c==null) {
+                      line("VERIFY_OPEN_NULL=true");
+                      passiveButton.setEnabled(false);
+                      return;
+                  }
+
+                  try {
+                      byte[] raw=c.getRawDescriptors();
+                      if(raw==null || raw.length==0) {
+                          line("RAW_DESCRIPTOR_EMPTY=true");
+                          return;
+                      }
+
+                      String rawSha=sha256(raw);
+                      line("RAW_DESCRIPTOR_BYTES="+raw.length);
+                      line("RAW_DESCRIPTOR_SHA256="+rawSha);
+
+                      Map<Integer,Integer> lens=hidLengths(raw);
+
+                      UsbInterface if3=null,if4=null;
+                      for(int i=0;i<d.getInterfaceCount();i++) {
+                          UsbInterface x=d.getInterface(i);
+                          if(x.getInterfaceClass()==3 && x.getId()==3)if3=x;
+                          if(x.getInterfaceClass()==3 && x.getId()==4)if4=x;
+                      }
+
+                      if(if3==null || if4==null) {
+                          line("REQUIRED_HID_INTERFACES_MISSING=true");
+                          return;
+                      }
+
+                      String h4=reportDescriptorSha(
+                          c,if4,lens.containsKey(4)?lens.get(4):36);
+
+                      int if3Expected=lens.containsKey(3)?lens.get(3):33;
+
+                      // IF3 can return -1 while owned by the Android kernel.
+                      // Retry only the descriptor control-IN read using temporary
+                      // claims. No Output or Feature report is sent.
+                      String h3=reportDescriptorSha(c,if3,if3Expected);
+
+                      if(!IF3_SHA.equals(h3)) {
+                          boolean cl3=c.claimInterface(if3,false);
+                          line("IF3_TEMP_CLAIM_FORCE_FALSE="+cl3);
+
+                          if(cl3) {
+                              try {
+                                  h3=reportDescriptorSha(c,if3,if3Expected);
+                              } finally {
+                                  line("IF3_TEMP_RELEASE_FORCE_FALSE="+
+                                      c.releaseInterface(if3));
+                              }
+                          }
+                      }
+
+                      if(!IF3_SHA.equals(h3)) {
+                          boolean cl3f=c.claimInterface(if3,true);
+                          line("IF3_TEMP_CLAIM_FORCE_TRUE="+cl3f);
+
+                          if(cl3f) {
+                              try {
+                                  h3=reportDescriptorSha(c,if3,if3Expected);
+                              } finally {
+                                  line("IF3_TEMP_RELEASE_FORCE_TRUE="+
+                                      c.releaseInterface(if3));
+                              }
+                          }
+                      }
+
+                      line("IF3_FINGERPRINT_FINAL_OK="+IF3_SHA.equals(h3));
+                      line("IF4_FINGERPRINT_FINAL_OK="+IF4_SHA.equals(h4));
+
+                      exactFingerprint=
+                          RAW_SHA.equals(rawSha) &&
+                          IF3_SHA.equals(h3) &&
+                          IF4_SHA.equals(h4);
+
+                      line("V35_FIXED_V2_EXACT_RUNTIME_FINGERPRINT_OK="+exactFingerprint);
+
+                  } finally {
+                      c.close();
+                      passiveButton.setEnabled(exactFingerprint && !captureRunning);
+                  }
+              }
+
+              private void startPassive() {
+                  if(!exactFingerprint || captureRunning) {
+                      line("PASSIVE_CAPTURE_BLOCKED=true");
+                      return;
+                  }
+
+                  captureRunning=true;
+                  passiveButton.setEnabled(false);
+
+                  new Thread(this::passiveCapture,"v35-passive-in").start();
+              }
+
+              private void passiveCapture() {
+                  UsbDevice target=null;
+                  for(UsbDevice d:usb.getDeviceList().values())
+                      if(runtime(d))target=d;
+
+                  if(target==null || !usb.hasPermission(target)) {
+                      line("PASSIVE_ABORT_TARGET_OR_PERMISSION=true");
+                      finishCapture();
+                      return;
+                  }
+
+                  UsbInterface hidIf=null;
+                  for(int i=0;i<target.getInterfaceCount();i++) {
+                      UsbInterface x=target.getInterface(i);
+                      if(x.getInterfaceClass()==3 && x.getId()==4) {
+                          hidIf=x;
+                          break;
+                      }
+                  }
+
+                  if(hidIf==null) {
+                      line("PASSIVE_ABORT_IF4_MISSING=true");
+                      finishCapture();
+                      return;
+                  }
+
+                  UsbEndpoint inEp=null;
+
+                  for(int e=0;e<hidIf.getEndpointCount();e++) {
+                      UsbEndpoint ep=hidIf.getEndpoint(e);
+
+                      line(
+                          "IF4_ENDPOINT_"+e+
+                          "_ADDR="+ep.getAddress()+
+                          " DIR="+ep.getDirection()+
+                          " TYPE="+ep.getType()+
+                          " MAX_PACKET="+ep.getMaxPacketSize());
+
+                      if(ep.getDirection()==UsbConstants.USB_DIR_IN &&
+                         ep.getType()==UsbConstants.USB_ENDPOINT_XFER_INT) {
+                          inEp=ep;
+                      }
+                  }
+
+                  if(inEp==null) {
+                      line("PASSIVE_ABORT_INTERRUPT_IN_ENDPOINT_MISSING=true");
+                      finishCapture();
+                      return;
+                  }
+
+                  UsbDeviceConnection conn=usb.openDevice(target);
+                  if(conn==null) {
+                      line("PASSIVE_ABORT_OPEN_NULL=true");
+                      finishCapture();
+                      return;
+                  }
+
+                  boolean claimed=conn.claimInterface(hidIf,false);
+                  line("PASSIVE_IF4_CLAIM_FORCE_FALSE="+claimed);
+
+                  if(!claimed) {
+                      conn.close();
+                      finishCapture();
+                      return;
+                  }
+
+                  final int depth=8;
+                  final int bufferBytes=Math.max(256,inEp.getMaxPacketSize());
+
+                  UsbRequest[] reqs=new UsbRequest[depth];
+                  IdentityHashMap<UsbRequest,ByteBuffer> buffers=
+                      new IdentityHashMap<>();
+
+                  try {
+                      for(int i=0;i<depth;i++) {
+                          UsbRequest req=new UsbRequest();
+
+                          if(!req.initialize(conn,inEp))
+                              throw new RuntimeException(
+                                  "UsbRequest.initialize failed index "+i);
+
+                          ByteBuffer buf=ByteBuffer.allocateDirect(bufferBytes);
+                          req.setClientData(i);
+
+                          if(!req.queue(buf))
+                              throw new RuntimeException(
+                                  "UsbRequest.queue failed index "+i);
+
+                          reqs[i]=req;
+                          buffers.put(req,buf);
+                      }
+
+                      line("PASSIVE_QUEUE_DEPTH="+depth);
+                      line("PASSIVE_BUFFER_BYTES="+bufferBytes);
+                      line("HOST_APPLICATION_OUTPUT_COUNT=0");
+                      line("PASSIVE_CAPTURE_STARTED=true");
+
+                      long deadline=SystemClock.elapsedRealtime()+20000;
+                      int completions=0;
+                      int nonZero=0;
+                      int bytesTotal=0;
+
+                      while(SystemClock.elapsedRealtime()<deadline &&
+                            completions<1024) {
+
+                          UsbRequest done=conn.requestWait(1000);
+                          if(done==null)continue;
+
+                          ByteBuffer buf=buffers.get(done);
+                          if(buf==null) {
+                              line("PASSIVE_UNKNOWN_REQUEST=true");
+                              continue;
+                          }
+
+                          int got=buf.position();
+                          if(got<0)got=0;
+                          if(got>buf.capacity())got=buf.capacity();
+
+                          byte[] data=new byte[got];
+                          buf.flip();
+                          if(got>0)buf.get(data);
+
+                          completions++;
+                          bytesTotal+=got;
+
+                          boolean nz=false;
+                          for(byte b:data) {
+                              if(b!=0) {
+                                  nz=true;
+                                  break;
+                              }
+                          }
+
+                          if(nz) {
+                              nonZero++;
+                              line(
+                                  "PASSIVE_NONZERO_"+nonZero+
+                                  "_LEN="+got+
+                                  " SHA256="+sha256(data)+
+                                  " HEX="+hex(data));
+
+                              if(got>0) {
+                                  int declared=data[0]&255;
+                                  line(
+                                      "PASSIVE_NONZERO_"+nonZero+
+                                      "_FIRST_BYTE_DEC="+declared);
+                              }
+                          }
+
+                          buf.clear();
+
+                          if(!done.queue(buf)) {
+                              line("PASSIVE_REQUEUE_FAILED=true");
+                              break;
+                          }
+                      }
+
+                      line("PASSIVE_COMPLETION_COUNT="+completions);
+                      line("PASSIVE_NONZERO_REPORT_COUNT="+nonZero);
+                      line("PASSIVE_TOTAL_TRANSFERRED_BYTES="+bytesTotal);
+                      line("PASSIVE_CAPTURE_FINISHED=true");
+                      line("HOST_APPLICATION_OUTPUT_COUNT=0");
+                      line("STARTUP_COMMAND_SENT=false");
+                      line("AUTH_REPLY_SENT=false");
+                      line("FEATURE_REPORT_USED=false");
+                      line("FLASH_WRITE_ERASE_RECOVERY=false");
+
+                  } catch(Exception ex) {
+                      line("PASSIVE_CAPTURE_EXCEPTION="+
+                          ex.getClass().getName()+":"+ex.getMessage());
+
+                  } finally {
+                      for(UsbRequest r:reqs) {
+                          if(r!=null) {
+                              try{r.cancel();}catch(Exception ignored){}
+                              try{r.close();}catch(Exception ignored){}
+                          }
+                      }
+
+                      try {
+                          line("PASSIVE_IF4_RELEASE="+conn.releaseInterface(hidIf));
+                      } catch(Exception ex) {
+                          line("PASSIVE_RELEASE_EXCEPTION="+ex.getClass().getName());
+                      }
+
+                      conn.close();
+                      finishCapture();
+                  }
+              }
+
+              private void finishCapture() {
+                  captureRunning=false;
+                  runOnUiThread(()->passiveButton.setEnabled(exactFingerprint));
+              }
+
+              private void saveEvidence() {
+                  Intent i=new Intent(Intent.ACTION_CREATE_DOCUMENT);
+                  i.addCategory(Intent.CATEGORY_OPENABLE);
+                  i.setType("text/plain");
+                  i.putExtra(
+                      Intent.EXTRA_TITLE,
+                      "OKN_BP1048P4_V35_FIXED_V2_PASSIVE_QUEUED_INTERRUPT_IN_EVIDENCE.txt");
+                  startActivityForResult(i,SAVE_EVIDENCE);
+              }
+
+              @Override protected void onActivityResult(
+                  int requestCode,int resultCode,Intent data) {
+
+                  super.onActivityResult(requestCode,resultCode,data);
+
+                  if(requestCode==SAVE_EVIDENCE &&
+                     resultCode==RESULT_OK &&
+                     data!=null) {
+
+                      try(OutputStream os=
+                          getContentResolver().openOutputStream(data.getData())) {
+
+                          String footer=
+                              "\nEXPORT_EXACT_RUNTIME_FINGERPRINT_OK="+exactFingerprint+
+                              "\nEXPORT_HOST_APPLICATION_OUTPUT_COUNT=0"+
+                              "\nEXPORT_STARTUP_COMMAND_SENT=false"+
+                              "\nEXPORT_AUTH_REPLY_SENT=false"+
+                              "\nEXPORT_FEATURE_REPORT_USED=false"+
+                              "\nEXPORT_FLASH_WRITE_ERASE_RECOVERY=false"+
+                              "\nEXPORT_FLASH_ALLOWED=NO\n";
+
+                          os.write(
+                              (evidence.toString()+footer)
+                              .getBytes(StandardCharsets.UTF_8));
+
+                          line("EVIDENCE_EXPORT_OK=true");
+
+                      } catch(Exception ex) {
+                          line("EVIDENCE_EXPORT_ERROR="+ex);
+                      }
+                  }
+              }
+
+              private static String hex(byte[] b) {
+                  StringBuilder s=new StringBuilder(b.length*2);
+                  for(byte x:b)
+                      s.append(String.format(Locale.US,"%02X",x&255));
+                  return s.toString();
+              }
+
+              private static String sha256(byte[] b) {
+                  try {
+                      MessageDigest md=MessageDigest.getInstance("SHA-256");
+                      return hex(md.digest(b));
+                  } catch(Exception e) {
+                      return "SHA256_ERROR";
+                  }
+              }
+
+              @Override protected void onDestroy() {
+                  try{unregisterReceiver(permissionRx);}catch(Exception ignored){}
+                  super.onDestroy();
+              }
+          }
+          JAVA
+
+      - name: Static zero-output safety audit
+        shell: bash
+        run: |
+          set -euo pipefail
+          SRC=/tmp/v35/app/app/src/main/java/com/okn/bp1048p4v35v2/MainActivity.java
+
+          python3 - <<'PY'
+          from pathlib import Path
+
+          p=Path("/tmp/v35/app/app/src/main/java/com/okn/bp1048p4v35v2/MainActivity.java")
+          t=p.read_text()
+
+          required=[
+              "USB_ENDPOINT_XFER_INT",
+              "USB_DIR_IN",
+              "UsbRequest",
+              "requestWait(1000)",
+              "PASSIVE_QUEUE_DEPTH=",
+              "PASSIVE_NONZERO_REPORT_COUNT=",
+              "HOST_APPLICATION_OUTPUT_COUNT=0",
+              "STARTUP_COMMAND_SENT=false",
+              "AUTH_REPLY_SENT=false",
+              "FEATURE_REPORT_USED=false",
+              "FLASH_WRITE_ERASE_RECOVERY=false",
+              "V35_FIXED_V2_EXACT_RUNTIME_FINGERPRINT_OK=",
+              "IF3_TEMP_CLAIM_FORCE_FALSE=",
+              "IF3_TEMP_CLAIM_FORCE_TRUE=",
+              "IF3_FINGERPRINT_FINAL_OK="
+          ]
+
+          missing=[x for x in required if x not in t]
+          if missing:
+              raise SystemExit("missing required marker(s): "+repr(missing))
+
+          forbidden=[
+              "USB_DIR_OUT",
+              "bulkTransfer(",
+              "0x21,0x09",
+              "0x21, 0x09",
+              "0xA1,0x09",
+              "HidD_SetOutputReport",
+              "HidD_SetFeature",
+              "FLASH_BOOT_EN",
+              "chiperas",
+              "codedata",
+              "bootdat",
+              "constdat",
+              "cnfgdat",
+              "btupdat",
+              "upinfo",
+              "cxxx",
+              "STARTUP_PREFIX",
+              "AUTH_ANDROID_WIRE"
+          ]
+
+          bad=[x for x in forbidden if x in t]
+          if bad:
+              raise SystemExit("forbidden output/destructive token(s): "+repr(bad))
+
+          # Descriptor reads are control-IN only. No application control-OUT exists.
+          if t.count("controlTransfer(") != 1:
+              raise SystemExit("expected exactly one controlTransfer call site for report-descriptor IN reads")
+
+          if "0x81,0x06,0x2200" not in t:
+              raise SystemExit("descriptor IN read missing")
+
+          print("V35_STATIC_ZERO_OUTPUT_AUDIT=PASS")
+          PY
+
+          cp "$SRC" /tmp/v35/evidence/MainActivity.java
+          sha256sum "$SRC" > /tmp/v35/evidence/01_MAINACTIVITY_SHA256.txt
+
+      - name: Build APK
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          SDKMAN="$(command -v sdkmanager || true)"
+          if [ -n "$SDKMAN" ]; then
+            set +o pipefail
+            yes | "$SDKMAN" --licenses >/dev/null 2>&1 || true
+            set -o pipefail
+            "$SDKMAN" "platforms;android-35" "build-tools;35.0.0" >/dev/null 2>&1 || true
+          fi
+
+          cd /tmp/v35
+          curl -fL --retry 4 --retry-all-errors \
+            https://services.gradle.org/distributions/gradle-8.9-bin.zip \
+            -o gradle.zip
+          unzip -q gradle.zip
+
+          export PATH="/tmp/v35/gradle-8.9/bin:$PATH"
+
+          cd /tmp/v35/app
+          gradle --no-daemon --stacktrace :app:assembleDebug \
+            | tee /tmp/v35/evidence/02_GRADLE_BUILD.txt
+
+          APK=app/build/outputs/apk/debug/app-debug.apk
+          test -s "$APK"
+
+          cp "$APK" /tmp/v35/out/OKN_BP1048P4_V35_FIXED_V2_PASSIVE_QUEUED_INTERRUPT_IN.apk
+          sha256sum "$APK" > /tmp/v35/evidence/03_APK_SHA256.txt
+
+      - name: Final build decision
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > /tmp/v35/evidence/04_V35_FINAL_DECISION.md <<'EOF'
+          # MASTER V35 FIXED V2 FINAL DECISION
+
+          V35 Fixed V2 APK is a bounded passive live diagnostic.
+
+          Fix in V2:
+          - IF3 report-descriptor read retries with temporary interface claims
+            when the first control-IN descriptor request returns -1.
+          - Exact fingerprint remains fail-closed unless IF3 SHA matches.
+
+          Host application command/output count: **0**
+
+          It does not send:
+          - startup command,
+          - authentication reply,
+          - Output report,
+          - Feature report,
+          - updater/recovery command,
+          - flash/erase/firmware write.
+
+          It only:
+          - verifies exact runtime board identity/fingerprint,
+          - claims HID interface 4,
+          - selects interrupt-IN,
+          - queues eight UsbRequest receive buffers,
+          - records traffic for 20 seconds,
+          - immediately requeues completed buffers.
+
+          This tests whether a no-command entry path exists and validates the
+          receive mechanism needed to avoid the seven missing reports seen in V31.
+
+          Classification:
+          PASSIVE_ZERO_OUTPUT_QUEUED_INTERRUPT_IN_DIAGNOSTIC_NOT_FOR_FLASH
+          EOF
+
+          cp /tmp/v35/evidence/* /tmp/v35/out/
+          (cd /tmp/v35/out && sha256sum * > SHA256SUMS.txt)
+          cat /tmp/v35/evidence/04_V35_FINAL_DECISION.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload V35 APK
+        uses: actions/upload-artifact@v7
+        with:
+          name: OKN-BP1048P4-MASTER-V35-FIXED-V2-PASSIVE-QUEUED-INTERRUPT-IN-APK
+          path: /tmp/v35/out/*
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Final fail-closed assertion
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$FLASH_ALLOWED" = "NO"
+          test "$ERASE_ALLOWED" = "NO"
+          test "$WRITE_ALLOWED" = "NO"
+          test "$FEATURE_REPORT_ALLOWED" = "NO"
+          test "$HOST_OUTPUT_ALLOWED" = "NO"
+          test "$STARTUP_COMMAND_ALLOWED" = "NO"
+          test "$AUTH_REPLY_ALLOWED" = "NO"
+
+          echo "MASTER_V35_FIXED_V2=PASS"
+          echo "HOST_APPLICATION_OUTPUT_COUNT=0"
+          echo "STARTUP_COMMAND_SENT=NO"
+          echo "AUTH_REPLY_SENT=NO"
+          echo "FEATURE_REPORT=NO"
+          echo "FLASH_ALLOWED=NO"
