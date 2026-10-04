@@ -1,0 +1,1491 @@
+name: OKN BP1048P4 R68 Firmware Dump Probe ALL-IN-ONE
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  PROJECT_DIR: /tmp/okn-r68
+  REQUIRED_PHONE: "Samsung Galaxy S25+"
+  REQUIRED_PATH: "Samsung Galaxy S25+ -> USB-C -> DSP board USB-C"
+  RUNTIME_VID_PID: "6324:1719"
+  RECOVERY_VID_PID: "0000:2244"
+  FULL_FLASH_READBACK_PROVEN: "NO"
+  ERASE_ALLOWED: "NO"
+  FLASH_WRITE_ALLOWED: "NO"
+  FEATURE_REPORT_ALLOWED: "NO"
+  RECOVERY_OUTPUT_ALLOWED: "NO"
+
+jobs:
+  build-r68:
+    name: Generate source + safety audit + build APK
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+
+    steps:
+      - name: Safety gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$REQUIRED_PHONE" = "Samsung Galaxy S25+"
+          test "$REQUIRED_PATH" = "Samsung Galaxy S25+ -> USB-C -> DSP board USB-C"
+          test "$FULL_FLASH_READBACK_PROVEN" = "NO"
+          test "$ERASE_ALLOWED" = "NO"
+          test "$FLASH_WRITE_ALLOWED" = "NO"
+          test "$FEATURE_REPORT_ALLOWED" = "NO"
+          test "$RECOVERY_OUTPUT_ALLOWED" = "NO"
+
+          rm -rf "$PROJECT_DIR"
+          mkdir -p "$PROJECT_DIR"
+          cd "$PROJECT_DIR"
+
+          cat > SAFETY_GATE.txt <<'OKN_SAFETY_EOF'
+          TARGET=MVSilicon BP1048P4
+          PHONE=Samsung Galaxy S25+
+          PHYSICAL_PATH=Samsung Galaxy S25+ -> USB-C -> DSP board USB-C
+          SOLDERING=NO
+          BOARD_MODIFICATION=NO
+          JTAG=NO
+          SDP=NO
+          AICE=NO
+          EXTERNAL_PROGRAMMER=NO
+          ERASE_ALLOWED=NO
+          FLASH_WRITE_ALLOWED=NO
+          FEATURE_REPORT_ALLOWED=NO
+          RECOVERY_OUTPUT_ALLOWED=NO
+          FULL_FLASH_READBACK_PROVEN=NO
+          MODE=DESCRIPTOR_AND_DEVICE_TO_HOST_CAPTURE_PLUS_EXACT_USER_CONFIRMED_VERSION_QUERY
+          OKN_SAFETY_EOF
+
+      - name: Generate complete Android project from this one workflow file
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$PROJECT_DIR"
+
+          cat > 'settings.gradle' <<'OKN_R68_FILE_01_EOF'
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+          rootProject.name = "OKN_BP1048P4_R68_FirmwareDumpProbe"
+          include ":app"
+          OKN_R68_FILE_01_EOF
+          cat > 'build.gradle' <<'OKN_R68_FILE_02_EOF'
+          plugins {
+              id "com.android.application" version "8.7.3" apply false
+          }
+          OKN_R68_FILE_02_EOF
+          cat > 'gradle.properties' <<'OKN_R68_FILE_03_EOF'
+          org.gradle.jvmargs=-Xmx2048m -Dfile.encoding=UTF-8
+          android.useAndroidX=false
+          android.nonTransitiveRClass=true
+          OKN_R68_FILE_03_EOF
+          mkdir -p 'app'
+          cat > 'app/build.gradle' <<'OKN_R68_FILE_04_EOF'
+          plugins {
+              id "com.android.application"
+          }
+          
+          android {
+              namespace "com.okn.bp1048p4r68"
+              compileSdk 35
+          
+              defaultConfig {
+                  applicationId "com.okn.bp1048p4r68"
+                  minSdk 29
+                  targetSdk 35
+                  versionCode 68
+                  versionName "68.0"
+              }
+          
+              compileOptions {
+                  sourceCompatibility JavaVersion.VERSION_17
+                  targetCompatibility JavaVersion.VERSION_17
+              }
+          }
+          OKN_R68_FILE_04_EOF
+          mkdir -p 'app/src/main'
+          cat > 'app/src/main/AndroidManifest.xml' <<'OKN_R68_FILE_05_EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <uses-feature
+                  android:name="android.hardware.usb.host"
+                  android:required="true" />
+          
+              <application
+                  android:allowBackup="false"
+                  android:label="OKN BP1048P4 R68"
+                  android:supportsRtl="true">
+          
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true"
+                      android:launchMode="singleTop">
+          
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+          
+                      <intent-filter>
+                          <action android:name="android.hardware.usb.action.USB_DEVICE_ATTACHED" />
+                      </intent-filter>
+          
+                      <meta-data
+                          android:name="android.hardware.usb.action.USB_DEVICE_ATTACHED"
+                          android:resource="@xml/device_filter" />
+                  </activity>
+              </application>
+          </manifest>
+          OKN_R68_FILE_05_EOF
+          mkdir -p 'app/src/main/res/xml'
+          cat > 'app/src/main/res/xml/device_filter.xml' <<'OKN_R68_FILE_06_EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <resources>
+              <!-- Exact runtime identity observed on target board: 0x6324:0x1719 -->
+              <usb-device vendor-id="25380" product-id="5913" />
+          
+              <!-- BP1048P4 FlashBoot reference recovery identity: 0x0000:0x2244 -->
+              <usb-device vendor-id="0" product-id="8772" />
+          </resources>
+          OKN_R68_FILE_06_EOF
+          mkdir -p 'app/src/main/java/com/okn/bp1048p4r68'
+          cat > 'app/src/main/java/com/okn/bp1048p4r68/ProtocolFacts.java' <<'OKN_R68_FILE_07_EOF'
+          package com.okn.bp1048p4r68;
+          
+          public final class ProtocolFacts {
+              private ProtocolFacts() {}
+          
+              public static final int RUNTIME_VID = 0x6324;
+              public static final int RUNTIME_PID = 0x1719;
+              public static final int RECOVERY_VID = 0x0000;
+              public static final int RECOVERY_PID = 0x2244;
+          
+              public static final int HID_CLASS = 3;
+              public static final int RUNTIME_VENDOR_IF = 4;
+          
+              public static final int HID_GET_DESCRIPTOR_BM = 0x81;
+              public static final int HID_GET_DESCRIPTOR_REQ = 0x06;
+              public static final int HID_REPORT_DESCRIPTOR_WVALUE = 0x2200;
+          
+              public static final int HID_INPUT_GET_REPORT_BM = 0xA1;
+              public static final int HID_GET_REPORT_REQ = 0x01;
+              public static final int HID_INPUT_REPORT_WVALUE = 0x0100;
+          
+              public static final int HID_OUTPUT_SET_REPORT_BM = 0x21;
+              public static final int HID_SET_REPORT_REQ = 0x09;
+              public static final int HID_OUTPUT_REPORT_WVALUE = 0x0200;
+          
+              public static final int REPORT_BYTES = 256;
+              public static final int RECOVERY_FLASH_BLOCK_BYTES = 4096;
+          
+              public static final String EXPECTED_RAW_DESCRIPTOR_SHA256 =
+                  "C7E861A6F28EB832E16450D3A35B64C557BEA4E0CC15FF1EB94C45E348C84001";
+              public static final String EXPECTED_IF3_REPORT_SHA256 =
+                  "BAFE7C0E6A251EB36B11362B18106DFF3DC0010A831A3B8B6CD49DBF4A9AE2C3";
+              public static final String EXPECTED_IF4_REPORT_SHA256 =
+                  "78510751B31DCC204CD6CA2FE023F05CF84B75227A279E8E1FBAF7D6C3A21B6F";
+          
+              public static boolean isRuntime(int vid, int pid) {
+                  return vid == RUNTIME_VID && pid == RUNTIME_PID;
+              }
+          
+              public static boolean isRecovery(int vid, int pid) {
+                  return vid == RECOVERY_VID && pid == RECOVERY_PID;
+              }
+          }
+          OKN_R68_FILE_07_EOF
+          mkdir -p 'app/src/main/java/com/okn/bp1048p4r68'
+          cat > 'app/src/main/java/com/okn/bp1048p4r68/FirmwareReadbackStrategy.java' <<'OKN_R68_FILE_08_EOF'
+          package com.okn.bp1048p4r68;
+          
+          import android.hardware.usb.UsbDevice;
+          import android.hardware.usb.UsbManager;
+          
+          import java.io.File;
+          
+          public interface FirmwareReadbackStrategy {
+              String id();
+              boolean isProven();
+              String status();
+          
+              /**
+               * A future implementation MUST be based on a proven, non-destructive
+               * device-to-host flash read primitive for this exact target.
+               *
+               * Never implement this by guessing FlashBoot command names/opcodes.
+               */
+              ReadbackResult dump(UsbManager manager, UsbDevice device, File destination) throws Exception;
+          
+              final class ReadbackResult {
+                  public final boolean success;
+                  public final long bytes;
+                  public final String sha256;
+                  public final String message;
+          
+                  public ReadbackResult(boolean success, long bytes, String sha256, String message) {
+                      this.success = success;
+                      this.bytes = bytes;
+                      this.sha256 = sha256;
+                      this.message = message;
+                  }
+              }
+          }
+          OKN_R68_FILE_08_EOF
+          mkdir -p 'app/src/main/java/com/okn/bp1048p4r68'
+          cat > 'app/src/main/java/com/okn/bp1048p4r68/NoProvenReadbackStrategy.java' <<'OKN_R68_FILE_09_EOF'
+          package com.okn.bp1048p4r68;
+          
+          import android.hardware.usb.UsbDevice;
+          import android.hardware.usb.UsbManager;
+          
+          import java.io.File;
+          
+          public final class NoProvenReadbackStrategy implements FirmwareReadbackStrategy {
+              @Override public String id() {
+                  return "NO_PROVEN_FULL_FLASH_READBACK_R68";
+              }
+          
+              @Override public boolean isProven() {
+                  return false;
+              }
+          
+              @Override public String status() {
+                  return "LOCKED: ยังไม่มี host-visible generic full-flash readback command ที่พิสูจน์แล้ว "
+                      + "ใน runtime HID หรือ FlashBoot dispatcher ของ BP1048P4. "
+                      + "btupdat มี internal flash read แต่เป็น read-modify-write ไม่ใช่ host dump.";
+              }
+          
+              @Override
+              public ReadbackResult dump(UsbManager manager, UsbDevice device, File destination) {
+                  return new ReadbackResult(false, 0, "", status());
+              }
+          }
+          OKN_R68_FILE_09_EOF
+          mkdir -p 'app/src/main/java/com/okn/bp1048p4r68'
+          cat > 'app/src/main/java/com/okn/bp1048p4r68/CaptureStore.java' <<'OKN_R68_FILE_10_EOF'
+          package com.okn.bp1048p4r68;
+          
+          import java.util.LinkedHashMap;
+          import java.util.Map;
+          
+          public final class CaptureStore {
+              private final LinkedHashMap<String, byte[]> blobs = new LinkedHashMap<>();
+              private final StringBuilder log = new StringBuilder();
+          
+              public synchronized void put(String name, byte[] data) {
+                  if (name == null || data == null) return;
+                  blobs.put(name, data.clone());
+              }
+          
+              public synchronized Map<String, byte[]> snapshot() {
+                  LinkedHashMap<String, byte[]> out = new LinkedHashMap<>();
+                  for (Map.Entry<String, byte[]> e : blobs.entrySet()) {
+                      out.put(e.getKey(), e.getValue().clone());
+                  }
+                  return out;
+              }
+          
+              public synchronized void append(String line) {
+                  log.append(line).append('\n');
+              }
+          
+              public synchronized String logText() {
+                  return log.toString();
+              }
+          
+              public synchronized void clear() {
+                  blobs.clear();
+                  log.setLength(0);
+              }
+          }
+          OKN_R68_FILE_10_EOF
+          mkdir -p 'app/src/main/java/com/okn/bp1048p4r68'
+          cat > 'app/src/main/java/com/okn/bp1048p4r68/UsbCaptureEngine.java' <<'OKN_R68_FILE_11_EOF'
+          package com.okn.bp1048p4r68;
+          
+          import android.hardware.usb.UsbDevice;
+          import android.hardware.usb.UsbDeviceConnection;
+          import android.hardware.usb.UsbEndpoint;
+          import android.hardware.usb.UsbInterface;
+          import android.hardware.usb.UsbManager;
+          import android.os.SystemClock;
+          
+          import java.security.MessageDigest;
+          import java.util.Arrays;
+          import java.util.HashMap;
+          import java.util.Locale;
+          import java.util.Map;
+          
+          public final class UsbCaptureEngine {
+              public interface Logger {
+                  void line(String s);
+              }
+          
+              private final UsbManager usb;
+              private final CaptureStore store;
+              private final Logger logger;
+          
+              public UsbCaptureEngine(UsbManager usb, CaptureStore store, Logger logger) {
+                  this.usb = usb;
+                  this.store = store;
+                  this.logger = logger;
+              }
+          
+              private void line(String s) {
+                  store.append(s);
+                  logger.line(s);
+              }
+          
+              public static String hex(byte[] b) {
+                  if (b == null) return "";
+                  StringBuilder sb = new StringBuilder(b.length * 2);
+                  for (byte x : b) sb.append(String.format(Locale.US, "%02X", x & 0xFF));
+                  return sb.toString();
+              }
+          
+              public static String sha256(byte[] b) {
+                  if (b == null) return "";
+                  try {
+                      MessageDigest md = MessageDigest.getInstance("SHA-256");
+                      byte[] d = md.digest(b);
+                      StringBuilder sb = new StringBuilder(64);
+                      for (byte x : d) sb.append(String.format(Locale.US, "%02X", x & 0xFF));
+                      return sb.toString();
+                  } catch (Exception e) {
+                      return "SHA256_ERROR_" + e.getClass().getSimpleName();
+                  }
+              }
+          
+              public void inventory(UsbDevice d) {
+                  if (d == null) {
+                      line("INVENTORY_DEVICE_NULL=true");
+                      return;
+                  }
+                  line(String.format(Locale.US,
+                      "DEVICE vid=%04X pid=%04X id=%d name=%s interfaces=%d permission=%s",
+                      d.getVendorId(), d.getProductId(), d.getDeviceId(),
+                      d.getDeviceName(), d.getInterfaceCount(), usb.hasPermission(d)));
+          
+                  try { line("MANUFACTURER=" + String.valueOf(d.getManufacturerName())); }
+                  catch (Throwable t) { line("MANUFACTURER_READ_ERROR=" + t.getClass().getSimpleName()); }
+          
+                  try { line("PRODUCT=" + String.valueOf(d.getProductName())); }
+                  catch (Throwable t) { line("PRODUCT_READ_ERROR=" + t.getClass().getSimpleName()); }
+          
+                  try { line("VERSION=" + String.valueOf(d.getVersion())); }
+                  catch (Throwable t) { line("VERSION_READ_ERROR=" + t.getClass().getSimpleName()); }
+          
+                  try { line("SERIAL=" + String.valueOf(d.getSerialNumber())); }
+                  catch (Throwable t) { line("SERIAL_READ_ERROR=" + t.getClass().getSimpleName()); }
+          
+                  for (int n = 0; n < d.getInterfaceCount(); n++) {
+                      UsbInterface x = d.getInterface(n);
+                      line(String.format(Locale.US,
+                          "IF index=%d id=%d alt=%d class=%d sub=%d proto=%d endpoints=%d",
+                          n, x.getId(), x.getAlternateSetting(), x.getInterfaceClass(),
+                          x.getInterfaceSubclass(), x.getInterfaceProtocol(), x.getEndpointCount()));
+          
+                      for (int k = 0; k < x.getEndpointCount(); k++) {
+                          UsbEndpoint ep = x.getEndpoint(k);
+                          line(String.format(Locale.US,
+                              "EP if=%d index=%d addr=0x%02X dir=%d type=%d maxPacket=%d interval=%d",
+                              x.getId(), k, ep.getAddress(), ep.getDirection(), ep.getType(),
+                              ep.getMaxPacketSize(), ep.getInterval()));
+                      }
+                  }
+              }
+          
+              public void captureReadOnlySnapshot(UsbDevice d) {
+                  if (d == null) {
+                      line("SNAPSHOT_DEVICE_NULL=true");
+                      return;
+                  }
+                  if (!usb.hasPermission(d)) {
+                      line("SNAPSHOT_NO_USB_PERMISSION=true");
+                      return;
+                  }
+          
+                  UsbDeviceConnection c = usb.openDevice(d);
+                  if (c == null) {
+                      line("SNAPSHOT_OPEN_DEVICE_NULL=true");
+                      return;
+                  }
+          
+                  try {
+                      line("READ_ONLY_SNAPSHOT_BEGIN=true");
+                      byte[] raw = c.getRawDescriptors();
+                      if (raw != null && raw.length > 0) {
+                          store.put("usb/raw-descriptors.bin", raw);
+                          String sh = sha256(raw);
+                          line("RAW_DESCRIPTOR_BYTES=" + raw.length);
+                          line("RAW_DESCRIPTOR_SHA256=" + sh);
+                          line("RAW_DESCRIPTOR_HEX=" + hex(raw));
+                          line("RAW_DESCRIPTOR_EXPECTED_MATCH=" +
+                              ProtocolFacts.EXPECTED_RAW_DESCRIPTOR_SHA256.equals(sh));
+          
+                          Map<Integer,Integer> reportLens = parseHidReportLengths(raw);
+                          line("PARSED_HID_REPORT_LENGTHS=" + reportLens);
+          
+                          for (int n = 0; n < d.getInterfaceCount(); n++) {
+                              UsbInterface x = d.getInterface(n);
+                              if (x.getInterfaceClass() != ProtocolFacts.HID_CLASS) continue;
+                              int expected = reportLens.containsKey(x.getId())
+                                  ? reportLens.get(x.getId()) : 4096;
+                              readHidDescriptor(c, x, expected);
+                          }
+                      } else {
+                          line("RAW_DESCRIPTOR_BYTES=0");
+                      }
+          
+                      // Runtime IF4 is the proven vendor HID input path.
+                      if (ProtocolFacts.isRuntime(d.getVendorId(), d.getProductId())) {
+                          UsbInterface if4 = findInterface(d, ProtocolFacts.RUNTIME_VENDOR_IF);
+                          if (if4 == null || if4.getInterfaceClass() != ProtocolFacts.HID_CLASS) {
+                              line("RUNTIME_IF4_HID_MISSING=true");
+                          } else {
+                              readRuntimeInputOnly(c, if4);
+                          }
+                      } else if (ProtocolFacts.isRecovery(d.getVendorId(), d.getProductId())) {
+                          // Passive recovery capture only. No Output/Feature report is sent.
+                          UsbInterface hid = findFirstHid(d);
+                          if (hid != null) readRecoveryInputOnly(c, hid);
+                          else line("RECOVERY_HID_INTERFACE_MISSING=true");
+                      }
+          
+                      line("READ_ONLY_SNAPSHOT_END=true");
+                  } finally {
+                      c.close();
+                  }
+              }
+          
+              private void readHidDescriptor(UsbDeviceConnection c, UsbInterface x, int expected) {
+                  int ask = expected > 0 && expected <= 4096 ? expected : 4096;
+                  byte[] buf = new byte[ask];
+          
+                  int r = c.controlTransfer(
+                      ProtocolFacts.HID_GET_DESCRIPTOR_BM,
+                      ProtocolFacts.HID_GET_DESCRIPTOR_REQ,
+                      ProtocolFacts.HID_REPORT_DESCRIPTOR_WVALUE,
+                      x.getId(),
+                      buf,
+                      buf.length,
+                      1500);
+          
+                  line("IF" + x.getId() + "_HID_REPORT_DESCRIPTOR_UNCLAIMED_RESULT=" + r);
+          
+                  boolean claimed = false;
+                  boolean forceClaimed = false;
+          
+                  if (r <= 0) {
+                      try {
+                          claimed = c.claimInterface(x, false);
+                          line("IF" + x.getId() + "_CLAIM_FORCE_FALSE=" + claimed);
+                          if (claimed) {
+                              r = c.controlTransfer(
+                                  ProtocolFacts.HID_GET_DESCRIPTOR_BM,
+                                  ProtocolFacts.HID_GET_DESCRIPTOR_REQ,
+                                  ProtocolFacts.HID_REPORT_DESCRIPTOR_WVALUE,
+                                  x.getId(),
+                                  buf,
+                                  buf.length,
+                                  1500);
+                              line("IF" + x.getId() + "_HID_REPORT_DESCRIPTOR_CLAIMED_RESULT=" + r);
+                          } else if (x.getId() == 3 && expected == 33) {
+                              // Existing physical evidence used this only as an IF3 fallback.
+                              forceClaimed = c.claimInterface(x, true);
+                              line("IF3_TEMP_FORCE_CLAIM=" + forceClaimed);
+                              if (forceClaimed) {
+                                  r = c.controlTransfer(
+                                      ProtocolFacts.HID_GET_DESCRIPTOR_BM,
+                                      ProtocolFacts.HID_GET_DESCRIPTOR_REQ,
+                                      ProtocolFacts.HID_REPORT_DESCRIPTOR_WVALUE,
+                                      x.getId(),
+                                      buf,
+                                      buf.length,
+                                      1500);
+                                  line("IF3_HID_REPORT_DESCRIPTOR_FORCE_CLAIM_RESULT=" + r);
+                              }
+                          }
+                      } finally {
+                          if (claimed || forceClaimed) {
+                              boolean released = c.releaseInterface(x);
+                              line("IF" + x.getId() + "_RELEASE=" + released);
+                          }
+                      }
+                  }
+          
+                  if (r > 0) {
+                      byte[] exact = Arrays.copyOf(buf, r);
+                      store.put("usb/if" + x.getId() + "-hid-report-descriptor.bin", exact);
+                      String sh = sha256(exact);
+                      line("IF" + x.getId() + "_HID_REPORT_BYTES=" + r);
+                      line("IF" + x.getId() + "_HID_REPORT_SHA256=" + sh);
+                      line("IF" + x.getId() + "_HID_REPORT_HEX=" + hex(exact));
+                      if (x.getId() == 3) {
+                          line("IF3_EXPECTED_FINGERPRINT_MATCH=" +
+                              ProtocolFacts.EXPECTED_IF3_REPORT_SHA256.equals(sh));
+                      }
+                      if (x.getId() == 4) {
+                          line("IF4_EXPECTED_FINGERPRINT_MATCH=" +
+                              ProtocolFacts.EXPECTED_IF4_REPORT_SHA256.equals(sh));
+                      }
+                  }
+              }
+          
+              private void readRuntimeInputOnly(UsbDeviceConnection c, UsbInterface if4) {
+                  boolean claimed = c.claimInterface(if4, false);
+                  line("RUNTIME_IF4_CLAIM_FORCE_FALSE=" + claimed);
+                  if (!claimed) {
+                      line("RUNTIME_INPUT_CAPTURE_ABORT_NO_NONFORCED_CLAIM=true");
+                      return;
+                  }
+          
+                  try {
+                      int[] sizes = new int[]{12, 64, 256};
+                      for (int size : sizes) {
+                          for (int round = 1; round <= 4; round++) {
+                              byte[] b = new byte[size];
+                              int r = c.controlTransfer(
+                                  ProtocolFacts.HID_INPUT_GET_REPORT_BM,
+                                  ProtocolFacts.HID_GET_REPORT_REQ,
+                                  ProtocolFacts.HID_INPUT_REPORT_WVALUE,
+                                  if4.getId(),
+                                  b,
+                                  b.length,
+                                  1000);
+                              line("IF4_INPUT_GET_REPORT size=" + size + " round=" + round + " result=" + r);
+                              if (r > 0) {
+                                  byte[] exact = Arrays.copyOf(b, r);
+                                  String name = "runtime/if4-input-" + size + "-r" + round + ".bin";
+                                  store.put(name, exact);
+                                  line(name + "_SHA256=" + sha256(exact));
+                                  line(name + "_HEX=" + hex(exact));
+                              }
+                              SystemClock.sleep(30);
+                          }
+                      }
+                  } finally {
+                      boolean released = c.releaseInterface(if4);
+                      line("RUNTIME_IF4_RELEASE=" + released);
+                  }
+              }
+          
+              private void readRecoveryInputOnly(UsbDeviceConnection c, UsbInterface hid) {
+                  boolean claimed = c.claimInterface(hid, false);
+                  line("RECOVERY_HID_CLAIM_FORCE_FALSE=" + claimed);
+                  if (!claimed) return;
+          
+                  try {
+                      for (int round = 1; round <= 4; round++) {
+                          byte[] b = new byte[256];
+                          int r = c.controlTransfer(
+                              ProtocolFacts.HID_INPUT_GET_REPORT_BM,
+                              ProtocolFacts.HID_GET_REPORT_REQ,
+                              ProtocolFacts.HID_INPUT_REPORT_WVALUE,
+                              hid.getId(),
+                              b,
+                              b.length,
+                              1000);
+                          line("RECOVERY_INPUT_GET_REPORT round=" + round + " result=" + r);
+                          if (r > 0) {
+                              byte[] exact = Arrays.copyOf(b, r);
+                              String name = "recovery/input-r" + round + ".bin";
+                              store.put(name, exact);
+                              line(name + "_SHA256=" + sha256(exact));
+                              line(name + "_HEX=" + hex(exact));
+                          }
+                          SystemClock.sleep(30);
+                      }
+                  } finally {
+                      boolean released = c.releaseInterface(hid);
+                      line("RECOVERY_HID_RELEASE=" + released);
+                  }
+              }
+          
+              public void runExactVersionQueryOnce(UsbDevice d) {
+                  if (d == null || !ProtocolFacts.isRuntime(d.getVendorId(), d.getProductId())) {
+                      line("VERSION_QUERY_BLOCKED_NOT_RUNTIME=true");
+                      return;
+                  }
+                  if (!usb.hasPermission(d)) {
+                      line("VERSION_QUERY_BLOCKED_NO_PERMISSION=true");
+                      return;
+                  }
+          
+                  UsbDeviceConnection c = usb.openDevice(d);
+                  if (c == null) {
+                      line("VERSION_QUERY_OPEN_DEVICE_NULL=true");
+                      return;
+                  }
+          
+                  UsbInterface if4 = findInterface(d, ProtocolFacts.RUNTIME_VENDOR_IF);
+                  if (if4 == null || if4.getInterfaceClass() != ProtocolFacts.HID_CLASS) {
+                      line("VERSION_QUERY_IF4_MISSING=true");
+                      c.close();
+                      return;
+                  }
+          
+                  boolean claimed = false;
+                  try {
+                      claimed = c.claimInterface(if4, false);
+                      line("VERSION_QUERY_IF4_CLAIM_FORCE_FALSE=" + claimed);
+                      if (!claimed) return;
+          
+                      byte[] out = new byte[256];
+                      out[0] = (byte) 0xA5;
+                      out[1] = (byte) 0x5A;
+                      out[2] = 0x00;
+                      out[3] = 0x00;
+                      out[4] = 0x16;
+                      store.put("runtime/version-query-output-256.bin", out);
+                      line("VERSION_QUERY_FRAME=A55A000016_PLUS_ZERO_PADDING");
+          
+                      int wo = c.controlTransfer(
+                          ProtocolFacts.HID_OUTPUT_SET_REPORT_BM,
+                          ProtocolFacts.HID_SET_REPORT_REQ,
+                          ProtocolFacts.HID_OUTPUT_REPORT_WVALUE,
+                          if4.getId(),
+                          out,
+                          out.length,
+                          1500);
+                      line("VERSION_QUERY_SET_REPORT_RESULT=" + wo);
+          
+                      SystemClock.sleep(50);
+          
+                      byte[] input = new byte[256];
+                      int ri = c.controlTransfer(
+                          ProtocolFacts.HID_INPUT_GET_REPORT_BM,
+                          ProtocolFacts.HID_GET_REPORT_REQ,
+                          ProtocolFacts.HID_INPUT_REPORT_WVALUE,
+                          if4.getId(),
+                          input,
+                          input.length,
+                          1500);
+                      line("VERSION_QUERY_GET_REPORT_RESULT=" + ri);
+          
+                      if (ri > 0) {
+                          byte[] exact = Arrays.copyOf(input, ri);
+                          store.put("runtime/version-query-response.bin", exact);
+                          line("VERSION_QUERY_RESPONSE_SHA256=" + sha256(exact));
+                          line("VERSION_QUERY_RESPONSE_HEX=" + hex(exact));
+                          boolean frame = ri >= 12
+                              && (input[0] & 255) == 0xA5
+                              && (input[1] & 255) == 0x5A
+                              && (input[2] & 255) == 0x00
+                              && (input[3] & 255) == 0x07
+                              && (input[11] & 255) == 0x16;
+                          line("VERSION_RESPONSE_FRAME_VALID=" + frame);
+                          if (frame) {
+                              line(String.format(Locale.US, "VERSION_MODEL_TAG=0x%02X", input[4] & 255));
+                              line(String.format(Locale.US, "EFFECT_VERSION=%d.%d.%d",
+                                  input[5] & 255, input[6] & 255, input[7] & 255));
+                              line(String.format(Locale.US, "AUDIO_LIB_VERSION=%d.%d.%d",
+                                  input[8] & 255, input[9] & 255, input[10] & 255));
+                          }
+                      }
+                  } finally {
+                      if (claimed) c.releaseInterface(if4);
+                      c.close();
+                  }
+              }
+          
+              private UsbInterface findInterface(UsbDevice d, int id) {
+                  for (int i = 0; i < d.getInterfaceCount(); i++) {
+                      UsbInterface x = d.getInterface(i);
+                      if (x.getId() == id) return x;
+                  }
+                  return null;
+              }
+          
+              private UsbInterface findFirstHid(UsbDevice d) {
+                  for (int i = 0; i < d.getInterfaceCount(); i++) {
+                      UsbInterface x = d.getInterface(i);
+                      if (x.getInterfaceClass() == ProtocolFacts.HID_CLASS) return x;
+                  }
+                  return null;
+              }
+          
+              private Map<Integer,Integer> parseHidReportLengths(byte[] raw) {
+                  Map<Integer,Integer> out = new HashMap<>();
+                  int p = 0;
+                  int currentIf = -1;
+                  int currentClass = -1;
+          
+                  while (raw != null && p + 2 <= raw.length) {
+                      int len = raw[p] & 255;
+                      int type = raw[p + 1] & 255;
+                      if (len < 2 || p + len > raw.length) break;
+          
+                      if (type == 0x04 && len >= 9) {
+                          currentIf = raw[p + 2] & 255;
+                          currentClass = raw[p + 5] & 255;
+                      } else if (type == 0x21 && currentClass == 3 && currentIf >= 0 && len >= 9) {
+                          int num = raw[p + 5] & 255;
+                          int q = p + 6;
+                          for (int k = 0; k < num && q + 2 < p + len; k++, q += 3) {
+                              int dtype = raw[q] & 255;
+                              int dlen = (raw[q + 1] & 255) | ((raw[q + 2] & 255) << 8);
+                              if (dtype == 0x22 && dlen > 0) {
+                                  out.put(currentIf, dlen);
+                                  break;
+                              }
+                          }
+                      }
+                      p += len;
+                  }
+                  return out;
+              }
+          }
+          OKN_R68_FILE_11_EOF
+          mkdir -p 'app/src/main/java/com/okn/bp1048p4r68'
+          cat > 'app/src/main/java/com/okn/bp1048p4r68/MainActivity.java' <<'OKN_R68_FILE_12_EOF'
+          package com.okn.bp1048p4r68;
+          
+          import android.app.Activity;
+          import android.app.AlertDialog;
+          import android.app.PendingIntent;
+          import android.content.BroadcastReceiver;
+          import android.content.Context;
+          import android.content.Intent;
+          import android.content.IntentFilter;
+          import android.hardware.usb.UsbDevice;
+          import android.hardware.usb.UsbManager;
+          import android.net.Uri;
+          import android.os.Build;
+          import android.os.Bundle;
+          import android.os.SystemClock;
+          import android.view.View;
+          import android.widget.Button;
+          import android.widget.LinearLayout;
+          import android.widget.ScrollView;
+          import android.widget.TextView;
+          import android.widget.Toast;
+          
+          import java.io.OutputStream;
+          import java.nio.charset.StandardCharsets;
+          import java.util.Locale;
+          import java.util.Map;
+          import java.util.zip.ZipEntry;
+          import java.util.zip.ZipOutputStream;
+          
+          @SuppressWarnings("deprecation")
+          public final class MainActivity extends Activity {
+              private static final String ACTION_USB_PERMISSION =
+                  "com.okn.bp1048p4r68.USB_PERMISSION";
+              private static final int SAVE_CAPTURE_ZIP = 6801;
+          
+              private UsbManager usb;
+              private UsbDevice selected;
+              private TextView logView;
+              private Button dumpButton;
+              private Button versionButton;
+              private long t0;
+              private int permissionRequestedFor = -1;
+          
+              private final CaptureStore store = new CaptureStore();
+              private FirmwareReadbackStrategy readbackStrategy = new NoProvenReadbackStrategy();
+              private UsbCaptureEngine engine;
+          
+              private final BroadcastReceiver permissionRx = new BroadcastReceiver() {
+                  @Override public void onReceive(Context context, Intent intent) {
+                      if (!ACTION_USB_PERMISSION.equals(intent.getAction())) return;
+                      UsbDevice d = getDevice(intent);
+                      boolean granted = intent.getBooleanExtra(
+                          UsbManager.EXTRA_PERMISSION_GRANTED, false);
+                      permissionRequestedFor = -1;
+                      line("USB_PERMISSION_RESULT=" + granted + dev(d));
+                      if (granted && d != null) {
+                          selected = d;
+                          engine.inventory(d);
+                      }
+                  }
+              };
+          
+              private final BroadcastReceiver usbSystemRx = new BroadcastReceiver() {
+                  @Override public void onReceive(Context context, Intent intent) {
+                      String action = intent.getAction();
+                      if (UsbManager.ACTION_USB_DEVICE_ATTACHED.equals(action)) {
+                          line("USB_ATTACHED=true");
+                          scan(true);
+                      } else if (UsbManager.ACTION_USB_DEVICE_DETACHED.equals(action)) {
+                          line("USB_DETACHED=true");
+                          permissionRequestedFor = -1;
+                          scan(false);
+                      }
+                  }
+              };
+          
+              @Override protected void onCreate(Bundle state) {
+                  super.onCreate(state);
+                  t0 = SystemClock.elapsedRealtime();
+                  usb = (UsbManager) getSystemService(Context.USB_SERVICE);
+                  engine = new UsbCaptureEngine(usb, store, this::line);
+          
+                  IntentFilter usbFilter = new IntentFilter();
+                  usbFilter.addAction(UsbManager.ACTION_USB_DEVICE_ATTACHED);
+                  usbFilter.addAction(UsbManager.ACTION_USB_DEVICE_DETACHED);
+                  IntentFilter permissionFilter = new IntentFilter(ACTION_USB_PERMISSION);
+          
+                  if (Build.VERSION.SDK_INT >= 33) {
+                      // System-only USB attach/detach broadcast.
+                      registerReceiver(usbSystemRx, usbFilter);
+                      // App-private permission callback.
+                      registerReceiver(permissionRx, permissionFilter, Context.RECEIVER_NOT_EXPORTED);
+                  } else {
+                      registerReceiver(usbSystemRx, usbFilter);
+                      registerReceiver(permissionRx, permissionFilter);
+                  }
+          
+                  LinearLayout root = new LinearLayout(this);
+                  root.setOrientation(LinearLayout.VERTICAL);
+                  root.setPadding(28, 28, 28, 28);
+          
+                  TextView title = new TextView(this);
+                  title.setText("OKN BP1048P4 R68 • Firmware Dump Probe");
+                  title.setTextSize(21);
+                  root.addView(title);
+          
+                  TextView constraints = new TextView(this);
+                  constraints.setText(
+                      "\nเส้นทางเดียว:\nSamsung Galaxy S25+ → USB-C → DSP USB-C\n\n"
+                      + "ไม่บัดกรี • ไม่แก้บอร์ด • ไม่ใช้ JTAG/SDP/AICE/โปรแกรมเมอร์ภายนอก\n"
+                      + "โหมด Snapshot = device→host / descriptor read เท่านั้น\n"
+                      + "Feature report 0x55/0xAA = ปิด (upgrade-control path)\n"
+                      + "Recovery Output commands = ปิด (มี erase/write และยังไม่มี full-readback ที่พิสูจน์)\n\n"
+                  );
+                  root.addView(constraints);
+          
+                  add(root, "1) SCAN + VERIFY USB", v -> scan(false));
+                  add(root, "2) REQUEST USB PERMISSION", v -> requestPermission());
+                  add(root, "3) CAPTURE READ-ONLY SNAPSHOT", v -> captureSnapshot());
+                  add(root, "4) EXPORT CAPTURE ZIP", v -> chooseExportZip());
+          
+                  versionButton = add(root,
+                      "ADVANCED: ONE-TIME EXACT VERSION QUERY A5 5A 00 00 16",
+                      v -> confirmVersionQuery());
+          
+                  dumpButton = add(root, "FULL FIRMWARE DUMP — LOCKED", v -> fullDump());
+                  dumpButton.setEnabled(readbackStrategy.isProven());
+          
+                  add(root, "CLEAR LOCAL CAPTURE", v -> {
+                      store.clear();
+                      line("CAPTURE_STORE_CLEARED=true");
+                  });
+          
+                  TextView status = new TextView(this);
+                  status.setText("\nFull flash status:\n" + readbackStrategy.status() + "\n");
+                  root.addView(status);
+          
+                  logView = new TextView(this);
+                  logView.setTextIsSelectable(true);
+                  logView.setText("\nLog:\n");
+                  root.addView(logView);
+          
+                  ScrollView scroll = new ScrollView(this);
+                  scroll.addView(root);
+                  setContentView(scroll);
+          
+                  line("R68_START=true");
+                  line("READBACK_STRATEGY=" + readbackStrategy.id());
+                  line("READBACK_PROVEN=" + readbackStrategy.isProven());
+                  scan(false);
+              }
+          
+              @Override protected void onDestroy() {
+                  try { unregisterReceiver(permissionRx); } catch (Throwable ignored) {}
+                  try { unregisterReceiver(usbSystemRx); } catch (Throwable ignored) {}
+                  super.onDestroy();
+              }
+          
+              private Button add(LinearLayout root, String text, View.OnClickListener l) {
+                  Button b = new Button(this);
+                  b.setAllCaps(false);
+                  b.setText(text);
+                  b.setOnClickListener(l);
+                  root.addView(b);
+                  return b;
+              }
+          
+              private UsbDevice getDevice(Intent i) {
+                  if (Build.VERSION.SDK_INT >= 33) {
+                      return i.getParcelableExtra(UsbManager.EXTRA_DEVICE, UsbDevice.class);
+                  }
+                  return i.getParcelableExtra(UsbManager.EXTRA_DEVICE);
+              }
+          
+              private void line(String s) {
+                  long ms = SystemClock.elapsedRealtime() - t0;
+                  String row = String.format(Locale.US, "[%06dms] %s", ms, s);
+                  if (logView != null) logView.append(row + "\n");
+              }
+          
+              private String dev(UsbDevice d) {
+                  if (d == null) return "";
+                  return String.format(Locale.US, " [%04X:%04X id=%d name=%s]",
+                      d.getVendorId(), d.getProductId(), d.getDeviceId(), d.getDeviceName());
+              }
+          
+              private void scan(boolean requestPermission) {
+                  Map<String, UsbDevice> map = usb.getDeviceList();
+                  line("USB_DEVICE_COUNT=" + map.size());
+          
+                  UsbDevice runtime = null;
+                  UsbDevice recovery = null;
+          
+                  for (UsbDevice d : map.values()) {
+                      line("FOUND" + dev(d));
+                      if (ProtocolFacts.isRuntime(d.getVendorId(), d.getProductId())) runtime = d;
+                      if (ProtocolFacts.isRecovery(d.getVendorId(), d.getProductId())) recovery = d;
+                  }
+          
+                  // Prefer recovery if the board is already enumerated there.
+                  selected = recovery != null ? recovery : runtime;
+          
+                  if (selected == null) {
+                      line("TARGET_NOT_FOUND=true");
+                      return;
+                  }
+          
+                  line("SELECTED" + dev(selected));
+                  line("SELECTED_MODE=" + (
+                      ProtocolFacts.isRuntime(selected.getVendorId(), selected.getProductId())
+                          ? "RUNTIME" : "RECOVERY"));
+          
+                  engine.inventory(selected);
+          
+                  if (usb.hasPermission(selected)) {
+                      line("USB_PERMISSION_ALREADY_GRANTED=true");
+                  } else if (requestPermission) {
+                      requestUsbPermission(selected);
+                  }
+              }
+          
+              private void requestPermission() {
+                  scan(false);
+                  if (selected == null) {
+                      toast("ยังไม่พบบอร์ด BP1048P4");
+                      return;
+                  }
+                  requestUsbPermission(selected);
+              }
+          
+              private void requestUsbPermission(UsbDevice d) {
+                  if (d == null || usb.hasPermission(d)) return;
+                  if (permissionRequestedFor == d.getDeviceId()) {
+                      line("USB_PERMISSION_ALREADY_REQUESTED=true");
+                      return;
+                  }
+          
+                  Intent callback = new Intent(ACTION_USB_PERMISSION).setPackage(getPackageName());
+                  PendingIntent pi = PendingIntent.getBroadcast(
+                      this,
+                      d.getDeviceId(),
+                      callback,
+                      PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_MUTABLE);
+          
+                  permissionRequestedFor = d.getDeviceId();
+                  line("USB_PERMISSION_REQUEST=true" + dev(d));
+                  usb.requestPermission(d, pi);
+              }
+          
+              private void captureSnapshot() {
+                  scan(false);
+                  if (selected == null) {
+                      toast("ไม่พบบอร์ด");
+                      return;
+                  }
+                  if (!usb.hasPermission(selected)) {
+                      requestUsbPermission(selected);
+                      toast("อนุญาต USB แล้วกด Capture อีกครั้ง");
+                      return;
+                  }
+          
+                  new Thread(() -> {
+                      engine.captureReadOnlySnapshot(selected);
+                      runOnUiThread(() -> toast("เก็บ Snapshot เสร็จ"));
+                  }, "okn-r68-capture").start();
+              }
+          
+              private void confirmVersionQuery() {
+                  scan(false);
+                  if (selected == null
+                      || !ProtocolFacts.isRuntime(selected.getVendorId(), selected.getProductId())) {
+                      toast("Version query ใช้เฉพาะ runtime 6324:1719");
+                      return;
+                  }
+                  if (!usb.hasPermission(selected)) {
+                      requestUsbPermission(selected);
+                      toast("อนุญาต USB ก่อน");
+                      return;
+                  }
+          
+                  boolean already = getPreferences(MODE_PRIVATE)
+                      .getBoolean("r68_version_query_used", false);
+                  if (already) {
+                      line("VERSION_QUERY_BLOCKED_ALREADY_USED=true");
+                      toast("แอปล็อก version query หลังใช้งานครั้งแรก");
+                      versionButton.setEnabled(false);
+                      return;
+                  }
+          
+                  new AlertDialog.Builder(this)
+                      .setTitle("Exact version query")
+                      .setMessage(
+                          "จะส่งเฉพาะ Output report ที่พิสูจน์แล้ว:\n"
+                          + "A5 5A 00 00 16 + zero padding ถึง 256 bytes\n\n"
+                          + "ไม่มี Feature report, ไม่มี recovery command, ไม่มี erase/write")
+                      .setNegativeButton("ยกเลิก", null)
+                      .setPositiveButton("ส่ง 1 ครั้ง", (dialog, which) -> {
+                          boolean saved = getPreferences(MODE_PRIVATE)
+                              .edit().putBoolean("r68_version_query_used", true).commit();
+                          line("VERSION_QUERY_LATCH_PERSISTED=" + saved);
+                          versionButton.setEnabled(false);
+                          if (!saved) return;
+          
+                          new Thread(() -> {
+                              engine.runExactVersionQueryOnce(selected);
+                              runOnUiThread(() -> toast("Version query จบแล้ว"));
+                          }, "okn-r68-version").start();
+                      })
+                      .show();
+              }
+          
+              private void chooseExportZip() {
+                  Intent i = new Intent(Intent.ACTION_CREATE_DOCUMENT);
+                  i.addCategory(Intent.CATEGORY_OPENABLE);
+                  i.setType("application/zip");
+                  i.putExtra(Intent.EXTRA_TITLE, "OKN_BP1048P4_R68_CAPTURE.zip");
+                  startActivityForResult(i, SAVE_CAPTURE_ZIP);
+              }
+          
+              @Override protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+                  super.onActivityResult(requestCode, resultCode, data);
+                  if (requestCode != SAVE_CAPTURE_ZIP || resultCode != RESULT_OK || data == null) return;
+                  Uri uri = data.getData();
+                  if (uri == null) return;
+          
+                  new Thread(() -> exportZip(uri), "okn-r68-export").start();
+              }
+          
+              private void exportZip(Uri uri) {
+                  Map<String, byte[]> blobs = store.snapshot();
+                  String meta =
+                      "FORMAT=OKN_BP1048P4_R68_CAPTURE\n"
+                      + "PHONE=Samsung Galaxy S25+\n"
+                      + "PATH=Samsung Galaxy S25+ -> USB-C -> DSP board USB-C\n"
+                      + "RUNTIME_VID_PID=6324:1719\n"
+                      + "RECOVERY_VID_PID=0000:2244\n"
+                      + "FULL_FLASH_READBACK_PROVEN=" + readbackStrategy.isProven() + "\n"
+                      + "READBACK_STRATEGY=" + readbackStrategy.id() + "\n"
+                      + "READBACK_STATUS=" + readbackStrategy.status() + "\n"
+                      + "FEATURE_REPORT_SENT=false\n"
+                      + "RECOVERY_OUTPUT_REPORT_SENT=false\n"
+                      + "ERASE_SENT=false\n"
+                      + "FLASH_WRITE_SENT=false\n";
+          
+                  String protocol =
+                      "R68_KNOWN_PROTOCOL\n"
+                      + "runtime frame: A5 5A <control> <length> <payload> 16\n"
+                      + "runtime IF4 Input: GET_REPORT 0xA1/0x01 wValue=0x0100\n"
+                      + "runtime exact version query: A55A000016 as 256-byte Output report\n"
+                      + "recovery proven command names: cxxx, chiperas, bootdat, codedata, constdat, cnfgdat, btupdat, upinfo\n"
+                      + "chiperas: destructive erase\n"
+                      + "btupdat: internal flash read-modify-write; NOT host full-flash readback\n"
+                      + "generic recovery flash readback: NOT PROVEN\n";
+          
+                  try (OutputStream raw = getContentResolver().openOutputStream(uri);
+                       ZipOutputStream zip = new ZipOutputStream(raw)) {
+          
+                      putText(zip, "meta.txt", meta);
+                      putText(zip, "protocol-status.txt", protocol);
+                      putText(zip, "capture-log.txt", store.logText());
+          
+                      for (Map.Entry<String, byte[]> e : blobs.entrySet()) {
+                          ZipEntry ze = new ZipEntry(e.getKey());
+                          zip.putNextEntry(ze);
+                          zip.write(e.getValue());
+                          zip.closeEntry();
+          
+                          putText(zip, e.getKey() + ".sha256.txt",
+                              UsbCaptureEngine.sha256(e.getValue()) + "  " + e.getKey() + "\n");
+                      }
+          
+                      zip.finish();
+                      runOnUiThread(() -> toast("Export ZIP สำเร็จ: " + blobs.size() + " binary captures"));
+                  } catch (Exception e) {
+                      line("EXPORT_ERROR=" + e);
+                      runOnUiThread(() -> toast("Export ไม่สำเร็จ: " + e.getClass().getSimpleName()));
+                  }
+              }
+          
+              private static void putText(ZipOutputStream zip, String name, String text) throws Exception {
+                  ZipEntry ze = new ZipEntry(name);
+                  zip.putNextEntry(ze);
+                  zip.write(text.getBytes(StandardCharsets.UTF_8));
+                  zip.closeEntry();
+              }
+          
+              private void fullDump() {
+                  if (!readbackStrategy.isProven()) {
+                      new AlertDialog.Builder(this)
+                          .setTitle("Full firmware dump ยังล็อก")
+                          .setMessage(readbackStrategy.status()
+                              + "\n\nโครงสร้าง ReadbackStrategy พร้อมแล้ว แต่จะไม่เดาคำสั่งที่อาจชน erase/write.")
+                          .setPositiveButton("OK", null)
+                          .show();
+                      return;
+                  }
+          
+                  // Future proven implementation plugs in here.
+                  line("FULL_DUMP_STRATEGY_READY=true");
+              }
+          
+              private void toast(String s) {
+                  Toast.makeText(this, s, Toast.LENGTH_SHORT).show();
+                  line("UI=" + s);
+              }
+          }
+          OKN_R68_FILE_12_EOF
+          cat > 'README_TH.md' <<'OKN_R68_FILE_13_EOF'
+          # OKN BP1048P4 R68 — Firmware Dump Probe
+          
+          แอป Android สำหรับ Samsung Galaxy S25+ ที่ต่อ **USB-C → USB-C → บอร์ด DSP BP1048P4 โดยตรงเท่านั้น**
+          
+          ## เป้าหมาย
+          
+          1. เก็บข้อมูล USB ของบอร์ดให้มากที่สุดโดยไม่แก้ไขฮาร์ดแวร์
+          2. เก็บ raw USB descriptors และ HID report descriptors เป็นไฟล์ไบนารีจริง
+          3. อ่าน vendor HID Input reports ของ runtime IF4 แบบ device → host
+          4. อ่าน Input report แบบ passive ถ้าบอร์ดอยู่ใน FlashBoot recovery อยู่แล้ว
+          5. Export หลักฐานทั้งหมดเป็น ZIP พร้อม SHA-256 เพื่อใช้ reverse engineer ต่อ
+          6. เตรียม `FirmwareReadbackStrategy` สำหรับปลดล็อก full flash dump เมื่อพบคำสั่งอ่านแฟลชที่พิสูจน์แล้ว
+          
+          ## สิ่งที่แอป “ไม่ทำ” ในโหมด Snapshot
+          
+          - ไม่ส่ง Feature report
+          - ไม่ส่ง `0x55` / `0xAA`
+          - ไม่สั่งเข้า recovery
+          - ไม่ส่ง recovery Output command
+          - ไม่ erase
+          - ไม่ write flash
+          - ไม่เดา opcode full-flash readback
+          
+          ## USB ที่ใช้
+          
+          - Runtime: `6324:1719`
+          - FlashBoot reference recovery: `0000:2244`
+          - Runtime vendor HID: interface 4
+          - HID Input GET_REPORT: `A1 01 0100`
+          - HID Output SET_REPORT: `21 09 0200`
+          
+          ## Version query
+          
+          ปุ่ม Advanced สามารถส่งคำสั่งที่มี static proof แล้วเพียงครั้งเดียวต่อ app data:
+          
+          `A5 5A 00 00 16` + zero padding จนครบ 256 bytes
+          
+          จากนั้นอ่าน Input GET_REPORT 256 bytes
+          
+          ปุ่มนี้เป็น **host → device** จึงแยกจาก read-only Snapshot และมีหน้าต่างยืนยันก่อนส่ง
+          
+          ## เหตุผลที่ Full Firmware Dump ยังล็อก
+          
+          FlashBoot ที่แกะได้พิสูจน์ command dispatcher:
+          
+          `cxxx`, `chiperas`, `bootdat`, `codedata`, `constdat`, `cnfgdat`, `btupdat`, `upinfo`
+          
+          - `chiperas` = destructive erase
+          - `btupdat` มี flash read ภายใน แต่เป็นส่วนของ read-modify-write
+          - ยังไม่พบ generic command ที่ส่งเนื้อหา flash ทั้งชิปกลับ host
+          
+          ดังนั้น R68 ไม่สร้าง opcode ขึ้นเอง เพราะคำสั่งเดาผิดอาจชน erase/write.
+          
+          ## ไฟล์ใน Capture ZIP
+          
+          ตัวอย่าง:
+          - `usb/raw-descriptors.bin`
+          - `usb/if3-hid-report-descriptor.bin`
+          - `usb/if4-hid-report-descriptor.bin`
+          - `runtime/if4-input-12-r1.bin`
+          - `runtime/if4-input-64-r1.bin`
+          - `runtime/if4-input-256-r1.bin`
+          - `runtime/version-query-response.bin` (ถ้ามี)
+          - `capture-log.txt`
+          - `meta.txt`
+          - `protocol-status.txt`
+          - SHA-256 sidecar ของทุก binary capture
+          
+          ## Build
+          
+          ใช้ Android Studio หรือ GitHub Actions workflow ที่ให้มา:
+          
+          `.github/workflows/build-r68-apk.yml`
+          
+          ผลลัพธ์: `app-debug.apk`
+          OKN_R68_FILE_13_EOF
+          cat > 'KNOWN_PROTOCOL.md' <<'OKN_R68_FILE_14_EOF'
+          # BP1048P4 protocol facts used by R68
+          
+          ## Runtime USB
+          - VID:PID: `6324:1719`
+          - Runtime application frame: `A5 5A <control> <length> <payload...> 16`
+          - IF4 HID Input report size: 256 bytes
+          - IF4 HID Output report size: 256 bytes
+          - IF4 Feature report size: 8 bytes
+          - Feature SET_REPORT magic `0x55` / `0xAA` participates in upgrade-control path and is disabled in R68 snapshot mode.
+          
+          ### Proven version query
+          Host Output payload start:
+          `A5 5A 00 00 16`
+          
+          Control transfer:
+          - Host → device: `bmRequestType=0x21`, `bRequest=0x09`, `wValue=0x0200`, `wIndex=IF4`
+          - Device → host: `bmRequestType=0xA1`, `bRequest=0x01`, `wValue=0x0100`, `wIndex=IF4`
+          
+          Expected logical response:
+          `A5 5A 00 07 <model> <effect major> <effect minor> <effect patch> <audio major> <audio minor> <audio patch> 16`
+          
+          ## FlashBoot recovery
+          - Reference VID:PID: `0000:2244`
+          - Control-endpoint HID
+          - Input report: 256
+          - Output report: 256
+          - Feature report: 1
+          - Output receive: 4 × 64-byte EP0 chunks
+          - Firmware logical block: 4096 bytes = 16 × 256-byte reports
+          
+          Proven command dispatcher:
+          `cxxx -> chiperas -> bootdat -> codedata -> constdat -> cnfgdat -> btupdat -> upinfo`
+          
+          Risk:
+          - `chiperas` = destructive erase
+          - boot/code/const/config paths are writer paths
+          - `btupdat` uses internal flash read in a read-modify-write operation
+          - no proven generic host flash readback command
+          
+          R68 therefore keeps recovery Output/Feature traffic disabled.
+          OKN_R68_FILE_14_EOF
+          cat > 'R68_STATUS.txt' <<'OKN_R68_FILE_15_EOF'
+          OKN BP1048P4 R68 FIRMWARE DUMP PROBE
+          ====================================
+          
+          TARGET=MVSilicon BP1048P4
+          PHONE=Samsung Galaxy S25+
+          PHYSICAL_PATH=Samsung Galaxy S25+ -> USB-C -> DSP board USB-C
+          SOLDERING=NO
+          BOARD_MODIFICATION=NO
+          JTAG=NO
+          SDP=NO
+          AICE=NO
+          EXTERNAL_PROGRAMMER=NO
+          
+          RUNTIME_USB=6324:1719
+          REFERENCE_FLASHBOOT_USB=0000:2244
+          
+          READ_ONLY_CAPTURE=IMPLEMENTED
+          RAW_DESCRIPTORS=IMPLEMENTED
+          HID_REPORT_DESCRIPTORS=IMPLEMENTED
+          RUNTIME_IF4_INPUT_GET_REPORT_12_64_256=IMPLEMENTED
+          PASSIVE_RECOVERY_INPUT_GET_REPORT=IMPLEMENTED
+          CAPTURE_ZIP_EXPORT=IMPLEMENTED
+          SHA256_PER_CAPTURE=IMPLEMENTED
+          EXACT_VERSION_QUERY_A55A000016=IMPLEMENTED_ADVANCED_USER_CONFIRMED_ONE_SHOT
+          
+          FEATURE_REPORT=DISABLED
+          RECOVERY_OUTPUT_COMMANDS=DISABLED
+          ERASE=DISABLED
+          FLASH_WRITE=DISABLED
+          FULL_FLASH_READBACK_PROVEN=NO
+          
+          FULL_FLASH_DUMP=LOCKED
+          REASON=NO_PROVEN_HOST_VISIBLE_GENERIC_FLASH_READBACK_COMMAND
+          NEXT_UNLOCK=PROVE_NON_DESTRUCTIVE_FLASH_READBACK_PRIMITIVE_THEN_IMPLEMENT_FirmwareReadbackStrategy
+          OKN_R68_FILE_15_EOF
+
+      - name: Static safety and completeness audit
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$PROJECT_DIR"
+
+          python3 - <<'PY'
+          from pathlib import Path
+          import hashlib, re, sys
+
+          root = Path(".")
+          java = "\n".join(
+              p.read_text(encoding="utf-8")
+              for p in sorted((root/"app/src/main/java").rglob("*.java"))
+          )
+
+          required = [
+              "6324",
+              "1719",
+              "0000",
+              "2244",
+              "A5",
+              "5A",
+              "NoProvenReadbackStrategy",
+              "FULL FIRMWARE DUMP",
+              "captureReadOnlySnapshot",
+              "ACTION_CREATE_DOCUMENT",
+              "ZipOutputStream",
+              "HID_INPUT_REPORT_WVALUE",
+              "HID_OUTPUT_REPORT_WVALUE",
+              "r68_version_query_used",
+          ]
+          missing = [x for x in required if x not in java]
+          if missing:
+              raise SystemExit("R68_FAIL missing required source token(s): " + repr(missing))
+
+          # Full readback must remain fail-closed until a real non-destructive
+          # host-visible flash read primitive has been proven for the target.
+          np = (root/"app/src/main/java/com/okn/bp1048p4r68/NoProvenReadbackStrategy.java").read_text()
+          if "return false;" not in np:
+              raise SystemExit("R68_FAIL readback strategy unexpectedly unlocked")
+
+          # Feature report path must not be implemented in live Java.
+          forbidden_live = [
+              "0x0300",
+              "GET_REPORT_FEATURE",
+              "SET_REPORT_FEATURE",
+              "start_up_grate(",
+              "SpiFlashErase(",
+              "SpiFlashWrite(",
+              "FlashChipErase(",
+              "FlashSectorErase(",
+              "bulkTransfer(",
+              "UsbRequest",
+          ]
+          bad = [x for x in forbidden_live if x in java]
+          if bad:
+              raise SystemExit("R68_FAIL forbidden live USB/flash token(s): " + repr(bad))
+
+          # Exactly one host->device HID SET_REPORT call is permitted:
+          # the static-proof version query A5 5A 00 00 16.
+          eng = (root/"app/src/main/java/com/okn/bp1048p4r68/UsbCaptureEngine.java").read_text()
+          if eng.count("HID_OUTPUT_SET_REPORT_BM") != 1:
+              # one constant reference in call plus potential source mention count is
+              # intentionally bounded; fail if implementation grows unexpectedly.
+              raise SystemExit("R68_FAIL unexpected HID output transfer surface")
+          if "out[0] = (byte) 0xA5;" not in eng or "out[1] = (byte) 0x5A;" not in eng:
+              raise SystemExit("R68_FAIL exact version query header missing")
+          if "out[2] = 0x00;" not in eng or "out[3] = 0x00;" not in eng or "out[4] = 0x16;" not in eng:
+              raise SystemExit("R68_FAIL exact version query body missing")
+
+          # Build a source manifest for provenance.
+          rows = []
+          for p in sorted(root.rglob("*")):
+              if p.is_file() and ".gradle/" not in str(p):
+                  h = hashlib.sha256(p.read_bytes()).hexdigest()
+                  rows.append(f"{h}  {p}")
+          (root/"SOURCE_SHA256SUMS.txt").write_text("\n".join(rows)+"\n")
+          print("R68_STATIC_SAFETY_AUDIT_PASS")
+          PY
+
+          grep -q -F 'Samsung Galaxy S25+' README_TH.md
+          grep -q -F 'FULL_FLASH_READBACK_PROVEN=NO' R68_STATUS.txt
+          grep -q -F 'generic recovery flash readback: NOT PROVEN' KNOWN_PROTOCOL.md
+          echo "R68_PROJECT_GENERATION_PASS"
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v4
+        with:
+          packages: "platform-tools platforms;android-35 build-tools;35.0.0"
+          accept-android-sdk-licenses: true
+          log-accepted-android-sdk-licenses: false
+
+      - name: Install Gradle 8.9
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fL --retry 3 --connect-timeout 20 \
+            https://services.gradle.org/distributions/gradle-8.9-bin.zip \
+            -o /tmp/gradle-8.9-bin.zip
+          rm -rf /tmp/gradle-8.9
+          unzip -q /tmp/gradle-8.9-bin.zip -d /tmp
+          echo "/tmp/gradle-8.9/bin" >> "$GITHUB_PATH"
+
+      - name: Build R68 debug APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$PROJECT_DIR"
+          gradle --version
+          gradle --no-daemon :app:assembleDebug
+
+          mkdir -p out
+          cp app/build/outputs/apk/debug/app-debug.apk \
+            out/OKN_BP1048P4_R68_FirmwareDumpProbe.apk
+
+          sha256sum out/OKN_BP1048P4_R68_FirmwareDumpProbe.apk \
+            | tee out/OKN_BP1048P4_R68_FirmwareDumpProbe.apk.sha256
+
+          cp SAFETY_GATE.txt out/
+          cp R68_STATUS.txt out/
+          cp KNOWN_PROTOCOL.md out/
+          cp SOURCE_SHA256SUMS.txt out/
+
+      - name: Package generated source
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$PROJECT_DIR"
+
+          zip -9 -r out/OKN_BP1048P4_R68_GENERATED_SOURCE.zip \
+            settings.gradle build.gradle gradle.properties \
+            app README_TH.md KNOWN_PROTOCOL.md R68_STATUS.txt SAFETY_GATE.txt \
+            SOURCE_SHA256SUMS.txt >/dev/null
+
+          sha256sum out/OKN_BP1048P4_R68_GENERATED_SOURCE.zip \
+            | tee out/OKN_BP1048P4_R68_GENERATED_SOURCE.zip.sha256
+
+          echo "### OKN BP1048P4 R68" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Android project generated entirely by this single .yml file." >> "$GITHUB_STEP_SUMMARY"
+          echo "- Runtime USB: 6324:1719" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Reference FlashBoot USB: 0000:2244" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Full flash dump: LOCKED until a proven host-visible readback primitive exists." >> "$GITHUB_STEP_SUMMARY"
+          echo "- Erase/write/Feature/recovery Output: DISABLED." >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          cat out/OKN_BP1048P4_R68_FirmwareDumpProbe.apk.sha256 >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload APK and generated source
+        uses: actions/upload-artifact@v7
+        with:
+          name: OKN_BP1048P4_R68_ALL_IN_ONE
+          path: |
+            /tmp/okn-r68/out/OKN_BP1048P4_R68_FirmwareDumpProbe.apk
+            /tmp/okn-r68/out/OKN_BP1048P4_R68_FirmwareDumpProbe.apk.sha256
+            /tmp/okn-r68/out/OKN_BP1048P4_R68_GENERATED_SOURCE.zip
+            /tmp/okn-r68/out/OKN_BP1048P4_R68_GENERATED_SOURCE.zip.sha256
+            /tmp/okn-r68/out/SAFETY_GATE.txt
+            /tmp/okn-r68/out/R68_STATUS.txt
+            /tmp/okn-r68/out/KNOWN_PROTOCOL.md
+            /tmp/okn-r68/out/SOURCE_SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 30
