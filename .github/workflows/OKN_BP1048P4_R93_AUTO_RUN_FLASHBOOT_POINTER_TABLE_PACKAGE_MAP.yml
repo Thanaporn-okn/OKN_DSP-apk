@@ -1,0 +1,791 @@
+name: OKN BP1048P4 R93 AUTO-RUN FlashBoot Pointer Table and Package Map
+
+on:
+  push:
+    branches: [main, master]
+    paths:
+      - '.github/workflows/OKN_BP1048P4_R93_AUTO_RUN_FLASHBOOT_POINTER_TABLE_PACKAGE_MAP.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: read
+
+concurrency:
+  group: okn-r93-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  SDK_REPO: "https://github.com/leadercxn/bp1048_sdk_v0.1.12.git"
+  SDK_COMMIT: "8105bd864b04995d81c9f9ae77cb158259f39015"
+  R2_REPO: "https://github.com/radareorg/radare2.git"
+  R2_TAG: "6.2.2"
+  OUT: "/tmp/r93"
+  BOARD_USB_ACCESS: "NO"
+  HOST_TO_DEVICE_USB: "NO"
+  FLASH_ERASE_WRITE: "NO"
+  FLASH_ALLOWED: "NO"
+
+jobs:
+  analyze:
+    name: Recover FlashBoot pointer tables and MVA package map / STATIC ONLY
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Fail-closed scope gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$BOARD_USB_ACCESS" = "NO"
+          test "$HOST_TO_DEVICE_USB" = "NO"
+          test "$FLASH_ERASE_WRITE" = "NO"
+          test "$FLASH_ALLOWED" = "NO"
+          rm -rf "$OUT"
+          mkdir -p "$OUT/evidence"
+          cat > "$OUT/evidence/00_SCOPE.txt" <<'EOF'
+          REVISION=R93
+          MODE=OFFLINE_STATIC_ONLY
+          TARGET=MVSilicon_BP1048P4
+          INPUT=SDK_EMBEDDED_FLASHBOOT_65536_BYTES
+          BOARD_USB_ACCESS=NO
+          LIVE_USB_COMMANDS=NO
+          AA55_RETEST=NO
+          CONTROL_0X11_LIVE=NO
+          CXXX_LIVE=NO
+          CHIPERAS_LIVE=NO
+          ERASE=NO
+          WRITE=NO
+          FLASH_ALLOWED=NO
+          R92_RESULT=RADARE2_AUTO_XREF_ZERO_ON_RAW_IMAGE
+          R93_METHOD=RAW_POINTER_TABLE_PLUS_FULL_DISASSEMBLY_SPLIT_IMMEDIATE_SCAN
+          EOF
+
+      - name: Pin exact SDK
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone -q "$SDK_REPO" "$OUT/sdk"
+          git -C "$OUT/sdk" checkout -q "$SDK_COMMIT"
+          test "$(git -C "$OUT/sdk" rev-parse HEAD)" = "$SDK_COMMIT"
+          printf 'SDK_COMMIT=%s\n' "$(git -C "$OUT/sdk" rev-parse HEAD)" \
+            > "$OUT/evidence/01_PIN.txt"
+
+      - name: Reconstruct deterministic BP1048P4 FlashBoot64K
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import os,re,json,hashlib
+
+          root=Path(os.environ["OUT"])/"sdk"
+          ev=Path(os.environ["OUT"])/"evidence"
+          src=(root/"BT_Audio_APP/bt_audio_app_src/device/flash_boot.c").read_text(errors="ignore")
+
+          m=re.search(
+              r'const\s+unsigned\s+char\s+flash_data\s*\[\s*65536\s*\]\s*=\s*\{',
+              src
+          )
+          if not m:
+              raise SystemExit("flash_data[65536] not found")
+          end=src.find("};",m.end())
+          if end<0:
+              raise SystemExit("initializer terminator not found")
+
+          body=src[m.end():end]
+          body=re.sub(r'/\*[\s\S]*?\*/','',body)
+          body=re.sub(r'//[^\n]*','',body)
+          toks=[x.strip() for x in body.split(",") if x.strip()]
+
+          macros={
+              "CONST_DATA_ADDR":0x198000,
+              "USER_DATA_ADDR":0x3F0000,
+              "AUDIO_EFFECT_ADDR":0x3C8000,
+              "BOOT_UART_CONFIG":0x30,
+              "JUDGEMENT_STANDARD":0x55,
+              "UP_PORT":0x0D,
+          }
+
+          def eval_byte(tok):
+              s=tok
+              s=re.sub(r'(?<=\b[0-9A-Fa-fxX])[uUlL]+\b','',s)
+              for k,v in sorted(macros.items(),key=lambda kv:-len(kv[0])):
+                  s=re.sub(rf'\b{re.escape(k)}\b',str(v),s)
+              left=re.sub(r'0[xX][0-9A-Fa-f]+','',s)
+              if re.search(r'[A-Za-z_]',left):
+                  raise ValueError(f"unresolved {tok!r} -> {s!r}")
+              if not re.fullmatch(r'[\s0-9A-Fa-fxX()+\-*/%<>&|~]+',s):
+                  raise ValueError(f"unsafe token {tok!r}")
+              v=eval(s,{"__builtins__":{}},{})
+              if not isinstance(v,int) or not 0<=v<=255:
+                  raise ValueError((tok,v))
+              return v
+
+          data=bytes(eval_byte(x) for x in toks)
+          if len(data)!=65536:
+              raise SystemExit(f"length={len(data)} expected=65536")
+
+          blob=ev/"flashboot_BP1048P4.bin"
+          blob.write_bytes(data)
+
+          targets={
+            "MVA_HEADER_ERROR":b"MVA HEADER IS NOT MVB1X",
+            "MVB1X":b"MVB1X",
+            "CMD_CXXX_DEBUG":b"cmd_cxxx :",
+            "MAKE_MVA":b"Make mva upgrade package!",
+            "MAKE_HEADER_01":b"Make header&01pkg OK!",
+            "MAKE_03":b"Make 03pkg OK!",
+            "MAKE_02":b"Make 02pkg  pkg ID OK!",
+            "PKG02_OFFSET":b"02PKG offset:%lu",
+            "PKG04_OFFSET":b"04PKG offset:%lu",
+            "PKG05_OFFSET":b"05PKG offset:%lu",
+            "PKG7E_OFFSET":b"0x7E PKG offset:%lu",
+            "BOOTDAT":b"bootdat",
+            "CODEDATA":b"codedata",
+            "CONSTDAT":b"constdat",
+            "CNFGDAT":b"cnfgdat",
+            "BTUPDAT":b"btupdat",
+            "UPINFO":b"upinfo",
+            "CXXX":b"cxxx",
+            "CHIPERAS":b"chiperas",
+          }
+
+          found={}
+          for name,needle in targets.items():
+              offs=[]; s=0
+              while True:
+                  i=data.find(needle,s)
+                  if i<0: break
+                  offs.append(i); s=i+1
+              found[name]={
+                  "ascii":needle.decode("ascii",errors="ignore"),
+                  "offsets":offs,
+                  "offsets_hex":[hex(x) for x in offs],
+              }
+
+          result={
+              "bytes":len(data),
+              "sha256":hashlib.sha256(data).hexdigest(),
+              "macros":{k:hex(v) for k,v in macros.items()},
+              "targets":found,
+          }
+          (ev/"02_RECONSTRUCTION_TARGETS.json").write_text(
+              json.dumps(result,indent=2,ensure_ascii=False)+'\n'
+          )
+          print(json.dumps(result,indent=2))
+          PY
+
+      - name: Recover raw little-endian pointer tables to printable strings
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import os,re,json,collections
+
+          ev=Path(os.environ["OUT"])/"evidence"
+          data=(ev/"flashboot_BP1048P4.bin").read_bytes()
+          target=json.loads((ev/"02_RECONSTRUCTION_TARGETS.json").read_text())
+
+          # Printable string starts.
+          strings={}
+          for m in re.finditer(rb'[\x20-\x7e]{4,}',data):
+              strings[m.start()]=m.group().decode("ascii",errors="ignore")
+
+          ptr_rows=[]
+          for off in range(0,len(data)-3):
+              v=int.from_bytes(data[off:off+4],"little")
+              if v in strings:
+                  ptr_rows.append({
+                      "slot":off,
+                      "slot_hex":hex(off),
+                      "value":v,
+                      "value_hex":hex(v),
+                      "string":strings[v],
+                      "aligned4":off%4==0,
+                  })
+
+          # Group only 4-byte-aligned consecutive pointer slots.
+          aligned={r["slot"]:r for r in ptr_rows if r["aligned4"]}
+          groups=[]
+          seen=set()
+          for slot in sorted(aligned):
+              if slot in seen: continue
+              g=[]
+              cur=slot
+              while cur in aligned:
+                  g.append(aligned[cur])
+                  seen.add(cur)
+                  cur+=4
+              if len(g)>=3:
+                  groups.append({
+                      "start":g[0]["slot"],
+                      "start_hex":hex(g[0]["slot"]),
+                      "count":len(g),
+                      "entries":g,
+                  })
+
+          command_names=[
+              "chiperas","upinfo","btupdat","cnfgdat",
+              "constdat","codedata","bootdat","cxxx"
+          ]
+          command_group=None
+          for g in groups:
+              vals=[x["string"] for x in g["entries"]]
+              if all(x in vals for x in command_names):
+                  command_group=g
+                  break
+
+          # Exact local neighborhoods around all pointer groups.
+          neighborhoods=[]
+          for g in groups:
+              s=max(0,g["start"]-64)
+              e=min(len(data),g["start"]+4*g["count"]+64)
+              neighborhoods.append({
+                  "table_start":g["start"],
+                  "table_start_hex":hex(g["start"]),
+                  "count":g["count"],
+                  "raw_hex":data[s:e].hex().upper(),
+                  "window_start":s,
+                  "window_start_hex":hex(s),
+              })
+
+          result={
+              "printable_string_count":len(strings),
+              "string_pointer_hits":len(ptr_rows),
+              "aligned_pointer_groups_ge3":groups,
+              "command_string_pointer_table":command_group,
+              "neighborhoods":neighborhoods,
+          }
+          (ev/"03_POINTER_TABLES.json").write_text(
+              json.dumps(result,indent=2,ensure_ascii=False)+'\n'
+          )
+
+          if command_group:
+              print("COMMAND_TABLE_START",command_group["start_hex"])
+              for e in command_group["entries"]:
+                  print(e["slot_hex"],"->",e["value_hex"],e["string"])
+          else:
+              print("COMMAND_TABLE_NOT_FOUND")
+          PY
+
+      - name: Build pinned Radare2 NDS32 disassembler
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone -q --depth 1 --branch "$R2_TAG" "$R2_REPO" "$OUT/radare2"
+          "$OUT/radare2/sys/install.sh" \
+            --prefix="$OUT/r2prefix" \
+            --without-pull \
+            --install \
+            >"$OUT/r2-build.log" 2>&1
+
+          export PATH="$OUT/r2prefix/bin:$PATH"
+          {
+            r2 -v
+            echo
+            rasm2 -L | grep -i nds32
+          } | tee "$OUT/evidence/04_RADARE2.txt"
+          rasm2 -L | grep -qi nds32
+
+      - name: Dump full NDS32 disassembly JSON in both endian modes
+        shell: bash
+        run: |
+          set -euo pipefail
+          export PATH="$OUT/r2prefix/bin:$PATH"
+
+          python3 - <<'PY'
+          from pathlib import Path
+          import os,json,subprocess
+
+          ev=Path(os.environ["OUT"])/"evidence"
+          blob=ev/"flashboot_BP1048P4.bin"
+
+          result={}
+          for mode,big in (("big",True),("little",False)):
+              args=[
+                  "r2","-2","-q",
+                  "-a","nds32","-b","32","-m","0",
+                  "-e",f"cfg.bigendian={'true' if big else 'false'}",
+                  "-e","scr.color=false",
+                  "-e","asm.bytes=true",
+                  "-c","pDj 65536 @ 0",
+                  str(blob)
+              ]
+              p=subprocess.run(
+                  args,capture_output=True,text=True,errors="ignore",
+                  timeout=120,check=False
+              )
+              raw=p.stdout.strip()
+              try:
+                  ops=json.loads(raw)
+              except Exception:
+                  # tolerate non-JSON prefix/suffix
+                  a=raw.find("["); b=raw.rfind("]")
+                  ops=json.loads(raw[a:b+1]) if a>=0 and b>a else []
+              (ev/f"05_FULL_DISASM_{mode}.json").write_text(
+                  json.dumps(ops,indent=2,ensure_ascii=False)+'\n'
+              )
+              result[mode]={
+                  "rc":p.returncode,
+                  "instruction_records":len(ops),
+                  "invalid_records":sum(
+                      1 for x in ops
+                      if "invalid" in str(x.get("opcode","")).lower()
+                  ),
+                  "stderr_tail":p.stderr[-3000:],
+              }
+
+          (ev/"06_DISASM_SUMMARY.json").write_text(
+              json.dumps(result,indent=2)+'\n'
+          )
+          print(json.dumps(result,indent=2))
+          PY
+
+      - name: Recover direct and split-immediate references from disassembly
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import os,json,re
+
+          ev=Path(os.environ["OUT"])/"evidence"
+          tdoc=json.loads((ev/"02_RECONSTRUCTION_TARGETS.json").read_text())
+          pdoc=json.loads((ev/"03_POINTER_TABLES.json").read_text())
+          dsum=json.loads((ev/"06_DISASM_SUMMARY.json").read_text())
+
+          addr_targets={}
+          for name,info in tdoc["targets"].items():
+              for n,off in enumerate(info["offsets"]):
+                  addr_targets[f"{name}[{n}]"]=off
+
+          cmd=pdoc.get("command_string_pointer_table")
+          if cmd:
+              addr_targets["COMMAND_POINTER_TABLE"]=cmd["start"]
+
+          def nums_in_opcode(op):
+              vals=[]
+              for tok in re.findall(r'0x[0-9a-fA-F]+|-?\d+',op):
+                  try: vals.append(int(tok,0))
+                  except Exception: pass
+              return vals
+
+          modes={}
+          for mode in ("big","little"):
+              ops=json.loads((ev/f"05_FULL_DISASM_{mode}.json").read_text())
+              refs={}
+              for name,target in addr_targets.items():
+                  high=(target>>12)
+                  low=(target&0xFFF)
+                  direct=[]
+                  split=[]
+
+                  for i,op in enumerate(ops):
+                      text=str(op.get("opcode",""))
+                      vals=nums_in_opcode(text)
+
+                      # Direct immediate/address reference.
+                      if target in vals:
+                          direct.append({
+                              "index":i,
+                              "offset":op.get("offset"),
+                              "offset_hex":hex(op.get("offset",0)),
+                              "opcode":text,
+                          })
+
+                      # Conservative split address-load heuristic:
+                      # sethi-like high part followed within six instructions by low part.
+                      if "sethi" in text.lower() and high in vals:
+                          for j in range(i+1,min(len(ops),i+7)):
+                              t2=str(ops[j].get("opcode",""))
+                              v2=nums_in_opcode(t2)
+                              if low in v2 and any(
+                                  k in t2.lower()
+                                  for k in ("ori","addi","add","movi","setlo","or ")
+                              ):
+                                  split.append({
+                                      "high_index":i,
+                                      "low_index":j,
+                                      "high_offset":op.get("offset"),
+                                      "high_offset_hex":hex(op.get("offset",0)),
+                                      "high_opcode":text,
+                                      "low_offset":ops[j].get("offset"),
+                                      "low_offset_hex":hex(ops[j].get("offset",0)),
+                                      "low_opcode":t2,
+                                  })
+
+                  # Context windows.
+                  contexts=[]
+                  idxs=sorted(set(
+                      [x["index"] for x in direct] +
+                      [x["high_index"] for x in split]
+                  ))
+                  for idx in idxs[:80]:
+                      lo=max(0,idx-10); hi=min(len(ops),idx+18)
+                      contexts.append({
+                          "center_index":idx,
+                          "ops":[
+                              {
+                                  "offset":x.get("offset"),
+                                  "offset_hex":hex(x.get("offset",0)),
+                                  "bytes":x.get("bytes"),
+                                  "opcode":x.get("opcode"),
+                              }
+                              for x in ops[lo:hi]
+                          ]
+                      })
+
+                  refs[name]={
+                      "target":target,
+                      "target_hex":hex(target),
+                      "high20ish":high,
+                      "high_hex":hex(high),
+                      "low12":low,
+                      "low_hex":hex(low),
+                      "direct":direct,
+                      "split":split,
+                      "contexts":contexts,
+                  }
+
+              total_direct=sum(len(x["direct"]) for x in refs.values())
+              total_split=sum(len(x["split"]) for x in refs.values())
+              invalid=dsum[mode]["invalid_records"]
+              modes[mode]={
+                  "refs":refs,
+                  "total_direct":total_direct,
+                  "total_split":total_split,
+                  "invalid_records":invalid,
+                  "score":(total_direct*1000+total_split*500-invalid),
+              }
+
+          selected=max(modes,key=lambda k:modes[k]["score"])
+          (ev/"07_REFERENCE_RECOVERY.json").write_text(
+              json.dumps(
+                  {"selected":selected,"modes":modes},
+                  indent=2,ensure_ascii=False
+              )+'\n'
+          )
+          print(json.dumps({
+              "selected":selected,
+              "scores":{
+                  k:{
+                    "direct":v["total_direct"],
+                    "split":v["total_split"],
+                    "invalid":v["invalid_records"],
+                    "score":v["score"]
+                  } for k,v in modes.items()
+              }
+          },indent=2))
+          PY
+
+      - name: Derive MVA package-ID map from exact FlashBoot strings
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import os,json,re
+
+          ev=Path(os.environ["OUT"])/"evidence"
+          data=(ev/"flashboot_BP1048P4.bin").read_bytes()
+          refs=json.loads((ev/"07_REFERENCE_RECOVERY.json").read_text())
+          ptr=json.loads((ev/"03_POINTER_TABLES.json").read_text())
+
+          # Evidence strings are exact bytes in the reconstructed reference FlashBoot.
+          evidence_strings=[
+            (b"Make header&01pkg OK!","01","header","explicit"),
+            (b"02PKG offset:%lu","02","code","strong_context"),
+            (b"Make 03pkg OK!","03","flashboot_or_boot","strong_context"),
+            (b"04PKG offset:%lu","04","const","strong_context"),
+            (b"05PKG offset:%lu","05","config","strong_context"),
+            (b"0x7E PKG offset:%lu","7E","terminator_or_auxiliary","context_only"),
+          ]
+
+          package_map=[]
+          for needle,pid,meaning,confidence in evidence_strings:
+              off=data.find(needle)
+              package_map.append({
+                  "package_id_hex":pid,
+                  "meaning":meaning,
+                  "confidence":confidence,
+                  "evidence_ascii":needle.decode("ascii"),
+                  "evidence_offset":off,
+                  "evidence_offset_hex":hex(off) if off>=0 else None,
+              })
+
+          # Exact command string table recovered from raw pointers.
+          command_table=ptr.get("command_string_pointer_table")
+
+          selected=refs["selected"]
+          selected_refs=refs["modes"][selected]["refs"]
+
+          decision={
+              "flashboot_reference_sha256":
+                  json.loads((ev/"02_RECONSTRUCTION_TARGETS.json").read_text())["sha256"],
+              "selected_disasm_mode":selected,
+              "command_string_pointer_table":command_table,
+              "package_id_map":package_map,
+              "MVB1X_expected_identifier_candidate":True,
+              "MVB1X_exact_header_offset_proven":False,
+              "cmd_cxxx_semantics_proven":False,
+              "cmd_cxxx_non_destructive_readback_proven":False,
+              "live_cxxx_allowed":False,
+              "live_chiperas_allowed":False,
+              "production_readback_proven":False,
+              "flash_allowed":False,
+          }
+
+          (ev/"08_PACKAGE_ID_MAP.json").write_text(
+              json.dumps(package_map,indent=2,ensure_ascii=False)+'\n'
+          )
+          (ev/"09_DECISION.json").write_text(
+              json.dumps(decision,indent=2,ensure_ascii=False)+'\n'
+          )
+
+          md=[
+              "# R93 FlashBoot Pointer Table + MVA Package Map","",
+              f"- selected disassembly mode: **{selected}**",
+          ]
+          if command_table:
+              md += [
+                  f"- command pointer table start: **{command_table['start_hex']}**",
+                  f"- command pointer count: **{command_table['count']}**",
+                  "- command strings:"
+              ]
+              for e in command_table["entries"]:
+                  md.append(
+                      f"  - `{e['slot_hex']}` -> `{e['value_hex']}` `{e['string']}`"
+                  )
+          else:
+              md += ["- command pointer table: **NOT FOUND**"]
+
+          md += ["","## MVA package-ID evidence"]
+          for p in package_map:
+              md.append(
+                  f"- `0x{p['package_id_hex']}` → `{p['meaning']}` "
+                  f"({p['confidence']}) from `{p['evidence_ascii']}` "
+                  f"@ `{p['evidence_offset_hex']}`"
+              )
+
+          md += [
+              "","## Gate",
+              "- `MVB1X` remains a strong expected-header identifier candidate.",
+              "- Exact MVA header byte offsets are not promoted to proven without decoded parser accesses.",
+              "- `cxxx` remains static-only; no live command is allowed.",
+              "- `chiperas` remains destructive and live-forbidden.",
+              "- No production-board USB traffic is generated.",
+              "- `FLASH_ALLOWED=NO`",
+          ]
+          (ev/"10_REPORT.md").write_text("\n".join(md)+'\n')
+
+          print(json.dumps({
+              "command_table_start":
+                  command_table["start_hex"] if command_table else None,
+              "command_count":
+                  command_table["count"] if command_table else 0,
+              "package_map":package_map,
+              "flash_allowed":False
+          },indent=2))
+          PY
+
+      - name: Fail-closed safety audit
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$BOARD_USB_ACCESS" = "NO"
+          test "$HOST_TO_DEVICE_USB" = "NO"
+          test "$FLASH_ERASE_WRITE" = "NO"
+          test "$FLASH_ALLOWED" = "NO"
+
+          python3 - <<'PY'
+          from pathlib import Path
+          import os,json
+          ev=Path(os.environ["OUT"])/"evidence"
+          d=json.loads((ev/"09_DECISION.json").read_text())
+          assert d["live_cxxx_allowed"] is False
+          assert d["live_chiperas_allowed"] is False
+          assert d["production_readback_proven"] is False
+          assert d["flash_allowed"] is False
+          result={
+              "offline_static_only":True,
+              "board_usb_access":False,
+              "host_to_device_usb":False,
+              "aa55":False,
+              "control_0x11_live":False,
+              "cxxx_live":False,
+              "chiperas_live":False,
+              "erase":False,
+              "write":False,
+              "flash_allowed":False,
+          }
+          (ev/"11_SAFETY_AUDIT.json").write_text(
+              json.dumps(result,indent=2)+'\n'
+          )
+          print("R93_SAFETY_AUDIT=PASS",json.dumps(result))
+          PY
+
+      - name: Build evidence bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$OUT"
+          sha256sum evidence/* > SHA256SUMS.txt
+          cp SHA256SUMS.txt evidence/
+          zip -9 -r R93_FLASHBOOT_POINTER_TABLE_PACKAGE_MAP.zip evidence >/dev/null
+          sha256sum R93_FLASHBOOT_POINTER_TABLE_PACKAGE_MAP.zip \
+            | tee R93_FLASHBOOT_POINTER_TABLE_PACKAGE_MAP.zip.sha256
+
+      - name: Publish summary
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            cat "$OUT/evidence/10_REPORT.md"
+            echo
+            cat "$OUT/R93_FLASHBOOT_POINTER_TABLE_PACKAGE_MAP.zip.sha256"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload R93 evidence
+        uses: actions/upload-artifact@v7
+        with:
+          name: R93-FLASHBOOT-POINTER-TABLE-PACKAGE-MAP
+          path: |
+            /tmp/r93/R93_FLASHBOOT_POINTER_TABLE_PACKAGE_MAP.zip
+            /tmp/r93/R93_FLASHBOOT_POINTER_TABLE_PACKAGE_MAP.zip.sha256
+            /tmp/r93/evidence/**
+          if-no-files-found: error
+          retention-days: 30
+
+  diagnose-r93:
+    name: Capture R93 run diagnostics
+    if: ${{ always() }}
+    needs: analyze
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+
+      - name: Capture exact run state
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BUILD_RESULT: ${{ needs.analyze.result }}
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/r93diag
+          API="https://api.github.com/repos/$GITHUB_REPOSITORY"
+          AUTH=(-H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" -H "X-GitHub-Api-Version: 2022-11-28")
+
+          curl -fsSL "${AUTH[@]}" \
+            "$API/actions/runs/$GITHUB_RUN_ID/jobs?filter=latest&per_page=100" \
+            -o /tmp/r93diag/jobs.json
+
+          curl -fsSL "${AUTH[@]}" \
+            "$API/actions/runs/$GITHUB_RUN_ID/artifacts?per_page=100" \
+            -o /tmp/r93diag/artifacts.json
+
+          python3 - <<'PY'
+          import json,os
+          from pathlib import Path
+          jobs=json.loads(Path('/tmp/r93diag/jobs.json').read_text()).get('jobs',[])
+          build=next((x for x in jobs if x.get('name')=='Recover FlashBoot pointer tables and MVA package map / STATIC ONLY'),None)
+          report={
+            'run_id':os.environ.get('GITHUB_RUN_ID'),
+            'run_attempt':os.environ.get('GITHUB_RUN_ATTEMPT'),
+            'repository':os.environ.get('GITHUB_REPOSITORY'),
+            'head_sha':os.environ.get('GITHUB_SHA'),
+            'ref':os.environ.get('GITHUB_REF'),
+            'event':os.environ.get('GITHUB_EVENT_NAME'),
+            'build_result':os.environ.get('BUILD_RESULT'),
+            'build_job':build,
+          }
+          Path('/tmp/r93diag/summary.json').write_text(
+              json.dumps(report,indent=2,ensure_ascii=False)+'\n'
+          )
+          if build and build.get('id'):
+              Path('/tmp/r93diag/build_job_id.txt').write_text(str(build['id']))
+          PY
+
+          : > /tmp/r93diag/build-log-tail.txt
+          if [ -s /tmp/r93diag/build_job_id.txt ]; then
+            JOB_ID="$(cat /tmp/r93diag/build_job_id.txt)"
+            set +e
+            curl -fsSL "${AUTH[@]}" "$API/actions/jobs/$JOB_ID/logs" \
+              -o /tmp/r93diag/build.log
+            RC=$?
+            set -e
+            if [ "$RC" -eq 0 ]; then
+              tail -n 320 /tmp/r93diag/build.log > /tmp/r93diag/build-log-tail.txt
+            else
+              printf 'JOB_LOG_DOWNLOAD_FAILED rc=%s\n' "$RC" \
+                > /tmp/r93diag/build-log-tail.txt
+            fi
+          fi
+
+          {
+            echo '# R93 LAST GITHUB ACTIONS DIAGNOSTIC'
+            echo
+            echo "- Run ID: \`$GITHUB_RUN_ID\`"
+            echo "- Attempt: \`$GITHUB_RUN_ATTEMPT\`"
+            echo "- Event: \`$GITHUB_EVENT_NAME\`"
+            echo "- Ref: \`$GITHUB_REF\`"
+            echo "- Head SHA: \`$GITHUB_SHA\`"
+            echo "- Result: \`$BUILD_RESULT\`"
+            echo
+            echo '## Job / step metadata'
+            echo '~~~json'
+            cat /tmp/r93diag/summary.json
+            echo '~~~'
+            echo
+            echo '## Artifacts'
+            echo '~~~json'
+            cat /tmp/r93diag/artifacts.json
+            echo '~~~'
+            echo
+            echo '## Job log tail'
+            echo '~~~text'
+            cat /tmp/r93diag/build-log-tail.txt
+            echo '~~~'
+          } > /tmp/r93diag/R93_LAST_DIAGNOSTIC.md
+
+      - name: Persist diagnostic to main with race-safe rebase
+        if: ${{ github.event_name != 'pull_request' && github.ref == 'refs/heads/main' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp /tmp/r93diag/R93_LAST_DIAGNOSTIC.md .github/R93_LAST_DIAGNOSTIC.md
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add .github/R93_LAST_DIAGNOSTIC.md
+          if git diff --cached --quiet; then
+            exit 0
+          fi
+          git commit -m "Record R93 Actions diagnostic [skip ci]"
+          git fetch origin main
+          git rebase origin/main
+          git push origin HEAD:main
+
+      - name: Upload diagnostic
+        uses: actions/upload-artifact@v7
+        with:
+          name: R93-RUN-DIAGNOSTIC
+          path: |
+            /tmp/r93diag/R93_LAST_DIAGNOSTIC.md
+            /tmp/r93diag/summary.json
+            /tmp/r93diag/jobs.json
+            /tmp/r93diag/artifacts.json
+            /tmp/r93diag/build-log-tail.txt
+          if-no-files-found: error
+          retention-days: 30
