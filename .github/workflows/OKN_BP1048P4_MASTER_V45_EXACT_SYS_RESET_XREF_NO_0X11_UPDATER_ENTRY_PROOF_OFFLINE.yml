@@ -1,0 +1,450 @@
+name: OKN BP1048P4 MASTER V45 EXACT SYS-RESET XREF + NO-0X11 UPDATER ENTRY PROOF OFFLINE
+
+"on":
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/OKN_BP1048P4_MASTER_V45_EXACT_SYS_RESET_XREF_NO_0X11_UPDATER_ENTRY_PROOF_OFFLINE.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+env:
+  V44_ARTIFACT_ID: "11302220314"
+  SDK_REPO: "https://github.com/leadercxn/bp1048_sdk_v0.1.12.git"
+  SDK_COMMIT: "8105bd864b04995d81c9f9ae77cb158259f39015"
+
+  LIVE_DSP_ALLOWED: "NO"
+  HOST_TO_DSP_IO: "NO"
+  FEATURE_REPORT_ALLOWED: "NO"
+  STARTUP_COMMAND_ALLOWED: "NO"
+  AUTH_REPLY_ALLOWED: "NO"
+  NEW_LIVE_0X11_ALLOWED: "NO"
+  FLASH_ALLOWED: "NO"
+  ERASE_ALLOWED: "NO"
+  WRITE_ALLOWED: "NO"
+
+jobs:
+  v45:
+    name: Trace exact reset and updater call paths in pinned public SDK OFFLINE
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+
+    steps:
+      - name: Gate 0 - immutable safety
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$LIVE_DSP_ALLOWED" = "NO"
+          test "$HOST_TO_DSP_IO" = "NO"
+          test "$FEATURE_REPORT_ALLOWED" = "NO"
+          test "$STARTUP_COMMAND_ALLOWED" = "NO"
+          test "$AUTH_REPLY_ALLOWED" = "NO"
+          test "$NEW_LIVE_0X11_ALLOWED" = "NO"
+          test "$FLASH_ALLOWED" = "NO"
+          test "$ERASE_ALLOWED" = "NO"
+          test "$WRITE_ALLOWED" = "NO"
+
+          rm -rf /tmp/v45
+          mkdir -p /tmp/v45/{downloads,v44,sdk,evidence,out}
+
+          cat > /tmp/v45/evidence/00_SCOPE.txt <<'EOF'
+          REVISION=MASTER-V45
+          MODE=OFFLINE_ONLY
+
+          OBJECTIVE:
+          Resolve the V44 false-positive space by tracing the exact public-SDK
+          semantics of:
+          - top-level runtime control dispatch,
+          - Control 0x01 system config,
+          - gCtrlVars.sys_reset / sys_mode / sys_default_set,
+          - all callers of start_up_grate / pc_upgrade / reset/watchdog APIs,
+          - whether any updater-entry path exists without byte 0x11 and without
+            HID Feature reports.
+
+          No APK is built. No USB I/O occurs. No live frame is produced.
+          FLASH_ALLOWED=NO
+          EOF
+
+      - name: Gate 1 - acquire exact V44 and pinned SDK
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          curl -fL --retry 5 --retry-all-errors \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/artifacts/${V44_ARTIFACT_ID}/zip" \
+            -o /tmp/v45/downloads/v44.zip
+          unzip -q /tmp/v45/downloads/v44.zip -d /tmp/v45/v44
+
+          git clone -q "$SDK_REPO" /tmp/v45/sdk/repo
+          cd /tmp/v45/sdk/repo
+          git checkout -q "$SDK_COMMIT"
+          test "$(git rev-parse HEAD)" = "$SDK_COMMIT"
+
+          {
+            echo "SDK_REPO=$SDK_REPO"
+            echo "SDK_COMMIT=$(git rev-parse HEAD)"
+            echo "V44_ARTIFACT_ID=$V44_ARTIFACT_ID"
+          } > /tmp/v45/evidence/01_PROVENANCE.txt
+
+      - name: Gate 2 - exact runtime dispatch extraction
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import re, json
+
+          root=Path("/tmp/v45/sdk/repo")
+          comm_candidates=list(root.rglob("communication.c"))
+          if not comm_candidates:
+              raise SystemExit("communication.c not found")
+
+          # Prefer the BT_Audio_APP effect transport source.
+          comm=next((p for p in comm_candidates if "BT_Audio_APP" in str(p)), comm_candidates[0])
+          s=comm.read_text(errors="replace")
+
+          def function_body(name):
+              m=re.search(r'\b(?:void|bool|int|uint\w*|static\s+\w+)\s+'+re.escape(name)+r'\s*\([^)]*\)\s*\{',s)
+              if not m: return None
+              i=s.find('{',m.start())
+              depth=0
+              for j in range(i,len(s)):
+                  if s[j]=='{': depth+=1
+                  elif s[j]=='}':
+                      depth-=1
+                      if depth==0:
+                          return s[m.start():j+1]
+              return None
+
+          names=[
+              "Communication_Effect_Config",
+              "Communication_Effect_0x01",
+              "Comm_Effect_0x01",
+              "Communication_Effect_0x00",
+              "Communication_Effect_Send",
+          ]
+          bodies={n:function_body(n) for n in names}
+          missing=[n for n,v in bodies.items() if not v]
+          if missing:
+              raise SystemExit("missing functions: "+",".join(missing))
+
+          out=[]
+          for n in names:
+              out.append(f"===== {n} =====\n{bodies[n]}\n")
+          Path("/tmp/v45/evidence/02_EXACT_RUNTIME_DISPATCH_SLICES.txt").write_text("\n".join(out))
+
+          cases=[]
+          cfg=bodies["Communication_Effect_Config"]
+          for m in re.finditer(r'case\s+(0x[0-9A-Fa-f]+|\d+)\s*:',cfg):
+              token=m.group(1)
+              try: val=int(token,0)
+              except: continue
+              cases.append({"value":val,"hex":f"0x{val:02X}"})
+
+          syscfg=bodies["Comm_Effect_0x01"]
+          subcases=[]
+          for m in re.finditer(r'case\s+(0x[0-9A-Fa-f]+|\d+)\s*:',syscfg):
+              token=m.group(1)
+              try: val=int(token,0)
+              except: continue
+              a=m.start()
+              nxt=re.search(r'\n\s*case\s+',syscfg[m.end():])
+              b=m.end()+nxt.start() if nxt else len(syscfg)
+              ctx=syscfg[a:b]
+              subcases.append({
+                  "value":val,
+                  "hex":f"0x{val:02X}",
+                  "mentions_sys_reset":"sys_reset" in ctx,
+                  "mentions_boot_or_upgrade":bool(re.search(r'boot|upgrade|loader|start_up_grate|pc_upgrade',ctx,re.I)),
+                  "context":ctx
+              })
+
+          result={
+              "communication_c":str(comm.relative_to(root)),
+              "top_level_control_cases":cases,
+              "control_0x01_subcases":subcases,
+              "control_0x00_is_version_response":
+                  all(x in bodies["Communication_Effect_0x00"] for x in
+                      ["tx_buf[2]  = 0x00","Communication_Effect_Send(tx_buf, 12)"]),
+              "control_0x01_contains_sys_reset_assignment":
+                  "gCtrlVars.sys_reset" in bodies["Comm_Effect_0x01"],
+          }
+          Path("/tmp/v45/evidence/03_RUNTIME_DISPATCH_MAP.json").write_text(
+              json.dumps(result,indent=2)+"\n")
+          print(json.dumps(result,indent=2))
+          PY
+
+      - name: Gate 3 - exhaustive symbol xref for reset and upgrade state
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /tmp/v45/sdk/repo
+
+          {
+            echo "===== sys_reset ====="
+            rg -n -S --glob '*.{c,h,cpp,S,s}' '\bsys_reset\b' . || true
+            echo
+            echo "===== sys_mode ====="
+            rg -n -S --glob '*.{c,h,cpp,S,s}' '\bsys_mode\b' . || true
+            echo
+            echo "===== sys_default_set ====="
+            rg -n -S --glob '*.{c,h,cpp,S,s}' '\bsys_default_set\b' . || true
+            echo
+            echo "===== pc_upgrade ====="
+            rg -n -S --glob '*.{c,h,cpp,S,s}' '\bpc_upgrade\b' . || true
+            echo
+            echo "===== start_up_grate / grade ====="
+            rg -n -S --glob '*.{c,h,cpp,S,s}' 'start_up_grate|start_up_grade' . || true
+            echo
+            echo "===== reset/watchdog/jump/boot APIs ====="
+            rg -n -S --glob '*.{c,h,cpp,S,s}' \
+              'SystemReset|system_reset|soft_reset|SoftReset|Watchdog|watchdog|WDT|wdt|ResetChip|ChipReset|jump.*boot|boot.*jump|bootloader|FLASH_BOOT_EN' . || true
+          } > /tmp/v45/evidence/04_EXACT_SYMBOL_XREF.txt
+
+      - name: Gate 4 - classify sys_reset as parameter-only or transition trigger
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import re, json
+
+          root=Path("/tmp/v45/sdk/repo")
+          refs=[]
+          for p in root.rglob("*"):
+              if not p.is_file() or p.suffix.lower() not in {'.c','.h','.cpp','.s','.S'}:
+                  continue
+              try: lines=p.read_text(errors='replace').splitlines()
+              except: continue
+              for i,line in enumerate(lines,1):
+                  if re.search(r'\bsys_reset\b',line):
+                      refs.append({
+                          "path":str(p.relative_to(root)),
+                          "line":i,
+                          "text":line.strip(),
+                          "is_definition":bool(re.search(r'\bsys_reset\s*;',line)),
+                          "is_assignment":bool(re.search(r'\bsys_reset\s*=',line)),
+                          "is_read_or_condition":bool(re.search(r'if\s*\([^)]*sys_reset|switch\s*\([^)]*sys_reset|while\s*\([^)]*sys_reset|return\s+.*sys_reset',line))
+                      })
+
+          readers=[r for r in refs if r["is_read_or_condition"]]
+          assignments=[r for r in refs if r["is_assignment"]]
+
+          result={
+              "sys_reset_reference_count":len(refs),
+              "sys_reset_assignment_count":len(assignments),
+              "sys_reset_explicit_condition_read_count":len(readers),
+              "sys_reset_has_downstream_transition_reader":bool(readers),
+              "references":refs,
+          }
+          Path("/tmp/v45/evidence/05_SYS_RESET_XREF_CLASSIFICATION.json").write_text(
+              json.dumps(result,indent=2)+"\n")
+          print(json.dumps(result,indent=2))
+          PY
+
+      - name: Gate 5 - enumerate all start_up_grate callers and predicates
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import re, json
+
+          root=Path("/tmp/v45/sdk/repo")
+          calls=[]
+          for p in root.rglob("*"):
+              if not p.is_file() or p.suffix.lower() not in {'.c','.h','.cpp'}:
+                  continue
+              try:
+                  s=p.read_text(errors='replace')
+              except:
+                  continue
+              lines=s.splitlines()
+              for i,line in enumerate(lines,1):
+                  if re.search(r'\bstart_up_grate\s*\(|\bstart_up_grade\s*\(',line):
+                      a=max(1,i-20); b=min(len(lines),i+20)
+                      ctx="\n".join(f"{n+1}: {lines[n]}" for n in range(a-1,b))
+                      calls.append({
+                          "path":str(p.relative_to(root)),
+                          "line":i,
+                          "line_text":line.strip(),
+                          "context":ctx,
+                          "mentions_feature":bool(re.search(r'feature|GET_REPORT|SET_REPORT|HID_REQ',ctx,re.I)),
+                          "mentions_pc_upgrade":bool(re.search(r'pc_upgrade',ctx,re.I)),
+                          "mentions_control_0x11":bool(re.search(r'0x11|Control\s*==\s*17|case\s+17',ctx,re.I))
+                      })
+
+          # Function definitions are not callers; keep them marked.
+          for c in calls:
+              c["looks_like_definition"]=bool(re.search(r'^\s*(?:void|int|bool|uint\w*)\s+start_up_grat?e\s*\(',c["line_text"]))
+
+          actual=[c for c in calls if not c["looks_like_definition"]]
+          non_feature_non_11=[
+              c for c in actual
+              if not c["mentions_feature"] and not c["mentions_control_0x11"]
+          ]
+
+          result={
+              "all_occurrences":len(calls),
+              "actual_call_sites":len(actual),
+              "non_feature_non_0x11_call_sites":len(non_feature_non_11),
+              "call_sites":actual,
+              "non_feature_non_0x11_call_sites_detail":non_feature_non_11
+          }
+          Path("/tmp/v45/evidence/06_START_UP_GRATE_CALLERS.json").write_text(
+              json.dumps(result,indent=2)+"\n")
+          print(json.dumps(result,indent=2))
+          PY
+
+      - name: Gate 6 - trace pc_upgrade writers and readers
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import re, json
+
+          root=Path("/tmp/v45/sdk/repo")
+          refs=[]
+          for p in root.rglob("*"):
+              if not p.is_file() or p.suffix.lower() not in {'.c','.h','.cpp'}:
+                  continue
+              try: lines=p.read_text(errors='replace').splitlines()
+              except: continue
+              for i,line in enumerate(lines,1):
+                  if re.search(r'\bpc_upgrade\b',line):
+                      a=max(1,i-8); b=min(len(lines),i+8)
+                      ctx="\n".join(f"{n+1}: {lines[n]}" for n in range(a-1,b))
+                      refs.append({
+                          "path":str(p.relative_to(root)),
+                          "line":i,
+                          "text":line.strip(),
+                          "write":bool(re.search(r'\bpc_upgrade\s*=',line)),
+                          "condition":bool(re.search(r'if\s*\([^)]*pc_upgrade|while\s*\([^)]*pc_upgrade|switch\s*\([^)]*pc_upgrade',line)),
+                          "feature_context":bool(re.search(r'feature|GET_REPORT|SET_REPORT|HID_REQ',ctx,re.I)),
+                          "control_0x11_context":bool(re.search(r'0x11|case\s+17',ctx,re.I)),
+                          "context":ctx,
+                      })
+
+          writes=[x for x in refs if x["write"]]
+          unsafe_writers=[x for x in writes if x["feature_context"] or x["control_0x11_context"]]
+          safeish_writers=[x for x in writes if not x["feature_context"] and not x["control_0x11_context"]]
+
+          result={
+              "reference_count":len(refs),
+              "writer_count":len(writes),
+              "writers_with_feature_or_0x11_context":len(unsafe_writers),
+              "writers_without_feature_or_0x11_context":len(safeish_writers),
+              "writers_without_feature_or_0x11_context_detail":safeish_writers,
+              "all_refs":refs
+          }
+          Path("/tmp/v45/evidence/07_PC_UPGRADE_XREF.json").write_text(
+              json.dumps(result,indent=2)+"\n")
+          print(json.dumps(result,indent=2))
+          PY
+
+      - name: Gate 7 - final exact-path decision
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import json
+
+          reset=json.loads(Path("/tmp/v45/evidence/05_SYS_RESET_XREF_CLASSIFICATION.json").read_text())
+          callers=json.loads(Path("/tmp/v45/evidence/06_START_UP_GRATE_CALLERS.json").read_text())
+          pc=json.loads(Path("/tmp/v45/evidence/07_PC_UPGRADE_XREF.json").read_text())
+          v44=json.loads(Path("/tmp/v45/v44/08_V44_FINAL_DECISION.json").read_text())
+
+          # Exact public-SDK proof requires an actual updater-entry call site that
+          # is outside Feature and outside control 0x11, plus a writer/state path
+          # that also avoids those mechanisms. Anything less remains unproven.
+          non_feature_calls=callers["non_feature_non_0x11_call_sites"]
+          non_feature_writers=pc["writers_without_feature_or_0x11_context"]
+          exact_candidate=bool(non_feature_calls and non_feature_writers)
+
+          if exact_candidate:
+              status="PUBLIC_SDK_NON_FEATURE_NON_0X11_TRANSITION_CANDIDATE_FOUND_OFFLINE_REVIEW_REQUIRED"
+              next_action="V46_INDEPENDENT_CALLGRAPH_AND_FRAME_PROOF_OFFLINE"
+          else:
+              status="PUBLIC_SDK_HAS_NO_EXACT_NON_FEATURE_NON_0X11_UPDATER_ENTRY_PATH"
+              next_action="V46_VENDOR_NATIVE_BINARY_XREF_DEEPENING_OFFLINE"
+
+          final={
+              "revision":"MASTER-V45",
+              "v44_production_safe_entry_proven":v44["production_safe_runtime_to_updater_entry_proven"],
+              "sys_reset_downstream_transition_reader":reset["sys_reset_has_downstream_transition_reader"],
+              "start_up_grate_non_feature_non_0x11_call_sites":non_feature_calls,
+              "pc_upgrade_writers_without_feature_or_0x11":non_feature_writers,
+              "public_sdk_exact_non_feature_non_0x11_transition_candidate":exact_candidate,
+              "production_runtime_to_updater_entry_proven":False,
+              "new_live_0x11_allowed":False,
+              "feature_report_live_allowed":False,
+              "host_to_dsp_io":False,
+              "flash_allowed":False,
+              "status":status,
+              "next_allowed_action":next_action
+          }
+          Path("/tmp/v45/evidence/08_V45_FINAL_DECISION.json").write_text(
+              json.dumps(final,indent=2)+"\n")
+
+          md=f"""# MASTER V45 FINAL DECISION
+
+          V45 replaced V44 proximity matches with exact source xrefs on the pinned
+          public BP1048 SDK.
+
+          - V44 production-safe entry proven: **{v44['production_safe_runtime_to_updater_entry_proven']}**
+          - `sys_reset` has an explicit downstream condition reader: **{reset['sys_reset_has_downstream_transition_reader']}**
+          - `start_up_grate` call sites outside Feature and outside 0x11: **{non_feature_calls}**
+          - `pc_upgrade` writers outside Feature and outside 0x11: **{non_feature_writers}**
+          - public-SDK exact non-Feature/non-0x11 transition candidate: **{exact_candidate}**
+          - production runtime -> updater/recovery proven: **False**
+          - new live byte 0x11: **NOT ALLOWED**
+          - Feature report live use: **NO**
+          - host-to-DSP I/O in V45: **NO**
+          - flash/erase/write: **NO / NO / NO**
+          - `FLASH_ALLOWED = NO`
+
+          Status:
+          **{status}**
+
+          Next allowed action:
+          **{next_action}**
+          """
+          Path("/tmp/v45/evidence/09_V45_FINAL_DECISION.md").write_text(md)
+          print(md)
+          PY
+
+          cp /tmp/v45/evidence/* /tmp/v45/out/
+          (cd /tmp/v45/out && sha256sum * > SHA256SUMS.txt)
+
+      - name: Upload V45 evidence
+        uses: actions/upload-artifact@v7
+        with:
+          name: OKN-BP1048P4-MASTER-V45-EXACT-SYS-RESET-XREF-NO-0X11-EVIDENCE
+          path: /tmp/v45/out/*
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Final fail-closed assertion
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$LIVE_DSP_ALLOWED" = "NO"
+          test "$HOST_TO_DSP_IO" = "NO"
+          test "$FEATURE_REPORT_ALLOWED" = "NO"
+          test "$NEW_LIVE_0X11_ALLOWED" = "NO"
+          test "$FLASH_ALLOWED" = "NO"
+          test "$ERASE_ALLOWED" = "NO"
+          test "$WRITE_ALLOWED" = "NO"
+          grep -q '"flash_allowed": false' /tmp/v45/evidence/08_V45_FINAL_DECISION.json
+          echo "MASTER_V45=PASS"
+          echo "FLASH_ALLOWED=NO"
