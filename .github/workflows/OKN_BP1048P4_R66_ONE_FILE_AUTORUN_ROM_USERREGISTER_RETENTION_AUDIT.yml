@@ -1,0 +1,618 @@
+name: OKN BP1048P4 R66 ONE-FILE AUTO ROM UserRegister Retention Audit
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/OKN_BP1048P4_R66_ONE_FILE_AUTORUN_ROM_USERREGISTER_RETENTION_AUDIT.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+env:
+  TARGET_SOC: "MVSilicon BP1048P4"
+  REQUIRED_PHONE: "Samsung Galaxy S25+"
+  REQUIRED_PATH: "Samsung Galaxy S25+ -> USB-C cable -> DSP board USB-C port only"
+
+  SDK_REPO: "https://github.com/leadercxn/bp1048_sdk_v0.1.12.git"
+  SDK_COMMIT: "8105bd864b04995d81c9f9ae77cb158259f39015"
+
+  TOOLCHAIN_REPO: "https://github.com/xingrz/nds-builder.git"
+  TOOLCHAIN_COMMIT: "572969caccb1d0c576b2893c905fa7b3396815e4"
+  TOOLCHAIN_SHA256: "a231682172de4af23ac94726c021a824f1ae7d1f7c72a4619093b90caa7de0e4"
+
+  R65_ARTIFACT_ID: "11304874032"
+
+  LIVE_USB_ALLOWED: "NO"
+  FEATURE_REPORT_ALLOWED: "NO"
+  RUNTIME_0X11_ALLOWED: "NO"
+  FLASH_READ_ALLOWED: "NO"
+  FLASH_WRITE_ALLOWED: "NO"
+  FLASH_ERASE_ALLOWED: "NO"
+  FLASH_ALLOWED: "NO"
+
+jobs:
+  r66-userregister-retention:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Hard fail-closed gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$TARGET_SOC" = "MVSilicon BP1048P4"
+          test "$REQUIRED_PHONE" = "Samsung Galaxy S25+"
+          test "$REQUIRED_PATH" = "Samsung Galaxy S25+ -> USB-C cable -> DSP board USB-C port only"
+
+          for v in LIVE_USB_ALLOWED FEATURE_REPORT_ALLOWED RUNTIME_0X11_ALLOWED FLASH_READ_ALLOWED FLASH_WRITE_ALLOWED FLASH_ERASE_ALLOWED FLASH_ALLOWED; do
+            test "${!v}" = "NO"
+          done
+
+          rm -rf /tmp/r66
+          mkdir -p /tmp/r66/{sdk,toolchain,r65,evidence,out,extract}
+
+          cat > /tmp/r66/evidence/00_SCOPE.txt <<'EOF'
+          REVISION=R66
+          TARGET=MVSilicon BP1048P4
+          REQUIRED_PATH=Samsung Galaxy S25+ -> USB-C cable -> DSP board USB-C port only
+
+          PURPOSE:
+          Determine whether ROM_UserRegister / retention state exposes a non-flash,
+          software-requested boot/update entry that can be reached from stock USB/HID.
+
+          IMPORTANT:
+          Upgrade RESULT/status persistence must not be confused with an upgrade REQUEST.
+
+          STATIC/OFFLINE ONLY.
+          NO BOARD I/O.
+          NO FEATURE REPORT.
+          NO RUNTIME 0x11.
+          NO RESET EXECUTION.
+          NO FLASH READ/WRITE/ERASE.
+          FLASH_ALLOWED=NO
+          EOF
+
+      - name: Install NDS32 runtime compatibility
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libc6-i386 lib32z1 xz-utils binutils file unzip git >/dev/null
+          dpkg -s libc6-i386 lib32z1 > /tmp/r66/evidence/00B_RUNTIME_PACKAGES.txt
+
+      - name: Download exact successful R65 evidence
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          curl -fL --retry 5 --retry-all-errors \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/artifacts/${R65_ARTIFACT_ID}/zip" \
+            -o /tmp/r66/R65.zip
+
+          unzip -q /tmp/r66/R65.zip -d /tmp/r66/r65
+
+          test -s /tmp/r66/r65/10_R65_FINAL_DECISION.json
+          grep -q '"r65_hypothesis_result": "REJECTED_IN_PUBLIC_REFERENCE"' \
+            /tmp/r66/r65/10_R65_FINAL_DECISION.json
+
+      - name: Clone exact public SDK
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          rm -rf /tmp/r66/sdk
+          git clone --filter=blob:none --no-checkout "$SDK_REPO" /tmp/r66/sdk
+          git -C /tmp/r66/sdk fetch --depth 1 origin "$SDK_COMMIT"
+          git -C /tmp/r66/sdk checkout -q --detach "$SDK_COMMIT"
+
+          test "$(git -C /tmp/r66/sdk rev-parse HEAD)" = "$SDK_COMMIT"
+          echo "SDK_COMMIT_MATCH=YES" > /tmp/r66/evidence/01_SDK_IDENTITY.txt
+
+      - name: Fetch exact NDS32 toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          git init -q /tmp/r66/toolchain-src
+          git -C /tmp/r66/toolchain-src remote add origin "$TOOLCHAIN_REPO"
+          git -C /tmp/r66/toolchain-src fetch -q --depth 1 origin "$TOOLCHAIN_COMMIT"
+          git -C /tmp/r66/toolchain-src checkout -q --detach FETCH_HEAD
+
+          T=/tmp/r66/toolchain-src/nds32le-elf-mculib-v3s.4.9.4.txz
+          echo "${TOOLCHAIN_SHA256}  ${T}" | sha256sum -c -
+
+          tar -xJf "$T" -C /tmp/r66/toolchain
+          TC=/tmp/r66/toolchain/nds32le-elf-mculib-v3s/bin
+
+          "$TC/nds32le-elf-nm" --version > /tmp/r66/evidence/01B_NM_VERSION.txt
+          "$TC/nds32le-elf-objdump" --version > /tmp/r66/evidence/01C_OBJDUMP_VERSION.txt
+          "$TC/nds32le-elf-ar" --version > /tmp/r66/evidence/01D_AR_VERSION.txt
+
+          ldd "$TC/nds32le-elf-nm" > /tmp/r66/evidence/01E_NM_LDD.txt || true
+          ! grep -q 'not found' /tmp/r66/evidence/01E_NM_LDD.txt
+
+          echo "$TC" >> "$GITHUB_PATH"
+
+      - name: Exact source census for UserRegister and persistent boot state
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /tmp/r66/sdk
+
+          {
+            echo "=== ROM UserRegister source references ==="
+            git grep -n -I -E \
+              'ROM_UserRegister(Get|Set|Clear)|UserRegister' \
+              -- . || true
+
+            echo
+            echo "=== upgrade status/result constants ==="
+            git grep -n -I -E \
+              'USER_CODE_RUN_START|UPDAT_OK|NEEDLESS_UPDAT|ERROR_CODE|POR_CODE|NO_PC_LINK|PROCESS_.*ERR|FLASH_UNLOCK_ERR' \
+              -- . || true
+
+            echo
+            echo "=== actual updater request/handoff state ==="
+            git grep -n -I -E \
+              'ADR_FLASH_BOOT_FLAGE|SREG_FLASH_BOOT_FLAGE|start_up_grate|AppResourceUsbDevice|pc_upgrade|updata[[:space:]]*=' \
+              -- . || true
+
+            echo
+            echo "=== reset/retention/backup state ==="
+            git grep -n -I -E \
+              'retention|backup.?reg|BACKUP_|Reset_Flag(Get|Clear)|Reset_McuSystem|POR|watchdog|WDG_' \
+              -- . || true
+
+            echo
+            echo "=== USB/HID request handlers ==="
+            git grep -n -I -E \
+              'OTG_Device(Standard|Class|Manufacturer)Request|SET_REPORT|GET_REPORT|HIDUsb_Rx|UsbLoadAudioMode' \
+              -- MVsB1_Base_SDK BT_Audio_APP || true
+          } > /tmp/r66/evidence/02_SOURCE_CENSUS.txt
+
+          git grep -n -I -E \
+            'ROM_UserRegister(Get|Set|Clear)|UserRegister' \
+            -- . > /tmp/r66/evidence/03_USERREGISTER_SOURCE_XREFS.txt || true
+
+          git grep -n -I -E \
+            'USER_CODE_RUN_START|UPDAT_OK|NEEDLESS_UPDAT|ERROR_CODE|POR_CODE' \
+            -- . > /tmp/r66/evidence/04_RESULT_STATUS_XREFS.txt || true
+
+          git grep -n -I -E \
+            'ADR_FLASH_BOOT_FLAGE|SREG_FLASH_BOOT_FLAGE|start_up_grate|AppResourceUsbDevice|pc_upgrade' \
+            -- . > /tmp/r66/evidence/05_BOOT_REQUEST_XREFS.txt || true
+
+      - name: Audit every SDK archive for UserRegister symbols and callers
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /tmp/r66/sdk
+
+          : > /tmp/r66/evidence/06_USERREGISTER_ARCHIVE_SYMBOLS.txt
+          : > /tmp/r66/evidence/07_USERREGISTER_ARCHIVE_RELOCS.txt
+          : > /tmp/r66/evidence/08_ARCHIVE_HEALTH.txt
+
+          ARCHIVE_COUNT=0
+          NM_OK_COUNT=0
+
+          while IFS= read -r a; do
+            ARCHIVE_COUNT=$((ARCHIVE_COUNT+1))
+            TMP=/tmp/r66/nm.$ARCHIVE_COUNT.txt
+            ERR=/tmp/r66/nm.$ARCHIVE_COUNT.err
+
+            if nds32le-elf-nm -A "$a" > "$TMP" 2> "$ERR"; then
+              NM_OK_COUNT=$((NM_OK_COUNT+1))
+            else
+              echo "NM_FAILED=$a" >&2
+              cat "$ERR" >&2
+              exit 1
+            fi
+
+            grep -E \
+              'ROM_UserRegister(Get|Set|Clear)|UserRegister' \
+              "$TMP" >> /tmp/r66/evidence/06_USERREGISTER_ARCHIVE_SYMBOLS.txt || true
+
+            if grep -Eq 'ROM_UserRegister(Get|Set|Clear)' "$TMP"; then
+              echo "===== $a =====" >> /tmp/r66/evidence/07_USERREGISTER_ARCHIVE_RELOCS.txt
+              nds32le-elf-objdump -dr "$a" 2>/dev/null | \
+                grep -E -B16 -A80 \
+                '<ROM_UserRegisterGet>|<ROM_UserRegisterSet>|<ROM_UserRegisterClear>|ROM_UserRegisterGet|ROM_UserRegisterSet|ROM_UserRegisterClear' \
+                >> /tmp/r66/evidence/07_USERREGISTER_ARCHIVE_RELOCS.txt || true
+            fi
+          done < <(find . -type f -name '*.a' | sort)
+
+          printf 'ARCHIVE_COUNT=%d\nNM_OK_COUNT=%d\n' \
+            "$ARCHIVE_COUNT" "$NM_OK_COUNT" \
+            | tee /tmp/r66/evidence/08_ARCHIVE_HEALTH.txt
+
+          test "$ARCHIVE_COUNT" -gt 0
+          test "$NM_OK_COUNT" -eq "$ARCHIVE_COUNT"
+
+          cat /tmp/r66/evidence/06_USERREGISTER_ARCHIVE_SYMBOLS.txt
+          sed -n '1,1600p' /tmp/r66/evidence/07_USERREGISTER_ARCHIVE_RELOCS.txt
+
+      - name: Extract and disassemble libDriver rom object
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          LIB=/tmp/r66/sdk/MVsB1_Base_SDK/driver/driver/libDriver.a
+          test -s "$LIB"
+
+          cd /tmp/r66/extract
+          nds32le-elf-ar x "$LIB"
+
+          test -s rom.o
+
+          nds32le-elf-nm -a rom.o \
+            > /tmp/r66/evidence/09_ROM_O_SYMBOLS.txt
+
+          nds32le-elf-objdump -dr rom.o \
+            > /tmp/r66/evidence/10_ROM_O_DISASSEMBLY.txt
+
+          grep -E -B20 -A100 \
+            '<ROM_UserRegisterGet>|<ROM_UserRegisterSet>|<ROM_UserRegisterClear>' \
+            /tmp/r66/evidence/10_ROM_O_DISASSEMBLY.txt \
+            > /tmp/r66/evidence/11_USERREGISTER_FUNCTIONS_DISASM.txt || true
+
+          grep -E \
+            'ROM_UserRegister(Get|Set|Clear)|ROM_BankBUpgrade|Reset_McuSystem|Upgrade|Boot|UserRegister' \
+            /tmp/r66/evidence/09_ROM_O_SYMBOLS.txt \
+            > /tmp/r66/evidence/12_ROM_RELEVANT_SYMBOLS.txt || true
+
+          sed -n '1,1200p' /tmp/r66/evidence/11_USERREGISTER_FUNCTIONS_DISASM.txt
+          cat /tmp/r66/evidence/12_ROM_RELEVANT_SYMBOLS.txt
+
+      - name: Classify UserRegister semantics from exact call sites
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python3 - <<'PY'
+          from pathlib import Path
+          import json, re
+
+          S=Path("/tmp/r66/sdk")
+          E=Path("/tmp/r66/evidence")
+
+          files=[]
+          for p in S.rglob("*"):
+              if not p.is_file() or ".git" in p.parts:
+                  continue
+              if p.suffix.lower() not in {".c",".h",".cpp",".cc",".s",".asm",".inc",".txt"}:
+                  continue
+              try:
+                  t=p.read_text(errors="replace")
+              except Exception:
+                  continue
+              files.append((p,t))
+
+          def hit_rows(pattern):
+              rx=re.compile(pattern)
+              out=[]
+              for p,t in files:
+                  for no,line in enumerate(t.splitlines(),1):
+                      if rx.search(line):
+                          out.append({
+                              "path":str(p.relative_to(S)),
+                              "line":no,
+                              "text":line.strip()
+                          })
+              return out
+
+          get_rows=hit_rows(r'\bROM_UserRegisterGet\s*\(')
+          set_rows=hit_rows(r'\bROM_UserRegisterSet\s*\(')
+          clear_rows=hit_rows(r'\bROM_UserRegisterClear\s*\(')
+
+          # Ignore prototypes/declarations when classifying call sites.
+          def calls(rows):
+              out=[]
+              for r in rows:
+                  t=r["text"]
+                  if re.search(r'^\s*(?:extern\s+)?(?:void|u?int\d*_t|unsigned|int|long)\b.*ROM_UserRegister', t):
+                      continue
+                  out.append(r)
+              return out
+
+          get_calls=calls(get_rows)
+          set_calls=calls(set_rows)
+          clear_calls=calls(clear_rows)
+
+          # USB/HID-side UserRegister writes would be the high-value alternate entry.
+          usb_terms=("usb","hid","otg","communication")
+          usb_userregister_set_calls=[
+              r for r in set_calls
+              if any(term in r["path"].lower() for term in usb_terms)
+          ]
+
+          # Known report_up_grate behavior in upgrade.c:
+          up=S/"BT_Audio_APP/bt_audio_app_src/device/upgrade.c"
+          ut=up.read_text(errors="replace")
+
+          report_gets_status=(
+              "err_code = ROM_UserRegisterGet()" in ut
+              and "err_code = (err_code&0x1f)" in ut
+          )
+          report_clears_status=(
+              "ROM_UserRegisterSet(clear_data)" in ut
+              and "clear_data = (clear_data&0xffe0)" in ut
+          )
+
+          # Critically, start_up_grate uses the RAM flag at 0x4000100C, not UserRegister.
+          startup_body=""
+          m=re.search(
+              r'void\s+start_up_grate\s*\([^)]*\)\s*\{(.*?)\n\}',
+              ut,re.S
+          )
+          if m:
+              startup_body=m.group(1)
+
+          startup_uses_userregister="ROM_UserRegister" in startup_body
+          startup_uses_ram_flag=(
+              "ADR_FLASH_BOOT_FLAGE" in startup_body
+              and "SREG_FLASH_BOOT_FLAGE" in startup_body
+          )
+
+          # Check whether any source function both writes UserRegister and reaches
+          # a boot handoff/reset primitive.
+          bridge_candidates=[]
+          primitive_rx=re.compile(
+              r'start_up_grate|Reset_McuSystem|jump_fun|ADR_FLASH_BOOT_FLAGE|SREG_FLASH_BOOT_FLAGE'
+          )
+          for p,t in files:
+              if "ROM_UserRegisterSet" in t and primitive_rx.search(t):
+                  # File-level proximity is not proof; retain as candidate only.
+                  bridge_candidates.append(str(p.relative_to(S)))
+
+          # Look for status constants near UserRegister uses.
+          status_terms=[
+              "USER_CODE_RUN_START","UPDAT_OK","NEEDLESS_UPDAT",
+              "ERROR_CODE","POR_CODE"
+          ]
+          status_near_userregister=[]
+          for p,t in files:
+              if "ROM_UserRegister" not in t:
+                  continue
+              present=[x for x in status_terms if x in t]
+              if present:
+                  status_near_userregister.append({
+                      "path":str(p.relative_to(S)),
+                      "status_terms":present
+                  })
+
+          archive_symbols=(E/"06_USERREGISTER_ARCHIVE_SYMBOLS.txt").read_text(errors="replace")
+          rom_symbols=(E/"12_ROM_RELEVANT_SYMBOLS.txt").read_text(errors="replace")
+
+          state={
+              "sdk_commit":"8105bd864b04995d81c9f9ae77cb158259f39015",
+              "rom_userregister_get_definition_present":"ROM_UserRegisterGet" in archive_symbols,
+              "rom_userregister_set_definition_present":"ROM_UserRegisterSet" in archive_symbols,
+              "rom_userregister_clear_definition_present":"ROM_UserRegisterClear" in archive_symbols,
+              "source_get_calls":get_calls,
+              "source_set_calls":set_calls,
+              "source_clear_calls":clear_calls,
+              "usb_hid_userregister_set_calls":usb_userregister_set_calls,
+              "report_up_grate_reads_low5_status_bits":report_gets_status,
+              "report_up_grate_clears_low5_status_bits":report_clears_status,
+              "start_up_grate_uses_userregister":startup_uses_userregister,
+              "start_up_grate_uses_ram_bootflag":startup_uses_ram_flag,
+              "files_with_userregister_set_and_boot_primitive_terms":bridge_candidates,
+              "status_terms_near_userregister":status_near_userregister,
+              "rom_object_relevant_symbols_seen":bool(rom_symbols.strip()),
+          }
+
+          # Conservative interpretation.
+          state["userregister_proven_as_upgrade_result_status_channel"]=(
+              report_gets_status and report_clears_status
+          )
+          state["userregister_proven_as_upgrade_request_channel"]=False
+          state["runtime_usb_to_userregister_boot_request_proven"]=False
+          state["nonflash_first_install_trigger_unlocked"]=False
+          state["flash_allowed"]=False
+
+          if usb_userregister_set_calls:
+              state["note"]=(
+                  "USB/HID UserRegisterSet source call exists and requires exact "
+                  "function-level callgraph review before any live test."
+              )
+          else:
+              state["note"]=(
+                  "Observed source semantics support upgrade result/status reporting; "
+                  "no USB/HID UserRegisterSet boot-request path was found."
+              )
+
+          (E/"13_R66_USERREGISTER_DECISION.json").write_text(
+              json.dumps(state,indent=2,ensure_ascii=False)+"\n"
+          )
+          print(json.dumps(state,indent=2,ensure_ascii=False))
+          PY
+
+      - name: Exact function-level bridge audit
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python3 - <<'PY'
+          from pathlib import Path
+          import json, re
+
+          S=Path("/tmp/r66/sdk")
+          E=Path("/tmp/r66/evidence")
+          d=json.loads((E/"13_R66_USERREGISTER_DECISION.json").read_text())
+
+          rows=[]
+          for p in S.rglob("*.c"):
+              if ".git" in p.parts:
+                  continue
+              try:
+                  t=p.read_text(errors="replace")
+              except Exception:
+                  continue
+
+              # Simple C function slicing sufficient for proving absence/presence
+              # of same-function UserRegisterSet + boot primitive.
+              rx=re.compile(
+                  r'([A-Za-z_][A-Za-z0-9_\s\*]*?)\b([A-Za-z_][A-Za-z0-9_]*)\s*\([^;{}]*\)\s*\{',
+                  re.M
+              )
+              for m in rx.finditer(t):
+                  start=m.start()
+                  brace=t.find("{",m.start())
+                  depth=0
+                  end=None
+                  for i in range(brace,len(t)):
+                      if t[i]=="{":
+                          depth+=1
+                      elif t[i]=="}":
+                          depth-=1
+                          if depth==0:
+                              end=i+1
+                              break
+                  if end is None:
+                      continue
+                  body=t[start:end]
+                  if "ROM_UserRegisterSet" not in body:
+                      continue
+                  primitives=[
+                      x for x in [
+                          "start_up_grate","Reset_McuSystem",
+                          "ADR_FLASH_BOOT_FLAGE","SREG_FLASH_BOOT_FLAGE",
+                          "jump_fun"
+                      ] if x in body
+                  ]
+                  rows.append({
+                      "path":str(p.relative_to(S)),
+                      "function":m.group(2),
+                      "boot_primitives":primitives,
+                      "userregister_set":True
+                  })
+
+          true_bridges=[r for r in rows if r["boot_primitives"]]
+
+          result={
+              "functions_containing_userregister_set":rows,
+              "same_function_userregister_set_plus_boot_primitive":true_bridges,
+              "same_function_boot_request_bridge_proven":bool(true_bridges),
+          }
+
+          (E/"14_R66_FUNCTION_BRIDGE_AUDIT.json").write_text(
+              json.dumps(result,indent=2,ensure_ascii=False)+"\n"
+          )
+
+          d["same_function_userregister_set_plus_boot_primitive"]=true_bridges
+          d["same_function_boot_request_bridge_proven"]=bool(true_bridges)
+
+          # Even if report_up_grate contains status handling and boot-related constants
+          # elsewhere in upgrade.c, status-clear logic itself is not a request path.
+          if true_bridges:
+              d["needs_manual_bridge_review"]=True
+              d["nonflash_first_install_trigger_unlocked"]=False
+          else:
+              d["needs_manual_bridge_review"]=False
+
+          d["r66_result"]=(
+              "USERREGISTER_RESULT_STATUS_ONLY_NO_USB_BOOT_REQUEST_PROVEN"
+              if not true_bridges and not d["usb_hid_userregister_set_calls"]
+              else
+              "USERREGISTER_BRIDGE_CANDIDATE_REQUIRES_MANUAL_REVIEW"
+          )
+          d["flash_allowed"]=False
+
+          (E/"15_R66_FINAL_DECISION.json").write_text(
+              json.dumps(d,indent=2,ensure_ascii=False)+"\n"
+          )
+          print(json.dumps(d,indent=2,ensure_ascii=False))
+          PY
+
+      - name: Build R66 final report
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python3 - <<'PY'
+          from pathlib import Path
+          import json
+
+          E=Path("/tmp/r66/evidence")
+          d=json.loads((E/"15_R66_FINAL_DECISION.json").read_text())
+
+          lines=[
+              "# R66 BP1048P4 ROM UserRegister / retention audit",
+              "",
+              "Required path:",
+              "**Samsung Galaxy S25+ -> USB-C -> DSP board USB-C only**",
+              "",
+              "Findings:",
+              f"- ROM_UserRegisterGet definition present: **{d['rom_userregister_get_definition_present']}**",
+              f"- ROM_UserRegisterSet definition present: **{d['rom_userregister_set_definition_present']}**",
+              f"- ROM_UserRegisterClear definition present: **{d['rom_userregister_clear_definition_present']}**",
+              f"- report_up_grate reads low 5 bits as upgrade status: **{d['report_up_grate_reads_low5_status_bits']}**",
+              f"- report_up_grate clears those low status bits: **{d['report_up_grate_clears_low5_status_bits']}**",
+              f"- start_up_grate uses UserRegister: **{d['start_up_grate_uses_userregister']}**",
+              f"- start_up_grate uses RAM boot flag 0x4000100C: **{d['start_up_grate_uses_ram_bootflag']}**",
+              f"- USB/HID UserRegisterSet call count: **{len(d['usb_hid_userregister_set_calls'])}**",
+              f"- same-function UserRegisterSet + boot primitive proven: **{d['same_function_boot_request_bridge_proven']}**",
+              "",
+              "Decision:",
+              f"**{d['r66_result']}**",
+              "",
+              "Interpretation:",
+              "- UserRegister result/status persistence is not automatically an updater-entry request.",
+              "- No UserRegister value is authorized for live testing unless an exact boot-selection consumer is proven.",
+              "- No flash or board I/O occurred in R66.",
+              "",
+              "Next branch if result/status-only is confirmed:",
+              "Audit ROM/reset startup consumers and hidden boot-decision reads for a non-flash request bit;",
+              "if none exists, the USB-C-only first-install path must be solved through the stock Feature/start_up_grate",
+              "compile-gate behavior rather than inventing a register value.",
+              "",
+              "FLASH_ALLOWED=NO",
+          ]
+
+          (E/"16_R66_FINAL_REPORT.md").write_text("\n".join(lines)+"\n")
+          print("\n".join(lines))
+          PY
+
+          cat /tmp/r66/evidence/16_R66_FINAL_REPORT.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Package R66 evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cp /tmp/r66/evidence/* /tmp/r66/out/
+          (cd /tmp/r66/out && sha256sum * > SHA256SUMS.txt)
+
+      - name: Upload R66 evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: R66_BP1048P4_ROM_USERREGISTER_RETENTION_AUDIT
+          path: /tmp/r66/out/*
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Final fail-closed assertion
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          for v in LIVE_USB_ALLOWED FEATURE_REPORT_ALLOWED RUNTIME_0X11_ALLOWED FLASH_READ_ALLOWED FLASH_WRITE_ALLOWED FLASH_ERASE_ALLOWED FLASH_ALLOWED; do
+            test "${!v}" = "NO"
+          done
+
+          test -s /tmp/r66/evidence/15_R66_FINAL_DECISION.json
+          grep -q '"flash_allowed": false' /tmp/r66/evidence/15_R66_FINAL_DECISION.json
+
+          echo "R66_USERREGISTER_RETENTION_AUDIT=PASS"
+          echo "FLASH_ALLOWED=NO"
