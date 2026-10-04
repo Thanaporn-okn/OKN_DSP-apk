@@ -1,0 +1,631 @@
+name: OKN BP1048P4 R88 AUTO-RUN Firmware Layout and Container Map
+
+on:
+  push:
+    branches: [main, master]
+    paths:
+      - '.github/workflows/OKN_BP1048P4_R88_AUTO_RUN_FIRMWARE_LAYOUT_CONTAINER_MAP.yml'
+      - '**/*.bin'
+      - '**/*.img'
+      - '**/*.fw'
+      - '**/*.rom'
+      - '**/*.mva'
+      - '**/*.ota'
+      - '**/*.dfu'
+      - '**/*.upd'
+      - '**/*.hex'
+      - '**/*.elf'
+      - '**/*.map'
+      - '**/*.ld'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: read
+
+concurrency:
+  group: okn-r88-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  SDK_REPO: "https://github.com/leadercxn/bp1048_sdk_v0.1.12.git"
+  SDK_COMMIT: "8105bd864b04995d81c9f9ae77cb158259f39015"
+  OUT: "/tmp/r88"
+  BOARD_USB_ACCESS: "NO"
+  HOST_TO_DEVICE_USB: "NO"
+  FLASH_ERASE_WRITE: "NO"
+  FLASH_ALLOWED: "NO"
+
+jobs:
+  map-firmware:
+    name: Map firmware layout / update container / static only
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Fail-closed scope gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$BOARD_USB_ACCESS" = "NO"
+          test "$HOST_TO_DEVICE_USB" = "NO"
+          test "$FLASH_ERASE_WRITE" = "NO"
+          test "$FLASH_ALLOWED" = "NO"
+          rm -rf "$OUT"
+          mkdir -p "$OUT/evidence"
+          cat > "$OUT/evidence/00_SCOPE.txt" <<'EOF'
+          REVISION=R88
+          MODE=OFFLINE_STATIC_ONLY
+          TARGET=MVSilicon_BP1048P4
+          BOARD_USB_ACCESS=NO
+          LIVE_USB_COMMANDS=NO
+          AA55_RETEST=NO
+          CONTROL_0X11_LIVE=NO
+          ERASE=NO
+          WRITE=NO
+          FLASH_ALLOWED=NO
+          R87_RESULT=NO_PROVEN_NONDESTRUCTIVE_HOST_VISIBLE_FLASH_READBACK
+          GOAL=Recover_flash_layout_update_container_headers_crc_sections_and_candidate_image_signatures
+          EOF
+
+      - name: Pin exact SDK
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone -q "$SDK_REPO" "$OUT/sdk"
+          git -C "$OUT/sdk" checkout -q "$SDK_COMMIT"
+          test "$(git -C "$OUT/sdk" rev-parse HEAD)" = "$SDK_COMMIT"
+          printf 'SDK_COMMIT=%s\n' "$(git -C "$OUT/sdk" rev-parse HEAD)" \
+            > "$OUT/evidence/01_PIN.txt"
+
+      - name: Extract flash layout and update-container evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import os, re, json, hashlib, math, collections
+
+          root = Path(os.environ["OUT"]) / "sdk"
+          repo = Path(os.environ["GITHUB_WORKSPACE"])
+          ev = Path(os.environ["OUT"]) / "evidence"
+
+          text_ext = {
+              ".c",".h",".s",".S",".ld",".lds",".map",".mk",".mak",".txt",".md",
+              ".ini",".cfg",".conf",".xml",".json",".yml",".yaml",".bat",".sh"
+          }
+
+          # High-value tokens grounded in prior static evidence and SDK naming.
+          needles = [
+              "FLASH_MVA", "MVA_UPDATE", "MVA", "SpiFlashRead", "SpiFlashWrite",
+              "SpiFlashErase", "start_up_grate", "pc_upgrade", "AppResourceUsbDevice",
+              "CRC", "CHECKSUM", "checksum", "crc", "bootdat", "codedata",
+              "constdat", "cnfgdat", "btupdat", "upinfo", "cxxx",
+              "FLASH_BOOT", "UPDATE", "UPGRADE", "CODE_START", "CODE_SIZE",
+              "CONST_START", "CONFIG_START", "FLASH_SIZE", "SECTOR_SIZE",
+              "ADR_FLASH", "ADDR_FLASH", "OFFSET", "PARTITION"
+          ]
+
+          def read_text(p):
+              try:
+                  return p.read_text(errors="ignore")
+              except Exception:
+                  return ""
+
+          source_index = []
+          contexts = []
+          define_rows = []
+          linker_rows = []
+          string_rows = []
+          file_hashes = []
+
+          define_re = re.compile(
+              r'(?m)^\s*#\s*define\s+([A-Za-z_]\w*)\s+'
+              r'((?:0x[0-9A-Fa-f]+|\d+)(?:[uUlL]{0,3})?|'
+              r'\([^\n]{1,120}\)|[A-Za-z_]\w*(?:\s*[+\-*/<>|&]\s*(?:0x[0-9A-Fa-f]+|\d+|[A-Za-z_]\w*)){0,6})'
+          )
+          memory_re = re.compile(
+              r'(?im)^\s*([A-Za-z_]\w*)\s*\([^)]*\)\s*:\s*'
+              r'ORIGIN\s*=\s*([^,\n]+)\s*,\s*LENGTH\s*=\s*([^\n]+)'
+          )
+          section_re = re.compile(
+              r'(?m)^\s*(\.[A-Za-z0-9_.$]+)\s*(?:0x([0-9A-Fa-f]+))?'
+          )
+          ascii_re = re.compile(rb'[\x20-\x7e]{4,}')
+
+          for p in sorted(root.rglob("*")):
+              if not p.is_file():
+                  continue
+              rel = str(p.relative_to(root))
+              try:
+                  data = p.read_bytes()
+              except Exception:
+                  continue
+              sha = hashlib.sha256(data).hexdigest()
+              file_hashes.append({"path":rel,"bytes":len(data),"sha256":sha})
+
+              if p.suffix in text_ext or len(data) < 2_000_000:
+                  t = data.decode("utf-8", errors="ignore")
+                  if t:
+                      source_index.append(rel)
+
+                      lines = t.splitlines()
+                      for i, line in enumerate(lines):
+                          hit = [n for n in needles if n.lower() in line.lower()]
+                          if hit:
+                              lo=max(0,i-3); hi=min(len(lines),i+6)
+                              contexts.append({
+                                  "path":rel,
+                                  "line":i+1,
+                                  "needles":hit,
+                                  "context":"\n".join(
+                                      f"{j+1}: {lines[j]}" for j in range(lo,hi)
+                                  )
+                              })
+
+                      for m in define_re.finditer(t):
+                          name, value = m.group(1), m.group(2).strip()
+                          upper = name.upper()
+                          if any(k in upper for k in (
+                              "FLASH","ADDR","ADR","OFFSET","SIZE","LEN",
+                              "CRC","CHECK","MVA","BOOT","CODE","CONST",
+                              "CONFIG","CNFG","UPDATE","UPGRADE","SECTOR"
+                          )):
+                              define_rows.append({
+                                  "path":rel,
+                                  "line":t.count("\n",0,m.start())+1,
+                                  "name":name,
+                                  "value":value,
+                              })
+
+                      if p.suffix.lower() in {".ld",".lds",".map"} or "MEMORY" in t:
+                          memories = []
+                          for m in memory_re.finditer(t):
+                              memories.append({
+                                  "region":m.group(1),
+                                  "origin":m.group(2).strip(),
+                                  "length":m.group(3).strip(),
+                                  "line":t.count("\n",0,m.start())+1,
+                              })
+                          sections = []
+                          for m in section_re.finditer(t):
+                              sections.append({
+                                  "section":m.group(1),
+                                  "address_hex":m.group(2),
+                                  "line":t.count("\n",0,m.start())+1,
+                              })
+                          if memories or sections:
+                              linker_rows.append({
+                                  "path":rel,
+                                  "memories":memories,
+                                  "sections":sections[:500],
+                              })
+
+              # Search short ASCII protocol/update strings in every file.
+              if len(data) <= 32_000_000:
+                  for s in ascii_re.findall(data):
+                      low = s.lower()
+                      if any(k.encode().lower() in low for k in (
+                          "bootdat","codedata","constdat","cnfgdat","btupdat",
+                          "upinfo","cxxx","upgrade","update","mva","crc","flash"
+                      )):
+                          st = s[:180].decode("ascii",errors="ignore")
+                          string_rows.append({"path":rel,"string":st})
+
+          # Deduplicate high-value strings.
+          uniq_strings = []
+          seen = set()
+          for r in string_rows:
+              k=(r["path"],r["string"])
+              if k not in seen:
+                  seen.add(k)
+                  uniq_strings.append(r)
+
+          # Detect update/flash-related functions using ctags-like regex context,
+          # but only for reporting source locations, not executing firmware.
+          funcs = []
+          fn_re = re.compile(
+              r'(?m)^[ \t]*(?:static\s+)?(?:inline\s+)?'
+              r'(?:[A-Za-z_]\w*(?:\s*\*)?\s+)+'
+              r'([A-Za-z_]\w*)\s*\([^;{}]*\)\s*(?://[^\n]*)?\n?[ \t]*\{'
+          )
+          for p in sorted(root.rglob("*.c")):
+              t = read_text(p)
+              rel = str(p.relative_to(root))
+              for m in fn_re.finditer(t):
+                  name = m.group(1)
+                  if any(k in name.lower() for k in (
+                      "upgrade","update","flash","mva","crc","checksum",
+                      "boot","userwrite","resource"
+                  )):
+                      funcs.append({
+                          "path":rel,
+                          "line":t.count("\n",0,m.start())+1,
+                          "name":name,
+                      })
+
+          # Repository-wide candidate scan: extension plus binary/magic heuristics.
+          candidate_ext = {
+              ".mva",".bin",".img",".fw",".rom",".ota",".dfu",".upd",
+              ".hex",".elf",".axf",".adx",".pack",".dat"
+          }
+          repo_candidates = []
+
+          def entropy(sample):
+              if not sample:
+                  return 0.0
+              c=collections.Counter(sample)
+              n=len(sample)
+              return -sum((v/n)*math.log2(v/n) for v in c.values())
+
+          for p in sorted(repo.rglob("*")):
+              if not p.is_file() or ".git" in p.parts:
+                  continue
+              try:
+                  data=p.read_bytes()
+              except Exception:
+                  continue
+              rel=str(p.relative_to(repo))
+              ext=p.suffix.lower()
+              sample=data[:262144]
+              ascii_sample=" ".join(
+                  x.decode("ascii",errors="ignore")[:120]
+                  for x in ascii_re.findall(sample)[:30]
+              )
+              magic_hits=[
+                  k for k in (
+                      "bootdat","codedata","constdat","cnfgdat","btupdat",
+                      "upinfo","cxxx","mva","firmware","upgrade"
+                  )
+                  if k in ascii_sample.lower()
+              ]
+              is_binary = b"\x00" in sample[:4096] if sample else False
+              if ext in candidate_ext or magic_hits or (
+                  is_binary and len(data) >= 65536 and entropy(sample) >= 6.5
+              ):
+                  repo_candidates.append({
+                      "path":rel,
+                      "bytes":len(data),
+                      "extension":ext,
+                      "sha256":hashlib.sha256(data).hexdigest(),
+                      "sample_entropy":round(entropy(sample),4),
+                      "magic_hits":magic_hits,
+                      "first64_hex":data[:64].hex().upper(),
+                      "ascii_sample":ascii_sample[:1000],
+                  })
+
+          # Strong constants subset with evaluated plain numeric values.
+          numeric = []
+          for r in define_rows:
+              v=r["value"].rstrip("uUlL")
+              if re.fullmatch(r'0x[0-9A-Fa-f]+|\d+',v):
+                  try:
+                      n=int(v,0)
+                  except Exception:
+                      continue
+                  if any(k in r["name"].upper() for k in (
+                      "FLASH","ADDR","ADR","OFFSET","SIZE","SECTOR",
+                      "BOOT","CODE","CONST","CONFIG","UPDATE","MVA"
+                  )):
+                      numeric.append({**r,"numeric":n,"hex":hex(n)})
+
+          # Summaries by symbol name, preserving all conflicting definitions.
+          symbols = collections.defaultdict(list)
+          for r in numeric:
+              symbols[r["name"]].append({
+                  "path":r["path"],"line":r["line"],
+                  "value":r["value"],"numeric":r["numeric"],"hex":r["hex"]
+              })
+
+          symbol_summary = [
+              {"name":k,"definitions":v}
+              for k,v in sorted(symbols.items())
+          ]
+
+          decision = {
+              "sdk_commit":os.environ["SDK_COMMIT"],
+              "source_files_indexed":len(source_index),
+              "high_value_contexts":len(contexts),
+              "flash_update_defines":len(define_rows),
+              "numeric_layout_symbols":len(numeric),
+              "linker_or_map_files":len(linker_rows),
+              "update_related_functions":len(funcs),
+              "high_value_ascii_strings":len(uniq_strings),
+              "repository_candidate_files":len(repo_candidates),
+              "proven_production_full_flash_backup_present":False,
+              "proven_host_visible_full_flash_readback":False,
+              "flash_allowed":False,
+          }
+
+          (ev/"02_FILE_HASHES.json").write_text(json.dumps(file_hashes,indent=2)+'\n')
+          (ev/"03_FLASH_UPDATE_DEFINES.json").write_text(json.dumps(define_rows,indent=2,ensure_ascii=False)+'\n')
+          (ev/"04_NUMERIC_LAYOUT_SYMBOLS.json").write_text(json.dumps(symbol_summary,indent=2,ensure_ascii=False)+'\n')
+          (ev/"05_LINKER_MEMORY_MAPS.json").write_text(json.dumps(linker_rows,indent=2,ensure_ascii=False)+'\n')
+          (ev/"06_UPDATE_RELATED_FUNCTIONS.json").write_text(json.dumps(funcs,indent=2,ensure_ascii=False)+'\n')
+          (ev/"07_HIGH_VALUE_CONTEXTS.json").write_text(json.dumps(contexts,indent=2,ensure_ascii=False)+'\n')
+          (ev/"08_UPDATE_ASCII_STRINGS.json").write_text(json.dumps(uniq_strings,indent=2,ensure_ascii=False)+'\n')
+          (ev/"09_REPO_FIRMWARE_CANDIDATES.json").write_text(json.dumps(repo_candidates,indent=2,ensure_ascii=False)+'\n')
+          (ev/"10_DECISION.json").write_text(json.dumps(decision,indent=2,ensure_ascii=False)+'\n')
+
+          md = [
+              "# R88 Firmware Layout / Update Container Map","",
+              f"- SDK commit: `{os.environ['SDK_COMMIT']}`",
+              f"- source files indexed: **{len(source_index)}**",
+              f"- flash/update defines: **{len(define_rows)}**",
+              f"- numeric layout symbols: **{len(numeric)}**",
+              f"- linker/map files with memory evidence: **{len(linker_rows)}**",
+              f"- update/flash-related functions: **{len(funcs)}**",
+              f"- high-value update strings: **{len(uniq_strings)}**",
+              f"- repository firmware candidates: **{len(repo_candidates)}**",
+              "",
+              "## Known update/container markers",
+              "- `bootdat`, `codedata`, `constdat`, `cnfgdat`, `btupdat`, `upinfo`, `cxxx` are searched across the pinned SDK and emitted with source/file context.",
+              "",
+              "## Repository candidate files",
+          ]
+          if repo_candidates:
+              for c in repo_candidates[:100]:
+                  md += [
+                      f"### {c['path']}",
+                      f"- bytes: {c['bytes']}",
+                      f"- SHA256: `{c['sha256']}`",
+                      f"- entropy(sample): {c['sample_entropy']}",
+                      f"- magic hits: `{c['magic_hits']}`",
+                      ""
+                  ]
+          else:
+              md += ["- No firmware/update image candidate was found in the repository by extension, known marker, or high-entropy binary heuristic.",""]
+
+          md += [
+              "## Gate",
+              "- This run does not contact the DSP board.",
+              "- It does not send USB/HID commands.",
+              "- It does not perform erase/write/flash.",
+              "- Layout evidence from the reference SDK is not automatically proof of the exact production board layout.",
+              "- `FLASH_ALLOWED=NO`",
+          ]
+          (ev/"11_REPORT.md").write_text("\n".join(md)+'\n')
+
+          print(json.dumps(decision,indent=2))
+          PY
+
+      - name: Build firmware-candidate signature helper
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > "$OUT/evidence/12_OFFLINE_CANDIDATE_CHECK.py" <<'PY'
+          #!/usr/bin/env python3
+          # Offline-only helper generated by R88.
+          # It does not communicate with USB hardware and does not flash anything.
+          from pathlib import Path
+          import sys, hashlib, math, collections, re, json
+
+          if len(sys.argv) != 2:
+              raise SystemExit("usage: 12_OFFLINE_CANDIDATE_CHECK.py <candidate-file>")
+
+          p=Path(sys.argv[1])
+          data=p.read_bytes()
+          sample=data[:262144]
+
+          def entropy(b):
+              if not b: return 0.0
+              c=collections.Counter(b); n=len(b)
+              return -sum((v/n)*math.log2(v/n) for v in c.values())
+
+          strings=[
+              s.decode("ascii",errors="ignore")
+              for s in re.findall(rb'[\x20-\x7e]{4,}',sample)
+          ]
+          joined="\n".join(strings).lower()
+          markers=[
+              k for k in (
+                  "bootdat","codedata","constdat","cnfgdat",
+                  "btupdat","upinfo","cxxx","mva","firmware","upgrade"
+              ) if k in joined
+          ]
+
+          result={
+              "path":str(p),
+              "bytes":len(data),
+              "sha256":hashlib.sha256(data).hexdigest(),
+              "first64_hex":data[:64].hex().upper(),
+              "sample_entropy":round(entropy(sample),4),
+              "markers":markers,
+              "note":"Offline classification only; no write/flash decision is implied."
+          }
+          print(json.dumps(result,indent=2))
+          PY
+          chmod +x "$OUT/evidence/12_OFFLINE_CANDIDATE_CHECK.py"
+
+      - name: Fail-closed safety audit
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$BOARD_USB_ACCESS" = "NO"
+          test "$HOST_TO_DEVICE_USB" = "NO"
+          test "$FLASH_ERASE_WRITE" = "NO"
+          test "$FLASH_ALLOWED" = "NO"
+          python3 - <<'PY'
+          from pathlib import Path
+          import os,json
+          ev=Path(os.environ["OUT"])/"evidence"
+          d=json.loads((ev/"10_DECISION.json").read_text())
+          assert d["proven_host_visible_full_flash_readback"] is False
+          assert d["flash_allowed"] is False
+          result={
+            "offline_static_only":True,
+            "board_usb_access":False,
+            "host_to_device_usb":False,
+            "aa55":False,
+            "control_0x11_live":False,
+            "erase":False,
+            "write":False,
+            "flash_allowed":False,
+          }
+          (ev/"13_SAFETY_AUDIT.json").write_text(json.dumps(result,indent=2)+'\n')
+          print("R88_SAFETY_AUDIT=PASS",json.dumps(result))
+          PY
+
+      - name: Build evidence bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$OUT"
+          sha256sum evidence/* > SHA256SUMS.txt
+          cp SHA256SUMS.txt evidence/
+          zip -9 -r R88_FIRMWARE_LAYOUT_CONTAINER_MAP.zip evidence >/dev/null
+          sha256sum R88_FIRMWARE_LAYOUT_CONTAINER_MAP.zip \
+            | tee R88_FIRMWARE_LAYOUT_CONTAINER_MAP.zip.sha256
+
+      - name: Publish summary
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            cat "$OUT/evidence/11_REPORT.md"
+            echo
+            cat "$OUT/R88_FIRMWARE_LAYOUT_CONTAINER_MAP.zip.sha256"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload R88 evidence
+        uses: actions/upload-artifact@v7
+        with:
+          name: R88-FIRMWARE-LAYOUT-CONTAINER-MAP
+          path: |
+            /tmp/r88/R88_FIRMWARE_LAYOUT_CONTAINER_MAP.zip
+            /tmp/r88/R88_FIRMWARE_LAYOUT_CONTAINER_MAP.zip.sha256
+            /tmp/r88/evidence/**
+          if-no-files-found: error
+          retention-days: 30
+
+  diagnose-r88:
+    name: Capture R88 run diagnostics
+    if: ${{ always() }}
+    needs: map-firmware
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+
+      - name: Capture exact run state
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BUILD_RESULT: ${{ needs.map-firmware.result }}
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/r88diag
+          API="https://api.github.com/repos/$GITHUB_REPOSITORY"
+          AUTH=(-H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" -H "X-GitHub-Api-Version: 2022-11-28")
+
+          curl -fsSL "${AUTH[@]}" \
+            "$API/actions/runs/$GITHUB_RUN_ID/jobs?filter=latest&per_page=100" \
+            -o /tmp/r88diag/jobs.json
+
+          curl -fsSL "${AUTH[@]}" \
+            "$API/actions/runs/$GITHUB_RUN_ID/artifacts?per_page=100" \
+            -o /tmp/r88diag/artifacts.json
+
+          python3 - <<'PY'
+          import json,os
+          from pathlib import Path
+          j=json.loads(Path('/tmp/r88diag/jobs.json').read_text())
+          jobs=j.get('jobs',[])
+          build=next((x for x in jobs if x.get('name')=='Map firmware layout / update container / static only'),None)
+          report={
+            'run_id':os.environ.get('GITHUB_RUN_ID'),
+            'run_attempt':os.environ.get('GITHUB_RUN_ATTEMPT'),
+            'repository':os.environ.get('GITHUB_REPOSITORY'),
+            'head_sha':os.environ.get('GITHUB_SHA'),
+            'ref':os.environ.get('GITHUB_REF'),
+            'event':os.environ.get('GITHUB_EVENT_NAME'),
+            'build_result':os.environ.get('BUILD_RESULT'),
+            'build_job':build,
+          }
+          Path('/tmp/r88diag/summary.json').write_text(
+              json.dumps(report,indent=2,ensure_ascii=False)+'\n'
+          )
+          if build and build.get('id'):
+              Path('/tmp/r88diag/build_job_id.txt').write_text(str(build['id']))
+          PY
+
+          : > /tmp/r88diag/build-log-tail.txt
+          if [ -s /tmp/r88diag/build_job_id.txt ]; then
+            JOB_ID="$(cat /tmp/r88diag/build_job_id.txt)"
+            set +e
+            curl -fsSL "${AUTH[@]}" "$API/actions/jobs/$JOB_ID/logs" \
+              -o /tmp/r88diag/build.log
+            RC=$?
+            set -e
+            if [ "$RC" -eq 0 ]; then
+              tail -n 260 /tmp/r88diag/build.log > /tmp/r88diag/build-log-tail.txt
+            else
+              printf 'JOB_LOG_DOWNLOAD_FAILED rc=%s\n' "$RC" > /tmp/r88diag/build-log-tail.txt
+            fi
+          fi
+
+          {
+            echo '# R88 LAST GITHUB ACTIONS DIAGNOSTIC'
+            echo
+            echo "- Run ID: \`$GITHUB_RUN_ID\`"
+            echo "- Attempt: \`$GITHUB_RUN_ATTEMPT\`"
+            echo "- Event: \`$GITHUB_EVENT_NAME\`"
+            echo "- Ref: \`$GITHUB_REF\`"
+            echo "- Head SHA: \`$GITHUB_SHA\`"
+            echo "- Result: \`$BUILD_RESULT\`"
+            echo
+            echo '## Job / step metadata'
+            echo '~~~json'
+            cat /tmp/r88diag/summary.json
+            echo '~~~'
+            echo
+            echo '## Artifacts'
+            echo '~~~json'
+            cat /tmp/r88diag/artifacts.json
+            echo '~~~'
+            echo
+            echo '## Job log tail'
+            echo '~~~text'
+            cat /tmp/r88diag/build-log-tail.txt
+            echo '~~~'
+          } > /tmp/r88diag/R88_LAST_DIAGNOSTIC.md
+
+      - name: Persist diagnostic to main with race-safe rebase
+        if: ${{ github.event_name != 'pull_request' && github.ref == 'refs/heads/main' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp /tmp/r88diag/R88_LAST_DIAGNOSTIC.md .github/R88_LAST_DIAGNOSTIC.md
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add .github/R88_LAST_DIAGNOSTIC.md
+          if git diff --cached --quiet; then
+            exit 0
+          fi
+          git commit -m "Record R88 Actions diagnostic [skip ci]"
+          git fetch origin main
+          git rebase origin/main
+          git push origin HEAD:main
+
+      - name: Upload diagnostic
+        uses: actions/upload-artifact@v7
+        with:
+          name: R88-RUN-DIAGNOSTIC
+          path: |
+            /tmp/r88diag/R88_LAST_DIAGNOSTIC.md
+            /tmp/r88diag/summary.json
+            /tmp/r88diag/jobs.json
+            /tmp/r88diag/artifacts.json
+            /tmp/r88diag/build-log-tail.txt
+          if-no-files-found: error
+          retention-days: 30
