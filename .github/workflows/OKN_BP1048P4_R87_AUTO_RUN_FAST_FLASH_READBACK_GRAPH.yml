@@ -1,0 +1,613 @@
+name: OKN BP1048P4 R87 AUTO-RUN Fast Flash Readback Graph
+
+on:
+  push:
+    branches: [main, master]
+    paths:
+      - '.github/workflows/OKN_BP1048P4_R87_AUTO_RUN_FAST_FLASH_READBACK_GRAPH.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: read
+
+concurrency:
+  group: okn-r87-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  SDK_REPO: "https://github.com/leadercxn/bp1048_sdk_v0.1.12.git"
+  SDK_COMMIT: "8105bd864b04995d81c9f9ae77cb158259f39015"
+  OUT: "/tmp/r87"
+  BOARD_USB_ACCESS: "NO"
+  HOST_TO_DEVICE_USB: "NO"
+  FLASH_ERASE_WRITE: "NO"
+  FLASH_ALLOWED: "NO"
+
+jobs:
+  static-map:
+    name: Fast host-visible flash-read graph / STATIC ONLY / NO USB / NO FLASH
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Fail-closed scope gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$BOARD_USB_ACCESS" = "NO"
+          test "$HOST_TO_DEVICE_USB" = "NO"
+          test "$FLASH_ERASE_WRITE" = "NO"
+          test "$FLASH_ALLOWED" = "NO"
+          rm -rf "$OUT"
+          mkdir -p "$OUT/evidence"
+          cat > "$OUT/evidence/00_SCOPE.txt" <<'EOF'
+          REVISION=R87
+          MODE=OFFLINE_STATIC_ONLY
+          TARGET=MVSilicon_BP1048P4
+          BOARD_USB_ACCESS=NO
+          LIVE_USB_COMMANDS=NO
+          AA55_RETEST=NO
+          CONTROL_0X11_LIVE=NO
+          ERASE=NO
+          WRITE=NO
+          FLASH_ALLOWED=NO
+          R85_TIMEOUT_CAUSE=quadratic_or_excessive_reverse_graph_analysis
+          R87_METHOD=ctags_plus_linear_multi_source_reachability
+          EOF
+
+      - name: Pin exact BP1048 SDK
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone -q "$SDK_REPO" "$OUT/sdk"
+          git -C "$OUT/sdk" checkout -q "$SDK_COMMIT"
+          test "$(git -C "$OUT/sdk" rev-parse HEAD)" = "$SDK_COMMIT"
+          printf 'SDK_COMMIT=%s\n' "$(git -C "$OUT/sdk" rev-parse HEAD)" \
+            > "$OUT/evidence/01_PIN.txt"
+
+      - name: Ensure Universal Ctags
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! command -v ctags >/dev/null 2>&1 || ! ctags --version 2>&1 | grep -qi 'Universal Ctags'; then
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq universal-ctags
+          fi
+          ctags --version | head -n 3 | tee "$OUT/evidence/02_CTAGS_VERSION.txt"
+          ctags --version | grep -qi 'Universal Ctags'
+
+      - name: Build linear-time call graph and classify flash-read paths
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ctags -R \
+            --languages=C \
+            --kinds-C=f \
+            --output-format=json \
+            --fields=+ne \
+            -f "$OUT/functions.tags.jsonl" \
+            "$OUT/sdk"
+
+          python3 - <<'PY'
+          from pathlib import Path
+          import os, json, re, collections, hashlib
+
+          out = Path(os.environ["OUT"])
+          root = out / "sdk"
+          ev = out / "evidence"
+          tags = out / "functions.tags.jsonl"
+
+          records = []
+          skipped = []
+          for raw in tags.read_text(errors="ignore").splitlines():
+              raw = raw.strip()
+              if not raw:
+                  continue
+              try:
+                  x = json.loads(raw)
+              except Exception:
+                  continue
+              if x.get("_type") != "tag" or x.get("kind") not in ("function","f"):
+                  continue
+              name = x.get("name")
+              path = x.get("path")
+              line = x.get("line")
+              end = x.get("end")
+              if not name or not path or not line or not end:
+                  skipped.append({"name":name,"path":path,"line":line,"end":end})
+                  continue
+              p = Path(path)
+              if not p.is_absolute():
+                  p = Path.cwd() / p
+              try:
+                  rel = str(p.resolve().relative_to(root.resolve()))
+              except Exception:
+                  try:
+                      rel = str(Path(path).relative_to(root))
+                  except Exception:
+                      rel = str(path)
+              try:
+                  lines = p.read_text(errors="ignore").splitlines()
+              except Exception:
+                  skipped.append({"name":name,"path":path,"reason":"read_failed"})
+                  continue
+              s = max(1, int(line))
+              e = min(len(lines), int(end))
+              body = "\n".join(lines[s-1:e])
+              key = f"{rel}:{s}:{name}"
+              records.append({
+                  "key":key, "name":name, "path":rel,
+                  "start_line":s, "end_line":e, "body":body
+              })
+
+          by_key = {r["key"]: r for r in records}
+          by_name = collections.defaultdict(list)
+          for r in records:
+              by_name[r["name"]].append(r)
+
+          call_re = re.compile(r'\b([A-Za-z_]\w*)\s*\(')
+          read_primitives = {"SpiFlashRead","SpiFlashReadWpr"}
+          erase_primitives = {"SpiFlashErase","FlashChipErase","FlashSectorErase"}
+          write_primitives = {"SpiFlashWrite","MV_UserWriteData"}
+          tx_primitives = {"Communication_Effect_Send","hid_send_data","OTG_DeviceControlSend"}
+
+          edges = collections.defaultdict(set)
+          reverse = collections.defaultdict(set)
+
+          for r in records:
+              calls = sorted(set(call_re.findall(r["body"])) - {r["name"]})
+              r["calls"] = calls
+              r["direct_flash_read"] = any(f"{n}(" in r["body"] for n in read_primitives)
+              r["direct_erase"] = any(f"{n}(" in r["body"] for n in erase_primitives)
+              r["direct_write"] = any(f"{n}(" in r["body"] for n in write_primitives)
+              r["direct_host_tx"] = any(f"{n}(" in r["body"] for n in tx_primitives)
+              r["runtime_handler"] = (
+                  r["name"].startswith("Communication_Effect_")
+                  or r["name"].startswith("Comm_")
+                  or r["name"] in {"Communication_Effect","hid_recive_data"}
+              )
+              for cname in calls:
+                  for callee in by_name.get(cname, ()):
+                      edges[r["key"]].add(callee["key"])
+                      reverse[callee["key"]].add(r["key"])
+
+          def reverse_reachable(seed_keys):
+              """All functions that can reach any seed through the call graph."""
+              seen = set(seed_keys)
+              q = collections.deque(seed_keys)
+              while q:
+                  cur = q.popleft()
+                  for parent in reverse.get(cur, ()):
+                      if parent not in seen:
+                          seen.add(parent)
+                          q.append(parent)
+              return seen
+
+          read_seeds = {r["key"] for r in records if r["direct_flash_read"]}
+          erase_seeds = {r["key"] for r in records if r["direct_erase"]}
+          write_seeds = {r["key"] for r in records if r["direct_write"]}
+          tx_seeds = {r["key"] for r in records if r["direct_host_tx"]}
+
+          reaches_read = reverse_reachable(read_seeds)
+          reaches_erase = reverse_reachable(erase_seeds)
+          reaches_write = reverse_reachable(write_seeds)
+          reaches_tx = reverse_reachable(tx_seeds)
+
+          runtime_roots = [r for r in records if r["runtime_handler"]]
+          candidates = []
+          destructive = []
+
+          for r in runtime_roots:
+              k = r["key"]
+              if k not in reaches_read or k not in reaches_tx:
+                  continue
+              row = {
+                  "key":k, "name":r["name"], "path":r["path"],
+                  "line":r["start_line"],
+                  "reaches_flash_read":True,
+                  "reaches_host_tx":True,
+                  "reaches_erase":k in reaches_erase,
+                  "reaches_write":k in reaches_write,
+                  "non_destructive_candidate":(
+                      k not in reaches_erase and k not in reaches_write
+                  ),
+              }
+              (candidates if row["non_destructive_candidate"] else destructive).append(row)
+
+          def shortest_path(start, target_set, max_nodes=20000):
+              if start in target_set:
+                  return [start]
+              q = collections.deque([start])
+              prev = {start: None}
+              while q and len(prev) < max_nodes:
+                  cur = q.popleft()
+                  for nxt in edges.get(cur, ()):
+                      if nxt in prev:
+                          continue
+                      prev[nxt] = cur
+                      if nxt in target_set:
+                          path = [nxt]
+                          x = cur
+                          while x is not None:
+                              path.append(x)
+                              x = prev[x]
+                          return list(reversed(path))
+                      q.append(nxt)
+              return []
+
+          # Attach one shortest proof path per candidate/destructive runtime root.
+          for row in candidates + destructive:
+              row["shortest_read_path"] = shortest_path(row["key"], read_seeds)
+              row["shortest_tx_path"] = shortest_path(row["key"], tx_seeds)
+              row["shortest_erase_path"] = shortest_path(row["key"], erase_seeds) if row["reaches_erase"] else []
+              row["shortest_write_path"] = shortest_path(row["key"], write_seeds) if row["reaches_write"] else []
+
+          # Exact runtime dispatcher mapping from reference communication.c.
+          comm_rel = "BT_Audio_APP/bt_audio_app_src/audio/communication.c"
+          comm_path = root / comm_rel
+          comm = comm_path.read_text(errors="ignore") if comm_path.exists() else ""
+          dispatch = []
+          case_re = re.compile(
+              r'case\s+(0x[0-9A-Fa-f]+|\d+)\s*:'
+              r'(?P<body>[\s\S]{0,700}?)'
+              r'(?P<handler>Communication_Effect_[A-Za-z0-9_]+)\s*\('
+          )
+          for m in case_re.finditer(comm):
+              dispatch.append({
+                  "case":m.group(1),
+                  "handler":m.group("handler"),
+                  "path":comm_rel,
+                  "line":comm.count("\n",0,m.start())+1,
+                  "excerpt":comm[m.start():m.start()+750]
+              })
+
+          x11_dispatch = [d for d in dispatch if d["case"].lower()=="0x11"]
+
+          # Direct flash-read occurrences with local source context.
+          read_occ = []
+          for p in sorted(root.rglob("*")):
+              if not p.is_file() or p.suffix.lower() not in {".c",".h"}:
+                  continue
+              try:
+                  ls = p.read_text(errors="ignore").splitlines()
+              except Exception:
+                  continue
+              for i, line in enumerate(ls):
+                  if "SpiFlashRead(" in line or "SpiFlashReadWpr(" in line:
+                      lo=max(0,i-6); hi=min(len(ls),i+10)
+                      read_occ.append({
+                          "path":str(p.relative_to(root)),
+                          "line":i+1,
+                          "context":"\n".join(
+                              f"{j+1}: {ls[j]}" for j in range(lo,hi)
+                          )
+                      })
+
+          # High-value exact excerpts.
+          focus_names = {
+              "Communication_Effect_0x11",
+              "MV_UserWriteData",
+              "Communication_Effect_Send",
+              "hid_recive_data",
+              "hid_send_data",
+              "Communication_Effect",
+          }
+          focus = []
+          for r in records:
+              if r["name"] in focus_names:
+                  focus.append({
+                      "key":r["key"],"name":r["name"],"path":r["path"],
+                      "start_line":r["start_line"],"end_line":r["end_line"],
+                      "direct_flash_read":r["direct_flash_read"],
+                      "direct_erase":r["direct_erase"],
+                      "direct_write":r["direct_write"],
+                      "direct_host_tx":r["direct_host_tx"],
+                      "body":r["body"][:20000],
+                  })
+
+          x11_def = next((r for r in records if r["name"]=="Communication_Effect_0x11"),None)
+          uw_def = next((r for r in records if r["name"]=="MV_UserWriteData"),None)
+
+          x11_class = {
+              "definition_found": bool(x11_def),
+              "dispatcher_found": bool(x11_dispatch),
+              "calls_MV_UserWriteData": bool(x11_def and "MV_UserWriteData(" in x11_def["body"]),
+              "has_subcommand_0x01": bool(x11_def and re.search(r'buf\s*\[\s*0\s*\]\s*==\s*0x01',x11_def["body"])),
+              "sends_response": bool(x11_def and "Communication_Effect_Send(" in x11_def["body"]),
+              "generic_flash_readback_proven": False,
+              "live_use_allowed": False,
+          }
+
+          userwrite_class = {
+              "definition_found": bool(uw_def),
+              "flash_read": bool(uw_def and ("SpiFlashRead(" in uw_def["body"] or "SpiFlashReadWpr(" in uw_def["body"])),
+              "erase": bool(uw_def and any(f"{n}(" in uw_def["body"] for n in erase_primitives)),
+              "write": bool(uw_def and "SpiFlashWrite(" in uw_def["body"]),
+              "classification":"READ_MODIFY_ERASE_WRITE_VERIFY_INTERNAL" if uw_def else "NOT_FOUND",
+              "host_readback_command":False,
+          }
+
+          decision = {
+              "sdk_commit":os.environ["SDK_COMMIT"],
+              "ctags_functions":len(records),
+              "ctags_skipped":len(skipped),
+              "graph_edges":sum(len(v) for v in edges.values()),
+              "direct_flash_read_functions":len(read_seeds),
+              "direct_flash_read_occurrences":len(read_occ),
+              "runtime_roots":len(runtime_roots),
+              "runtime_read_plus_tx_destructive":destructive,
+              "non_destructive_host_visible_candidates":candidates,
+              "dispatcher_rows":len(dispatch),
+              "x11_dispatch_rows":x11_dispatch,
+              "x11":x11_class,
+              "MV_UserWriteData":userwrite_class,
+              "production_generic_full_flash_readback_proven":False,
+              "flash_allowed":False,
+          }
+
+          (ev/"03_FUNCTION_SUMMARY.json").write_text(json.dumps({
+              "function_count":len(records),
+              "skipped_count":len(skipped),
+              "edge_count":sum(len(v) for v in edges.values()),
+              "read_seed_count":len(read_seeds),
+              "erase_seed_count":len(erase_seeds),
+              "write_seed_count":len(write_seeds),
+              "tx_seed_count":len(tx_seeds),
+          },indent=2)+'\n')
+          (ev/"04_DISPATCH.json").write_text(json.dumps(dispatch,indent=2,ensure_ascii=False)+'\n')
+          (ev/"05_FLASH_READ_OCCURRENCES.json").write_text(json.dumps(read_occ,indent=2,ensure_ascii=False)+'\n')
+          (ev/"06_RUNTIME_DESTRUCTIVE_PATHS.json").write_text(json.dumps(destructive,indent=2,ensure_ascii=False)+'\n')
+          (ev/"07_NONDESTRUCTIVE_CANDIDATES.json").write_text(json.dumps(candidates,indent=2,ensure_ascii=False)+'\n')
+          (ev/"08_FOCUS_EXCERPTS.json").write_text(json.dumps(focus,indent=2,ensure_ascii=False)+'\n')
+          (ev/"09_DECISION.json").write_text(json.dumps(decision,indent=2,ensure_ascii=False)+'\n')
+
+          md = [
+              "# R87 Fast Flash Readback Graph","",
+              f"- SDK commit: `{os.environ['SDK_COMMIT']}`",
+              f"- C functions indexed: **{len(records)}**",
+              f"- call edges: **{sum(len(v) for v in edges.values())}**",
+              f"- direct SpiFlashRead* functions: **{len(read_seeds)}**",
+              f"- direct SpiFlashRead* occurrences: **{len(read_occ)}**",
+              f"- dispatcher rows: **{len(dispatch)}**",
+              f"- 0x11 dispatcher rows: **{len(x11_dispatch)}**",
+              f"- runtime read+TX paths that can reach erase/write: **{len(destructive)}**",
+              f"- non-destructive runtime read+TX candidates: **{len(candidates)}**",
+              "",
+              "## 0x11",
+              f"- `{json.dumps(x11_class,ensure_ascii=False)}`",
+              "",
+              "## MV_UserWriteData",
+              f"- `{json.dumps(userwrite_class,ensure_ascii=False)}`",
+              "",
+              "## Non-destructive candidates",
+          ]
+          if candidates:
+              for c in candidates:
+                  md += [
+                      f"### {c['name']}",
+                      f"- source: `{c['path']}:{c['line']}`",
+                      f"- read path: `{c['shortest_read_path']}`",
+                      f"- TX path: `{c['shortest_tx_path']}`",""
+                  ]
+          else:
+              md += ["- **NONE PROVEN by this graph.**",""]
+
+          md += [
+              "## Gate",
+              "- This is static analysis only.",
+              "- No USB command was sent to the production board.",
+              "- Runtime 0x11 remains forbidden for live probing.",
+              "- A candidate is only a source lead; production behavior still requires separate proof.",
+              "- `FLASH_ALLOWED=NO`",
+          ]
+          (ev/"10_REPORT.md").write_text("\n".join(md)+'\n')
+
+          print(json.dumps({
+              "functions":len(records),
+              "edges":sum(len(v) for v in edges.values()),
+              "flash_read_functions":len(read_seeds),
+              "flash_read_occurrences":len(read_occ),
+              "dispatcher_rows":len(dispatch),
+              "x11_dispatch_rows":len(x11_dispatch),
+              "destructive_runtime_paths":len(destructive),
+              "non_destructive_candidates":len(candidates),
+              "MV_UserWriteData":userwrite_class,
+          },indent=2))
+          PY
+
+      - name: Fail-closed safety audit
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$BOARD_USB_ACCESS" = "NO"
+          test "$HOST_TO_DEVICE_USB" = "NO"
+          test "$FLASH_ERASE_WRITE" = "NO"
+          test "$FLASH_ALLOWED" = "NO"
+          python3 - <<'PY'
+          from pathlib import Path
+          import os,json
+          ev=Path(os.environ["OUT"])/"evidence"
+          d=json.loads((ev/"09_DECISION.json").read_text())
+          assert d["x11"]["live_use_allowed"] is False
+          assert d["flash_allowed"] is False
+          result={
+            "offline_static_only":True,
+            "board_usb_access":False,
+            "host_to_device_usb":False,
+            "aa55":False,
+            "control_0x11_live":False,
+            "erase":False,
+            "write":False,
+            "flash_allowed":False,
+          }
+          (ev/"11_SAFETY_AUDIT.json").write_text(json.dumps(result,indent=2)+'\n')
+          print("R87_SAFETY_AUDIT=PASS",json.dumps(result))
+          PY
+
+      - name: Build evidence bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$OUT"
+          sha256sum evidence/* > SHA256SUMS.txt
+          cp SHA256SUMS.txt evidence/
+          zip -9 -r R87_FAST_FLASH_READBACK_GRAPH.zip evidence >/dev/null
+          sha256sum R87_FAST_FLASH_READBACK_GRAPH.zip \
+            | tee R87_FAST_FLASH_READBACK_GRAPH.zip.sha256
+
+      - name: Publish summary
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            cat "$OUT/evidence/10_REPORT.md"
+            echo
+            cat "$OUT/R87_FAST_FLASH_READBACK_GRAPH.zip.sha256"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload R87 evidence
+        uses: actions/upload-artifact@v7
+        with:
+          name: R87-FAST-FLASH-READBACK-GRAPH
+          path: |
+            /tmp/r87/R87_FAST_FLASH_READBACK_GRAPH.zip
+            /tmp/r87/R87_FAST_FLASH_READBACK_GRAPH.zip.sha256
+            /tmp/r87/evidence/**
+          if-no-files-found: error
+          retention-days: 30
+
+  diagnose-r87:
+    name: Capture R87 run diagnostics
+    if: ${{ always() }}
+    needs: static-map
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+
+      - name: Capture exact run state
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BUILD_RESULT: ${{ needs.static-map.result }}
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/r87diag
+          API="https://api.github.com/repos/$GITHUB_REPOSITORY"
+          AUTH=(-H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" -H "X-GitHub-Api-Version: 2022-11-28")
+
+          curl -fsSL "${AUTH[@]}" \
+            "$API/actions/runs/$GITHUB_RUN_ID/jobs?filter=latest&per_page=100" \
+            -o /tmp/r87diag/jobs.json
+
+          curl -fsSL "${AUTH[@]}" \
+            "$API/actions/runs/$GITHUB_RUN_ID/artifacts?per_page=100" \
+            -o /tmp/r87diag/artifacts.json
+
+          python3 - <<'PY'
+          import json,os
+          from pathlib import Path
+          j=json.loads(Path('/tmp/r87diag/jobs.json').read_text())
+          jobs=j.get('jobs',[])
+          build=next((x for x in jobs if x.get('name')=='Fast host-visible flash-read graph / STATIC ONLY / NO USB / NO FLASH'),None)
+          report={
+            'run_id':os.environ.get('GITHUB_RUN_ID'),
+            'run_attempt':os.environ.get('GITHUB_RUN_ATTEMPT'),
+            'repository':os.environ.get('GITHUB_REPOSITORY'),
+            'head_sha':os.environ.get('GITHUB_SHA'),
+            'ref':os.environ.get('GITHUB_REF'),
+            'event':os.environ.get('GITHUB_EVENT_NAME'),
+            'build_result':os.environ.get('BUILD_RESULT'),
+            'build_job':build,
+          }
+          Path('/tmp/r87diag/summary.json').write_text(
+              json.dumps(report,indent=2,ensure_ascii=False)+'\n'
+          )
+          if build and build.get('id'):
+              Path('/tmp/r87diag/build_job_id.txt').write_text(str(build['id']))
+          PY
+
+          : > /tmp/r87diag/build-log-tail.txt
+          if [ -s /tmp/r87diag/build_job_id.txt ]; then
+            JOB_ID="$(cat /tmp/r87diag/build_job_id.txt)"
+            set +e
+            curl -fsSL "${AUTH[@]}" "$API/actions/jobs/$JOB_ID/logs" \
+              -o /tmp/r87diag/build.log
+            RC=$?
+            set -e
+            if [ "$RC" -eq 0 ]; then
+              tail -n 260 /tmp/r87diag/build.log \
+                > /tmp/r87diag/build-log-tail.txt
+            else
+              printf 'JOB_LOG_DOWNLOAD_FAILED rc=%s\n' "$RC" \
+                > /tmp/r87diag/build-log-tail.txt
+            fi
+          fi
+
+          {
+            echo '# R87 LAST GITHUB ACTIONS DIAGNOSTIC'
+            echo
+            echo "- Run ID: \`$GITHUB_RUN_ID\`"
+            echo "- Attempt: \`$GITHUB_RUN_ATTEMPT\`"
+            echo "- Event: \`$GITHUB_EVENT_NAME\`"
+            echo "- Ref: \`$GITHUB_REF\`"
+            echo "- Head SHA: \`$GITHUB_SHA\`"
+            echo "- Static-map result: \`$BUILD_RESULT\`"
+            echo
+            echo '## Job / step metadata'
+            echo '~~~json'
+            cat /tmp/r87diag/summary.json
+            echo '~~~'
+            echo
+            echo '## Artifacts'
+            echo '~~~json'
+            cat /tmp/r87diag/artifacts.json
+            echo '~~~'
+            echo
+            echo '## Static-map log tail'
+            echo '~~~text'
+            cat /tmp/r87diag/build-log-tail.txt
+            echo '~~~'
+          } > /tmp/r87diag/R87_LAST_DIAGNOSTIC.md
+
+      - name: Persist diagnostic to main with race-safe rebase
+        if: ${{ github.event_name != 'pull_request' && github.ref == 'refs/heads/main' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp /tmp/r87diag/R87_LAST_DIAGNOSTIC.md .github/R87_LAST_DIAGNOSTIC.md
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add .github/R87_LAST_DIAGNOSTIC.md
+          if git diff --cached --quiet; then
+            exit 0
+          fi
+          git commit -m "Record R87 Actions diagnostic [skip ci]"
+          git fetch origin main
+          git rebase origin/main
+          git push origin HEAD:main
+
+      - name: Upload diagnostic
+        uses: actions/upload-artifact@v7
+        with:
+          name: R87-RUN-DIAGNOSTIC
+          path: |
+            /tmp/r87diag/R87_LAST_DIAGNOSTIC.md
+            /tmp/r87diag/summary.json
+            /tmp/r87diag/jobs.json
+            /tmp/r87diag/artifacts.json
+            /tmp/r87diag/build-log-tail.txt
+          if-no-files-found: error
+          retention-days: 30
