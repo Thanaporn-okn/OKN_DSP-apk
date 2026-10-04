@@ -1,0 +1,613 @@
+name: OKN BP1048P4 MASTER V28 FIXED V2 RUNTIME TRANSPORT METHOD DISCOVERY JIT OFFLINE
+
+"on":
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  GOLOPINE_WINDOWS_URL: "https://golodsp.com/wp-content/uploads/2026/05/golopine_audio_turning_release_2026-04-08.exe_.zip"
+  EXPECTED_VENDOR_SHA256: "3ca54171c53f7badd963ffe6851b8b3e2faf8aee8ba2afcb7040990e22ae09b2"
+
+  LIVE_DSP_CONNECTED: "NO"
+  USB_TARGET_ACCESS: "NO"
+  HOST_TO_DSP_IO: "NO"
+  REAL_HID_OBJECT_ALLOWED: "NO"
+  REAL_HID_CONNECT_ALLOWED: "NO"
+  REAL_HID_SEND_ALLOWED: "NO"
+  REAL_HID_READ_ALLOWED: "NO"
+  REAL_HID_WRITE_ALLOWED: "NO"
+  FEATURE_REPORT_ALLOWED: "NO"
+  FLASH_ALLOWED: "NO"
+  ERASE_ALLOWED: "NO"
+  WRITE_ALLOWED: "NO"
+
+jobs:
+  master-v28-fixed-v2:
+    name: Discover real transport methods and capture JIT OFFLINE
+    runs-on: windows-latest
+    timeout-minutes: 35
+
+    steps:
+      - name: Safety gate and workspace
+        shell: pwsh
+        run: |
+          $ErrorActionPreference="Stop"
+
+          foreach($n in @(
+            "LIVE_DSP_CONNECTED","USB_TARGET_ACCESS","HOST_TO_DSP_IO",
+            "REAL_HID_OBJECT_ALLOWED","REAL_HID_CONNECT_ALLOWED",
+            "REAL_HID_SEND_ALLOWED","REAL_HID_READ_ALLOWED","REAL_HID_WRITE_ALLOWED",
+            "FEATURE_REPORT_ALLOWED","FLASH_ALLOWED","ERASE_ALLOWED","WRITE_ALLOWED"
+          )){
+            if((Get-Item "Env:$n").Value -ne "NO"){ throw "$n must remain NO" }
+          }
+
+          $root="C:\okn_v28v2"
+          if(Test-Path $root){ Remove-Item -Recurse -Force $root }
+          New-Item -ItemType Directory -Force -Path `
+            "$root\download","$root\pkg","$root\harness","$root\evidence","$root\out" | Out-Null
+
+          @"
+          REVISION=MASTER-V28-FIXED-V2
+          MODE=OFFLINE_RUNTIME_TRANSPORT_METHOD_DISCOVERY_AND_JIT
+          PREVIOUS_V28_FAILURE=USBHID_WRITE_METHOD_NOT_FOUND_BY_EXACT_TYPE_LOOKUP
+          REAL_HID_IO=NO
+          HOST_TO_DSP_IO=NO
+          FEATURE_REPORT=NO
+          FLASH_ALLOWED=NO
+          ERASE_ALLOWED=NO
+          WRITE_ALLOWED=NO
+          "@ | Set-Content "$root\evidence\00_SCOPE.txt"
+
+      - name: Acquire exact official vendor binary
+        shell: pwsh
+        run: |
+          $ErrorActionPreference="Stop"
+          $root="C:\okn_v28v2"
+
+          curl.exe -fL --retry 6 --retry-all-errors --retry-delay 2 `
+            --connect-timeout 20 --max-time 300 `
+            $env:GOLOPINE_WINDOWS_URL -o "$root\download\vendor.zip"
+          if($LASTEXITCODE -ne 0){ throw "vendor download failed" }
+
+          Expand-Archive -Force "$root\download\vendor.zip" "$root\pkg"
+
+          $exe=Get-ChildItem "$root\pkg" -Recurse -File -Filter *.exe |
+            Where-Object {$_.FullName -notmatch '\\__MACOSX\\' -and $_.Name -notlike '._*'} |
+            Sort-Object Length -Descending | Select-Object -First 1
+
+          if(-not $exe){ throw "vendor EXE missing" }
+          Copy-Item $exe.FullName "$root\vendor.exe" -Force
+
+          $sha=(Get-FileHash "$root\vendor.exe" -Algorithm SHA256).Hash.ToLowerInvariant()
+          if($sha -ne $env:EXPECTED_VENDOR_SHA256){ throw "vendor SHA changed: $sha" }
+
+          @"
+          SHA256=$sha
+          ORIGINAL_BINARY_MODIFIED=NO
+          "@ | Set-Content "$root\evidence\01_VENDOR_IDENTITY.txt"
+
+      - name: Build runtime discovery probe
+        shell: pwsh
+        run: |
+          $ErrorActionPreference="Stop"
+          $root="C:\okn_v28v2"
+
+          @'
+          using System;
+          using System.IO;
+          using System.Linq;
+          using System.Reflection;
+          using System.Runtime.CompilerServices;
+          using System.Runtime.InteropServices;
+          using System.Collections.Generic;
+
+          public static class Probe
+          {
+              static string OutPath;
+              static string EvidenceDir;
+
+              static void Log(string s)
+              {
+                  File.AppendAllText(OutPath,s+Environment.NewLine);
+              }
+
+              static string Hex(byte[] b)
+              {
+                  if(b==null)return "<NULL>";
+                  return BitConverter.ToString(b).Replace("-","");
+              }
+
+              static string SafeName(Type t)
+              {
+                  return (t.FullName ?? t.Name)
+                    .Replace('.','_').Replace('+','_')
+                    .Replace('`','_').Replace('[','_').Replace(']','_');
+              }
+
+              static string SafeMethod(MethodInfo m)
+              {
+                  return SafeName(m.DeclaringType)+"__"+m.Name+"__0x"+m.MetadataToken.ToString("X8");
+              }
+
+              static bool HasSingleByteArrayParam(MethodInfo m)
+              {
+                  ParameterInfo[] p=m.GetParameters();
+                  return p.Length==1 && p[0].ParameterType==typeof(byte[]);
+              }
+
+              static IntPtr ResolveJumps(IntPtr start,string tag)
+              {
+                  long cur=start.ToInt64();
+
+                  for(int depth=0;depth<8;depth++)
+                  {
+                      byte[] b=new byte[16];
+                      Marshal.Copy(new IntPtr(cur),b,0,b.Length);
+
+                      Log(tag+"_PTR_"+depth+"=0x"+cur.ToString("X"));
+                      Log(tag+"_HEAD16_"+depth+"="+Hex(b));
+
+                      if(b[0]==0xE9)
+                      {
+                          int rel=BitConverter.ToInt32(b,1);
+                          cur=cur+5+rel;
+                          continue;
+                      }
+
+                      if(b[0]==0xEB)
+                      {
+                          sbyte rel=unchecked((sbyte)b[1]);
+                          cur=cur+2+rel;
+                          continue;
+                      }
+
+                      if(b[0]==0xFF && b[1]==0x25)
+                      {
+                          int slot=BitConverter.ToInt32(b,2);
+                          int target=Marshal.ReadInt32(new IntPtr(slot));
+                          cur=unchecked((uint)target);
+                          continue;
+                      }
+
+                      break;
+                  }
+
+                  return new IntPtr(cur);
+              }
+
+              static void DumpJit(MethodInfo m,string tag)
+              {
+                  Log(tag+"_DECLARING_TYPE="+m.DeclaringType.FullName);
+                  Log(tag+"_NAME="+m.Name);
+                  Log(tag+"_TOKEN=0x"+m.MetadataToken.ToString("X8"));
+                  Log(tag+"_SIGNATURE="+m.ToString());
+                  Log(tag+"_IS_ABSTRACT="+m.IsAbstract);
+                  Log(tag+"_IS_VIRTUAL="+m.IsVirtual);
+
+                  try
+                  {
+                      MethodBody body=m.GetMethodBody();
+                      byte[] il=body==null?null:body.GetILAsByteArray();
+                      Log(tag+"_IL="+Hex(il));
+                  }
+                  catch(Exception ex)
+                  {
+                      Log(tag+"_IL_EXCEPTION="+ex.GetBaseException().GetType().FullName);
+                  }
+
+                  if(m.IsAbstract)
+                  {
+                      Log(tag+"_JIT_SKIPPED_ABSTRACT=true");
+                      return;
+                  }
+
+                  RuntimeHelpers.PrepareMethod(m.MethodHandle);
+
+                  IntPtr fp=m.MethodHandle.GetFunctionPointer();
+                  Log(tag+"_FUNCTION_PTR=0x"+fp.ToInt64().ToString("X"));
+
+                  IntPtr resolved=ResolveJumps(fp,tag+"_RESOLVE");
+                  Log(tag+"_RESOLVED_PTR=0x"+resolved.ToInt64().ToString("X"));
+
+                  byte[] native=new byte[1024];
+                  Marshal.Copy(resolved,native,0,native.Length);
+
+                  string fn=SafeMethod(m)+"_NATIVE1024.bin";
+                  File.WriteAllBytes(Path.Combine(EvidenceDir,fn),native);
+
+                  Log(tag+"_NATIVE_FILE="+fn);
+                  Log(tag+"_NATIVE_HEAD256="+Hex(native.Take(256).ToArray()));
+              }
+
+              public static void Main(string[] a)
+              {
+                  if(a.Length<2)throw new Exception("args: vendor.exe evidence.txt");
+
+                  string exe=Path.GetFullPath(a[0]);
+                  OutPath=Path.GetFullPath(a[1]);
+                  EvidenceDir=Path.GetDirectoryName(OutPath);
+
+                  File.WriteAllText(OutPath,"");
+                  Directory.SetCurrentDirectory(Path.GetDirectoryName(exe));
+
+                  Log("MODE=OFFLINE_RUNTIME_TRANSPORT_METHOD_DISCOVERY_AND_JIT");
+                  Log("REAL_HID_OBJECT_CREATED=NO");
+                  Log("REAL_HID_CONNECT_INVOKED=NO");
+                  Log("REAL_HID_SEND_INVOKED=NO");
+                  Log("REAL_HID_READ_INVOKED=NO");
+                  Log("REAL_HID_WRITE_INVOKED=NO");
+                  Log("HOST_TO_DSP_IO=NO");
+                  Log("FEATURE_REPORT_INVOKED=NO");
+                  Log("FLASH_ALLOWED=NO");
+
+                  Assembly asm=Assembly.LoadFile(exe);
+                  RuntimeHelpers.RunModuleConstructor(asm.ManifestModule.ModuleHandle);
+
+                  Type baseType=asm.GetType(
+                      "DSTech_AudioDSP_Client.DeviceCommunicationStream",false);
+
+                  Type usbType=asm.GetType(
+                      "DSTech_AudioDSP_Client.USBHID",false);
+
+                  Type hidType=asm.GetType(
+                      "DSTech_AudioDSP_Client.HIDInterface",false);
+
+                  Log("BASE_TYPE_PRESENT="+(baseType!=null));
+                  Log("USBHID_TYPE_PRESENT="+(usbType!=null));
+                  Log("HIDINTERFACE_TYPE_PRESENT="+(hidType!=null));
+
+                  Type[] types;
+                  try{ types=asm.GetTypes(); }
+                  catch(ReflectionTypeLoadException ex)
+                  {
+                      types=ex.Types.Where(x=>x!=null).ToArray();
+                      Log("REFLECTION_TYPE_LOAD_PARTIAL=true");
+                  }
+
+                  var allMethods=new List<MethodInfo>();
+
+                  foreach(Type t in types.OrderBy(x=>x.FullName))
+                  {
+                      bool interesting=
+                          (baseType!=null && baseType.IsAssignableFrom(t)) ||
+                          (t.FullName??"").IndexOf("HID",StringComparison.OrdinalIgnoreCase)>=0 ||
+                          (t.FullName??"").IndexOf("USB",StringComparison.OrdinalIgnoreCase)>=0;
+
+                      if(!interesting)continue;
+
+                      Log("TYPE|"+t.FullName+
+                          "|ABSTRACT="+t.IsAbstract+
+                          "|BASE="+(t.BaseType==null?"<NULL>":t.BaseType.FullName));
+
+                      MethodInfo[] mm=t.GetMethods(
+                          BindingFlags.Public|BindingFlags.NonPublic|
+                          BindingFlags.Instance|BindingFlags.Static|
+                          BindingFlags.DeclaredOnly);
+
+                      foreach(MethodInfo m in mm.OrderBy(x=>x.MetadataToken))
+                      {
+                          ParameterInfo[] p=m.GetParameters();
+
+                          string ps=String.Join(
+                              ",",
+                              p.Select(x=>x.ParameterType.FullName??x.ParameterType.Name).ToArray());
+
+                          Log("METHOD|"+t.FullName+
+                              "|0x"+m.MetadataToken.ToString("X8")+
+                              "|"+m.Name+
+                              "|RET="+(m.ReturnType.FullName??m.ReturnType.Name)+
+                              "|PARAMS="+ps+
+                              "|ABSTRACT="+m.IsAbstract+
+                              "|VIRTUAL="+m.IsVirtual);
+
+                          if(HasSingleByteArrayParam(m))
+                              allMethods.Add(m);
+                      }
+                  }
+
+                  var targets=allMethods
+                    .Where(m =>
+                        (m.Name=="Write" ||
+                         m.Name=="Send" ||
+                         (m.DeclaringType.FullName??"")
+                           .IndexOf("USBHID",StringComparison.OrdinalIgnoreCase)>=0 ||
+                         (m.DeclaringType.FullName??"")
+                           .IndexOf("HIDInterface",StringComparison.OrdinalIgnoreCase)>=0))
+                    .Where(m=>!m.IsAbstract)
+                    .GroupBy(m=>m.Module.ModuleVersionId.ToString()+"|"+m.MetadataToken)
+                    .Select(g=>g.First())
+                    .OrderBy(m=>m.MetadataToken)
+                    .ToList();
+
+                  Log("BYTE_ARRAY_METHOD_COUNT="+allMethods.Count);
+                  Log("TARGET_METHOD_COUNT="+targets.Count);
+
+                  int idx=0;
+                  foreach(MethodInfo m in targets)
+                  {
+                      string tag="TARGET_"+idx.ToString("D2");
+                      DumpJit(m,tag);
+                      idx++;
+                  }
+
+                  Log("DISCOVERY_COMPLETE=true");
+                  Environment.Exit(0);
+              }
+          }
+          '@ | Set-Content "$root\harness\Probe.cs"
+
+          $csc="$env:WINDIR\Microsoft.NET\Framework\v4.0.30319\csc.exe"
+          if(-not(Test-Path $csc)){ throw "x86 csc missing" }
+
+          & $csc /nologo /platform:x86 /target:exe `
+            /out:"$root\harness\Probe.exe" `
+            "$root\harness\Probe.cs"
+
+          if($LASTEXITCODE -ne 0){ throw "probe compile failed" }
+
+      - name: Static safety audit
+        shell: pwsh
+        run: |
+          $ErrorActionPreference="Stop"
+          $root="C:\okn_v28v2"
+          $s=Get-Content "$root\harness\Probe.cs" -Raw
+
+          foreach($bad in @(
+            "HidD_SetOutputReport(","HidD_GetInputReport(",
+            "HidD_SetFeature(","HidD_GetFeature(",
+            "ReadFile(","WriteFile(","CreateFileW("
+          )){
+            if($s.Contains($bad)){ throw "forbidden real HID primitive: $bad" }
+          }
+
+          foreach($need in @(
+            "RuntimeHelpers.PrepareMethod",
+            "GetFunctionPointer",
+            "DeviceCommunicationStream",
+            "USBHID",
+            "HIDInterface",
+            "REAL_HID_OBJECT_CREATED=NO",
+            "HOST_TO_DSP_IO=NO",
+            "FLASH_ALLOWED=NO"
+          )){
+            if(-not $s.Contains($need)){ throw "missing marker: $need" }
+          }
+
+          "STATIC_SAFETY_AUDIT=PASS" |
+            Set-Content "$root\evidence\02_STATIC_SAFETY_AUDIT.txt"
+
+      - name: Discover methods and capture JIT without invoking transport
+        shell: pwsh
+        run: |
+          $ErrorActionPreference="Stop"
+          $root="C:\okn_v28v2"
+
+          & "$root\harness\Probe.exe" `
+            "$root\vendor.exe" `
+            "$root\evidence\03_RUNTIME_METHOD_DISCOVERY.txt"
+
+          if($LASTEXITCODE -ne 0){ throw "runtime discovery failed" }
+
+          $ev=Get-Content "$root\evidence\03_RUNTIME_METHOD_DISCOVERY.txt" -Raw
+
+          if($ev -notmatch 'DISCOVERY_COMPLETE=true'){ throw "discovery incomplete" }
+
+          Get-Content "$root\evidence\03_RUNTIME_METHOD_DISCOVERY.txt" |
+            Select-String -Pattern '^(BASE_|USBHID_|HIDINTERFACE_|TYPE\||METHOD\||TARGET_|BYTE_ARRAY_|DISCOVERY_)'
+
+      - name: Disassemble candidates and derive decision
+        shell: pwsh
+        run: |
+          $ErrorActionPreference="Stop"
+          $root="C:\okn_v28v2"
+
+          python -m pip install --quiet capstone
+
+          @'
+          from pathlib import Path
+          import re,json
+          from capstone import Cs,CS_ARCH_X86,CS_MODE_32
+
+          root=Path(r"C:\okn_v28v2")
+          ev=root/"evidence"
+
+          text=(ev/"03_RUNTIME_METHOD_DISCOVERY.txt").read_text(errors="ignore")
+          lines=text.splitlines()
+
+          methods=[]
+          for line in lines:
+              if not line.startswith("METHOD|"):
+                  continue
+
+              # METHOD|type|token|name|RET=...|PARAMS=...|ABSTRACT=...|VIRTUAL=...
+              p=line.split("|")
+              if len(p)<8: continue
+              methods.append({
+                  "type":p[1],
+                  "token":p[2],
+                  "name":p[3],
+                  "ret":p[4].removeprefix("RET="),
+                  "params":p[5].removeprefix("PARAMS="),
+                  "abstract":p[6].removeprefix("ABSTRACT="),
+                  "virtual":p[7].removeprefix("VIRTUAL=")
+              })
+
+          byte_methods=[
+              m for m in methods
+              if m["params"]=="System.Byte[]"
+          ]
+
+          write_methods=[
+              m for m in byte_methods
+              if m["name"]=="Write"
+          ]
+
+          send_methods=[
+              m for m in byte_methods
+              if m["name"]=="Send"
+          ]
+
+          md=Cs(CS_ARCH_X86,CS_MODE_32)
+          dis_files=[]
+
+          for p in sorted(ev.glob("*_NATIVE1024.bin")):
+              data=p.read_bytes()
+              ins=list(md.disasm(data,0))[:500]
+
+              rows=[]
+              for i in ins:
+                  rows.append(f"{i.address:08X}: {i.mnemonic:<8} {i.op_str}")
+                  if i.mnemonic.startswith("ret") and len(rows)>20:
+                      break
+
+              out=ev/(p.stem+"_DISASM.txt")
+              out.write_text("\n".join(rows)+"\n")
+              dis_files.append(out.name)
+
+          usb_write=[
+              m for m in write_methods
+              if "USBHID" in m["type"].upper()
+          ]
+
+          hid_send=[
+              m for m in send_methods
+              if "HIDINTERFACE" in m["type"].upper()
+          ]
+
+          concrete_write=[
+              m for m in write_methods
+              if m["abstract"].lower()=="false"
+          ]
+
+          decision={
+              "revision":"MASTER-V28-FIXED-V2",
+              "classification":"OFFLINE_RUNTIME_TRANSPORT_METHOD_DISCOVERY_NOT_FOR_FLASH",
+              "method_inventory_count":len(methods),
+              "byte_array_method_count":len(byte_methods),
+              "write_byte_array_method_count":len(write_methods),
+              "concrete_write_byte_array_method_count":len(concrete_write),
+              "send_byte_array_method_count":len(send_methods),
+              "usb_hid_named_write_count":len(usb_write),
+              "hid_interface_send_count":len(hid_send),
+              "write_methods":write_methods,
+              "send_methods":send_methods,
+              "disassembly_files":dis_files,
+              "candidate_android_wire_hex":"05047427956A",
+              "candidate_live_use_proven":False,
+              "real_hid_invoked":False,
+              "host_to_dsp_io":False,
+              "feature_report_invoked":False,
+              "flash_allowed":False
+          }
+
+          if concrete_write and hid_send and dis_files:
+              status="CONCRETE_WRITE_AND_HID_SEND_RUNTIME_TARGETS_RECOVERED_REVIEW_JIT_FRAMING"
+          elif hid_send and dis_files:
+              status="HID_SEND_RECOVERED_CONCRETE_WRITE_OWNER_STILL_NOT_IDENTIFIED"
+          else:
+              status="RUNTIME_TRANSPORT_METHOD_DISCOVERY_INCOMPLETE"
+
+          decision["status"]=status
+
+          (ev/"04_V28V2_DECISION.json").write_text(json.dumps(decision,indent=2)+"\n")
+
+          def fmt(ms):
+              if not ms: return "- none"
+              return "\n".join(
+                  f"- `{m['token']}` {m['type']}.{m['name']}({m['params']}) -> {m['ret']} abstract={m['abstract']}"
+                  for m in ms[:30]
+              )
+
+          mdout=f"""# MASTER V28 FIXED V2 FINAL DECISION
+
+          - Runtime method inventory: **{len(methods)}**
+          - Byte[] methods: **{len(byte_methods)}**
+          - `Write(Byte[])` methods: **{len(write_methods)}**
+          - Concrete `Write(Byte[])` methods: **{len(concrete_write)}**
+          - `Send(Byte[])` methods: **{len(send_methods)}**
+          - JIT disassembly files: **{len(dis_files)}**
+          - Candidate Android auth wire bytes: **05 04 74 27 95 6A**
+          - Candidate authorized for live use: **NO**
+          - Real HID invoked: **NO**
+          - Host-to-DSP I/O: **NO**
+          - Flash/erase/write: **NO / NO / NO**
+
+          Concrete Write candidates:
+          {fmt(concrete_write)}
+
+          HIDInterface Send candidates:
+          {fmt(hid_send)}
+
+          Status: **{status}**
+
+          This revision fixes the incorrect V28 assumption that the concrete
+          `Write(Byte[])` implementation must be declared directly on a type named
+          `USBHID`. It discovers the actual runtime owner first, then captures JIT.
+
+          Classification:
+          **OFFLINE_RUNTIME_TRANSPORT_METHOD_DISCOVERY_NOT_FOR_FLASH**
+          """
+
+          (ev/"05_V28V2_FINAL_DECISION.md").write_text(mdout)
+          print(mdout)
+          '@ | Set-Content "$root\derive.py"
+
+          python "$root\derive.py"
+          if($LASTEXITCODE -ne 0){ throw "derive failed" }
+
+          Get-Content "$root\evidence\05_V28V2_FINAL_DECISION.md" >> $env:GITHUB_STEP_SUMMARY
+
+      - name: Package evidence
+        shell: pwsh
+        run: |
+          $ErrorActionPreference="Stop"
+          $root="C:\okn_v28v2"
+
+          Copy-Item "$root\evidence\*" "$root\out\" -Force
+
+          foreach($bad in @("vendor.exe","Probe.exe")){
+            if(Test-Path "$root\out\$bad"){ throw "binary leak: $bad" }
+          }
+
+          Get-ChildItem "$root\out" -File | ForEach-Object {
+            "$((Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower())  $($_.Name)"
+          } | Set-Content "$root\out\SHA256SUMS.txt"
+
+      - name: Upload evidence
+        uses: actions/upload-artifact@v7
+        with:
+          name: OKN-BP1048P4-MASTER-V28-FIXED-V2-RUNTIME-TRANSPORT-DISCOVERY-JIT-EVIDENCE
+          path: C:\okn_v28v2\out\*
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Final fail-closed assertion
+        shell: pwsh
+        run: |
+          $ErrorActionPreference="Stop"
+          $root="C:\okn_v28v2"
+
+          foreach($n in @(
+            "LIVE_DSP_CONNECTED","USB_TARGET_ACCESS","HOST_TO_DSP_IO",
+            "REAL_HID_OBJECT_ALLOWED","REAL_HID_CONNECT_ALLOWED",
+            "REAL_HID_SEND_ALLOWED","REAL_HID_READ_ALLOWED","REAL_HID_WRITE_ALLOWED",
+            "FEATURE_REPORT_ALLOWED","FLASH_ALLOWED","ERASE_ALLOWED","WRITE_ALLOWED"
+          )){
+            if((Get-Item "Env:$n").Value -ne "NO"){ throw "$n changed" }
+          }
+
+          $d=Get-Content "$root\evidence\04_V28V2_DECISION.json" -Raw | ConvertFrom-Json
+
+          if($d.real_hid_invoked -ne $false){ throw "unexpected HID state" }
+          if($d.host_to_dsp_io -ne $false){ throw "unexpected host-to-DSP state" }
+          if($d.feature_report_invoked -ne $false){ throw "unexpected feature state" }
+          if($d.flash_allowed -ne $false){ throw "unexpected flash state" }
+          if($d.candidate_live_use_proven -ne $false){ throw "must remain fail-closed" }
+
+          "MASTER_V28_FIXED_V2=PASS"
+          "REAL_HID_IO=NO"
+          "HOST_TO_DSP_IO=NO"
+          "FLASH_ALLOWED=NO"
