@@ -1,0 +1,867 @@
+name: OKN BP1048P4 MASTER V34 NO-0X11 ENTRY + LOSSLESS IN PATH RECOVERY OFFLINE
+
+"on":
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/OKN_BP1048P4_MASTER_V34_NO_0X11_ENTRY_LOSSLESS_IN_PATH_RECOVERY_OFFLINE.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+env:
+  GOLOPINE_WINDOWS_URL: "https://golodsp.com/wp-content/uploads/2026/05/golopine_audio_turning_release_2026-04-08.exe_.zip"
+  EXPECTED_VENDOR_SHA256: "3ca54171c53f7badd963ffe6851b8b3e2faf8aee8ba2afcb7040990e22ae09b2"
+
+  V33_RUN_ID: "37190127906"
+  V33_ARTIFACT_ID: "11298985578"
+
+  LIVE_DSP_CONNECTED: "NO"
+  USB_TARGET_ACCESS: "NO"
+  HOST_TO_DSP_IO: "NO"
+  REAL_HID_OBJECT_ALLOWED: "NO"
+  REAL_HID_CONNECT_ALLOWED: "NO"
+  REAL_HID_SEND_ALLOWED: "NO"
+  REAL_HID_READ_ALLOWED: "NO"
+  REAL_HID_WRITE_ALLOWED: "NO"
+  FEATURE_REPORT_ALLOWED: "NO"
+  FLASH_ALLOWED: "NO"
+  ERASE_ALLOWED: "NO"
+  WRITE_ALLOWED: "NO"
+
+jobs:
+  v34:
+    name: Recover safe auth entry candidates and receive architecture OFFLINE
+    runs-on: windows-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Safety gate and workspace
+        shell: pwsh
+        run: |
+          $ErrorActionPreference="Stop"
+
+          foreach($n in @(
+            "LIVE_DSP_CONNECTED","USB_TARGET_ACCESS","HOST_TO_DSP_IO",
+            "REAL_HID_OBJECT_ALLOWED","REAL_HID_CONNECT_ALLOWED",
+            "REAL_HID_SEND_ALLOWED","REAL_HID_READ_ALLOWED","REAL_HID_WRITE_ALLOWED",
+            "FEATURE_REPORT_ALLOWED","FLASH_ALLOWED","ERASE_ALLOWED","WRITE_ALLOWED"
+          )){
+            if((Get-Item "Env:$n").Value -ne "NO"){ throw "$n must remain NO" }
+          }
+
+          $root="C:\okn_v34"
+          if(Test-Path $root){Remove-Item -Recurse -Force $root}
+          New-Item -ItemType Directory -Force -Path `
+            "$root\download","$root\pkg","$root\harness","$root\evidence","$root\out" | Out-Null
+
+          @"
+          REVISION=MASTER-V34
+          MODE=OFFLINE_NO_0X11_ENTRY_AND_LOSSLESS_RECEIVE_RECOVERY
+          HARD_RULE_NEW_LIVE_0X11=FORBIDDEN
+          V33_RUN_ID=$env:V33_RUN_ID
+          V33_ARTIFACT_ID=$env:V33_ARTIFACT_ID
+          REAL_HID_IO=NO
+          HOST_TO_DSP_IO=NO
+          FEATURE_REPORT=NO
+          FLASH_ALLOWED=NO
+          ERASE_ALLOWED=NO
+          WRITE_ALLOWED=NO
+          "@ | Set-Content "$root\evidence\00_SCOPE.txt"
+
+      - name: Download V33 evidence
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference="Stop"
+          $root="C:\okn_v34"
+
+          curl.exe -fL --retry 4 --retry-all-errors `
+            -H "Accept: application/vnd.github+json" `
+            -H "Authorization: Bearer $env:GH_TOKEN" `
+            -H "X-GitHub-Api-Version: 2022-11-28" `
+            "https://api.github.com/repos/${{ github.repository }}/actions/artifacts/$env:V33_ARTIFACT_ID/zip" `
+            -o "$root\download\v33.zip"
+
+          if($LASTEXITCODE -ne 0){throw "V33 artifact download failed"}
+
+          Expand-Archive -Force "$root\download\v33.zip" "$root\v33"
+
+          foreach($f in @(
+            "02_V33_FORENSICS.json",
+            "03_EXACT_INVENTORY.tsv",
+            "04_CHANNEL_MAPPING.tsv",
+            "05_V33_FINAL_DECISION.md"
+          )){
+            if(-not(Test-Path "$root\v33\$f")){throw "missing V33 file: $f"}
+          }
+
+          Copy-Item "$root\v33\03_EXACT_INVENTORY.tsv" "$root\evidence\01_V33_EXACT_INVENTORY.tsv"
+          Copy-Item "$root\v33\04_CHANNEL_MAPPING.tsv" "$root\evidence\02_V33_CHANNEL_MAPPING.tsv"
+
+      - name: Acquire exact official vendor binary
+        shell: pwsh
+        run: |
+          $ErrorActionPreference="Stop"
+          $root="C:\okn_v34"
+
+          curl.exe -fL --retry 6 --retry-all-errors --retry-delay 2 `
+            --connect-timeout 20 --max-time 300 `
+            $env:GOLOPINE_WINDOWS_URL -o "$root\download\vendor.zip"
+
+          if($LASTEXITCODE -ne 0){throw "vendor download failed"}
+
+          Expand-Archive -Force "$root\download\vendor.zip" "$root\pkg"
+
+          $exe=Get-ChildItem "$root\pkg" -Recurse -File -Filter *.exe |
+            Where-Object {$_.FullName -notmatch '\\__MACOSX\\' -and $_.Name -notlike '._*'} |
+            Sort-Object Length -Descending | Select-Object -First 1
+
+          if(-not $exe){throw "vendor EXE missing"}
+          Copy-Item $exe.FullName "$root\vendor.exe" -Force
+
+          $sha=(Get-FileHash "$root\vendor.exe" -Algorithm SHA256).Hash.ToLowerInvariant()
+          if($sha -ne $env:EXPECTED_VENDOR_SHA256){throw "vendor SHA changed: $sha"}
+
+          @"
+          VENDOR_SHA256=$sha
+          ORIGINAL_BINARY_MODIFIED=NO
+          "@ | Set-Content "$root\evidence\03_VENDOR_IDENTITY.txt"
+
+      - name: Build x86 bridge candidate and read-path probe
+        shell: pwsh
+        run: |
+          $ErrorActionPreference="Stop"
+          $root="C:\okn_v34"
+
+          @'
+          using System;
+          using System.IO;
+          using System.Linq;
+          using System.Reflection;
+          using System.Reflection.Emit;
+          using System.Runtime.CompilerServices;
+          using System.Collections.Generic;
+          using System.Threading;
+
+          public static class Sink
+          {
+              public static readonly List<byte[]> Writes=new List<byte[]>();
+
+              public static void Clear()
+              {
+                  lock(Writes){Writes.Clear();}
+              }
+
+              public static void Record(byte[] b)
+              {
+                  lock(Writes){Writes.Add(b==null?null:(byte[])b.Clone());}
+              }
+
+              public static byte[][] Snapshot()
+              {
+                  lock(Writes)
+                  {
+                      return Writes.Select(x=>x==null?null:(byte[])x.Clone()).ToArray();
+                  }
+              }
+          }
+
+          public static class Probe
+          {
+              static string OutPath;
+
+              static void Log(string s)
+              {
+                  File.AppendAllText(OutPath,s+Environment.NewLine);
+              }
+
+              static string Hex(byte[] b)
+              {
+                  return b==null?"<NULL>":BitConverter.ToString(b).Replace("-","");
+              }
+
+              static object InvokeBounded(MethodInfo m,object target,object[] args,int ms,string tag)
+              {
+                  object result=null;
+                  Exception error=null;
+
+                  Thread t=new Thread(delegate(){
+                      try{result=m.Invoke(target,args);}
+                      catch(Exception ex){error=ex;}
+                  });
+
+                  t.IsBackground=true;
+                  t.Start();
+
+                  if(!t.Join(ms))
+                  {
+                      Log(tag+"_TIMEOUT=true");
+                      try{t.Abort();}catch{}
+                      return null;
+                  }
+
+                  if(error!=null)throw error;
+                  return result;
+              }
+
+              static void DefaultRet(ILGenerator il,Type ret)
+              {
+                  if(ret==typeof(void)){il.Emit(OpCodes.Ret);return;}
+
+                  if(ret.IsValueType)
+                  {
+                      LocalBuilder l=il.DeclareLocal(ret);
+                      il.Emit(OpCodes.Ldloca_S,l);
+                      il.Emit(OpCodes.Initobj,ret);
+                      il.Emit(OpCodes.Ldloc,l);
+                      il.Emit(OpCodes.Ret);
+                      return;
+                  }
+
+                  il.Emit(OpCodes.Ldnull);
+                  il.Emit(OpCodes.Ret);
+              }
+
+              static MethodAttributes Vis(MethodInfo m)
+              {
+                  MethodAttributes a=MethodAttributes.Virtual|MethodAttributes.HideBySig;
+
+                  if(m.IsPublic)a|=MethodAttributes.Public;
+                  else if(m.IsFamily)a|=MethodAttributes.Family;
+                  else if(m.IsFamilyOrAssembly)a|=MethodAttributes.FamORAssem;
+                  else if(m.IsAssembly)a|=MethodAttributes.Assembly;
+                  else a|=MethodAttributes.Private;
+
+                  if(m.IsSpecialName)a|=MethodAttributes.SpecialName;
+                  return a;
+              }
+
+              static Type CaptureType(Type baseType)
+              {
+                  AssemblyBuilder ab=AppDomain.CurrentDomain.DefineDynamicAssembly(
+                      new AssemblyName("OKN_V34_CAPTURE"),AssemblyBuilderAccess.Run);
+
+                  TypeBuilder tb=ab.DefineDynamicModule("main").DefineType(
+                      "OKN.CaptureStream",
+                      TypeAttributes.Public|TypeAttributes.Class,
+                      baseType);
+
+                  ConstructorInfo bc=baseType.GetConstructor(
+                      BindingFlags.Public|BindingFlags.NonPublic|BindingFlags.Instance,
+                      null,Type.EmptyTypes,null);
+
+                  if(bc==null)throw new Exception("stream parameterless ctor missing");
+
+                  ConstructorBuilder cb=tb.DefineConstructor(
+                      MethodAttributes.Public,
+                      CallingConventions.Standard,
+                      Type.EmptyTypes);
+
+                  ILGenerator ci=cb.GetILGenerator();
+                  ci.Emit(OpCodes.Ldarg_0);
+                  ci.Emit(OpCodes.Call,bc);
+                  ci.Emit(OpCodes.Ret);
+
+                  foreach(MethodInfo m in baseType.GetMethods(
+                      BindingFlags.Public|BindingFlags.NonPublic|BindingFlags.Instance)
+                      .Where(m=>m.IsVirtual&&!m.IsFinal&&
+                          (m.IsAbstract ||
+                           m.Name=="Write" || m.Name=="WriteLine" ||
+                           m.Name=="ReadBytes" || m.Name=="ReadLine" ||
+                           m.Name=="Connect" || m.Name=="Disconnect"))
+                      .GroupBy(m=>m.ToString()).Select(g=>g.First()))
+                  {
+                      Type[] ps=m.GetParameters().Select(x=>x.ParameterType).ToArray();
+                      MethodBuilder b=tb.DefineMethod(m.Name,Vis(m),m.ReturnType,ps);
+                      ILGenerator il=b.GetILGenerator();
+
+                      if(m.Name=="Write"&&ps.Length==1&&ps[0]==typeof(byte[]))
+                      {
+                          il.Emit(OpCodes.Ldarg_1);
+                          il.Emit(OpCodes.Call,typeof(Sink).GetMethod("Record"));
+                          DefaultRet(il,m.ReturnType);
+                      }
+                      else
+                      {
+                          DefaultRet(il,m.ReturnType);
+                      }
+
+                      tb.DefineMethodOverride(b,m);
+                  }
+
+                  return tb.CreateType();
+              }
+
+              static void SetConnected(object stream,Type baseType)
+              {
+                  Type e=baseType.GetNestedType(
+                      "ConnectionStatus",
+                      BindingFlags.Public|BindingFlags.NonPublic);
+
+                  object v=Enum.Parse(e,"Connected");
+
+                  FieldInfo f=baseType.GetFields(
+                      BindingFlags.Public|BindingFlags.NonPublic|BindingFlags.Instance)
+                      .FirstOrDefault(x=>x.FieldType==e);
+
+                  if(f!=null)
+                  {
+                      f.SetValue(stream,v);
+                      return;
+                  }
+
+                  MethodInfo m=baseType.GetMethod(
+                      "UpdateDeviceConnStatus",
+                      BindingFlags.Public|BindingFlags.NonPublic|BindingFlags.Instance);
+
+                  if(m==null)throw new Exception("connection setter missing");
+                  m.Invoke(stream,new object[]{v});
+              }
+
+              static string Status(object bridge,Type t)
+              {
+                  PropertyInfo p=t.GetProperty(
+                      "StreamStatus",
+                      BindingFlags.Public|BindingFlags.NonPublic|BindingFlags.Instance);
+
+                  if(p!=null)
+                  {
+                      try
+                      {
+                          object v=p.GetValue(bridge,null);
+                          if(v!=null)return v.ToString();
+                      }
+                      catch{}
+                  }
+
+                  foreach(FieldInfo f in t.GetFields(
+                      BindingFlags.Public|BindingFlags.NonPublic|BindingFlags.Instance))
+                  {
+                      if(f.FieldType.IsEnum &&
+                         f.FieldType.Name.IndexOf(
+                         "UFEStreamStatus",StringComparison.OrdinalIgnoreCase)>=0)
+                      {
+                          object v=f.GetValue(bridge);
+                          if(v!=null)return v.ToString();
+                      }
+                  }
+
+                  return "<UNKNOWN>";
+              }
+
+              static bool SafeName(string n)
+              {
+                  string s=n.ToLowerInvariant();
+
+                  string[] forbidden={
+                      "flash","erase","burn","update","upgrade","boot",
+                      "recovery","program","firmware","download","writeflash"
+                  };
+
+                  foreach(string x in forbidden)
+                      if(s.Contains(x))return false;
+
+                  return
+                      s.Contains("auth") ||
+                      s.Contains("devtype") ||
+                      s.Contains("description") ||
+                      s.Contains("version") ||
+                      s.Contains("device") ||
+                      s.Contains("identify") ||
+                      s.Contains("info");
+              }
+
+              static object FreshBridge(Type baseType,Type bridgeType)
+              {
+                  Type cap=CaptureType(baseType);
+                  object stream=Activator.CreateInstance(cap);
+                  SetConnected(stream,baseType);
+
+                  ConstructorInfo ctor=bridgeType.GetConstructor(new[]{baseType});
+                  if(ctor==null)throw new Exception("bridge ctor missing");
+
+                  return ctor.Invoke(new[]{stream});
+              }
+
+              static void ProbeBridgeMethod(Type baseType,Type bridgeType,MethodInfo m,int idx)
+              {
+                  object bridge=FreshBridge(baseType,bridgeType);
+
+                  Sink.Clear();
+
+                  string tag="CAND_"+idx.ToString("D2");
+
+                  Log(tag+"_TOKEN=0x"+m.MetadataToken.ToString("X8"));
+                  Log(tag+"_NAME="+m.Name);
+                  Log(tag+"_SIGNATURE="+m.ToString());
+                  Log(tag+"_STATE_BEFORE="+Status(bridge,bridgeType));
+
+                  try
+                  {
+                      InvokeBounded(m,bridge,new object[0],1200,tag);
+                      Log(tag+"_RETURNED=true");
+                  }
+                  catch(Exception ex)
+                  {
+                      Exception b=ex.GetBaseException();
+                      Log(tag+"_EXCEPTION="+b.GetType().FullName+":"+b.Message);
+                  }
+
+                  Thread.Sleep(80);
+
+                  Log(tag+"_STATE_AFTER="+Status(bridge,bridgeType));
+
+                  byte[][] w=Sink.Snapshot();
+                  Log(tag+"_WRITE_COUNT="+w.Length);
+
+                  for(int i=0;i<w.Length;i++)
+                  {
+                      byte[] b=w[i];
+                      int n=b==null?-1:b.Length;
+                      int outerFirst=(n>=0 && n<255)?n+1:-1;
+
+                      Log(tag+"_WRITE_"+i+"_RAW_LEN="+n);
+                      Log(tag+"_WRITE_"+i+"_RAW_HEX="+Hex(b));
+                      Log(tag+"_WRITE_"+i+"_PREDICTED_ANDROID_OUTER_FIRST_DEC="+outerFirst);
+                      Log(tag+"_WRITE_"+i+"_PREDICTED_ANDROID_OUTER_FIRST_HEX="+
+                          (outerFirst<0?"<NA>":outerFirst.ToString("X2")));
+                      Log(tag+"_WRITE_"+i+"_NEW_LIVE_0X11_SAFE="+
+                          (outerFirst!=0x11));
+                  }
+              }
+
+              static void InventoryReadPath(Assembly asm)
+              {
+                  Type[] types;
+
+                  try{types=asm.GetTypes();}
+                  catch(ReflectionTypeLoadException ex)
+                  {
+                      types=ex.Types.Where(x=>x!=null).ToArray();
+                  }
+
+                  foreach(Type t in types.OrderBy(x=>x.FullName))
+                  {
+                      string tn=t.FullName??"";
+
+                      bool typeInteresting=
+                          tn.IndexOf("HID",StringComparison.OrdinalIgnoreCase)>=0 ||
+                          tn.IndexOf("USB",StringComparison.OrdinalIgnoreCase)>=0 ||
+                          tn.IndexOf("CommunicationStream",StringComparison.OrdinalIgnoreCase)>=0;
+
+                      if(!typeInteresting)continue;
+
+                      Log("READ_TYPE|"+tn+
+                          "|BASE="+(t.BaseType==null?"<NULL>":t.BaseType.FullName));
+
+                      foreach(FieldInfo f in t.GetFields(
+                          BindingFlags.Public|BindingFlags.NonPublic|
+                          BindingFlags.Instance|BindingFlags.Static))
+                      {
+                          string fn=f.Name??"";
+                          string ft=f.FieldType.FullName??f.FieldType.Name;
+
+                          if(fn.IndexOf("read",StringComparison.OrdinalIgnoreCase)>=0 ||
+                             fn.IndexOf("recv",StringComparison.OrdinalIgnoreCase)>=0 ||
+                             fn.IndexOf("input",StringComparison.OrdinalIgnoreCase)>=0 ||
+                             fn.IndexOf("event",StringComparison.OrdinalIgnoreCase)>=0 ||
+                             ft.IndexOf("delegate",StringComparison.OrdinalIgnoreCase)>=0)
+                          {
+                              Log("READ_FIELD|"+tn+
+                                  "|"+fn+
+                                  "|TYPE="+ft);
+                          }
+                      }
+
+                      foreach(EventInfo e in t.GetEvents(
+                          BindingFlags.Public|BindingFlags.NonPublic|
+                          BindingFlags.Instance|BindingFlags.Static))
+                      {
+                          Log("READ_EVENT|"+tn+
+                              "|"+e.Name+
+                              "|TYPE="+(e.EventHandlerType==null?"<NULL>":e.EventHandlerType.FullName));
+                      }
+
+                      foreach(MethodInfo m in t.GetMethods(
+                          BindingFlags.Public|BindingFlags.NonPublic|
+                          BindingFlags.Instance|BindingFlags.Static|
+                          BindingFlags.DeclaredOnly)
+                          .OrderBy(x=>x.MetadataToken))
+                      {
+                          string mn=m.Name??"";
+                          bool interesting=
+                              mn.IndexOf("read",StringComparison.OrdinalIgnoreCase)>=0 ||
+                              mn.IndexOf("recv",StringComparison.OrdinalIgnoreCase)>=0 ||
+                              mn.IndexOf("receive",StringComparison.OrdinalIgnoreCase)>=0 ||
+                              mn.IndexOf("input",StringComparison.OrdinalIgnoreCase)>=0 ||
+                              mn.IndexOf("report",StringComparison.OrdinalIgnoreCase)>=0;
+
+                          if(!interesting)continue;
+
+                          string ps=String.Join(",",
+                              m.GetParameters()
+                               .Select(x=>x.ParameterType.FullName??x.ParameterType.Name)
+                               .ToArray());
+
+                          Log("READ_METHOD|"+tn+
+                              "|TOKEN=0x"+m.MetadataToken.ToString("X8")+
+                              "|NAME="+mn+
+                              "|RET="+(m.ReturnType.FullName??m.ReturnType.Name)+
+                              "|PARAMS="+ps);
+                      }
+                  }
+              }
+
+              public static void Main(string[] a)
+              {
+                  if(a.Length<2)throw new Exception("args: vendor.exe output");
+
+                  string exe=Path.GetFullPath(a[0]);
+                  OutPath=Path.GetFullPath(a[1]);
+
+                  File.WriteAllText(OutPath,"");
+                  Directory.SetCurrentDirectory(Path.GetDirectoryName(exe));
+
+                  Log("MODE=OFFLINE_NO_0X11_ENTRY_AND_LOSSLESS_RECEIVE_RECOVERY");
+                  Log("REAL_HID_OBJECT_CREATED=NO");
+                  Log("REAL_HID_CONNECT_INVOKED=NO");
+                  Log("REAL_HID_SEND_INVOKED=NO");
+                  Log("REAL_HID_READ_INVOKED=NO");
+                  Log("REAL_HID_WRITE_INVOKED=NO");
+                  Log("HOST_TO_DSP_IO=NO");
+                  Log("FEATURE_REPORT_INVOKED=NO");
+                  Log("FLASH_ALLOWED=NO");
+
+                  Assembly asm=Assembly.LoadFile(exe);
+                  RuntimeHelpers.RunModuleConstructor(asm.ManifestModule.ModuleHandle);
+
+                  Type baseType=asm.GetType(
+                      "DSTech_AudioDSP_Client.DeviceCommunicationStream",true);
+
+                  Type bridgeType=asm.GetType(
+                      "DSTech_AudioDSP_Client.UFEcommandBridge",true);
+
+                  var candidates=bridgeType.GetMethods(
+                      BindingFlags.Public|BindingFlags.NonPublic|BindingFlags.Instance)
+                      .Where(m=>m.DeclaringType==bridgeType)
+                      .Where(m=>!m.IsGenericMethod)
+                      .Where(m=>m.GetParameters().Length==0)
+                      .Where(m=>SafeName(m.Name))
+                      .OrderBy(m=>m.MetadataToken)
+                      .ToList();
+
+                  Log("BRIDGE_ZEROARG_SAFE_NAME_CANDIDATE_COUNT="+candidates.Count);
+
+                  int idx=0;
+                  foreach(MethodInfo m in candidates)
+                  {
+                      ProbeBridgeMethod(baseType,bridgeType,m,idx++);
+                  }
+
+                  InventoryReadPath(asm);
+
+                  Log("PROBE_COMPLETE=true");
+                  Environment.Exit(0);
+              }
+          }
+          '@ | Set-Content "$root\harness\Probe.cs"
+
+          $csc="$env:WINDIR\Microsoft.NET\Framework\v4.0.30319\csc.exe"
+          if(-not(Test-Path $csc)){throw "x86 csc missing"}
+
+          & $csc /nologo /platform:x86 /target:exe `
+            /out:"$root\harness\Probe.exe" `
+            "$root\harness\Probe.cs"
+
+          if($LASTEXITCODE -ne 0){throw "probe compile failed"}
+
+      - name: Static safety audit
+        shell: pwsh
+        run: |
+          $ErrorActionPreference="Stop"
+          $root="C:\okn_v34"
+          $s=Get-Content "$root\harness\Probe.cs" -Raw
+
+          foreach($bad in @(
+            "HidD_SetOutputReport(","HidD_GetInputReport(",
+            "HidD_SetFeature(","HidD_GetFeature(",
+            "ReadFile(","WriteFile(","CreateFileW("
+          )){
+            if($s.Contains($bad)){throw "forbidden real HID primitive: $bad"}
+          }
+
+          foreach($need in @(
+            "CaptureType",
+            "SafeName",
+            "PREDICTED_ANDROID_OUTER_FIRST_HEX",
+            "NEW_LIVE_0X11_SAFE",
+            "InventoryReadPath",
+            "REAL_HID_OBJECT_CREATED=NO",
+            "HOST_TO_DSP_IO=NO",
+            "FLASH_ALLOWED=NO"
+          )){
+            if(-not $s.Contains($need)){throw "missing marker: $need"}
+          }
+
+          "STATIC_SAFETY_AUDIT=PASS" |
+            Set-Content "$root\evidence\04_STATIC_SAFETY_AUDIT.txt"
+
+      - name: Run offline vendor probe
+        shell: pwsh
+        run: |
+          $ErrorActionPreference="Continue"
+          $root="C:\okn_v34"
+
+          & "$root\harness\Probe.exe" `
+            "$root\vendor.exe" `
+            "$root\evidence\05_VENDOR_PROBE.txt"
+
+          $exit=$LASTEXITCODE
+          "HARNESS_EXIT=$exit" | Set-Content "$root\evidence\05A_HARNESS_EXIT.txt"
+
+          if(Test-Path "$root\evidence\05_VENDOR_PROBE.txt"){
+            Get-Content "$root\evidence\05_VENDOR_PROBE.txt" |
+              Select-String -Pattern `
+              '^(BRIDGE_|CAND_|READ_TYPE|READ_FIELD|READ_EVENT|READ_METHOD|PROBE_)'
+          }
+
+          exit 0
+
+      - name: Derive V34 decision and Android receive blueprint
+        shell: pwsh
+        run: |
+          $ErrorActionPreference="Stop"
+          $root="C:\okn_v34"
+
+          @'
+          from pathlib import Path
+          import json,re
+
+          root=Path(r"C:\okn_v34")
+          ev=root/"evidence"
+
+          text=(ev/"05_VENDOR_PROBE.txt").read_text(errors="ignore")
+          v33=json.loads((root/"v33"/"02_V33_FORENSICS.json").read_text())
+
+          cands={}
+          current=None
+
+          for line in text.splitlines():
+              m=re.match(r"CAND_(\d+)_NAME=(.*)",line)
+              if m:
+                  current=int(m.group(1))
+                  cands.setdefault(current,{})["name"]=m.group(2)
+                  continue
+
+              m=re.match(r"CAND_(\d+)_TOKEN=(.*)",line)
+              if m:
+                  cands.setdefault(int(m.group(1)),{})["token"]=m.group(2)
+                  continue
+
+              m=re.match(r"CAND_(\d+)_STATE_BEFORE=(.*)",line)
+              if m:
+                  cands.setdefault(int(m.group(1)),{})["state_before"]=m.group(2)
+                  continue
+
+              m=re.match(r"CAND_(\d+)_STATE_AFTER=(.*)",line)
+              if m:
+                  cands.setdefault(int(m.group(1)),{})["state_after"]=m.group(2)
+                  continue
+
+              m=re.match(r"CAND_(\d+)_WRITE_(\d+)_RAW_LEN=(-?\d+)",line)
+              if m:
+                  ci,wi,n=map(int,m.groups())
+                  cands.setdefault(ci,{}).setdefault("writes",{}).setdefault(wi,{})["raw_len"]=n
+                  continue
+
+              m=re.match(r"CAND_(\d+)_WRITE_(\d+)_RAW_HEX=(.*)",line)
+              if m:
+                  ci=int(m.group(1)); wi=int(m.group(2))
+                  cands.setdefault(ci,{}).setdefault("writes",{}).setdefault(wi,{})["raw_hex"]=m.group(3)
+                  continue
+
+              m=re.match(r"CAND_(\d+)_WRITE_(\d+)_PREDICTED_ANDROID_OUTER_FIRST_HEX=(.*)",line)
+              if m:
+                  ci=int(m.group(1)); wi=int(m.group(2))
+                  cands.setdefault(ci,{}).setdefault("writes",{}).setdefault(wi,{})["outer_first_hex"]=m.group(3)
+                  continue
+
+              m=re.match(r"CAND_(\d+)_WRITE_(\d+)_NEW_LIVE_0X11_SAFE=(True|False)",line)
+              if m:
+                  ci=int(m.group(1)); wi=int(m.group(2))
+                  cands.setdefault(ci,{}).setdefault("writes",{}).setdefault(wi,{})["no_0x11_safe"]=m.group(3)=="True"
+
+          candidate_list=[]
+          safe_entry=[]
+
+          for i in sorted(cands):
+              c=cands[i]
+              writes=[c.get("writes",{}).get(k,{}) for k in sorted(c.get("writes",{}))]
+              row={
+                  "index":i,
+                  "name":c.get("name"),
+                  "token":c.get("token"),
+                  "state_before":c.get("state_before"),
+                  "state_after":c.get("state_after"),
+                  "writes":writes
+              }
+              candidate_list.append(row)
+
+              if writes and all(w.get("no_0x11_safe") for w in writes):
+                  after=(c.get("state_after") or "").upper()
+                  name=(c.get("name") or "").lower()
+
+                  if ("AUTH" in after or "DESCRIPTION" in after or
+                      "auth" in name or "description" in name):
+                      safe_entry.append(row)
+
+          read_methods=[]
+          read_events=[]
+          read_fields=[]
+
+          for line in text.splitlines():
+              if line.startswith("READ_METHOD|"):
+                  read_methods.append(line)
+              elif line.startswith("READ_EVENT|"):
+                  read_events.append(line)
+              elif line.startswith("READ_FIELD|"):
+                  read_fields.append(line)
+
+          # Queue-based Android design is source-level architecture only.
+          android_blueprint = {
+              "interface":"runtime HID interface 4 after exact fingerprint gate",
+              "selection_rule":
+                  "select endpoint with direction USB_DIR_IN and type USB_ENDPOINT_XFER_INT",
+              "api":"android.hardware.usb.UsbRequest",
+              "receive_model":
+                  "queue multiple ByteBuffer requests before any expected response; on requestWait, immediately requeue consumed buffer",
+              "minimum_queue_depth":8,
+              "output_transfers_in_blueprint":0,
+              "feature_reports_in_blueprint":0,
+              "reason":
+                  "control GET_REPORT polling is snapshot-style and V31 lost seven fragments; queued interrupt-IN is designed to consume each endpoint packet",
+              "live_authorized":False
+          }
+
+          result={
+              "revision":"MASTER-V34",
+              "classification":"OFFLINE_NO_0X11_ENTRY_AND_RECEIVE_PATH_RECOVERY_NOT_FOR_FLASH",
+              "vendor_zeroarg_candidates":candidate_list,
+              "no_0x11_auth_or_description_candidates":safe_entry,
+              "no_0x11_candidate_count":len(safe_entry),
+              "read_method_inventory_count":len(read_methods),
+              "read_event_inventory_count":len(read_events),
+              "read_field_inventory_count":len(read_fields),
+              "read_methods":read_methods,
+              "read_events":read_events,
+              "read_fields":read_fields,
+              "android_lossless_receive_blueprint":android_blueprint,
+              "v33_expected_total_report_hypothesis":
+                  v33.get("expected_total_report_hypothesis"),
+              "new_live_0x11_allowed":False,
+              "live_capture_authorized":False,
+              "real_hid_invoked":False,
+              "host_to_dsp_io":False,
+              "feature_report_invoked":False,
+              "flash_allowed":False
+          }
+
+          if safe_entry:
+              status="NO_0X11_VENDOR_ENTRY_CANDIDATE_FOUND_REQUIRES_EXACT_SEMANTIC_REVIEW"
+          else:
+              status="NO_ALTERNATE_NO_0X11_VENDOR_ENTRY_FOUND_QUEUED_IN_BLUEPRINT_READY_OFFLINE"
+
+          result["status"]=status
+
+          (ev/"06_V34_DECISION.json").write_text(
+              json.dumps(result,indent=2,ensure_ascii=False)+"\n")
+
+          (ev/"07_ANDROID_QUEUED_INTERRUPT_IN_BLUEPRINT.json").write_text(
+              json.dumps(android_blueprint,indent=2,ensure_ascii=False)+"\n")
+
+          md=f"""# MASTER V34 FINAL DECISION
+
+          - Vendor bridge zero-arg candidates tested: **{len(candidate_list)}**
+          - No-0x11 auth/description candidates: **{len(safe_entry)}**
+          - Read-path methods inventoried: **{len(read_methods)}**
+          - Read-path events inventoried: **{len(read_events)}**
+          - Read-path fields inventoried: **{len(read_fields)}**
+          - V33 expected full stream reports: **{v33.get('expected_total_report_hypothesis')}**
+          - Android queued interrupt-IN blueprint: **READY OFFLINE**
+          - New live startup containing byte 0x11: **NOT ALLOWED**
+          - Live capture authorized: **NO**
+          - Real HID invoked: **NO**
+          - Host-to-DSP I/O: **NO**
+          - Flash/erase/write: **NO / NO / NO**
+
+          Status: **{status}**
+
+          V34 searches the exact official vendor bridge for authentication or
+          Device Description entry methods whose predicted Android outer framing
+          does not begin with 0x11. It also inventories the vendor receive path and
+          records a lossless Android queued interrupt-IN architecture. It does not
+          contact hardware.
+
+          Classification:
+          **OFFLINE_NO_0X11_ENTRY_AND_RECEIVE_PATH_RECOVERY_NOT_FOR_FLASH**
+          """
+
+          (ev/"08_V34_FINAL_DECISION.md").write_text(md)
+          print(md)
+          '@ | Set-Content "$root\derive.py"
+
+          python "$root\derive.py"
+          if($LASTEXITCODE -ne 0){throw "V34 derive failed"}
+
+          Get-Content "$root\evidence\08_V34_FINAL_DECISION.md" >> $env:GITHUB_STEP_SUMMARY
+
+      - name: Package V34 evidence
+        if: always()
+        shell: pwsh
+        run: |
+          $ErrorActionPreference="Continue"
+          $root="C:\okn_v34"
+
+          Copy-Item "$root\evidence\*" "$root\out\" -Force -ErrorAction SilentlyContinue
+
+          foreach($bad in @("vendor.exe","Probe.exe")){
+            if(Test-Path "$root\out\$bad"){Remove-Item -Force "$root\out\$bad"}
+          }
+
+          Get-ChildItem "$root\out" -File | ForEach-Object {
+            "$((Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower())  $($_.Name)"
+          } | Set-Content "$root\out\SHA256SUMS.txt"
+
+      - name: Upload V34 evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: OKN-BP1048P4-MASTER-V34-NO-0X11-ENTRY-LOSSLESS-IN-RECOVERY-EVIDENCE
+          path: C:\okn_v34\out\*
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Final fail-closed assertion
+        if: always()
+        shell: pwsh
+        run: |
+          $ErrorActionPreference="Stop"
+
+          foreach($n in @(
+            "LIVE_DSP_CONNECTED","USB_TARGET_ACCESS","HOST_TO_DSP_IO",
+            "REAL_HID_OBJECT_ALLOWED","REAL_HID_CONNECT_ALLOWED",
+            "REAL_HID_SEND_ALLOWED","REAL_HID_READ_ALLOWED","REAL_HID_WRITE_ALLOWED",
+            "FEATURE_REPORT_ALLOWED","FLASH_ALLOWED","ERASE_ALLOWED","WRITE_ALLOWED"
+          )){
+            if((Get-Item "Env:$n").Value -ne "NO"){throw "$n changed"}
+          }
+
+          "MASTER_V34=PASS"
+          "NEW_LIVE_0X11_ALLOWED=NO"
+          "REAL_HID_IO=NO"
+          "HOST_TO_DSP_IO=NO"
+          "FLASH_ALLOWED=NO"
