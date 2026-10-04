@@ -1,0 +1,68 @@
+name: OKN Cleanup Workflows - Keep AutoBuild Only
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Keep only OKN_DSP_AutoBuild.yml
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          KEEP=".github/workflows/OKN_DSP_AutoBuild.yml"
+          DIR=".github/workflows"
+
+          echo "Keeping: $KEEP"
+
+          if [[ ! -f "$KEEP" ]]; then
+            echo "ERROR: Important workflow not found: $KEEP"
+            exit 1
+          fi
+
+          while IFS= read -r -d '' file; do
+            if [[ "$file" != "$KEEP" ]]; then
+              echo "Deleting: $file"
+              rm -f -- "$file"
+            fi
+          done < <(find "$DIR" -maxdepth 1 -type f \( -name '*.yml' -o -name '*.yaml' \) -print0)
+
+          mapfile -t remaining < <(find "$DIR" -maxdepth 1 -type f \( -name '*.yml' -o -name '*.yaml' \) | sort)
+
+          echo "Remaining workflow files:"
+          printf '  %s\n' "${remaining[@]}"
+
+          if [[ "${#remaining[@]}" -ne 1 || "${remaining[0]}" != "$KEEP" ]]; then
+            echo "ERROR: Safety check failed. Expected exactly one workflow: $KEEP"
+            exit 1
+          fi
+
+      - name: Commit cleanup
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add -A .github/workflows
+
+          if git diff --cached --quiet; then
+            echo "Nothing to delete."
+            exit 0
+          fi
+
+          git commit -m "Keep only OKN_DSP_AutoBuild workflow"
+          git push origin HEAD:main
