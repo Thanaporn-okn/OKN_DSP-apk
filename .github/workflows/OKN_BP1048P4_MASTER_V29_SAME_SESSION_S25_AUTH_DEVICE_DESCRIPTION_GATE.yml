@@ -1,0 +1,1394 @@
+name: OKN BP1048P4 MASTER V29 SAME-SESSION S25 AUTH + DEVICE DESCRIPTION GATE
+
+"on":
+  workflow_dispatch:
+    inputs:
+      challenge_hex:
+        description: "32-byte challenge HEX from V29 app. Leave blank on first run to build APK only."
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  GOLOPINE_WINDOWS_URL: "https://golodsp.com/wp-content/uploads/2026/05/golopine_audio_turning_release_2026-04-08.exe_.zip"
+  EXPECTED_VENDOR_SHA256: "3ca54171c53f7badd963ffe6851b8b3e2faf8aee8ba2afcb7040990e22ae09b2"
+
+  REQUIRED_PHONE: "Samsung Galaxy S25+"
+  REQUIRED_PATH: "Samsung Galaxy S25+ -> USB-C cable -> DSP board USB-C port only"
+
+  FLASH_ALLOWED: "NO"
+  ERASE_ALLOWED: "NO"
+  FIRMWARE_WRITE_ALLOWED: "NO"
+  FEATURE_REPORT_ALLOWED: "NO"
+  UPDATE_COMMAND_ALLOWED: "NO"
+  RECOVERY_COMMAND_ALLOWED: "NO"
+
+jobs:
+  build-v29-apk:
+    name: Build bounded same-session S25+ auth diagnostic APK
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+
+    steps:
+      - name: Safety gate
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          test "$REQUIRED_PHONE" = "Samsung Galaxy S25+"
+          test "$REQUIRED_PATH" = "Samsung Galaxy S25+ -> USB-C cable -> DSP board USB-C port only"
+          test "$FLASH_ALLOWED" = "NO"
+          test "$ERASE_ALLOWED" = "NO"
+          test "$FIRMWARE_WRITE_ALLOWED" = "NO"
+          test "$FEATURE_REPORT_ALLOWED" = "NO"
+          test "$UPDATE_COMMAND_ALLOWED" = "NO"
+          test "$RECOVERY_COMMAND_ALLOWED" = "NO"
+
+          rm -rf /tmp/v29
+          mkdir -p /tmp/v29/{app,evidence,out}
+
+          cat > /tmp/v29/evidence/00_READ_FIRST.txt <<'EOF'
+          OKN BP1048P4 MASTER V29
+
+          PURPOSE:
+          Same-session authentication gate only.
+
+          REQUIRED PHYSICAL PATH:
+          Samsung Galaxy S25+ -> USB-C cable -> DSP board USB-C port only
+
+          PROVEN BEFORE V29:
+          - Runtime USB identity 6324:1719.
+          - Exact V25 raw/IF3/IF4 fingerprints.
+          - Cross-session challenge changes.
+          - Official vendor parser generates a challenge-specific 4-byte reply.
+          - V28 FIXED V2 runtime JIT identifies the USB HID DeviceCommunicationStream:
+            BHWnxZ6spmGFPV1vs95.neOkHj6BdZDIamOJWhM.Write(Byte[])
+            metadata token 0x0600043A.
+          - Its JIT allocates input.Length + 1.
+          - HIDInterface.Send(Byte[]) metadata token 0x06000496 also allocates input.Length + 1.
+          - Therefore a raw 4-byte vendor reply is framed as:
+            05 04 <4 reply bytes>
+            then zero-padded to the 256-byte Android Output report.
+          - This is consistent with the already-proven V17 16-byte startup path:
+            raw16 -> 10 raw16 -> 11 10 raw16.
+
+          V29 ALLOWS ONLY:
+          1) one proven startup handshake,
+          2) Input GET_REPORT capture,
+          3) one manually supplied 4-byte challenge-specific auth reply in the SAME open USB session,
+          4) Input GET_REPORT capture after auth.
+
+          V29 DOES NOT:
+          - send Feature reports,
+          - send updater/recovery commands,
+          - erase flash,
+          - write firmware,
+          - enter bootloader,
+          - send any arbitrary third command.
+
+          FLASH_ALLOWED=NO
+          NOT_FOR_FLASH
+          EOF
+
+      - name: Setup Java 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Generate Android project
+        shell: bash
+        run: |
+          set -euo pipefail
+          A=/tmp/v29/app
+          mkdir -p "$A/app/src/main/java/com/okn/bp1048p4v29" "$A/app/src/main/res/xml"
+
+          cat > "$A/settings.gradle" <<'EOF'
+          pluginManagement {
+              repositories { google(); mavenCentral(); gradlePluginPortal() }
+          }
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories { google(); mavenCentral() }
+          }
+          rootProject.name='OKN_BP1048P4_V29_SAME_SESSION_AUTH'
+          include ':app'
+          EOF
+
+          cat > "$A/build.gradle" <<'EOF'
+          plugins {
+              id 'com.android.application' version '8.7.3' apply false
+          }
+          EOF
+
+          cat > "$A/gradle.properties" <<'EOF'
+          org.gradle.jvmargs=-Xmx2048m -Dfile.encoding=UTF-8
+          android.useAndroidX=false
+          android.nonTransitiveRClass=true
+          EOF
+
+          cat > "$A/app/build.gradle" <<'EOF'
+          plugins { id 'com.android.application' }
+
+          android {
+              namespace 'com.okn.bp1048p4v29'
+              compileSdk 35
+              defaultConfig {
+                  applicationId 'com.okn.bp1048p4v29'
+                  minSdk 29
+                  targetSdk 35
+                  versionCode 29
+                  versionName '29.0'
+              }
+          }
+          EOF
+
+          cat > "$A/app/src/main/AndroidManifest.xml" <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <uses-feature android:name="android.hardware.usb.host" android:required="true"/>
+              <application
+                  android:allowBackup="false"
+                  android:label="OKN BP1048P4 V29 Same Session Auth">
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true"
+                      android:launchMode="singleTop">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN"/>
+                          <category android:name="android.intent.category.LAUNCHER"/>
+                      </intent-filter>
+                      <intent-filter>
+                          <action android:name="android.hardware.usb.action.USB_DEVICE_ATTACHED"/>
+                      </intent-filter>
+                      <meta-data
+                          android:name="android.hardware.usb.action.USB_DEVICE_ATTACHED"
+                          android:resource="@xml/device_filter"/>
+                  </activity>
+              </application>
+          </manifest>
+          EOF
+
+          cat > "$A/app/src/main/res/xml/device_filter.xml" <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <resources>
+              <usb-device vendor-id="25380" product-id="5913"/>
+          </resources>
+          EOF
+
+          cat > "$A/app/src/main/java/com/okn/bp1048p4v29/MainActivity.java" <<'JAVA'
+          package com.okn.bp1048p4v29;
+
+          import android.app.Activity;
+          import android.app.AlertDialog;
+          import android.app.PendingIntent;
+          import android.content.BroadcastReceiver;
+          import android.content.ClipData;
+          import android.content.ClipboardManager;
+          import android.content.Context;
+          import android.content.Intent;
+          import android.content.IntentFilter;
+          import android.hardware.usb.UsbDevice;
+          import android.hardware.usb.UsbDeviceConnection;
+          import android.hardware.usb.UsbInterface;
+          import android.hardware.usb.UsbManager;
+          import android.os.Build;
+          import android.os.Bundle;
+          import android.os.SystemClock;
+          import android.view.WindowManager;
+          import android.widget.Button;
+          import android.widget.EditText;
+          import android.widget.LinearLayout;
+          import android.widget.ScrollView;
+          import android.widget.TextView;
+
+          import java.io.OutputStream;
+          import java.nio.charset.StandardCharsets;
+          import java.security.MessageDigest;
+          import java.util.Arrays;
+          import java.util.HashMap;
+          import java.util.Locale;
+          import java.util.Map;
+
+          @SuppressWarnings("deprecation")
+          public class MainActivity extends Activity {
+              private static final int RUNTIME_VID=0x6324;
+              private static final int RUNTIME_PID=0x1719;
+              private static final int SAVE_EVIDENCE=129;
+              private static final String ACTION_USB_PERMISSION=
+                  "com.okn.bp1048p4v29.USB_PERMISSION";
+
+              private static final String EXPECTED_RAW_SHA=
+                  "C7E861A6F28EB832E16450D3A35B64C557BEA4E0CC15FF1EB94C45E348C84001";
+              private static final String EXPECTED_IF3_SHA=
+                  "BAFE7C0E6A251EB36B11362B18106DFF3DC0010A831A3B8B6CD49DBF4A9AE2C3";
+              private static final String EXPECTED_IF4_SHA=
+                  "78510751B31DCC204CD6CA2FE023F05CF84B75227A279E8E1FBAF7D6C3A21B6F";
+
+              // Proven V17 startup Android report prefix.
+              private static final byte[] STARTUP_PREFIX=new byte[]{
+                  0x11,0x10,0x63,0x1C,0x06,0x24,0x43,(byte)0xFD,
+                  0x38,0x44,0x55,(byte)0x80,0x01,(byte)0xF3,
+                  (byte)0xED,(byte)0xA0,(byte)0xCC,(byte)0xF8
+              };
+
+              private UsbManager usb;
+              private TextView log;
+              private TextView challengeView;
+              private EditText replyEdit;
+              private Button startButton;
+              private Button authButton;
+              private long t0;
+              private int permissionRequestedFor=-1;
+
+              private boolean rawFingerprintOk=false;
+              private boolean if3FingerprintOk=false;
+              private boolean if4FingerprintOk=false;
+              private boolean exactFingerprintOk=false;
+
+              private UsbDevice sessionDevice=null;
+              private UsbInterface sessionIf=null;
+              private UsbDeviceConnection sessionConn=null;
+              private boolean sessionClaimed=false;
+              private boolean startupSent=false;
+              private boolean challengeReady=false;
+              private boolean authSent=false;
+              private byte[] currentChallenge=null;
+
+              private final StringBuilder evidence=new StringBuilder();
+
+              private final BroadcastReceiver permissionRx=new BroadcastReceiver(){
+                  @Override public void onReceive(Context c,Intent i){
+                      if(!ACTION_USB_PERMISSION.equals(i.getAction()))return;
+                      UsbDevice d=getDevice(i);
+                      boolean granted=i.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED,false);
+                      permissionRequestedFor=-1;
+                      line("USB_PERMISSION_RESULT="+granted+dev(d));
+                      if(granted && runtime(d))readDescriptors(d);
+                  }
+              };
+
+              private final BroadcastReceiver usbRx=new BroadcastReceiver(){
+                  @Override public void onReceive(Context c,Intent i){
+                      if(UsbManager.ACTION_USB_DEVICE_DETACHED.equals(i.getAction())){
+                          line("USB_DETACHED=true");
+                          closeSession("DETACH");
+                          exactFingerprintOk=false;
+                          updateButtons();
+                      }else if(UsbManager.ACTION_USB_DEVICE_ATTACHED.equals(i.getAction())){
+                          line("USB_ATTACHED=true");
+                          scan(true);
+                      }
+                  }
+              };
+
+              @Override protected void onCreate(Bundle b){
+                  super.onCreate(b);
+
+                  getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+
+                  t0=SystemClock.elapsedRealtime();
+                  usb=(UsbManager)getSystemService(Context.USB_SERVICE);
+
+                  evidence.append("EVIDENCE_FORMAT=OKN_BP1048P4_V29_SAME_SESSION_AUTH\n");
+                  evidence.append("REQUIRED_PHONE=Samsung Galaxy S25+\n");
+                  evidence.append("REQUIRED_PATH=Samsung Galaxy S25+ -> USB-C cable -> DSP board USB-C port only\n");
+                  evidence.append("EXPECTED_RUNTIME_VID_PID=6324:1719\n");
+                  evidence.append("V28_USB_STREAM_WRITE_TOKEN=0x0600043A\n");
+                  evidence.append("V28_HIDINTERFACE_SEND_TOKEN=0x06000496\n");
+                  evidence.append("V29_AUTH_WIRE_RULE=05 04 <4 reply bytes>\n");
+                  evidence.append("FEATURE_REPORT_USED=false\n");
+                  evidence.append("FLASH_WRITE_ERASE_RECOVERY=false\n");
+                  evidence.append("FLASH_ALLOWED=NO\n");
+
+                  IntentFilter pf=new IntentFilter(ACTION_USB_PERMISSION);
+                  IntentFilter uf=new IntentFilter();
+                  uf.addAction(UsbManager.ACTION_USB_DEVICE_ATTACHED);
+                  uf.addAction(UsbManager.ACTION_USB_DEVICE_DETACHED);
+
+                  if(Build.VERSION.SDK_INT>=33){
+                      registerReceiver(permissionRx,pf,Context.RECEIVER_NOT_EXPORTED);
+                      registerReceiver(usbRx,uf);
+                  }else{
+                      registerReceiver(permissionRx,pf);
+                      registerReceiver(usbRx,uf);
+                  }
+
+                  LinearLayout root=new LinearLayout(this);
+                  root.setOrientation(LinearLayout.VERTICAL);
+                  root.setPadding(28,28,28,28);
+
+                  TextView title=new TextView(this);
+                  title.setText("OKN BP1048P4 V29 — Same-session Auth Gate");
+                  title.setTextSize(20);
+                  root.addView(title);
+
+                  TextView note=new TextView(this);
+                  note.setText(
+                      "\nทำตามลำดับและห้ามถอดสายระหว่าง challenge กับ auth reply:\n"+
+                      "1) VERIFY EXACT BOARD\n"+
+                      "2) START SESSION + CAPTURE CHALLENGE\n"+
+                      "3) COPY CHALLENGE แล้วเปิด GitHub Actions V29 อีกครั้ง ใส่ challenge_hex\n"+
+                      "4) เอา AUTH_REPLY_HEX 8 ตัวมาใส่ช่องด้านล่าง\n"+
+                      "5) กลับมาหน้านี้แล้วกด SEND AUTH REPLY + CAPTURE RESPONSE\n\n"+
+                      "ไม่ Feature report • ไม่ updater • ไม่ recovery • ไม่ flash/erase/write firmware\n");
+                  root.addView(note);
+
+                  add(root,"REQUEST USB PERMISSION + VERIFY EXACT BOARD",v->scan(true));
+
+                  startButton=add(root,"START SESSION + CAPTURE CHALLENGE",v->confirmStart());
+                  startButton.setEnabled(false);
+
+                  challengeView=new TextView(this);
+                  challengeView.setText("\nChallenge: <not captured>\n");
+                  challengeView.setTextIsSelectable(true);
+                  root.addView(challengeView);
+
+                  add(root,"COPY CHALLENGE HEX",v->copyChallenge());
+
+                  replyEdit=new EditText(this);
+                  replyEdit.setHint("AUTH_REPLY_HEX exactly 8 hex chars, e.g. 7427956A");
+                  replyEdit.setSingleLine(true);
+                  root.addView(replyEdit);
+
+                  authButton=add(root,"SEND AUTH REPLY + CAPTURE DEVICE RESPONSE",v->confirmAuth());
+                  authButton.setEnabled(false);
+
+                  add(root,"CLOSE CURRENT SESSION",v->closeSession("USER"));
+                  add(root,"SAVE FULL EVIDENCE REPORT",v->saveEvidence());
+
+                  log=new TextView(this);
+                  log.setTextIsSelectable(true);
+                  log.setText("\nLog:\n");
+                  root.addView(log);
+
+                  ScrollView sv=new ScrollView(this);
+                  sv.addView(root);
+                  setContentView(sv);
+
+                  scan(false);
+              }
+
+              private Button add(LinearLayout r,String text,android.view.View.OnClickListener l){
+                  Button b=new Button(this);
+                  b.setText(text);
+                  b.setAllCaps(false);
+                  b.setOnClickListener(l);
+                  r.addView(b);
+                  return b;
+              }
+
+              private void line(String s){
+                  long ms=SystemClock.elapsedRealtime()-t0;
+                  String row=String.format(Locale.US,"[%06dms] %s\n",ms,s);
+                  evidence.append(row);
+                  runOnUiThread(()->{
+                      if(log!=null)log.append(row);
+                  });
+              }
+
+              private UsbDevice getDevice(Intent i){
+                  if(Build.VERSION.SDK_INT>=33)
+                      return i.getParcelableExtra(UsbManager.EXTRA_DEVICE,UsbDevice.class);
+                  return i.getParcelableExtra(UsbManager.EXTRA_DEVICE);
+              }
+
+              private String dev(UsbDevice d){
+                  if(d==null)return " device=<NULL>";
+                  return String.format(
+                      Locale.US," vid=%04X pid=%04X id=%d ifaces=%d",
+                      d.getVendorId(),d.getProductId(),d.getDeviceId(),d.getInterfaceCount());
+              }
+
+              private boolean runtime(UsbDevice d){
+                  return d!=null &&
+                      d.getVendorId()==RUNTIME_VID &&
+                      d.getProductId()==RUNTIME_PID;
+              }
+
+              private void updateButtons(){
+                  if(startButton!=null)
+                      startButton.setEnabled(
+                          exactFingerprintOk && sessionConn==null && !startupSent);
+
+                  if(authButton!=null)
+                      authButton.setEnabled(
+                          sessionConn!=null && sessionClaimed &&
+                          challengeReady && !authSent);
+              }
+
+              private void requestPermission(UsbDevice d){
+                  if(d==null || usb.hasPermission(d))return;
+                  if(permissionRequestedFor==d.getDeviceId())return;
+
+                  Intent intent=new Intent(ACTION_USB_PERMISSION).setPackage(getPackageName());
+                  PendingIntent pi=PendingIntent.getBroadcast(
+                      this,d.getDeviceId(),intent,
+                      PendingIntent.FLAG_UPDATE_CURRENT|PendingIntent.FLAG_MUTABLE);
+
+                  permissionRequestedFor=d.getDeviceId();
+                  usb.requestPermission(d,pi);
+                  line("USB_PERMISSION_REQUESTED=true"+dev(d));
+              }
+
+              private void scan(boolean request){
+                  UsbDevice target=null;
+                  Map<String,UsbDevice> m=usb.getDeviceList();
+                  line("USB_DEVICE_COUNT="+m.size());
+
+                  for(UsbDevice d:m.values()){
+                      line("USB_DEVICE="+dev(d)+" permission="+usb.hasPermission(d));
+                      if(runtime(d))target=d;
+                  }
+
+                  if(target==null){
+                      exactFingerprintOk=false;
+                      line("V29_RUNTIME_TARGET_FOUND=false");
+                      updateButtons();
+                      return;
+                  }
+
+                  line("V29_RUNTIME_TARGET_FOUND=true");
+
+                  if(!usb.hasPermission(target)){
+                      line("V29_RUNTIME_PERMISSION=false");
+                      if(request)requestPermission(target);
+                      updateButtons();
+                      return;
+                  }
+
+                  line("V29_RUNTIME_PERMISSION=true");
+                  readDescriptors(target);
+              }
+
+              private Map<Integer,Integer> hidLengths(byte[] raw){
+                  Map<Integer,Integer> out=new HashMap<>();
+                  int p=0,currentIf=-1,currentClass=-1;
+
+                  while(raw!=null && p+2<=raw.length){
+                      int len=raw[p]&255;
+                      int type=raw[p+1]&255;
+                      if(len<2 || p+len>raw.length)break;
+
+                      if(type==0x04 && len>=9){
+                          currentIf=raw[p+2]&255;
+                          currentClass=raw[p+5]&255;
+                      }else if(type==0x21 && currentClass==3 && currentIf>=0 && len>=9){
+                          int num=raw[p+5]&255;
+                          int q=p+6;
+                          for(int k=0;k<num && q+2<p+len;k++,q+=3){
+                              int dtype=raw[q]&255;
+                              int dlen=(raw[q+1]&255)|((raw[q+2]&255)<<8);
+                              if(dtype==0x22 && dlen>0){
+                                  out.put(currentIf,dlen);
+                                  break;
+                              }
+                          }
+                      }
+                      p+=len;
+                  }
+                  return out;
+              }
+
+              private int readReportDescriptor(
+                  UsbDeviceConnection c,UsbInterface x,int expected,String phase){
+
+                  byte[] b=new byte[expected>0?expected:4096];
+
+                  int r=c.controlTransfer(
+                      0x81,0x06,0x2200,x.getId(),b,b.length,1500);
+
+                  line("IF"+x.getId()+"_"+phase+"_REPORT_DESCRIPTOR_RESULT="+r);
+
+                  if(r>0){
+                      byte[] exact=Arrays.copyOf(b,r);
+                      String sh=sha256(exact);
+                      line("IF"+x.getId()+"_REPORT_SHA256="+sh);
+
+                      if(x.getId()==3 && r==33)if3FingerprintOk=EXPECTED_IF3_SHA.equals(sh);
+                      if(x.getId()==4 && r==36)if4FingerprintOk=EXPECTED_IF4_SHA.equals(sh);
+                  }
+
+                  return r;
+              }
+
+              private void readDescriptors(UsbDevice d){
+                  rawFingerprintOk=false;
+                  if3FingerprintOk=false;
+                  if4FingerprintOk=false;
+                  exactFingerprintOk=false;
+
+                  UsbDeviceConnection c=usb.openDevice(d);
+                  if(c==null){
+                      line("DESCRIPTOR_OPEN_DEVICE_NULL=true");
+                      updateButtons();
+                      return;
+                  }
+
+                  try{
+                      byte[] raw=c.getRawDescriptors();
+                      if(raw==null || raw.length==0){
+                          line("RAW_DESCRIPTOR_EMPTY=true");
+                          return;
+                      }
+
+                      String rawSha=sha256(raw);
+                      rawFingerprintOk=EXPECTED_RAW_SHA.equals(rawSha);
+
+                      line("RAW_DESCRIPTOR_BYTES="+raw.length);
+                      line("RAW_DESCRIPTOR_SHA256="+rawSha);
+                      line("RAW_DESCRIPTOR_FINGERPRINT_OK="+rawFingerprintOk);
+
+                      Map<Integer,Integer> lens=hidLengths(raw);
+                      line("HID_REPORT_DESCRIPTOR_LENGTHS="+lens);
+
+                      UsbInterface if3=null,if4=null;
+
+                      for(int i=0;i<d.getInterfaceCount();i++){
+                          UsbInterface x=d.getInterface(i);
+                          if(x.getInterfaceClass()==3 && x.getId()==3)if3=x;
+                          if(x.getInterfaceClass()==3 && x.getId()==4)if4=x;
+                      }
+
+                      if(if4!=null)
+                          readReportDescriptor(c,if4,lens.containsKey(4)?lens.get(4):36,"UNCLAIMED");
+
+                      if(if3!=null){
+                          int exp=lens.containsKey(3)?lens.get(3):33;
+                          int rr=readReportDescriptor(c,if3,exp,"UNCLAIMED");
+
+                          if(rr<=0){
+                              boolean cl=c.claimInterface(if3,false);
+                              line("IF3_NONFORCED_CLAIM="+cl);
+                              if(cl){
+                                  try{ readReportDescriptor(c,if3,exp,"CLAIM_FALSE"); }
+                                  finally{ line("IF3_NONFORCED_RELEASE="+c.releaseInterface(if3)); }
+                              }
+                          }
+
+                          if(!if3FingerprintOk){
+                              boolean cl=c.claimInterface(if3,true);
+                              line("IF3_TEMP_FORCE_CLAIM="+cl);
+                              if(cl){
+                                  try{ readReportDescriptor(c,if3,exp,"TEMP_FORCE_TRUE"); }
+                                  finally{ line("IF3_TEMP_FORCE_RELEASE="+c.releaseInterface(if3)); }
+                              }
+                          }
+                      }
+
+                      exactFingerprintOk=
+                          rawFingerprintOk && if3FingerprintOk && if4FingerprintOk;
+
+                      line("V29_EXACT_RUNTIME_FINGERPRINT_OK="+exactFingerprintOk);
+
+                  }finally{
+                      c.close();
+                      updateButtons();
+                  }
+              }
+
+              private void confirmStart(){
+                  if(!exactFingerprintOk || sessionConn!=null || startupSent){
+                      line("V29_START_BLOCKED=true");
+                      return;
+                  }
+
+                  new AlertDialog.Builder(this)
+                      .setTitle("Start same-session auth gate")
+                      .setMessage(
+                          "ส่ง startup handshake เดิม 1 ครั้ง แล้วเก็บ challenge\n"+
+                          "จากนั้นจะถือ USB session เปิดไว้จนกว่าจะใส่ auth reply\n\n"+
+                          "ไม่มี Feature / updater / recovery / flash")
+                      .setNegativeButton("CANCEL",null)
+                      .setPositiveButton("START",(d,w)->startSession())
+                      .show();
+              }
+
+              private void startSession(){
+                  UsbDevice target=null;
+                  for(UsbDevice d:usb.getDeviceList().values())
+                      if(runtime(d))target=d;
+
+                  if(target==null || !usb.hasPermission(target)){
+                      line("V29_START_ABORT_TARGET_OR_PERMISSION=true");
+                      return;
+                  }
+
+                  UsbInterface vendor=null;
+                  for(int i=0;i<target.getInterfaceCount();i++){
+                      UsbInterface x=target.getInterface(i);
+                      if(x.getInterfaceClass()==3 && x.getId()==4){
+                          vendor=x;
+                          break;
+                      }
+                  }
+
+                  if(vendor==null){
+                      line("V29_START_ABORT_IF4_MISSING=true");
+                      return;
+                  }
+
+                  UsbDeviceConnection c=usb.openDevice(target);
+                  if(c==null){
+                      line("V29_START_OPEN_NULL=true");
+                      return;
+                  }
+
+                  boolean claimed=c.claimInterface(vendor,false);
+                  line("V29_IF4_CLAIM_FORCE_FALSE="+claimed);
+
+                  if(!claimed){
+                      c.close();
+                      line("V29_START_ABORT_CLAIM=false");
+                      return;
+                  }
+
+                  sessionDevice=target;
+                  sessionIf=vendor;
+                  sessionConn=c;
+                  sessionClaimed=true;
+
+                  byte[] report=new byte[256];
+                  System.arraycopy(STARTUP_PREFIX,0,report,0,STARTUP_PREFIX.length);
+
+                  int wo=sessionConn.controlTransfer(
+                      0x21,0x09,0x0200,sessionIf.getId(),
+                      report,report.length,1500);
+
+                  startupSent=true;
+                  line("V29_STARTUP_SET_REPORT_RESULT="+wo);
+                  line("V29_STARTUP_PREFIX_HEX="+hex(STARTUP_PREFIX));
+
+                  if(wo!=256){
+                      line("V29_START_ABORT_OUTPUT_NOT_FULL=true");
+                      closeSession("STARTUP_OUTPUT_FAIL");
+                      return;
+                  }
+
+                  currentChallenge=null;
+
+                  for(int n=0;n<96;n++){
+                      SystemClock.sleep(n==0?50:25);
+
+                      byte[] input=new byte[256];
+
+                      int ri=sessionConn.controlTransfer(
+                          0xA1,0x01,0x0100,sessionIf.getId(),
+                          input,input.length,1000);
+
+                      line("V29_CHALLENGE_INPUT_"+n+"_RESULT="+ri);
+
+                      if(ri<=0)continue;
+
+                      byte[] exact=Arrays.copyOf(input,ri);
+                      boolean nonZero=false;
+                      for(byte z:exact)if(z!=0){nonZero=true;break;}
+                      if(!nonZero)continue;
+
+                      int declared=exact[0]&255;
+                      int take=Math.min(declared,Math.max(0,ri-1));
+
+                      line("V29_CHALLENGE_DECLARED_LENGTH="+declared);
+
+                      if(take==32){
+                          currentChallenge=new byte[32];
+                          System.arraycopy(exact,1,currentChallenge,0,32);
+                          challengeReady=true;
+
+                          String h=hex(currentChallenge);
+                          line("V29_CHALLENGE_HEX="+h);
+                          line("V29_CHALLENGE_SHA256="+sha256(currentChallenge));
+
+                          challengeView.setText("\nChallenge: "+h+"\n");
+                          break;
+                      }
+                  }
+
+                  line("V29_CHALLENGE_READY="+challengeReady);
+                  line("V29_SESSION_HELD_OPEN="+(sessionConn!=null && sessionClaimed));
+                  updateButtons();
+              }
+
+              private void copyChallenge(){
+                  if(!challengeReady || currentChallenge==null){
+                      line("V29_COPY_CHALLENGE_BLOCKED=true");
+                      return;
+                  }
+
+                  String h=hex(currentChallenge);
+                  ClipboardManager cm=(ClipboardManager)getSystemService(CLIPBOARD_SERVICE);
+                  cm.setPrimaryClip(ClipData.newPlainText("V29 challenge",h));
+                  line("V29_CHALLENGE_COPIED=true");
+              }
+
+              private void confirmAuth(){
+                  if(sessionConn==null || !sessionClaimed || !challengeReady || authSent){
+                      line("V29_AUTH_BLOCKED_SESSION_STATE=true");
+                      return;
+                  }
+
+                  String s=replyEdit.getText().toString().trim().replace(" ","").toUpperCase(Locale.US);
+
+                  if(!s.matches("[0-9A-F]{8}")){
+                      line("V29_AUTH_BLOCKED_BAD_HEX=true");
+                      replyEdit.setError("ต้องเป็น HEX 8 ตัว");
+                      return;
+                  }
+
+                  final String reply=s;
+
+                  new AlertDialog.Builder(this)
+                      .setTitle("Send challenge-specific auth reply")
+                      .setMessage(
+                          "จะส่ง reply "+reply+" ใน USB session ที่ยังเปิดอยู่\n"+
+                          "wire framing: 05 04 "+reply.substring(0,2)+" "+reply.substring(2,4)+" "+
+                          reply.substring(4,6)+" "+reply.substring(6,8)+"\n\n"+
+                          "หลังจากนั้นอ่าน response เท่านั้น ไม่มี flash")
+                      .setNegativeButton("CANCEL",null)
+                      .setPositiveButton("SEND ONCE",(d,w)->sendAuth(reply))
+                      .show();
+              }
+
+              private void sendAuth(String replyHex){
+                  if(sessionConn==null || !sessionClaimed || !challengeReady || authSent){
+                      line("V29_AUTH_ABORT_SESSION_STATE=true");
+                      return;
+                  }
+
+                  byte[] reply=hexToBytes(replyHex);
+                  byte[] report=new byte[256];
+
+                  report[0]=0x05;
+                  report[1]=0x04;
+                  System.arraycopy(reply,0,report,2,4);
+
+                  line("V29_AUTH_RAW_REPLY_HEX="+replyHex);
+                  line("V29_AUTH_ANDROID_WIRE_PREFIX_HEX="+
+                      hex(Arrays.copyOf(report,6)));
+
+                  int wo=sessionConn.controlTransfer(
+                      0x21,0x09,0x0200,sessionIf.getId(),
+                      report,report.length,1500);
+
+                  authSent=true;
+                  line("V29_AUTH_SET_REPORT_RESULT="+wo);
+
+                  if(wo!=256){
+                      line("V29_AUTH_ABORT_OUTPUT_NOT_FULL=true");
+                      closeSession("AUTH_OUTPUT_FAIL");
+                      return;
+                  }
+
+                  int nonZeroCount=0;
+
+                  for(int n=0;n<128;n++){
+                      SystemClock.sleep(n==0?50:25);
+
+                      byte[] input=new byte[256];
+
+                      int ri=sessionConn.controlTransfer(
+                          0xA1,0x01,0x0100,sessionIf.getId(),
+                          input,input.length,1000);
+
+                      line("V29_POST_AUTH_INPUT_"+n+"_RESULT="+ri);
+
+                      if(ri<=0){
+                          if(nonZeroCount>0)break;
+                          continue;
+                      }
+
+                      byte[] exact=Arrays.copyOf(input,ri);
+                      boolean nonZero=false;
+                      for(byte z:exact)if(z!=0){nonZero=true;break;}
+                      if(!nonZero)continue;
+
+                      nonZeroCount++;
+
+                      line("V29_POST_AUTH_REPORT_"+nonZeroCount+"_SHA256="+sha256(exact));
+                      line("V29_POST_AUTH_REPORT_"+nonZeroCount+"_HEX="+hex(exact));
+
+                      int declared=exact[0]&255;
+                      int take=Math.min(declared,Math.max(0,ri-1));
+
+                      line("V29_POST_AUTH_REPORT_"+nonZeroCount+"_DECLARED_LENGTH="+declared);
+
+                      if(take>0){
+                          byte[] payload=new byte[take];
+                          System.arraycopy(exact,1,payload,0,take);
+                          line("V29_POST_AUTH_REPORT_"+nonZeroCount+"_PAYLOAD_HEX="+hex(payload));
+                      }
+
+                      if(nonZeroCount>=4)break;
+                  }
+
+                  line("V29_POST_AUTH_NONZERO_REPORT_COUNT="+nonZeroCount);
+                  line("V29_DEVICE_RESPONSE_SEEN="+(nonZeroCount>0));
+                  line("V29_FEATURE_REPORT_USED=false");
+                  line("V29_FLASH_WRITE_ERASE_RECOVERY=false");
+
+                  updateButtons();
+              }
+
+              private void closeSession(String why){
+                  line("V29_CLOSE_SESSION_REASON="+why);
+
+                  if(sessionConn!=null){
+                      if(sessionClaimed && sessionIf!=null){
+                          try{
+                              line("V29_IF4_RELEASE="+sessionConn.releaseInterface(sessionIf));
+                          }catch(Exception ex){
+                              line("V29_RELEASE_EXCEPTION="+ex.getClass().getName());
+                          }
+                      }
+
+                      try{ sessionConn.close(); }catch(Exception ignored){}
+                  }
+
+                  sessionConn=null;
+                  sessionIf=null;
+                  sessionDevice=null;
+                  sessionClaimed=false;
+
+                  line("V29_SESSION_HELD_OPEN=false");
+                  updateButtons();
+              }
+
+              private void saveEvidence(){
+                  Intent i=new Intent(Intent.ACTION_CREATE_DOCUMENT);
+                  i.addCategory(Intent.CATEGORY_OPENABLE);
+                  i.setType("text/plain");
+                  i.putExtra(
+                      Intent.EXTRA_TITLE,
+                      "OKN_BP1048P4_V29_SAME_SESSION_AUTH_EVIDENCE.txt");
+
+                  startActivityForResult(i,SAVE_EVIDENCE);
+              }
+
+              @Override protected void onActivityResult(
+                  int requestCode,int resultCode,Intent data){
+
+                  super.onActivityResult(requestCode,resultCode,data);
+
+                  if(requestCode==SAVE_EVIDENCE &&
+                     resultCode==RESULT_OK && data!=null){
+
+                      try(OutputStream os=
+                          getContentResolver().openOutputStream(data.getData())){
+
+                          String footer=
+                              "\nEXPORT_EXACT_RUNTIME_FINGERPRINT_OK="+exactFingerprintOk+
+                              "\nEXPORT_STARTUP_SENT="+startupSent+
+                              "\nEXPORT_CHALLENGE_READY="+challengeReady+
+                              "\nEXPORT_AUTH_SENT="+authSent+
+                              "\nEXPORT_FEATURE_REPORT_USED=false"+
+                              "\nEXPORT_FLASH_WRITE_ERASE_RECOVERY=false"+
+                              "\nEXPORT_FLASH_ALLOWED=NO\n";
+
+                          os.write(
+                              (evidence.toString()+footer)
+                              .getBytes(StandardCharsets.UTF_8));
+
+                          line("EVIDENCE_EXPORT_OK=true");
+
+                      }catch(Exception ex){
+                          line("EVIDENCE_EXPORT_ERROR="+ex);
+                      }
+                  }
+              }
+
+              private static byte[] hexToBytes(String s){
+                  byte[] b=new byte[s.length()/2];
+                  for(int i=0;i<b.length;i++)
+                      b[i]=(byte)Integer.parseInt(s.substring(i*2,i*2+2),16);
+                  return b;
+              }
+
+              private static String hex(byte[] b){
+                  StringBuilder s=new StringBuilder(b.length*2);
+                  for(byte x:b)s.append(String.format(Locale.US,"%02X",x&255));
+                  return s.toString();
+              }
+
+              private static String sha256(byte[] b){
+                  try{
+                      MessageDigest md=MessageDigest.getInstance("SHA-256");
+                      return hex(md.digest(b));
+                  }catch(Exception e){
+                      return "SHA256_ERROR";
+                  }
+              }
+
+              @Override protected void onDestroy(){
+                  closeSession("ACTIVITY_DESTROY");
+                  try{unregisterReceiver(permissionRx);}catch(Exception ignored){}
+                  try{unregisterReceiver(usbRx);}catch(Exception ignored){}
+                  super.onDestroy();
+              }
+          }
+          JAVA
+
+      - name: Static safety and framing audit
+        shell: bash
+        run: |
+          set -euo pipefail
+          SRC=/tmp/v29/app/app/src/main/java/com/okn/bp1048p4v29/MainActivity.java
+
+          python3 - <<'PY'
+          from pathlib import Path
+          t=Path('/tmp/v29/app/app/src/main/java/com/okn/bp1048p4v29/MainActivity.java').read_text()
+
+          required=[
+              'RUNTIME_VID=0x6324',
+              'RUNTIME_PID=0x1719',
+              'EXPECTED_RAW_SHA=',
+              'EXPECTED_IF3_SHA=',
+              'EXPECTED_IF4_SHA=',
+              '0x11,0x10,0x63,0x1C,0x06,0x24,0x43,(byte)0xFD',
+              'report[0]=0x05',
+              'report[1]=0x04',
+              'System.arraycopy(reply,0,report,2,4)',
+              'V29_SESSION_HELD_OPEN=',
+              'V29_CHALLENGE_HEX=',
+              'V29_AUTH_ANDROID_WIRE_PREFIX_HEX=',
+              'V29_DEVICE_RESPONSE_SEEN=',
+              'V29_FEATURE_REPORT_USED=false',
+              'V29_FLASH_WRITE_ERASE_RECOVERY=false'
+          ]
+
+          missing=[x for x in required if x not in t]
+          if missing:
+              raise SystemExit('missing required token(s): '+repr(missing))
+
+          forbidden=[
+              '0x0300',
+              'bulkTransfer(',
+              'UsbRequest',
+              'setConfiguration(',
+              'setInterface(',
+              'SpiFlashErase',
+              'SpiFlashWrite',
+              'FLASH_BOOT_EN',
+              'chiperas',
+              'codedata',
+              'bootdat',
+              'constdat',
+              'cnfgdat',
+              'btupdat',
+              'upinfo',
+              'cxxx'
+          ]
+
+          bad=[x for x in forbidden if x in t]
+          if bad:
+              raise SystemExit('forbidden token(s): '+repr(bad))
+
+          # Exactly two Output SET_REPORT call sites:
+          # startup and challenge-specific auth.
+          if t.count('0x21,0x09,0x0200') != 2:
+              raise SystemExit('must contain exactly two Output SET_REPORT call sites')
+
+          # Input GET_REPORT call sites: challenge and post-auth response.
+          if t.count('0xA1,0x01,0x0100') != 2:
+              raise SystemExit('must contain exactly two Input GET_REPORT call sites')
+
+          print('V29_STATIC_SAFETY_AND_FRAMING_AUDIT=PASS')
+          PY
+
+          cp "$SRC" /tmp/v29/evidence/MainActivity.java
+          sha256sum "$SRC" > /tmp/v29/evidence/01_MAINACTIVITY_SHA256.txt
+
+      - name: Build V29 APK
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          SDKMAN="$(command -v sdkmanager || true)"
+          if [ -n "$SDKMAN" ]; then
+            set +o pipefail
+            yes | "$SDKMAN" --licenses >/dev/null 2>&1 || true
+            set -o pipefail
+            "$SDKMAN" "platforms;android-35" "build-tools;35.0.0" >/dev/null 2>&1 || true
+          fi
+
+          cd /tmp/v29
+          curl -fL --retry 4 --retry-all-errors \
+            https://services.gradle.org/distributions/gradle-8.9-bin.zip \
+            -o gradle.zip
+          unzip -q gradle.zip
+          export PATH="/tmp/v29/gradle-8.9/bin:$PATH"
+
+          cd /tmp/v29/app
+          gradle --no-daemon --stacktrace :app:assembleDebug \
+            | tee /tmp/v29/evidence/02_GRADLE_BUILD.txt
+
+          APK=app/build/outputs/apk/debug/app-debug.apk
+          test -s "$APK"
+
+          cp "$APK" /tmp/v29/out/OKN_BP1048P4_V29_SAME_SESSION_AUTH_GATE.apk
+          sha256sum "$APK" > /tmp/v29/evidence/03_APK_SHA256.txt
+
+      - name: Package V29 APK evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cat > /tmp/v29/evidence/04_V29_APK_DECISION.md <<'EOF'
+          # MASTER V29 APK
+
+          This APK is a bounded same-session authentication diagnostic.
+
+          It permits:
+          - one V17-proven startup handshake,
+          - challenge capture,
+          - one manually supplied 4-byte auth reply framed as 05 04 <reply4>,
+          - post-auth Input GET_REPORT capture.
+
+          It prohibits:
+          - Feature reports,
+          - updater/recovery commands,
+          - erase,
+          - flash,
+          - firmware write.
+
+          Classification:
+          SAME_SESSION_AUTH_AND_DEVICE_RESPONSE_GATE_NOT_FOR_FLASH
+          EOF
+
+          cp /tmp/v29/evidence/* /tmp/v29/out/
+          (cd /tmp/v29/out && sha256sum * > SHA256SUMS.txt)
+
+      - name: Upload V29 APK
+        uses: actions/upload-artifact@v7
+        with:
+          name: OKN-BP1048P4-MASTER-V29-SAME-SESSION-AUTH-GATE-APK
+          path: /tmp/v29/out/*
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Final APK fail-closed assertion
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$FLASH_ALLOWED" = "NO"
+          test "$ERASE_ALLOWED" = "NO"
+          test "$FIRMWARE_WRITE_ALLOWED" = "NO"
+          test "$FEATURE_REPORT_ALLOWED" = "NO"
+          test "$UPDATE_COMMAND_ALLOWED" = "NO"
+          test "$RECOVERY_COMMAND_ALLOWED" = "NO"
+          echo "V29_APK_BUILD=PASS"
+          echo "FLASH_ALLOWED=NO"
+
+  compute-auth-reply:
+    name: Compute challenge-specific reply with official vendor parser OFFLINE
+    if: ${{ inputs.challenge_hex != '' }}
+    runs-on: windows-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: Validate challenge and safety
+        shell: pwsh
+        env:
+          CHALLENGE_HEX: ${{ inputs.challenge_hex }}
+        run: |
+          $ErrorActionPreference="Stop"
+
+          foreach($n in @(
+            "FLASH_ALLOWED","ERASE_ALLOWED","FIRMWARE_WRITE_ALLOWED",
+            "FEATURE_REPORT_ALLOWED","UPDATE_COMMAND_ALLOWED","RECOVERY_COMMAND_ALLOWED"
+          )){
+            if((Get-Item "Env:$n").Value -ne "NO"){ throw "$n must be NO" }
+          }
+
+          $c=$env:CHALLENGE_HEX.Trim().Replace(" ","").ToUpperInvariant()
+          if($c -notmatch '^[0-9A-F]{64}$'){
+            throw "challenge_hex must be exactly 64 hex chars (32 bytes)"
+          }
+
+          $root="C:\okn_v29oracle"
+          if(Test-Path $root){Remove-Item -Recurse -Force $root}
+          New-Item -ItemType Directory -Force -Path `
+            "$root\download","$root\pkg","$root\harness","$root\out" | Out-Null
+
+          $c | Set-Content "$root\challenge.txt"
+
+      - name: Acquire exact official vendor binary
+        shell: pwsh
+        run: |
+          $ErrorActionPreference="Stop"
+          $root="C:\okn_v29oracle"
+
+          curl.exe -fL --retry 6 --retry-all-errors --retry-delay 2 `
+            --connect-timeout 20 --max-time 300 `
+            $env:GOLOPINE_WINDOWS_URL -o "$root\download\vendor.zip"
+          if($LASTEXITCODE -ne 0){throw "vendor download failed"}
+
+          Expand-Archive -Force "$root\download\vendor.zip" "$root\pkg"
+
+          $exe=Get-ChildItem "$root\pkg" -Recurse -File -Filter *.exe |
+            Where-Object {$_.FullName -notmatch '\\__MACOSX\\' -and $_.Name -notlike '._*'} |
+            Sort-Object Length -Descending | Select-Object -First 1
+
+          if(-not $exe){throw "vendor EXE missing"}
+          Copy-Item $exe.FullName "$root\vendor.exe" -Force
+
+          $sha=(Get-FileHash "$root\vendor.exe" -Algorithm SHA256).Hash.ToLowerInvariant()
+          if($sha -ne $env:EXPECTED_VENDOR_SHA256){throw "vendor SHA changed"}
+
+      - name: Build offline parser oracle
+        shell: pwsh
+        run: |
+          $ErrorActionPreference="Stop"
+          $root="C:\okn_v29oracle"
+
+          @'
+          using System;
+          using System.IO;
+          using System.Linq;
+          using System.Reflection;
+          using System.Reflection.Emit;
+          using System.Runtime.CompilerServices;
+          using System.Collections.Generic;
+          using System.Threading;
+
+          public static class Sink
+          {
+              public static readonly List<byte[]> Writes=new List<byte[]>();
+              public static void Clear(){lock(Writes){Writes.Clear();}}
+              public static void Record(byte[] b){
+                  lock(Writes){Writes.Add(b==null?null:(byte[])b.Clone());}
+              }
+              public static byte[][] Snapshot(){
+                  lock(Writes){return Writes.Select(x=>x==null?null:(byte[])x.Clone()).ToArray();}
+              }
+          }
+
+          public static class Oracle
+          {
+              static string Hex(byte[] b){
+                  return b==null?"<NULL>":BitConverter.ToString(b).Replace("-","");
+              }
+
+              static byte[] FromHex(string s){
+                  byte[] b=new byte[s.Length/2];
+                  for(int i=0;i<b.Length;i++)b[i]=Convert.ToByte(s.Substring(i*2,2),16);
+                  return b;
+              }
+
+              static object InvokeBounded(MethodInfo m,object target,object[] args,int ms){
+                  object result=null; Exception error=null;
+                  Thread t=new Thread(delegate(){
+                      try{result=m.Invoke(target,args);}catch(Exception ex){error=ex;}
+                  });
+                  t.IsBackground=true;t.Start();
+                  if(!t.Join(ms)){try{t.Abort();}catch{};return null;}
+                  if(error!=null)throw error;
+                  return result;
+              }
+
+              static void DefaultRet(ILGenerator il,Type ret){
+                  if(ret==typeof(void)){il.Emit(OpCodes.Ret);return;}
+                  if(ret.IsValueType){
+                      LocalBuilder l=il.DeclareLocal(ret);
+                      il.Emit(OpCodes.Ldloca_S,l);il.Emit(OpCodes.Initobj,ret);
+                      il.Emit(OpCodes.Ldloc,l);il.Emit(OpCodes.Ret);return;
+                  }
+                  il.Emit(OpCodes.Ldnull);il.Emit(OpCodes.Ret);
+              }
+
+              static MethodAttributes Vis(MethodInfo m){
+                  MethodAttributes a=MethodAttributes.Virtual|MethodAttributes.HideBySig;
+                  if(m.IsPublic)a|=MethodAttributes.Public;
+                  else if(m.IsFamily)a|=MethodAttributes.Family;
+                  else if(m.IsAssembly)a|=MethodAttributes.Assembly;
+                  else a|=MethodAttributes.Private;
+                  if(m.IsSpecialName)a|=MethodAttributes.SpecialName;
+                  return a;
+              }
+
+              static Type CaptureType(Type baseType){
+                  AssemblyBuilder ab=AppDomain.CurrentDomain.DefineDynamicAssembly(
+                      new AssemblyName("OKN_V29_CAPTURE"),AssemblyBuilderAccess.Run);
+                  TypeBuilder tb=ab.DefineDynamicModule("main").DefineType(
+                      "OKN.CaptureStream",TypeAttributes.Public|TypeAttributes.Class,baseType);
+
+                  ConstructorInfo bc=baseType.GetConstructor(
+                      BindingFlags.Public|BindingFlags.NonPublic|BindingFlags.Instance,
+                      null,Type.EmptyTypes,null);
+
+                  ConstructorBuilder cb=tb.DefineConstructor(
+                      MethodAttributes.Public,CallingConventions.Standard,Type.EmptyTypes);
+                  ILGenerator ci=cb.GetILGenerator();
+                  ci.Emit(OpCodes.Ldarg_0);ci.Emit(OpCodes.Call,bc);ci.Emit(OpCodes.Ret);
+
+                  foreach(MethodInfo m in baseType.GetMethods(
+                      BindingFlags.Public|BindingFlags.NonPublic|BindingFlags.Instance)
+                      .Where(m=>m.IsVirtual&&!m.IsFinal&&
+                          (m.IsAbstract||m.Name=="Write"||m.Name=="ReadBytes"||
+                           m.Name=="ReadLine"||m.Name=="Connect"||m.Name=="Disconnect"))
+                      .GroupBy(m=>m.ToString()).Select(g=>g.First()))
+                  {
+                      Type[] ps=m.GetParameters().Select(x=>x.ParameterType).ToArray();
+                      MethodBuilder b=tb.DefineMethod(m.Name,Vis(m),m.ReturnType,ps);
+                      ILGenerator il=b.GetILGenerator();
+
+                      if(m.Name=="Write"&&ps.Length==1&&ps[0]==typeof(byte[])){
+                          il.Emit(OpCodes.Ldarg_1);
+                          il.Emit(OpCodes.Call,typeof(Sink).GetMethod("Record"));
+                          DefaultRet(il,m.ReturnType);
+                      }else DefaultRet(il,m.ReturnType);
+
+                      tb.DefineMethodOverride(b,m);
+                  }
+
+                  return tb.CreateType();
+              }
+
+              static void Connected(object stream,Type baseType){
+                  Type e=baseType.GetNestedType("ConnectionStatus",
+                      BindingFlags.Public|BindingFlags.NonPublic);
+                  object v=Enum.Parse(e,"Connected");
+                  FieldInfo f=baseType.GetFields(
+                      BindingFlags.Public|BindingFlags.NonPublic|BindingFlags.Instance)
+                      .FirstOrDefault(x=>x.FieldType==e);
+                  if(f!=null){f.SetValue(stream,v);return;}
+                  MethodInfo m=baseType.GetMethod("UpdateDeviceConnStatus",
+                      BindingFlags.Public|BindingFlags.NonPublic|BindingFlags.Instance);
+                  m.Invoke(stream,new object[]{v});
+              }
+
+              static string Status(object bridge,Type t){
+                  PropertyInfo p=t.GetProperty("StreamStatus",
+                      BindingFlags.Public|BindingFlags.NonPublic|BindingFlags.Instance);
+                  if(p!=null){
+                      object v=p.GetValue(bridge,null);
+                      if(v!=null)return v.ToString();
+                  }
+                  return "<UNKNOWN>";
+              }
+
+              public static void Main(string[] a){
+                  string exe=Path.GetFullPath(a[0]);
+                  string challengeHex=a[1];
+                  string outFile=Path.GetFullPath(a[2]);
+                  Directory.SetCurrentDirectory(Path.GetDirectoryName(exe));
+
+                  Assembly asm=Assembly.LoadFile(exe);
+                  RuntimeHelpers.RunModuleConstructor(asm.ManifestModule.ModuleHandle);
+
+                  Type baseType=asm.GetType("DSTech_AudioDSP_Client.DeviceCommunicationStream",true);
+                  Type bridgeType=asm.GetType("DSTech_AudioDSP_Client.UFEcommandBridge",true);
+                  Type cap=CaptureType(baseType);
+
+                  object stream=Activator.CreateInstance(cap);
+                  Connected(stream,baseType);
+
+                  object bridge=bridgeType.GetConstructor(new[]{baseType}).Invoke(new[]{stream});
+
+                  MethodInfo req=bridgeType.GetMethod("SendDevTypeSwVersAuthenRequest",
+                      BindingFlags.Public|BindingFlags.NonPublic|BindingFlags.Instance);
+
+                  Sink.Clear();
+                  InvokeBounded(req,bridge,null,1500);
+                  Thread.Sleep(80);
+                  Sink.Clear();
+
+                  MethodInfo fbl=bridgeType.GetMethod("FBL3HEmTva",
+                      BindingFlags.Public|BindingFlags.NonPublic|BindingFlags.Instance);
+
+                  byte[] challenge=FromHex(challengeHex);
+
+                  InvokeBounded(fbl,bridge,new object[]{stream,challenge,EventArgs.Empty},3000);
+                  Thread.Sleep(150);
+
+                  byte[][] w=Sink.Snapshot();
+                  string status=Status(bridge,bridgeType);
+
+                  if(w.Length<1||w[0]==null||w[0].Length!=4||
+                     status!="UFE_STREAM_GETTING_DEVICE_DESCRIPTION")
+                      Environment.Exit(2);
+
+                  string reply=Hex(w[0]);
+                  string wire="0504"+reply;
+
+                  File.WriteAllText(outFile,
+                      "CHALLENGE_HEX="+challengeHex+Environment.NewLine+
+                      "AUTH_REPLY_HEX="+reply+Environment.NewLine+
+                      "ANDROID_WIRE_HEX="+wire+Environment.NewLine+
+                      "POST_AUTH_STREAM_STATUS="+status+Environment.NewLine+
+                      "REAL_HID_IO=NO"+Environment.NewLine+
+                      "FLASH_ALLOWED=NO"+Environment.NewLine);
+
+                  Console.WriteLine("AUTH_REPLY_HEX="+reply);
+                  Console.WriteLine("ANDROID_WIRE_HEX="+wire);
+                  Console.WriteLine("POST_AUTH_STREAM_STATUS="+status);
+                  Environment.Exit(0);
+              }
+          }
+          '@ | Set-Content "$root\harness\Oracle.cs"
+
+          $csc="$env:WINDIR\Microsoft.NET\Framework\v4.0.30319\csc.exe"
+          & $csc /nologo /platform:x86 /target:exe `
+            /out:"$root\harness\Oracle.exe" "$root\harness\Oracle.cs"
+          if($LASTEXITCODE -ne 0){throw "oracle compile failed"}
+
+      - name: Compute reply
+        shell: pwsh
+        run: |
+          $ErrorActionPreference="Stop"
+          $root="C:\okn_v29oracle"
+          $c=(Get-Content "$root\challenge.txt" -Raw).Trim()
+
+          & "$root\harness\Oracle.exe" `
+            "$root\vendor.exe" `
+            "$c" `
+            "$root\out\V29_AUTH_REPLY.txt"
+
+          if($LASTEXITCODE -ne 0){throw "vendor parser oracle failed"}
+
+          $r=Get-Content "$root\out\V29_AUTH_REPLY.txt" -Raw
+
+          $reply=[regex]::Match($r,'AUTH_REPLY_HEX=([0-9A-F]{8})').Groups[1].Value
+          $wire=[regex]::Match($r,'ANDROID_WIRE_HEX=([0-9A-F]{12})').Groups[1].Value
+
+          if(-not $reply -or -not $wire){throw "reply parse failed"}
+
+          @"
+          # V29 SAME-SESSION AUTH REPLY
+
+          Challenge: `$c`
+
+          **AUTH_REPLY_HEX: `$reply`**
+
+          Android wire prefix: `$wire`
+
+          Return to the still-open V29 app session, paste only the 8-character
+          AUTH_REPLY_HEX, then press SEND AUTH REPLY + CAPTURE DEVICE RESPONSE.
+
+          Do not disconnect the USB-C cable and do not restart the app before sending.
+          Flash remains disabled.
+          "@ >> $env:GITHUB_STEP_SUMMARY
+
+      - name: Upload challenge-specific reply
+        uses: actions/upload-artifact@v7
+        with:
+          name: OKN-BP1048P4-V29-CHALLENGE-SPECIFIC-AUTH-REPLY
+          path: C:\okn_v29oracle\out\V29_AUTH_REPLY.txt
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Final oracle fail-closed assertion
+        shell: pwsh
+        run: |
+          $ErrorActionPreference="Stop"
+          $root="C:\okn_v29oracle"
+
+          $r=Get-Content "$root\out\V29_AUTH_REPLY.txt" -Raw
+          if($r -notmatch 'REAL_HID_IO=NO'){throw "bad HID state"}
+          if($r -notmatch 'FLASH_ALLOWED=NO'){throw "bad flash state"}
+
+          "V29_ORACLE=PASS"
+          "REAL_HID_IO=NO"
+          "FLASH_ALLOWED=NO"
