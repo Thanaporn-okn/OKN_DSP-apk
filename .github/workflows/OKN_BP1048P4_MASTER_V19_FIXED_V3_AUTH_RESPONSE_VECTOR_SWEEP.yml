@@ -1,0 +1,937 @@
+name: OKN BP1048P4 MASTER V19 FIXED V3 AUTH RESPONSE VECTOR SWEEP
+
+"on":
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  GOLOPINE_WINDOWS_URL: "https://golodsp.com/wp-content/uploads/2026/05/golopine_audio_turning_release_2026-04-08.exe_.zip"
+  LIVE_DSP_CONNECTED: "NO"
+  USB_TARGET_ACCESS: "NO"
+  HOST_TO_DSP_IO: "NO"
+  REAL_HID_OBJECT_ALLOWED: "NO"
+  REAL_HID_CONNECT_ALLOWED: "NO"
+  REAL_HID_SEND_ALLOWED: "NO"
+  REAL_HID_READ_ALLOWED: "NO"
+  REAL_HID_WRITE_ALLOWED: "NO"
+  FEATURE_REPORT_ALLOWED: "NO"
+  FLASH_ALLOWED: "NO"
+  ERASE_ALLOWED: "NO"
+  WRITE_ALLOWED: "NO"
+
+jobs:
+  master-v18:
+    name: MASTER V19 FIXED V3 auth response vector sweep offline
+    runs-on: windows-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Safety gate and workspace
+        shell: pwsh
+        run: |
+          $ErrorActionPreference="Stop"
+          foreach($n in @(
+            "LIVE_DSP_CONNECTED","USB_TARGET_ACCESS","HOST_TO_DSP_IO",
+            "REAL_HID_OBJECT_ALLOWED","REAL_HID_CONNECT_ALLOWED",
+            "REAL_HID_SEND_ALLOWED","REAL_HID_READ_ALLOWED","REAL_HID_WRITE_ALLOWED",
+            "FEATURE_REPORT_ALLOWED","FLASH_ALLOWED","ERASE_ALLOWED","WRITE_ALLOWED"
+          )){
+            if((Get-Item "Env:$n").Value -ne "NO"){throw "$n must be NO"}
+          }
+
+          $root="C:\okn_v19"
+          if(Test-Path $root){Remove-Item -Recurse -Force $root}
+          New-Item -ItemType Directory -Force -Path `
+            "$root\download","$root\pkg","$root\harness","$root\evidence","$root\out" | Out-Null
+
+          @"
+          MODE=OFFLINE_REPLAY_OF_V17_REAL_PHYSICAL_RESPONSE
+          LIVE_DSP_CONNECTED=NO
+          USB_TARGET_ACCESS=NO
+          HOST_TO_DSP_IO=NO
+          REAL_HID_OBJECT_ALLOWED=NO
+          FEATURE_REPORT_ALLOWED=NO
+          FLASH_ALLOWED=NO
+          V17_RESPONSE_SEEN=true
+          V17_INPUT_REPORT_RESULT=256
+          V17_DECLARED_PAYLOAD_LENGTH=32
+          V17_PAYLOAD_HEX=D024E38C410000004202B94C65A23F2C640C8F60E133784C7E47463A7A521056
+          "@ | Set-Content "$root\evidence\00_SAFETY_AND_INPUT.txt"
+
+      - name: Download untouched official GoloPine Windows client
+        shell: pwsh
+        run: |
+          $ErrorActionPreference="Stop"
+          $root="C:\okn_v19"
+
+          curl.exe -fL --retry 6 --retry-all-errors --retry-delay 2 `
+            --connect-timeout 20 --max-time 300 `
+            $env:GOLOPINE_WINDOWS_URL -o "$root\download\vendor.zip"
+          if($LASTEXITCODE -ne 0){throw "vendor download failed"}
+
+          Expand-Archive -Force "$root\download\vendor.zip" "$root\pkg"
+
+          $exe=Get-ChildItem "$root\pkg" -Recurse -File -Filter *.exe |
+            Where-Object {$_.FullName -notmatch '\\__MACOSX\\' -and $_.Name -notlike '._*'} |
+            Sort-Object Length -Descending | Select-Object -First 1
+
+          if(-not $exe){throw "vendor EXE missing"}
+          Copy-Item $exe.FullName "$root\vendor.exe" -Force
+
+          $b=[IO.File]::ReadAllBytes("$root\vendor.exe")
+          if($b.Length -lt 100000 -or $b[0] -ne 0x4D -or $b[1] -ne 0x5A){
+            throw "bad vendor PE"
+          }
+
+          $sha=(Get-FileHash "$root\vendor.exe" -Algorithm SHA256).Hash
+          if($sha -ne "3CA54171C53F7BADD963FFE6851B8B3E2FAF8AEE8BA2AFCB7040990E22AE09B2"){
+            throw "official vendor EXE hash changed"
+          }
+
+          @"
+          BYTES=$($b.Length)
+          SHA256=$sha
+          ORIGINAL_BINARY_MODIFIED=NO
+          "@ | Set-Content "$root\evidence\01_VENDOR_IDENTITY.txt"
+
+      - name: Build x86 fake-stream auth vector probe
+        shell: pwsh
+        run: |
+          $ErrorActionPreference="Stop"
+          $root="C:\okn_v19"
+
+          @'
+          using System;
+          using System.IO;
+          using System.Linq;
+          using System.Text;
+          using System.Reflection;
+          using System.Reflection.Emit;
+          using System.Runtime.CompilerServices;
+          using System.Collections;
+          using System.Collections.Generic;
+          using System.Threading;
+
+          public static class CaptureSink
+          {
+              public static readonly List<byte[]> Writes=new List<byte[]>();
+
+              public static void Clear()
+              {
+                  lock(Writes){ Writes.Clear(); }
+              }
+
+              public static void Record(byte[] b)
+              {
+                  lock(Writes)
+                  {
+                      Writes.Add(b==null ? null : (byte[])b.Clone());
+                  }
+              }
+
+              public static byte[][] Snapshot()
+              {
+                  lock(Writes)
+                  {
+                      return Writes.Select(x=>x==null?null:(byte[])x.Clone()).ToArray();
+                  }
+              }
+          }
+
+          class ReplayProbe
+          {
+              static List<string> L=new List<string>();
+              static string OutPath;
+
+              static readonly string RAW256_HEX=
+                  "20D024E38C410000004202B94C65A23F2C640C8F60E133784C7E47463A7A52105634343435353535363636363737373738383838393939393A3A3A3A3B3B3B3B3C3C3C3C3D3D3D3D3E3E3E3E3F3F3F3F40404040414141414242424243434343B0B8022043434343C820030090ED0100C9200700000000000000000000000000282828287818022078180220301B0320E6E7000090A8022001000000000000007CB902200A0A0A0A0B0B0B0B0C0C0C0C0D0D0D0D0E0E0E0E01000000E825032000000000000000000000000000000000000000000000000000000000D41A0120D01A0120C92007000000000018F4010090A8022001000000000000009CED0100";
+              static readonly string LEN33_HEX=
+                  "20D024E38C410000004202B94C65A23F2C640C8F60E133784C7E47463A7A521056";
+              static readonly string PAYLOAD32_HEX=
+                  "D024E38C410000004202B94C65A23F2C640C8F60E133784C7E47463A7A521056";
+              static readonly string REPORTID_LEN34_HEX=
+                  "0020D024E38C410000004202B94C65A23F2C640C8F60E133784C7E47463A7A521056";
+
+              static void Log(string s)
+              {
+                  L.Add(s);
+                  if(!String.IsNullOrEmpty(OutPath))
+                      File.AppendAllText(OutPath,s+Environment.NewLine);
+              }
+
+              static string Hex(byte[] b)
+              {
+                  if(b==null)return "<NULL>";
+                  return BitConverter.ToString(b).Replace("-","");
+              }
+
+              static byte[] HexToBytes(string s)
+              {
+                  byte[] b=new byte[s.Length/2];
+                  for(int i=0;i<b.Length;i++)
+                      b[i]=Convert.ToByte(s.Substring(i*2,2),16);
+                  return b;
+              }
+
+              static string SafeValue(object v)
+              {
+                  if(v==null)return "<NULL>";
+                  byte[] bb=v as byte[];
+                  if(bb!=null)return "BYTE["+bb.Length+"]="+Hex(bb);
+                  Array a=v as Array;
+                  if(a!=null)
+                  {
+                      List<string> x=new List<string>();
+                      int n=Math.Min(a.Length,32);
+                      for(int i=0;i<n;i++)
+                          x.Add(a.GetValue(i)==null?"<NULL>":a.GetValue(i).ToString());
+                      return "ARRAY["+a.Length+"]="+String.Join(",",x.ToArray());
+                  }
+                  return v.ToString();
+              }
+
+              static object InvokeBounded(
+                  MethodInfo m, object target, object[] args,
+                  int timeoutMs, string label)
+              {
+                  object result=null;
+                  Exception error=null;
+                  Thread th=new Thread(delegate(){
+                      try{ result=m.Invoke(target,args); }
+                      catch(Exception ex){ error=ex; }
+                  });
+                  th.IsBackground=true;
+                  th.Start();
+
+                  if(!th.Join(timeoutMs))
+                  {
+                      Log(label+"_TIMEOUT_MS="+timeoutMs);
+                      try{ th.Abort(); }catch{}
+                      return null;
+                  }
+
+                  if(error!=null) throw error;
+                  return result;
+              }
+
+              static void EmitDefaultReturn(ILGenerator il,Type ret)
+              {
+                  if(ret==typeof(void)){ il.Emit(OpCodes.Ret); return; }
+                  if(ret.IsValueType)
+                  {
+                      LocalBuilder loc=il.DeclareLocal(ret);
+                      il.Emit(OpCodes.Ldloca_S,loc);
+                      il.Emit(OpCodes.Initobj,ret);
+                      il.Emit(OpCodes.Ldloc,loc);
+                      il.Emit(OpCodes.Ret);
+                      return;
+                  }
+                  il.Emit(OpCodes.Ldnull);
+                  il.Emit(OpCodes.Ret);
+              }
+
+              static MethodAttributes Visibility(MethodInfo m)
+              {
+                  MethodAttributes a=MethodAttributes.Virtual|MethodAttributes.HideBySig;
+                  if(m.IsPublic)a|=MethodAttributes.Public;
+                  else if(m.IsFamily)a|=MethodAttributes.Family;
+                  else if(m.IsFamilyOrAssembly)a|=MethodAttributes.FamORAssem;
+                  else if(m.IsAssembly)a|=MethodAttributes.Assembly;
+                  else a|=MethodAttributes.Private;
+                  if(m.IsSpecialName)a|=MethodAttributes.SpecialName;
+                  return a;
+              }
+
+              static Type BuildCaptureStream(Type baseType)
+              {
+                  AssemblyName an=new AssemblyName("OKN_V19_CAPTURE_STREAM");
+                  AssemblyBuilder ab=AppDomain.CurrentDomain.DefineDynamicAssembly(
+                      an,AssemblyBuilderAccess.Run);
+                  ModuleBuilder mb=ab.DefineDynamicModule("main");
+                  TypeBuilder tb=mb.DefineType(
+                      "OKN.CaptureDeviceCommunicationStream",
+                      TypeAttributes.Public|TypeAttributes.Class,
+                      baseType
+                  );
+
+                  ConstructorInfo bc=baseType.GetConstructor(
+                      BindingFlags.Public|BindingFlags.NonPublic|BindingFlags.Instance,
+                      null,Type.EmptyTypes,null
+                  );
+                  if(bc==null)throw new Exception("DeviceCommunicationStream parameterless ctor missing");
+
+                  ConstructorBuilder cb=tb.DefineConstructor(
+                      MethodAttributes.Public,CallingConventions.Standard,Type.EmptyTypes
+                  );
+                  ILGenerator ci=cb.GetILGenerator();
+                  ci.Emit(OpCodes.Ldarg_0);
+                  ci.Emit(OpCodes.Call,bc);
+                  ci.Emit(OpCodes.Ret);
+
+                  MethodInfo[] all=baseType.GetMethods(
+                      BindingFlags.Public|BindingFlags.NonPublic|BindingFlags.Instance
+                  );
+
+                  MethodInfo[] selected=all.Where(m =>
+                      m.IsVirtual && !m.IsFinal &&
+                      (m.IsAbstract ||
+                       m.Name=="Write" || m.Name=="WriteLine" ||
+                       m.Name=="ReadBytes" || m.Name=="ReadLine" ||
+                       m.Name=="Connect" || m.Name=="Disconnect")
+                  ).GroupBy(m=>m.ToString()).Select(g=>g.First()).ToArray();
+
+                  foreach(MethodInfo m in selected)
+                  {
+                      Type[] ps=m.GetParameters().Select(x=>x.ParameterType).ToArray();
+                      MethodBuilder b=tb.DefineMethod(
+                          m.Name,Visibility(m),m.ReturnType,ps
+                      );
+                      ILGenerator il=b.GetILGenerator();
+
+                      if(m.Name=="Write" && ps.Length==1 && ps[0]==typeof(byte[]))
+                      {
+                          il.Emit(OpCodes.Ldarg_1);
+                          il.Emit(OpCodes.Call,
+                              typeof(CaptureSink).GetMethod(
+                                  "Record",BindingFlags.Public|BindingFlags.Static));
+                          EmitDefaultReturn(il,m.ReturnType);
+                      }
+                      else
+                      {
+                          EmitDefaultReturn(il,m.ReturnType);
+                      }
+
+                      tb.DefineMethodOverride(b,m);
+                  }
+
+                  return tb.CreateType();
+              }
+
+              static void SetConnected(object stream,Type baseType)
+              {
+                  Type et=baseType.GetNestedType(
+                      "ConnectionStatus",
+                      BindingFlags.Public|BindingFlags.NonPublic
+                  );
+                  if(et==null || !et.IsEnum)
+                  {
+                      Log("CONNECTION_STATUS_ENUM_MISSING=true");
+                      return;
+                  }
+
+                  object connected=Enum.Parse(et,"Connected");
+                  FieldInfo f=baseType.GetFields(
+                      BindingFlags.Public|BindingFlags.NonPublic|BindingFlags.Instance
+                  ).FirstOrDefault(x=>x.FieldType==et);
+
+                  if(f!=null)
+                  {
+                      f.SetValue(stream,connected);
+                      Log("SET_CONNECTION_STATUS_FIELD="+f.Name+" VALUE=Connected");
+                      return;
+                  }
+
+                  MethodInfo up=baseType.GetMethod(
+                      "UpdateDeviceConnStatus",
+                      BindingFlags.Public|BindingFlags.NonPublic|BindingFlags.Instance
+                  );
+                  if(up!=null)
+                  {
+                      up.Invoke(stream,new object[]{connected});
+                      Log("SET_CONNECTION_STATUS_METHOD=Connected");
+                  }
+              }
+
+              static void DumpEnums(Assembly asm)
+              {
+                  foreach(string tn in new[]{
+                      "DSTech_AudioDSP_Client.UFEHeader",
+                      "DSTech_AudioDSP_Client.UFEStreamStatus"
+                  })
+                  {
+                      Type t=asm.GetType(tn,false);
+                      if(t==null || !t.IsEnum)continue;
+                      foreach(object v in Enum.GetValues(t))
+                          Log("ENUM|"+tn+"|"+Enum.GetName(t,v)+"=0x"+
+                              Convert.ToInt64(v).ToString("X"));
+                  }
+              }
+
+              static void DumpQueue(object bridge,Type bridgeType,string tag)
+              {
+                  FieldInfo q=bridgeType.GetFields(
+                      BindingFlags.Public|BindingFlags.NonPublic|BindingFlags.Instance
+                  ).FirstOrDefault(f =>
+                      f.FieldType.IsGenericType &&
+                      f.FieldType.GetGenericTypeDefinition()==typeof(List<>)
+                  );
+                  if(q==null)
+                  {
+                      Log(tag+"_QUEUE_FIELD_MISSING=true");
+                      return;
+                  }
+
+                  IEnumerable en=q.GetValue(bridge) as IEnumerable;
+                  if(en==null)
+                  {
+                      Log(tag+"_QUEUE_NULL=true");
+                      return;
+                  }
+
+                  int i=0;
+                  foreach(object cmd in en)
+                  {
+                      if(cmd==null)continue;
+                      MethodInfo tba=cmd.GetType().GetMethod(
+                          "ToByteArray",
+                          BindingFlags.Public|BindingFlags.NonPublic|BindingFlags.Instance,
+                          null,Type.EmptyTypes,null
+                      );
+                      if(tba!=null)
+                      {
+                          try
+                          {
+                              byte[] b=tba.Invoke(cmd,null) as byte[];
+                              Log(tag+"_QUEUE_"+i+"_TYPE="+cmd.GetType().FullName+
+                                  " HEX="+Hex(b));
+                          }
+                          catch(Exception ex)
+                          {
+                              Log(tag+"_QUEUE_"+i+"_EXCEPTION="+ex.GetBaseException());
+                          }
+                      }
+                      i++;
+                  }
+                  Log(tag+"_QUEUE_COUNT="+i);
+              }
+
+              static void DumpUFEDevice(object dev,string tag)
+              {
+                  if(dev==null)
+                  {
+                      Log(tag+"_REMOTE_DEVICE=<NULL>");
+                      return;
+                  }
+
+                  Type t=dev.GetType();
+                  Log(tag+"_REMOTE_DEVICE_TYPE="+t.FullName);
+
+                  string[] wanted={
+                      "name","typeID","swVersion","hwVersion","description",
+                      "manufacturer","manufacturingSite","serviceTag","vendor",
+                      "supportedCommunicationWay"
+                  };
+
+                  foreach(string n in wanted)
+                  {
+                      PropertyInfo p=t.GetProperty(
+                          n,BindingFlags.Public|BindingFlags.NonPublic|BindingFlags.Instance
+                      );
+                      if(p==null || p.GetIndexParameters().Length!=0)continue;
+                      MethodInfo g=p.GetGetMethod(true);
+                      if(g==null)continue;
+                      try
+                      {
+                          object v=InvokeBounded(g,dev,null,800,tag+"_PROP_"+n);
+                          Log(tag+"_REMOTE_PROP_"+n+"="+SafeValue(v));
+                      }
+                      catch(Exception ex)
+                      {
+                          Log(tag+"_REMOTE_PROP_"+n+"_EXCEPTION="+
+                              ex.GetBaseException().GetType().FullName+":"+
+                              ex.GetBaseException().Message);
+                      }
+                  }
+              }
+
+              static void DumpBridgeState(object bridge,Type bridgeType,string tag)
+              {
+                  foreach(FieldInfo f in bridgeType.GetFields(
+                      BindingFlags.Public|BindingFlags.NonPublic|BindingFlags.Instance
+                  ))
+                  {
+                      Type ft=f.FieldType;
+                      bool simple=
+                          ft.IsPrimitive || ft.IsEnum || ft==typeof(string) ||
+                          ft==typeof(byte[]) ||
+                          (ft.IsGenericType &&
+                           ft.GetGenericTypeDefinition()==typeof(Nullable<>));
+
+                      if(f.Name=="RemoteDevice")
+                      {
+                          try{ DumpUFEDevice(f.GetValue(bridge),tag); }
+                          catch(Exception ex){ Log(tag+"_REMOTE_DEVICE_EXCEPTION="+ex.GetBaseException()); }
+                      }
+                      else if(simple)
+                      {
+                          try{ Log(tag+"_FIELD_"+f.Name+"="+SafeValue(f.GetValue(bridge))); }
+                          catch(Exception ex){ Log(tag+"_FIELD_"+f.Name+"_EXCEPTION="+ex.GetBaseException()); }
+                      }
+                  }
+
+                  foreach(string pn in new[]{"StreamStatus","DevDescriptionLength"})
+                  {
+                      PropertyInfo p=bridgeType.GetProperty(
+                          pn,BindingFlags.Public|BindingFlags.NonPublic|BindingFlags.Instance
+                      );
+                      if(p==null)continue;
+                      MethodInfo g=p.GetGetMethod(true);
+                      if(g==null)continue;
+                      try
+                      {
+                          object v=InvokeBounded(g,bridge,null,800,tag+"_GET_"+pn);
+                          Log(tag+"_PROPERTY_"+pn+"="+SafeValue(v));
+                      }
+                      catch(Exception ex)
+                      {
+                          Log(tag+"_PROPERTY_"+pn+"_EXCEPTION="+ex.GetBaseException());
+                      }
+                  }
+              }
+
+              static object NewPreparedBridge(
+                  Type baseType,Type captureType,Type bridgeType,
+                  out object stream,string tag)
+              {
+                  stream=Activator.CreateInstance(captureType);
+                  SetConnected(stream,baseType);
+
+                  ConstructorInfo bc=bridgeType.GetConstructor(new[]{baseType});
+                  if(bc==null)throw new Exception("UFEcommandBridge ctor missing");
+                  object bridge=bc.Invoke(new[]{stream});
+
+                  MethodInfo req=bridgeType.GetMethod(
+                      "SendDevTypeSwVersAuthenRequest",
+                      BindingFlags.Public|BindingFlags.NonPublic|BindingFlags.Instance
+                  );
+                  if(req==null)throw new Exception("actual startup helper missing");
+
+                  CaptureSink.Clear();
+                  InvokeBounded(req,bridge,null,1500,tag+"_STARTUP_HELPER");
+                  Thread.Sleep(150);
+
+                  byte[][] baseline=CaptureSink.Snapshot();
+                  for(int i=0;i<baseline.Length;i++)
+                      Log(tag+"_BASELINE_HANDSHAKE_WRITE_"+i+"="+Hex(baseline[i]));
+
+                  CaptureSink.Clear();
+                  DumpBridgeState(bridge,bridgeType,tag+"_BEFORE_RESPONSE");
+                  DumpQueue(bridge,bridgeType,tag+"_BEFORE_RESPONSE");
+                  return bridge;
+              }
+
+              static void CaptureWrites(string tag)
+              {
+                  Thread.Sleep(250);
+                  byte[][] w=CaptureSink.Snapshot();
+                  Log(tag+"_FOLLOWUP_WRITE_COUNT="+w.Length);
+                  for(int i=0;i<w.Length;i++)
+                      Log(tag+"_FOLLOWUP_WRITE_"+i+"="+Hex(w[i]));
+              }
+
+              static void RunFblCase(
+                  Type baseType,Type captureType,Type bridgeType,
+                  byte[] data,string tag)
+              {
+                  object stream;
+                  object bridge=NewPreparedBridge(
+                      baseType,captureType,bridgeType,out stream,tag
+                  );
+
+                  MethodInfo fbl=bridgeType.GetMethod(
+                      "FBL3HEmTva",
+                      BindingFlags.Public|BindingFlags.NonPublic|BindingFlags.Instance
+                  );
+                  if(fbl==null)throw new Exception("FBL3HEmTva parser event handler missing");
+
+                  Log(tag+"_INPUT_LEN="+data.Length);
+                  Log(tag+"_INPUT_HEX="+Hex(data));
+
+                  try
+                  {
+                      InvokeBounded(
+                          fbl,bridge,new object[]{stream,data,EventArgs.Empty},
+                          2500,tag+"_FBL"
+                      );
+                      Log(tag+"_FBL_INVOKE=RETURNED");
+                  }
+                  catch(Exception ex)
+                  {
+                      Exception b=ex.GetBaseException();
+                      Log(tag+"_FBL_EXCEPTION="+b.GetType().FullName+":"+b.Message);
+                  }
+
+                  CaptureWrites(tag);
+                  DumpQueue(bridge,bridgeType,tag+"_AFTER_RESPONSE");
+                  DumpBridgeState(bridge,bridgeType,tag+"_AFTER_RESPONSE");
+              }
+
+              static void Main(string[] a)
+              {
+                  string exe=Path.GetFullPath(a[0]);
+                  string outp=Path.GetFullPath(a[1]);
+                  Directory.SetCurrentDirectory(Path.GetDirectoryName(exe));
+                  OutPath=outp;
+                  File.WriteAllText(OutPath,"");
+
+                  Log("MODE=OFFLINE_V17_AUTH_RESPONSE_VECTOR_SWEEP");
+                  Log("REAL_HID_OBJECT_CREATED=NO");
+                  Log("REAL_HID_CONNECT_INVOKED=NO");
+                  Log("REAL_HID_SEND_INVOKED=NO");
+                  Log("REAL_HID_WRITE_INVOKED=NO");
+                  Log("REAL_HID_READ_INVOKED=NO");
+                  Log("HOST_TO_DSP_IO=NO");
+
+                  try
+                  {
+                      Assembly asm=Assembly.LoadFile(exe);
+                      RuntimeHelpers.RunModuleConstructor(asm.ManifestModule.ModuleHandle);
+                      Log("MODULE_INITIALIZER=SUCCESS");
+
+                      DumpEnums(asm);
+
+                      Type baseType=asm.GetType(
+                          "DSTech_AudioDSP_Client.DeviceCommunicationStream",true);
+                      Type bridgeType=asm.GetType(
+                          "DSTech_AudioDSP_Client.UFEcommandBridge",true);
+                      Type captureType=BuildCaptureStream(baseType);
+                      Log("CAPTURE_STREAM_TYPE="+captureType.FullName);
+
+                      byte[] payload32=HexToBytes(PAYLOAD32_HEX);
+
+                      // Proven physical-event input shape from V18.
+                      RunFblCase(
+                          baseType,captureType,bridgeType,
+                          (byte[])payload32.Clone(),"BASELINE"
+                      );
+
+                      // Change exactly one low bit at each byte position.
+                      // This is offline black-box characterization of the vendor auth transform.
+                      for(int i=0;i<payload32.Length;i++)
+                      {
+                          byte[] m=(byte[])payload32.Clone();
+                          m[i]^=0x01;
+                          RunFblCase(
+                              baseType,captureType,bridgeType,
+                              m,"MUT_"+i.ToString("D2")
+                          );
+                      }
+
+                      // Extra deterministic probes retaining 32-byte shape.
+                      byte[] first=(byte[])payload32.Clone();
+                      first[0]=0xD1;
+                      RunFblCase(baseType,captureType,bridgeType,first,"EXTRA_HEADER_D1");
+
+                      byte[] tail=(byte[])payload32.Clone();
+                      tail[31]^=0x80;
+                      RunFblCase(baseType,captureType,bridgeType,tail,"EXTRA_TAIL_BIT7");
+                  }
+                  catch(Exception ex)
+                  {
+                      Log("TOP_EXCEPTION="+ex.ToString());
+                  }
+
+                  Log("VECTOR_PROBE_MAIN_COMPLETE=true");
+                  Environment.Exit(0);
+              }
+          }
+          '@ | Set-Content "$root\harness\ReplayProbe.cs"
+
+          $csc="$env:WINDIR\Microsoft.NET\Framework\v4.0.30319\csc.exe"
+          if(-not(Test-Path $csc)){throw "x86 csc missing"}
+
+          & $csc /nologo /platform:x86 /target:exe `
+            /out:"$root\harness\ReplayProbe.exe" "$root\harness\ReplayProbe.cs"
+          if($LASTEXITCODE -ne 0){throw "ReplayProbe compile failed"}
+
+      - name: Static safety audit auth vector probe
+        shell: pwsh
+        run: |
+          $ErrorActionPreference="Stop"
+          $root="C:\okn_v19"
+          $s=Get-Content "$root\harness\ReplayProbe.cs" -Raw
+
+          foreach($bad in @(
+            "HidD_SetOutputReport(","HidD_GetInputReport(",
+            "HidD_SetFeature(","HidD_GetFeature(",
+            "ReadFile(","WriteFile(","CreateFileW("
+          )){
+            if($s.Contains($bad)){throw "native/real HID call forbidden: $bad"}
+          }
+
+          foreach($required in @(
+            "BuildCaptureStream",
+            "SendDevTypeSwVersAuthenRequest",
+            "FBL3HEmTva",
+            "D024E38C410000004202B94C65A23F2C640C8F60E133784C7E47463A7A521056",
+            "REAL_HID_OBJECT_CREATED=NO",
+            "HOST_TO_DSP_IO=NO"
+          )){
+            if(-not $s.Contains($required)){throw "required offline replay marker missing: $required"}
+          }
+
+          $probe=Get-Content "$root\harness\ReplayProbe.cs" -Raw
+          if($probe -match '"FBL3HEmTva"\s*,\s*"'){
+            throw "FBL GetMethod contains an unexpected second string argument"
+          }
+          if($probe.Contains("RunYeaCase(")){
+            throw "unused RunYeaCase must not exist in V19 FIXED V3"
+          }
+
+          "STATIC_SAFETY_AUDIT=PASS" |
+            Set-Content "$root\evidence\02_STATIC_SAFETY_AUDIT.txt"
+
+      - name: Sweep V17 challenge mutations through real vendor parser offline
+        shell: pwsh
+        run: |
+          $ErrorActionPreference="Stop"
+          $root="C:\okn_v19"
+
+          $p=Start-Process `
+            -FilePath "$root\harness\ReplayProbe.exe" `
+            -ArgumentList @("$root\vendor.exe","$root\evidence\03_AUTH_VECTOR_SWEEP.txt") `
+            -WorkingDirectory $root `
+            -RedirectStandardOutput "$root\evidence\03A_STDOUT.txt" `
+            -RedirectStandardError "$root\evidence\03B_STDERR.txt" `
+            -PassThru
+
+          if(-not $p.WaitForExit(30000)){
+            Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
+            throw "response replay probe timed out"
+          }
+
+          if(-not(Test-Path "$root\evidence\03_AUTH_VECTOR_SWEEP.txt")){
+            throw "response replay evidence missing"
+          }
+
+          $ev=Get-Content "$root\evidence\03_AUTH_VECTOR_SWEEP.txt" -Raw
+          if($ev -notmatch 'VECTOR_PROBE_MAIN_COMPLETE=true'){
+            throw "auth vector sweep incomplete"
+          }
+
+          Get-Content "$root\evidence\03_AUTH_VECTOR_SWEEP.txt"
+
+      - name: Derive V19 auth-response dependency verdict
+        shell: pwsh
+        run: |
+          $ErrorActionPreference="Stop"
+          $root="C:\okn_v19"
+
+          @'
+          from pathlib import Path
+          import json,re,zlib,struct
+
+          ev=Path(r"C:\okn_v19\evidence")
+          txt=(ev/"03_AUTH_VECTOR_SWEEP.txt").read_text(errors="ignore")
+          lines=txt.splitlines()
+
+          cases=["BASELINE"]+[f"MUT_{i:02d}" for i in range(32)]+[
+              "EXTRA_HEADER_D1","EXTRA_TAIL_BIT7"
+          ]
+
+          def parse_case(c):
+              writes=[]
+              status=None
+              input_hex=None
+              exc=None
+
+              for line in lines:
+                  if line.startswith(c+"_INPUT_HEX="):
+                      input_hex=line.split("=",1)[1]
+                  # IMPORTANT: match indexed writes only; never count FOLLOWUP_WRITE_COUNT.
+                  m=re.match(
+                      re.escape(c)+r"_FOLLOWUP_WRITE_(\d+)=([0-9A-F]+|<NULL>)$",
+                      line
+                  )
+                  if m:
+                      writes.append(m.group(2))
+                  if line.startswith(c+"_AFTER_RESPONSE_PROPERTY_StreamStatus="):
+                      status=line.split("=",1)[1]
+                  if line.startswith(c+"_FBL_EXCEPTION="):
+                      exc=line.split("=",1)[1]
+
+              return {
+                  "input_hex":input_hex,
+                  "followup_writes":writes,
+                  "stream_status":status,
+                  "exception":exc,
+                  "accepted":(
+                      bool(writes) and
+                      status=="UFE_STREAM_GETTING_DEVICE_DESCRIPTION"
+                  )
+              }
+
+          results={c:parse_case(c) for c in cases}
+          base=results["BASELINE"]
+          baseline_out=(base["followup_writes"][0]
+                        if base["followup_writes"] else None)
+
+          accepted=[
+              c for c in cases if results[c]["accepted"]
+          ]
+          changed=[]
+          unchanged=[]
+          rejected=[]
+
+          for c in cases[1:]:
+              r=results[c]
+              if not r["accepted"]:
+                  rejected.append(c)
+              elif r["followup_writes"][0] == baseline_out:
+                  unchanged.append(c)
+              else:
+                  changed.append(c)
+
+          # Common 32-bit checksum/hash comparison for the baseline.
+          p=bytes.fromhex(base["input_hex"]) if base["input_hex"] else b""
+          candidates={}
+          if p:
+              candidates["crc32_be"]=f"{zlib.crc32(p)&0xffffffff:08X}"
+              candidates["crc32_le"]=struct.pack(
+                  "<I",zlib.crc32(p)&0xffffffff
+              ).hex().upper()
+              candidates["adler32_be"]=f"{zlib.adler32(p)&0xffffffff:08X}"
+              candidates["adler32_le"]=struct.pack(
+                  "<I",zlib.adler32(p)&0xffffffff
+              ).hex().upper()
+
+              h=0x811C9DC5
+              for b in p:
+                  h ^= b
+                  h=(h*0x01000193)&0xffffffff
+              candidates["fnv1a32_be"]=f"{h:08X}"
+              candidates["fnv1a32_le"]=struct.pack("<I",h).hex().upper()
+
+              if len(p)%4==0:
+                  le=struct.unpack("<"+"I"*(len(p)//4),p)
+                  be=struct.unpack(">"+"I"*(len(p)//4),p)
+                  x=0
+                  for v in le:x^=v
+                  candidates["xor_words_le"]=f"{x&0xffffffff:08X}"
+                  x=0
+                  for v in be:x^=v
+                  candidates["xor_words_be"]=f"{x&0xffffffff:08X}"
+                  candidates["sum_words_le"]=f"{sum(le)&0xffffffff:08X}"
+                  candidates["sum_words_be"]=f"{sum(be)&0xffffffff:08X}"
+
+          common_matches=[
+              k for k,v in candidates.items()
+              if baseline_out and v==baseline_out
+          ]
+
+          facts={
+              "revision":"MASTER-V19",
+              "v17_real_challenge_payload_hex":
+                  "D024E38C410000004202B94C65A23F2C640C8F60E133784C7E47463A7A521056",
+              "v18_correct_physical_event_case":"FBL_PAYLOAD32",
+              "v18_baseline_auth_reply_hex":"3A5BADF3",
+              "v18_post_auth_state":"UFE_STREAM_GETTING_DEVICE_DESCRIPTION",
+              "baseline_output_hex":baseline_out,
+              "accepted_case_count":len(accepted),
+              "mutation_output_changed_cases":changed,
+              "mutation_output_unchanged_cases":unchanged,
+              "mutation_rejected_cases":rejected,
+              "results":results,
+              "common_hash_candidates":candidates,
+              "common_hash_matches":common_matches,
+              "real_hid_invoked":False,
+              "host_to_dsp_io":False,
+              "feature_report_invoked":False,
+              "flash_allowed":False
+          }
+
+          if not base["accepted"] or baseline_out!="3A5BADF3":
+              facts["status"]="BASELINE_AUTH_REPLAY_DID_NOT_REPRODUCE_V18"
+          elif changed:
+              facts["status"]="AUTH_REPLY_IS_CHALLENGE_DEPENDENT_DO_NOT_HARDCODE"
+          elif len(unchanged)>=16:
+              facts["status"]="AUTH_REPLY_APPEARS_STATIC_OVER_TESTED_MUTATIONS_VERIFY_BEFORE_LIVE_USE"
+          else:
+              facts["status"]="AUTH_TRANSFORM_NEEDS_MORE_OFFLINE_RECOVERY"
+
+          (ev/"04_V19_FINAL_DECISION.json").write_text(
+              json.dumps(facts,indent=2)+"\n"
+          )
+
+          md=f"""# MASTER V19 FINAL DECISION
+
+          - V18 corrected physical event path: **FBL_PAYLOAD32**
+          - Baseline auth reply reproduced: **{baseline_out}**
+          - Post-auth state: **{base['stream_status']}**
+          - Accepted test cases: **{len(accepted)} / {len(cases)}**
+          - Mutations changing auth reply: **{len(changed)}**
+          - Mutations leaving auth reply unchanged: **{len(unchanged)}**
+          - Rejected mutations: **{len(rejected)}**
+          - Changed cases: **{changed}**
+          - Common simple-hash matches: **{common_matches}**
+          - Real HID invoked: **NO**
+          - Host-to-DSP I/O: **NO**
+          - Feature report invoked: **NO**
+          - Flash allowed: **NO**
+
+          Status: **{facts['status']}**
+
+          If any accepted mutation changes the 4-byte reply, `3A5BADF3` is not safe to
+          hardcode for future sessions; the auth transform must be recovered first.
+
+          Classification: **OFFLINE_AUTH_RESPONSE_VECTOR_SWEEP_NOT_FOR_FLASH**
+          """
+          (ev/"05_V19_FINAL_DECISION.md").write_text(md)
+          print(md)
+          '@ | Set-Content "$root\derive.py"
+
+          python "$root\derive.py"
+          Get-Content "$root\evidence\05_V19_FINAL_DECISION.md" >> $env:GITHUB_STEP_SUMMARY
+
+      - name: Package V19 evidence
+        shell: pwsh
+        run: |
+          $ErrorActionPreference="Stop"
+          $root="C:\okn_v19"
+
+          Copy-Item "$root\evidence\*" "$root\out\" -Force
+
+          if(Test-Path "$root\out\vendor.exe"){throw "vendor EXE leak"}
+          if(Test-Path "$root\out\ReplayProbe.exe"){throw "probe EXE leak"}
+
+          Get-ChildItem "$root\out" -File | ForEach-Object {
+            "$((Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower())  $($_.Name)"
+          } | Set-Content "$root\out\SHA256SUMS.txt"
+
+      - name: Upload V19 evidence
+        uses: actions/upload-artifact@v7
+        with:
+          name: OKN-BP1048P4-MASTER-V19-FIXED-V3-AUTH-RESPONSE-VECTOR-SWEEP-EVIDENCE
+          path: C:\okn_v19\out\*
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Final fail-closed assertion
+        shell: pwsh
+        run: |
+          $ErrorActionPreference="Stop"
+          $root="C:\okn_v19"
+
+          foreach($n in @(
+            "LIVE_DSP_CONNECTED","USB_TARGET_ACCESS","HOST_TO_DSP_IO",
+            "REAL_HID_OBJECT_ALLOWED","REAL_HID_CONNECT_ALLOWED",
+            "REAL_HID_SEND_ALLOWED","REAL_HID_READ_ALLOWED","REAL_HID_WRITE_ALLOWED",
+            "FEATURE_REPORT_ALLOWED","FLASH_ALLOWED","ERASE_ALLOWED","WRITE_ALLOWED"
+          )){
+            if((Get-Item "Env:$n").Value -ne "NO"){throw "$n changed"}
+          }
+
+          $d=Get-Content "$root\evidence\04_V19_FINAL_DECISION.json" -Raw | ConvertFrom-Json
+          if($d.real_hid_invoked -ne $false){throw "bad HID state"}
+          if($d.host_to_dsp_io -ne $false){throw "bad host-to-DSP state"}
+          if($d.feature_report_invoked -ne $false){throw "bad feature state"}
+          if($d.flash_allowed -ne $false){throw "bad flash state"}
+          if($d.v18_correct_physical_event_case -ne "FBL_PAYLOAD32"){throw "V18 corrected path missing"}
+
+          "MASTER_V19_FIXED_V3=PASS"
+          "REAL_HID_IO=NO"
+          "HOST_TO_DSP_IO=NO"
+          "FEATURE_REPORT=NO"
+          "FLASH_ALLOWED=NO"
