@@ -1,0 +1,577 @@
+name: OKN BP1048P4 MASTER V22 AUTH JIT RECOVERY S25 USB-C ONLY
+
+"on":
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/OKN_BP1048P4_MASTER_V22_AUTH_JIT_RECOVERY_S25_USB_C_ONLY.yml'
+
+permissions:
+  contents: read
+
+env:
+  GOLOPINE_WINDOWS_URL: "https://golodsp.com/wp-content/uploads/2026/05/golopine_audio_turning_release_2026-04-08.exe_.zip"
+  EXPECTED_VENDOR_SHA256: "3ca54171c53f7badd963ffe6851b8b3e2faf8aee8ba2afcb7040990e22ae09b2"
+  REQUIRED_PHONE: "Samsung Galaxy S25+"
+  REQUIRED_PATH: "Samsung Galaxy S25+ -> USB-C cable -> DSP board USB-C port only"
+  LIVE_DSP_CONNECTED: "NO"
+  USB_TARGET_ACCESS: "NO"
+  HOST_TO_DSP_IO: "NO"
+  HID_CONNECT_ALLOWED: "NO"
+  HID_SEND_ALLOWED: "NO"
+  HID_WRITE_ALLOWED: "NO"
+  FEATURE_REPORT_ALLOWED: "NO"
+  FLASH_ALLOWED: "NO"
+  ERASE_ALLOWED: "NO"
+  WRITE_ALLOWED: "NO"
+
+jobs:
+  recover-auth-and-upgrade-jit:
+    name: Recover auth plus upgrade/flash JIT offline for S25 USB-C path
+    runs-on: windows-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Immutable safety gate
+        shell: pwsh
+        run: |
+          $ErrorActionPreference="Stop"
+          foreach($n in @(
+            "LIVE_DSP_CONNECTED","USB_TARGET_ACCESS","HOST_TO_DSP_IO",
+            "HID_CONNECT_ALLOWED","HID_SEND_ALLOWED","HID_WRITE_ALLOWED",
+            "FEATURE_REPORT_ALLOWED","FLASH_ALLOWED","ERASE_ALLOWED","WRITE_ALLOWED"
+          )){
+            if((Get-Item "Env:$n").Value -ne "NO"){ throw "$n must stay NO" }
+          }
+
+          $root="C:\okn_v22"
+          if(Test-Path $root){ Remove-Item -Recurse -Force $root }
+          New-Item -ItemType Directory -Force -Path `
+            "$root\download","$root\pkg","$root\harness","$root\jit",`
+            "$root\evidence","$root\out" | Out-Null
+
+          @"
+          REVISION=MASTER_V22
+          MODE=OFFLINE_JIT_AUTH_AND_UPGRADE_RECOVERY
+          TARGET=MVSilicon_BP1048P4
+          REQUIRED_PHONE=Samsung Galaxy S25+
+          REQUIRED_PATH=Samsung Galaxy S25+ -> USB-C cable -> DSP board USB-C port only
+          SOLDERING_REQUIRED=NO
+          BOARD_MODIFICATION_REQUIRED=NO
+          LIVE_DSP_CONNECTED=NO
+          USB_TARGET_ACCESS=NO
+          HOST_TO_DSP_IO=NO
+          FLASH_ALLOWED=NO
+          ERASE_ALLOWED=NO
+          WRITE_ALLOWED=NO
+          "@ | Set-Content "$root\evidence\00_SAFETY_AND_SCOPE.txt"
+
+      - name: Acquire exact official vendor binary and pin SHA256
+        shell: pwsh
+        run: |
+          $ErrorActionPreference="Stop"
+          $root="C:\okn_v22"
+
+          curl.exe -fL --retry 6 --retry-all-errors --retry-delay 2 `
+            --connect-timeout 20 --max-time 300 `
+            $env:GOLOPINE_WINDOWS_URL -o "$root\download\vendor.zip"
+          if($LASTEXITCODE -ne 0){ throw "vendor download failed" }
+
+          Expand-Archive -Force "$root\download\vendor.zip" "$root\pkg"
+          $exe=Get-ChildItem "$root\pkg" -Recurse -File -Filter *.exe |
+            Where-Object { $_.FullName -notmatch '\\__MACOSX\\' -and $_.Name -notlike '._*' } |
+            Sort-Object Length -Descending | Select-Object -First 1
+          if(-not $exe){ throw "vendor EXE missing" }
+
+          Copy-Item $exe.FullName "$root\vendor.exe" -Force
+          $actual=(Get-FileHash "$root\vendor.exe" -Algorithm SHA256).Hash.ToLower()
+          if($actual -ne $env:EXPECTED_VENDOR_SHA256){
+            throw "vendor SHA mismatch: $actual"
+          }
+
+          @"
+          FILE=$($exe.FullName)
+          BYTES=$($exe.Length)
+          SHA256=$actual
+          VENDOR_BINARY_EXECUTED_AS_UI=NO
+          BOARD_USB_ACCESSED=NO
+          "@ | Set-Content "$root\evidence\01_VENDOR_IDENTITY.txt"
+
+      - name: Build x86 method scout and isolated JIT pointer probe
+        shell: pwsh
+        run: |
+          $ErrorActionPreference="Stop"
+          $root="C:\okn_v22"
+
+          @'
+          using System;
+          using System.IO;
+          using System.Linq;
+          using System.Reflection;
+          using System.Runtime.CompilerServices;
+          using System.Collections.Generic;
+
+          class MethodScout
+          {
+              static bool Hit(string s)
+              {
+                  s=(s??"").ToLowerInvariant();
+                  string[] k={
+                      "auth","challenge","verify","token","nonce",
+                      "upgrade","update","firmware","flash","boot","recovery",
+                      "erase","program","download","write","hid","ufe"
+                  };
+                  return k.Any(x=>s.Contains(x));
+              }
+
+              static void Main(string[] a)
+              {
+                  string exe=Path.GetFullPath(a[0]);
+                  string outp=Path.GetFullPath(a[1]);
+                  Directory.SetCurrentDirectory(Path.GetDirectoryName(exe));
+                  var L=new List<string>();
+
+                  AppDomain.CurrentDomain.AssemblyResolve += (s,e) => {
+                      string n=new AssemblyName(e.Name).Name+".dll";
+                      string p=Path.Combine(Path.GetDirectoryName(exe),n);
+                      return File.Exists(p)?Assembly.LoadFrom(p):null;
+                  };
+
+                  try
+                  {
+                      Assembly asm=Assembly.LoadFile(exe);
+                      RuntimeHelpers.RunModuleConstructor(asm.ManifestModule.ModuleHandle);
+                      L.Add("MODULE_INITIALIZER=SUCCESS");
+
+                      Type[] ts;
+                      try{ts=asm.GetTypes();}
+                      catch(ReflectionTypeLoadException ex){ts=ex.Types.Where(x=>x!=null).ToArray();}
+
+                      foreach(Type t in ts)
+                      {
+                          MethodInfo[] ms;
+                          try{
+                              ms=t.GetMethods(BindingFlags.Public|BindingFlags.NonPublic|
+                                              BindingFlags.Static|BindingFlags.Instance|
+                                              BindingFlags.DeclaredOnly);
+                          }catch{continue;}
+
+                          foreach(var m in ms)
+                          {
+                              string key=(t.FullName??"")+"::"+m.Name;
+                              bool exact=(t.FullName=="DSTech_AudioDSP_Client.UFEcommandBridge" &&
+                                         (m.Name=="FBL3HEmTva" ||
+                                          m.Name=="SendDevTypeSwVersAuthenRequest"));
+                              if(!exact && !Hit(key)) continue;
+
+                              int il=-1;
+                              try{
+                                  var b=m.GetMethodBody();
+                                  il=(b==null || b.GetILAsByteArray()==null)?0:b.GetILAsByteArray().Length;
+                              }catch{}
+
+                              L.Add("CANDIDATE|"+
+                                    t.FullName+"|"+
+                                    m.Name+"|"+
+                                    m.MetadataToken.ToString("X8")+"|"+
+                                    il+"|"+
+                                    m.ToString().Replace("|","/"));
+                          }
+                      }
+                  }
+                  catch(Exception ex)
+                  {
+                      L.Add("TOP_EXCEPTION="+ex.ToString().Replace("\r"," ").Replace("\n"," "));
+                  }
+
+                  File.WriteAllLines(outp,L.ToArray());
+              }
+          }
+          '@ | Set-Content "$root\harness\MethodScout.cs"
+
+          @'
+          using System;
+          using System.IO;
+          using System.Linq;
+          using System.Reflection;
+          using System.Runtime.CompilerServices;
+          using System.Threading;
+          using System.Collections.Generic;
+
+          class JitPtrProbe
+          {
+              static void Main(string[] a)
+              {
+                  string exe=Path.GetFullPath(a[0]);
+                  string typeName=a[1];
+                  string methodName=a[2];
+                  string outp=Path.GetFullPath(a[3]);
+                  Directory.SetCurrentDirectory(Path.GetDirectoryName(exe));
+                  var L=new List<string>();
+                  L.Add("PID="+System.Diagnostics.Process.GetCurrentProcess().Id);
+                  L.Add("TYPE="+typeName);
+                  L.Add("METHOD="+methodName);
+
+                  try
+                  {
+                      Assembly asm=Assembly.LoadFile(exe);
+                      RuntimeHelpers.RunModuleConstructor(asm.ManifestModule.ModuleHandle);
+                      Type t=asm.GetType(typeName,false);
+                      if(t==null){L.Add("TYPE_NOT_FOUND=1");File.WriteAllLines(outp,L);return;}
+
+                      var ms=t.GetMethods(BindingFlags.Public|BindingFlags.NonPublic|
+                                          BindingFlags.Static|BindingFlags.Instance)
+                              .Where(x=>x.Name==methodName).ToArray();
+                      L.Add("OVERLOADS="+ms.Length);
+
+                      foreach(var m in ms)
+                      {
+                          try
+                          {
+                              RuntimeHelpers.PrepareMethod(m.MethodHandle);
+                              IntPtr p=m.MethodHandle.GetFunctionPointer();
+                              L.Add("PTR|"+m.MetadataToken.ToString("X8")+"|"+
+                                    p.ToInt64().ToString("X")+"|"+
+                                    m.ToString().Replace("|","/"));
+                          }
+                          catch(Exception ex)
+                          {
+                              L.Add("PREPARE_EXCEPTION|"+m.MetadataToken.ToString("X8")+"|"+
+                                    ex.GetBaseException().ToString().Replace("\r"," ").Replace("\n"," "));
+                          }
+                      }
+
+                      File.WriteAllLines(outp,L.ToArray());
+                      Console.WriteLine("READY");
+                      Console.Out.Flush();
+                      Thread.Sleep(20000);
+                  }
+                  catch(Exception ex)
+                  {
+                      L.Add("TOP_EXCEPTION="+ex.ToString().Replace("\r"," ").Replace("\n"," "));
+                      try{File.WriteAllLines(outp,L.ToArray());}catch{}
+                  }
+              }
+          }
+          '@ | Set-Content "$root\harness\JitPtrProbe.cs"
+
+          $csc="$env:WINDIR\Microsoft.NET\Framework\v4.0.30319\csc.exe"
+          if(-not(Test-Path $csc)){ throw "x86 csc missing" }
+
+          & $csc /nologo /platform:x86 /target:exe `
+            /out:"$root\harness\MethodScout.exe" "$root\harness\MethodScout.cs"
+          if($LASTEXITCODE -ne 0){ throw "MethodScout compile failed" }
+
+          & $csc /nologo /platform:x86 /target:exe `
+            /out:"$root\harness\JitPtrProbe.exe" "$root\harness\JitPtrProbe.cs"
+          if($LASTEXITCODE -ne 0){ throw "JitPtrProbe compile failed" }
+
+          @"
+          METHOD_SCOUT_SHA256=$((Get-FileHash "$root\harness\MethodScout.exe" -Algorithm SHA256).Hash)
+          JIT_PTR_PROBE_SHA256=$((Get-FileHash "$root\harness\JitPtrProbe.exe" -Algorithm SHA256).Hash)
+          "@ | Set-Content "$root\evidence\02_HARNESS_HASHES.txt"
+
+      - name: Static safety audit harnesses
+        shell: pwsh
+        run: |
+          $ErrorActionPreference="Stop"
+          $root="C:\okn_v22"
+          $s=(Get-Content "$root\harness\MethodScout.cs" -Raw)+"`n"+
+             (Get-Content "$root\harness\JitPtrProbe.cs" -Raw)
+
+          if($s -match 'EntryPoint\.Invoke'){ throw "entrypoint invocation forbidden" }
+          if($s -match 'HidD_SetFeature'){ throw "feature report forbidden" }
+          if($s -match 'HidD_SetOutputReport'){ throw "HID output forbidden" }
+          if($s -match 'WriteFile\('){ throw "native USB write forbidden" }
+          if($s -match '\.Invoke\('){ throw "method invocation forbidden in V22 probes" }
+
+          "STATIC_AUDIT=PASS" | Set-Content "$root\evidence\03_STATIC_AUDIT.txt"
+
+      - name: Enumerate auth upgrade flash and boot candidates
+        shell: pwsh
+        run: |
+          $ErrorActionPreference="Stop"
+          $root="C:\okn_v22"
+          & "$root\harness\MethodScout.exe" `
+            "$root\vendor.exe" "$root\evidence\04_METHOD_CANDIDATES.txt"
+          if($LASTEXITCODE -ne 0){ throw "method scout failed" }
+
+          Get-Content "$root\evidence\04_METHOD_CANDIDATES.txt" | Select-Object -First 500
+
+          if(-not(Select-String -Path "$root\evidence\04_METHOD_CANDIDATES.txt" `
+            -SimpleMatch 'DSTech_AudioDSP_Client.UFEcommandBridge|FBL3HEmTva')){
+            throw "FBL3HEmTva not enumerated"
+          }
+          if(-not(Select-String -Path "$root\evidence\04_METHOD_CANDIDATES.txt" `
+            -SimpleMatch 'DSTech_AudioDSP_Client.UFEcommandBridge|SendDevTypeSwVersAuthenRequest')){
+            throw "SendDevTypeSwVersAuthenRequest not enumerated"
+          }
+
+      - name: Prepare selected JIT methods and capture native bytes externally
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          $ErrorActionPreference="Continue"
+          $root="C:\okn_v22"
+          python -m pip install --disable-pip-version-check --quiet capstone
+
+          @'
+          from pathlib import Path
+          import ctypes,sys,json,struct
+
+          pid=int(sys.argv[1]); info=Path(sys.argv[2]); outdir=Path(sys.argv[3]); label=sys.argv[4]
+          k=ctypes.WinDLL("kernel32",use_last_error=True)
+          k.OpenProcess.argtypes=[ctypes.c_uint32,ctypes.c_int,ctypes.c_uint32]
+          k.OpenProcess.restype=ctypes.c_void_p
+          k.ReadProcessMemory.argtypes=[ctypes.c_void_p,ctypes.c_void_p,ctypes.c_void_p,ctypes.c_size_t,ctypes.POINTER(ctypes.c_size_t)]
+          k.ReadProcessMemory.restype=ctypes.c_int
+          k.CloseHandle.argtypes=[ctypes.c_void_p]
+
+          h=k.OpenProcess(0x0010|0x0400,False,pid)
+          if not h: raise SystemExit("OpenProcess failed "+str(ctypes.get_last_error()))
+
+          def rpm(addr,n):
+              b=(ctypes.c_ubyte*n)(); got=ctypes.c_size_t()
+              ok=k.ReadProcessMemory(h,ctypes.c_void_p(addr),ctypes.byref(b),n,ctypes.byref(got))
+              return bool(ok),bytes(b[:got.value])
+
+          def u32(addr):
+              ok,b=rpm(addr,4)
+              return struct.unpack("<I",b)[0] if ok and len(b)==4 else None
+
+          def follow(addr):
+              chain=[]; cur=addr
+              for _ in range(16):
+                  ok,b=rpm(cur,32)
+                  if not ok or len(b)<2: break
+                  chain.append({"addr":cur,"first16":b[:16].hex().upper()})
+                  if b[0]==0xE9 and len(b)>=5:
+                      cur=cur+5+struct.unpack_from("<i",b,1)[0]; continue
+                  if b[0]==0xEB and len(b)>=2:
+                      cur=cur+2+struct.unpack_from("<b",b,1)[0]; continue
+                  if b[:2]==b"\xFF\x25" and len(b)>=6:
+                      nxt=u32(struct.unpack_from("<I",b,2)[0])
+                      if nxt: cur=nxt; continue
+                  if b[0]==0x68 and len(b)>=6 and b[5]==0xC3:
+                      cur=struct.unpack_from("<I",b,1)[0]; continue
+                  if b[0]==0xB8 and len(b)>=7 and b[5:7]==b"\xFF\xE0":
+                      cur=struct.unpack_from("<I",b,1)[0]; continue
+                  break
+              return cur,chain
+
+          rows=[]
+          if info.exists():
+              for line in info.read_text(errors="ignore").splitlines():
+                  if not line.startswith("PTR|"): continue
+                  _,tok,ptrhex,sig=line.split("|",3)
+                  entry=int(ptrhex,16); resolved,chain=follow(entry)
+                  ok,b=rpm(resolved,2048)
+                  safe="".join(c if c.isalnum() else "_" for c in (label+"_"+tok))[:120]
+                  if ok and b: (outdir/(safe+"_resolved.bin")).write_bytes(b)
+                  rows.append({"token":tok,"signature":sig,"entry_hex":f"0x{entry:X}",
+                               "resolved_hex":f"0x{resolved:X}","read_ok":ok,
+                               "bytes":len(b),"jump_chain":chain})
+          k.CloseHandle(h)
+          (outdir/(label+"_jit_capture.json")).write_text(json.dumps(rows,indent=2)+"\n")
+          print(json.dumps(rows,indent=2))
+          '@ | Set-Content "$root\read_jit_external.py"
+
+          $lines=Get-Content "$root\evidence\04_METHOD_CANDIDATES.txt" |
+            Where-Object { $_ -like 'CANDIDATE|*' }
+
+          $targets=@()
+          foreach($line in $lines){
+            $p=$line.Split('|',6)
+            if($p.Count -lt 6){ continue }
+            $type=$p[1]; $method=$p[2]; $token=$p[3]
+            $exact=($type -eq 'DSTech_AudioDSP_Client.UFEcommandBridge' -and
+                    ($method -eq 'FBL3HEmTva' -or $method -eq 'SendDevTypeSwVersAuthenRequest'))
+            $upgrade=(($type+'::'+$method) -match '(?i)upgrade|update|firmware|flash|boot|recovery|erase|program|download')
+            if($exact -or $upgrade){
+              $label=(($type.Split('.')[-1]+'_'+$method+'_'+$token) -replace '[^A-Za-z0-9_]','_')
+              $targets += ,@($type,$method,$label)
+            }
+          }
+
+          # Always include transport wrappers for call-path comparison.
+          $targets += ,@('DSTech_AudioDSP_Client.HIDInterface','Send','HID_SEND')
+          $targets += ,@('DSTech_AudioDSP_Client.Hid','Write','HID_WRITE')
+
+          # Deduplicate and bound work.
+          $seen=@{}
+          $unique=@()
+          foreach($t in $targets){
+            $k=$t[0]+'|'+$t[1]
+            if(-not $seen.ContainsKey($k)){$seen[$k]=$true;$unique += ,$t}
+          }
+          $unique=$unique | Select-Object -First 80
+          "TARGET_COUNT=$($unique.Count)" | Set-Content "$root\evidence\05_JIT_TARGET_COUNT.txt"
+
+          foreach($t in $unique){
+            $type=$t[0]; $method=$t[1]; $label=$t[2]
+            $info="$root\jit\$label.txt"
+            $stdout="$root\evidence\JIT_${label}_console.txt"
+            Remove-Item $info -Force -ErrorAction SilentlyContinue
+
+            $p=Start-Process -FilePath "$root\harness\JitPtrProbe.exe" `
+              -ArgumentList @("$root\vendor.exe",$type,$method,$info) `
+              -WorkingDirectory $root -RedirectStandardOutput $stdout `
+              -RedirectStandardError "$root\evidence\JIT_${label}_stderr.txt" -PassThru
+
+            $ready=$false
+            for($i=0;$i -lt 60;$i++){
+              Start-Sleep -Milliseconds 100
+              if(Test-Path $info){$ready=$true;break}
+              if($p.HasExited){break}
+            }
+
+            if($ready){
+              try{
+                python "$root\read_jit_external.py" $p.Id $info "$root\evidence" $label `
+                  *> "$root\evidence\JIT_${label}_read.txt"
+              }catch{
+                "EXTERNAL_READ_EXCEPTION=$($_.Exception.Message)" |
+                  Set-Content "$root\evidence\JIT_${label}_read_error.txt"
+              }
+            }else{
+              "JIT_POINTER_INFO_MISSING=1" |
+                Set-Content "$root\evidence\JIT_${label}_missing.txt"
+            }
+
+            if(-not $p.HasExited){ Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue }
+          }
+
+      - name: Disassemble captured JIT and derive V22 decision
+        shell: pwsh
+        run: |
+          $ErrorActionPreference="Stop"
+          $root="C:\okn_v22"
+
+          @'
+          from pathlib import Path
+          import json,re
+          from capstone import Cs,CS_ARCH_X86,CS_MODE_32
+
+          ev=Path(r"C:\okn_v22\evidence")
+          md=Cs(CS_ARCH_X86,CS_MODE_32)
+          idx=[]; chunks=[]
+          for p in sorted(ev.glob("*_resolved.bin")):
+              b=p.read_bytes(); lines=[]
+              for ins in md.disasm(b,0):
+                  lines.append(f"{ins.address:04X}: {ins.mnemonic} {ins.op_str}".rstrip())
+                  if len(lines)>=600: break
+              idx.append({"file":p.name,"bytes":len(b),"instructions":len(lines)})
+              chunks.append("\n===== "+p.name+" =====\n"+"\n".join(lines)+"\n")
+
+          dis="".join(chunks)
+          (ev/"06_JIT_INDEX.json").write_text(json.dumps(idx,indent=2)+"\n")
+          (ev/"07_JIT_DISASSEMBLY.txt").write_text(dis)
+
+          cand=(ev/"04_METHOD_CANDIDATES.txt").read_text(errors="ignore")
+          exact_fbl=any("UFEcommandBridge_FBL3HEmTva" in x["file"] for x in idx)
+          exact_send=any("UFEcommandBridge_SendDevTypeSwVersAuthenRequest" in x["file"] for x in idx)
+          upgrade_names=[]
+          for line in cand.splitlines():
+              if not line.startswith("CANDIDATE|"): continue
+              s=line.lower()
+              if re.search(r'upgrade|update|firmware|flash|boot|recovery|erase|program|download',s):
+                  upgrade_names.append(line)
+
+          decision={
+              "revision":"MASTER-V22",
+              "required_phone":"Samsung Galaxy S25+",
+              "required_path":"Samsung Galaxy S25+ -> USB-C cable -> DSP board USB-C port only",
+              "soldering_required":False,
+              "board_modification_required":False,
+              "candidate_method_count":sum(1 for x in cand.splitlines() if x.startswith("CANDIDATE|")),
+              "upgrade_flash_candidate_count":len(upgrade_names),
+              "jit_capture_count":len(idx),
+              "auth_fbl3_jit_captured":exact_fbl,
+              "auth_send_jit_captured":exact_send,
+              "upgrade_flash_candidates":upgrade_names[:200],
+              "live_dsp_connected":False,
+              "usb_target_access":False,
+              "host_to_dsp_io":False,
+              "flash_allowed":False,
+          }
+          if exact_fbl and exact_send and upgrade_names:
+              decision["status"]="AUTH_JIT_AND_UPGRADE_CANDIDATES_RECOVERED_RECONSTRUCT_PROTOCOL_NEXT"
+          elif exact_fbl and exact_send:
+              decision["status"]="AUTH_JIT_RECOVERED_NO_VENDOR_UPGRADE_METHOD_NAME_FOUND"
+          else:
+              decision["status"]="MORE_RUNTIME_RECOVERY_REQUIRED"
+
+          (ev/"08_V22_DECISION.json").write_text(json.dumps(decision,indent=2)+"\n")
+          mdout=f'''# MASTER V22 FINAL DECISION
+
+          - Required phone: **Samsung Galaxy S25+**
+          - Physical path: **USB-C cable -> DSP board USB-C port only**
+          - Soldering / board modification: **NO / NO**
+          - Candidate methods: **{decision['candidate_method_count']}**
+          - Upgrade/flash-name candidates: **{decision['upgrade_flash_candidate_count']}**
+          - JIT captures: **{decision['jit_capture_count']}**
+          - FBL3HEmTva JIT captured: **{decision['auth_fbl3_jit_captured']}**
+          - SendDevTypeSwVersAuthenRequest JIT captured: **{decision['auth_send_jit_captured']}**
+          - Hardware contacted: **NO**
+          - Flash/erase/write: **NO / NO / NO**
+
+          Status: **{decision['status']}**
+
+          Next gate: reconstruct exact auth plus any vendor upgrade/boot/flash packet path,
+          then port only the proven path into the Samsung S25+ USB-C installer.
+          '''
+          (ev/"09_V22_FINAL_DECISION.md").write_text(mdout)
+          print(mdout)
+          '@ | Set-Content "$root\derive.py"
+
+          python "$root\derive.py"
+          Get-Content "$root\evidence\09_V22_FINAL_DECISION.md" >> $env:GITHUB_STEP_SUMMARY
+
+          # Do not retain raw executable native pages in the artifact.
+          Get-ChildItem "$root\evidence" -Filter *_resolved.bin -File | Remove-Item -Force
+
+      - name: Package focused evidence
+        shell: pwsh
+        run: |
+          $ErrorActionPreference="Stop"
+          $root="C:\okn_v22"
+          Copy-Item "$root\evidence\*" "$root\out\" -Force
+          if(Test-Path "$root\out\vendor.exe"){ throw "vendor binary leak" }
+          if(Test-Path "$root\out\MethodScout.exe"){ throw "scout binary leak" }
+          if(Test-Path "$root\out\JitPtrProbe.exe"){ throw "probe binary leak" }
+          Get-ChildItem "$root\out" -File | ForEach-Object {
+            "$((Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower())  $($_.Name)"
+          } | Set-Content "$root\out\SHA256SUMS.txt"
+
+      - name: Upload V22 evidence
+        uses: actions/upload-artifact@v7
+        with:
+          name: OKN-BP1048P4-MASTER-V22-AUTH-JIT-RECOVERY-S25-USB-C-EVIDENCE
+          path: C:\okn_v22\out\*
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Final fail-closed assertion
+        shell: pwsh
+        run: |
+          $ErrorActionPreference="Stop"
+          $root="C:\okn_v22"
+          foreach($n in @(
+            "LIVE_DSP_CONNECTED","USB_TARGET_ACCESS","HOST_TO_DSP_IO",
+            "HID_CONNECT_ALLOWED","HID_SEND_ALLOWED","HID_WRITE_ALLOWED",
+            "FEATURE_REPORT_ALLOWED","FLASH_ALLOWED","ERASE_ALLOWED","WRITE_ALLOWED"
+          )){
+            if((Get-Item "Env:$n").Value -ne "NO"){ throw "$n changed" }
+          }
+          $d=Get-Content "$root\evidence\08_V22_DECISION.json" -Raw | ConvertFrom-Json
+          if($d.live_dsp_connected -ne $false){ throw "bad DSP state" }
+          if($d.host_to_dsp_io -ne $false){ throw "bad host-to-DSP state" }
+          if($d.flash_allowed -ne $false){ throw "bad flash state" }
+          "MASTER_V22=PASS"
+          "REQUIRED_PATH=S25_PLUS_USB_C_TO_DSP_USB_C_ONLY"
+          "SOLDERING=NO"
+          "BOARD_MODIFICATION=NO"
+          "FLASH_ALLOWED=NO"
