@@ -1,0 +1,664 @@
+name: OKN BP1048P4 MASTER V30 REPLAY V29 POST-AUTH STREAM INTO VENDOR PARSER OFFLINE
+
+"on":
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  GOLOPINE_WINDOWS_URL: "https://golodsp.com/wp-content/uploads/2026/05/golopine_audio_turning_release_2026-04-08.exe_.zip"
+  EXPECTED_VENDOR_SHA256: "3ca54171c53f7badd963ffe6851b8b3e2faf8aee8ba2afcb7040990e22ae09b2"
+
+  V29_CHALLENGE_HEX: "D024E38C410000004202B94C65A23F2CEB1B306145DFEC6FC32C1EDB563DBFFE"
+  V29_EXPECTED_AUTH_REPLY_HEX: "055C04FE"
+
+  V29_POST_AUTH_PAYLOAD_1: "E5F24F5F896DE39D163ECDEC4D2106216CD5BC4377870ED2618914AA0474A9BD0B7F583CFADD29EB06CE94345A559D6E7A58516D70FFC4509E6E8267C7CA578647B75FE494454D1D2633B8D5CFA115AF537BFED7993A3690C6BFF2C8E2DDA059DF65F5039254B940FA1C3C7DBF62ACBEDAAD8B2681E06FFF353A7BFD7634023B035D5A7A9E71EC8A77E13FC5673BB64FCABE491974B1BFB4460B0468C6C6125F9559456920A3FD64A046C8EE83FE407C4057CD9A205E6934C0C99B2A429ED23DEBB3EB0A72C53C55CB2921C447A3C4B5AAFE50997A264A5F84B00D97A0752188318C98B857DDB04FE9043DA86B5A1C42869383A1E00BF79E06018FB5645C8A"
+  V29_POST_AUTH_PAYLOAD_2: "950C89EC7B867D40CB171DF5FB121E48FCAECF5658C4AAAB6DCBA0FC77EA3FCABD97A142A7EDEC0C87A05BBE8336F955BA5E7BDED3B25597C1C5320EFDC4489EB4254625ABA2189B745FFE7FEC3390AEDB2CC7650B7FFABEF854BAE311B70FC120D568BD90FC580BCCA1F427DADD1AE5334D592595C78501CE7D1C9FAB1686A23D47A65A12D5557C4CDD3DCC547B9D1F911B1FF4423ABCDAABDAA70BC110F9C2848C926382D3C58630C1EFA1101105EEE99ACAA137140BC9E43C6058AD2682F5C1B892887FE1854ED575FB3E57E33EB23FD811C89F969458729AB7B260427337F3463A7839D0E409A761CCB8CEC99E51994CF147C6A39E7188B6B1234A41FC"
+  V29_POST_AUTH_PAYLOAD_3: "5265EFDE1DBD154A50FBEDC4EA923960BB343B1E05A75E8BF9D077F40D4AB4C56C57F7AEF360E2CCB26C7ED11ECC2A6DB392E6347033360EDDB6BC513B524C162391B405785239F37B8497B4B95CFFD96319FEC6B43F40522E93E7AD0D2A6C37FAD7C75490084C5DEFEFDD4751DF522BCE93CE281E31308B88C1934E00E596E9B428B332BD683E72C7061BA7A433AD694F78308F709FC66775E022C304E5F3ED4AE8BA1A8FA4DB61F3F9F342AF79624AAA6C06A4C97C36CDACC1A165A9D8FECFE801ED79B8F1E3899CE8F6FDA7996D4365C7D2C3AD14D2E11E33AC67A8853A89D1F71DB249146F5162EAE1B1C68748096C8945B031D414D492CCEF7F0FF07A"
+  V29_POST_AUTH_PAYLOAD_4: "E9ED88621A1D7A7D1128959430B9DCEF2B6323E652749C6BF9266E30A4D398298D7CF14B7C4F663322A36C6D20A8F94C1400163612BF84A9B6020B13E67C0D3B6FA21D06D1FFBDE3C4FCA98A79CD71EC9351CA6B2E765385DDDBDEC12A7557159BFF79D250FA38C135DF6CFBAED0C5C3BBE776176023CC8F2E8F1C71476F687A392E2C746A3003FD5002A0D522618CBC6FB23083EBA0584980D059C45035727DA372D0FCC6AD20F35439C4541EBCAE894F3DABF04B79FC7E69E899B6722290F03CB2C5F37075DBCDF94F8AF65F759ACD7A400F38C3C55E971E3C94FC82565F0D18BB685E1DC864CD85B97BFC90ED58103AD82C3247DA25498FEF0885F7FC81"
+
+  LIVE_DSP_CONNECTED: "NO"
+  USB_TARGET_ACCESS: "NO"
+  HOST_TO_DSP_IO: "NO"
+  REAL_HID_OBJECT_ALLOWED: "NO"
+  REAL_HID_CONNECT_ALLOWED: "NO"
+  REAL_HID_SEND_ALLOWED: "NO"
+  REAL_HID_READ_ALLOWED: "NO"
+  REAL_HID_WRITE_ALLOWED: "NO"
+  FEATURE_REPORT_ALLOWED: "NO"
+  FLASH_ALLOWED: "NO"
+  ERASE_ALLOWED: "NO"
+  WRITE_ALLOWED: "NO"
+
+jobs:
+  master-v30:
+    name: Replay four real V29 post-auth payloads through official parser OFFLINE
+    runs-on: windows-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Safety gate and workspace
+        shell: pwsh
+        run: |
+          $ErrorActionPreference="Stop"
+
+          foreach($n in @(
+            "LIVE_DSP_CONNECTED","USB_TARGET_ACCESS","HOST_TO_DSP_IO",
+            "REAL_HID_OBJECT_ALLOWED","REAL_HID_CONNECT_ALLOWED",
+            "REAL_HID_SEND_ALLOWED","REAL_HID_READ_ALLOWED","REAL_HID_WRITE_ALLOWED",
+            "FEATURE_REPORT_ALLOWED","FLASH_ALLOWED","ERASE_ALLOWED","WRITE_ALLOWED"
+          )){
+            if((Get-Item "Env:$n").Value -ne "NO"){ throw "$n must be NO" }
+          }
+
+          if($env:V29_CHALLENGE_HEX -notmatch '^[0-9A-F]{64}$'){throw "bad challenge"}
+          if($env:V29_EXPECTED_AUTH_REPLY_HEX -notmatch '^[0-9A-F]{8}$'){throw "bad auth reply"}
+
+          foreach($n in 1..4){
+            $v=(Get-Item "Env:V29_POST_AUTH_PAYLOAD_$n").Value
+            if($v -notmatch '^[0-9A-F]{510}$'){throw "payload $n must be 255 bytes"}
+          }
+
+          $root="C:\okn_v30"
+          if(Test-Path $root){Remove-Item -Recurse -Force $root}
+          New-Item -ItemType Directory -Force -Path `
+            "$root\download","$root\pkg","$root\harness","$root\evidence","$root\out" | Out-Null
+
+          @"
+          REVISION=MASTER-V30
+          MODE=OFFLINE_REPLAY_OF_REAL_V29_POST_AUTH_STREAM
+          INPUT_SOURCE=OKN_BP1048P4_V29_SAME_SESSION_AUTH_EVIDENCE
+          CHALLENGE_HEX=$env:V29_CHALLENGE_HEX
+          EXPECTED_AUTH_REPLY_HEX=$env:V29_EXPECTED_AUTH_REPLY_HEX
+          POST_AUTH_PAYLOAD_COUNT=4
+          EACH_PAYLOAD_BYTES=255
+          REAL_HID_IO=NO
+          HOST_TO_DSP_IO=NO
+          FEATURE_REPORT=NO
+          FLASH_ALLOWED=NO
+          ERASE_ALLOWED=NO
+          WRITE_ALLOWED=NO
+          "@ | Set-Content "$root\evidence\00_SCOPE.txt"
+
+      - name: Acquire exact official vendor binary
+        shell: pwsh
+        run: |
+          $ErrorActionPreference="Stop"
+          $root="C:\okn_v30"
+
+          curl.exe -fL --retry 6 --retry-all-errors --retry-delay 2 `
+            --connect-timeout 20 --max-time 300 `
+            $env:GOLOPINE_WINDOWS_URL -o "$root\download\vendor.zip"
+          if($LASTEXITCODE -ne 0){throw "vendor download failed"}
+
+          Expand-Archive -Force "$root\download\vendor.zip" "$root\pkg"
+
+          $exe=Get-ChildItem "$root\pkg" -Recurse -File -Filter *.exe |
+            Where-Object {$_.FullName -notmatch '\\__MACOSX\\' -and $_.Name -notlike '._*'} |
+            Sort-Object Length -Descending | Select-Object -First 1
+
+          if(-not $exe){throw "vendor EXE missing"}
+          Copy-Item $exe.FullName "$root\vendor.exe" -Force
+
+          $sha=(Get-FileHash "$root\vendor.exe" -Algorithm SHA256).Hash.ToLowerInvariant()
+          if($sha -ne $env:EXPECTED_VENDOR_SHA256){throw "vendor SHA changed: $sha"}
+
+          "SHA256=$sha" | Set-Content "$root\evidence\01_VENDOR_SHA256.txt"
+
+      - name: Build x86 parser replay harness
+        shell: pwsh
+        run: |
+          $ErrorActionPreference="Stop"
+          $root="C:\okn_v30"
+
+          @'
+          using System;
+          using System.IO;
+          using System.Linq;
+          using System.Reflection;
+          using System.Reflection.Emit;
+          using System.Runtime.CompilerServices;
+          using System.Collections.Generic;
+          using System.Threading;
+
+          public static class Sink
+          {
+              public static readonly List<byte[]> Writes=new List<byte[]>();
+              public static void Clear(){lock(Writes){Writes.Clear();}}
+              public static void Record(byte[] b){
+                  lock(Writes){Writes.Add(b==null?null:(byte[])b.Clone());}
+              }
+              public static byte[][] Snapshot(){
+                  lock(Writes){return Writes.Select(x=>x==null?null:(byte[])x.Clone()).ToArray();}
+              }
+          }
+
+          public static class Replay
+          {
+              static string OutPath;
+
+              static void Log(string s){
+                  File.AppendAllText(OutPath,s+Environment.NewLine);
+              }
+
+              static string Hex(byte[] b){
+                  return b==null?"<NULL>":BitConverter.ToString(b).Replace("-","");
+              }
+
+              static byte[] FromHex(string s){
+                  byte[] b=new byte[s.Length/2];
+                  for(int i=0;i<b.Length;i++)b[i]=Convert.ToByte(s.Substring(i*2,2),16);
+                  return b;
+              }
+
+              static object InvokeBounded(MethodInfo m,object target,object[] args,int ms,string label){
+                  object result=null; Exception error=null;
+                  Thread t=new Thread(delegate(){
+                      try{result=m.Invoke(target,args);}catch(Exception ex){error=ex;}
+                  });
+                  t.IsBackground=true;t.Start();
+                  if(!t.Join(ms)){
+                      Log(label+"_TIMEOUT_MS="+ms);
+                      try{t.Abort();}catch{}
+                      return null;
+                  }
+                  if(error!=null)throw error;
+                  return result;
+              }
+
+              static void DefaultRet(ILGenerator il,Type ret){
+                  if(ret==typeof(void)){il.Emit(OpCodes.Ret);return;}
+                  if(ret.IsValueType){
+                      LocalBuilder l=il.DeclareLocal(ret);
+                      il.Emit(OpCodes.Ldloca_S,l);il.Emit(OpCodes.Initobj,ret);
+                      il.Emit(OpCodes.Ldloc,l);il.Emit(OpCodes.Ret);return;
+                  }
+                  il.Emit(OpCodes.Ldnull);il.Emit(OpCodes.Ret);
+              }
+
+              static MethodAttributes Vis(MethodInfo m){
+                  MethodAttributes a=MethodAttributes.Virtual|MethodAttributes.HideBySig;
+                  if(m.IsPublic)a|=MethodAttributes.Public;
+                  else if(m.IsFamily)a|=MethodAttributes.Family;
+                  else if(m.IsFamilyOrAssembly)a|=MethodAttributes.FamORAssem;
+                  else if(m.IsAssembly)a|=MethodAttributes.Assembly;
+                  else a|=MethodAttributes.Private;
+                  if(m.IsSpecialName)a|=MethodAttributes.SpecialName;
+                  return a;
+              }
+
+              static Type CaptureType(Type baseType){
+                  AssemblyBuilder ab=AppDomain.CurrentDomain.DefineDynamicAssembly(
+                      new AssemblyName("OKN_V30_CAPTURE"),AssemblyBuilderAccess.Run);
+                  TypeBuilder tb=ab.DefineDynamicModule("main").DefineType(
+                      "OKN.CaptureStream",TypeAttributes.Public|TypeAttributes.Class,baseType);
+
+                  ConstructorInfo bc=baseType.GetConstructor(
+                      BindingFlags.Public|BindingFlags.NonPublic|BindingFlags.Instance,
+                      null,Type.EmptyTypes,null);
+                  if(bc==null)throw new Exception("parameterless stream ctor missing");
+
+                  ConstructorBuilder cb=tb.DefineConstructor(
+                      MethodAttributes.Public,CallingConventions.Standard,Type.EmptyTypes);
+                  ILGenerator ci=cb.GetILGenerator();
+                  ci.Emit(OpCodes.Ldarg_0);ci.Emit(OpCodes.Call,bc);ci.Emit(OpCodes.Ret);
+
+                  foreach(MethodInfo m in baseType.GetMethods(
+                      BindingFlags.Public|BindingFlags.NonPublic|BindingFlags.Instance)
+                      .Where(m=>m.IsVirtual&&!m.IsFinal&&
+                          (m.IsAbstract||m.Name=="Write"||m.Name=="WriteLine"||
+                           m.Name=="ReadBytes"||m.Name=="ReadLine"||
+                           m.Name=="Connect"||m.Name=="Disconnect"))
+                      .GroupBy(m=>m.ToString()).Select(g=>g.First()))
+                  {
+                      Type[] ps=m.GetParameters().Select(x=>x.ParameterType).ToArray();
+                      MethodBuilder b=tb.DefineMethod(m.Name,Vis(m),m.ReturnType,ps);
+                      ILGenerator il=b.GetILGenerator();
+
+                      if(m.Name=="Write"&&ps.Length==1&&ps[0]==typeof(byte[])){
+                          il.Emit(OpCodes.Ldarg_1);
+                          il.Emit(OpCodes.Call,typeof(Sink).GetMethod("Record"));
+                          DefaultRet(il,m.ReturnType);
+                      }else DefaultRet(il,m.ReturnType);
+
+                      tb.DefineMethodOverride(b,m);
+                  }
+
+                  return tb.CreateType();
+              }
+
+              static void SetConnected(object stream,Type baseType){
+                  Type e=baseType.GetNestedType("ConnectionStatus",
+                      BindingFlags.Public|BindingFlags.NonPublic);
+                  object v=Enum.Parse(e,"Connected");
+
+                  FieldInfo f=baseType.GetFields(
+                      BindingFlags.Public|BindingFlags.NonPublic|BindingFlags.Instance)
+                      .FirstOrDefault(x=>x.FieldType==e);
+
+                  if(f!=null){f.SetValue(stream,v);return;}
+
+                  MethodInfo m=baseType.GetMethod("UpdateDeviceConnStatus",
+                      BindingFlags.Public|BindingFlags.NonPublic|BindingFlags.Instance);
+
+                  if(m==null)throw new Exception("connected-state setter missing");
+                  m.Invoke(stream,new object[]{v});
+              }
+
+              static string ReadStatus(object bridge,Type t){
+                  PropertyInfo p=t.GetProperty("StreamStatus",
+                      BindingFlags.Public|BindingFlags.NonPublic|BindingFlags.Instance);
+                  if(p!=null){
+                      try{
+                          object v=p.GetValue(bridge,null);
+                          if(v!=null)return v.ToString();
+                      }catch{}
+                  }
+
+                  foreach(FieldInfo f in t.GetFields(
+                      BindingFlags.Public|BindingFlags.NonPublic|BindingFlags.Instance))
+                  {
+                      if(f.FieldType.IsEnum &&
+                         f.FieldType.Name.IndexOf("UFEStreamStatus",
+                             StringComparison.OrdinalIgnoreCase)>=0)
+                      {
+                          object v=f.GetValue(bridge);
+                          if(v!=null)return v.ToString();
+                      }
+                  }
+                  return "<UNKNOWN>";
+              }
+
+              static void DumpInteresting(object bridge,Type t,string tag){
+                  BindingFlags bf=BindingFlags.Public|BindingFlags.NonPublic|BindingFlags.Instance;
+
+                  foreach(FieldInfo f in t.GetFields(bf))
+                  {
+                      string name=f.Name??"";
+                      string tn=f.FieldType.FullName??f.FieldType.Name;
+                      bool interesting=
+                          name.IndexOf("desc",StringComparison.OrdinalIgnoreCase)>=0 ||
+                          name.IndexOf("device",StringComparison.OrdinalIgnoreCase)>=0 ||
+                          name.IndexOf("version",StringComparison.OrdinalIgnoreCase)>=0 ||
+                          name.IndexOf("uuid",StringComparison.OrdinalIgnoreCase)>=0 ||
+                          name.IndexOf("manufact",StringComparison.OrdinalIgnoreCase)>=0 ||
+                          tn.IndexOf("desc",StringComparison.OrdinalIgnoreCase)>=0 ||
+                          tn.IndexOf("device",StringComparison.OrdinalIgnoreCase)>=0;
+
+                      if(!interesting)continue;
+
+                      try{
+                          object v=f.GetValue(bridge);
+                          if(v==null)Log(tag+"_FIELD|"+name+"|"+tn+"|<NULL>");
+                          else if(v is byte[])Log(tag+"_FIELD|"+name+"|"+tn+"|"+Hex((byte[])v));
+                          else Log(tag+"_FIELD|"+name+"|"+tn+"|"+v.ToString());
+                      }catch(Exception ex){
+                          Log(tag+"_FIELD_ERROR|"+name+"|"+ex.GetBaseException().GetType().FullName);
+                      }
+                  }
+
+                  foreach(PropertyInfo p in t.GetProperties(bf))
+                  {
+                      if(p.GetIndexParameters().Length!=0 || !p.CanRead)continue;
+
+                      string name=p.Name??"";
+                      string tn=p.PropertyType.FullName??p.PropertyType.Name;
+                      bool interesting=
+                          name.IndexOf("desc",StringComparison.OrdinalIgnoreCase)>=0 ||
+                          name.IndexOf("device",StringComparison.OrdinalIgnoreCase)>=0 ||
+                          name.IndexOf("version",StringComparison.OrdinalIgnoreCase)>=0 ||
+                          name.IndexOf("uuid",StringComparison.OrdinalIgnoreCase)>=0 ||
+                          name.IndexOf("manufact",StringComparison.OrdinalIgnoreCase)>=0 ||
+                          tn.IndexOf("desc",StringComparison.OrdinalIgnoreCase)>=0 ||
+                          tn.IndexOf("device",StringComparison.OrdinalIgnoreCase)>=0;
+
+                      if(!interesting)continue;
+
+                      try{
+                          object v=p.GetValue(bridge,null);
+                          if(v==null)Log(tag+"_PROP|"+name+"|"+tn+"|<NULL>");
+                          else if(v is byte[])Log(tag+"_PROP|"+name+"|"+tn+"|"+Hex((byte[])v));
+                          else Log(tag+"_PROP|"+name+"|"+tn+"|"+v.ToString());
+                      }catch(Exception ex){
+                          Log(tag+"_PROP_ERROR|"+name+"|"+ex.GetBaseException().GetType().FullName);
+                      }
+                  }
+              }
+
+              public static void Main(string[] a)
+              {
+                  if(a.Length<8)throw new Exception(
+                      "args: vendor.exe output challenge expectedReply p1 p2 p3 p4");
+
+                  string exe=Path.GetFullPath(a[0]);
+                  OutPath=Path.GetFullPath(a[1]);
+                  string challengeHex=a[2];
+                  string expectedReply=a[3];
+                  string[] payloadHex=new[]{a[4],a[5],a[6],a[7]};
+
+                  File.WriteAllText(OutPath,"");
+                  Directory.SetCurrentDirectory(Path.GetDirectoryName(exe));
+
+                  Log("MODE=OFFLINE_REPLAY_OF_REAL_V29_POST_AUTH_STREAM");
+                  Log("REAL_HID_OBJECT_CREATED=NO");
+                  Log("REAL_HID_CONNECT_INVOKED=NO");
+                  Log("REAL_HID_SEND_INVOKED=NO");
+                  Log("REAL_HID_READ_INVOKED=NO");
+                  Log("REAL_HID_WRITE_INVOKED=NO");
+                  Log("HOST_TO_DSP_IO=NO");
+                  Log("FEATURE_REPORT_INVOKED=NO");
+                  Log("FLASH_ALLOWED=NO");
+
+                  Assembly asm=Assembly.LoadFile(exe);
+                  RuntimeHelpers.RunModuleConstructor(asm.ManifestModule.ModuleHandle);
+
+                  Type baseType=asm.GetType(
+                      "DSTech_AudioDSP_Client.DeviceCommunicationStream",true);
+                  Type bridgeType=asm.GetType(
+                      "DSTech_AudioDSP_Client.UFEcommandBridge",true);
+
+                  Type cap=CaptureType(baseType);
+                  object stream=Activator.CreateInstance(cap);
+                  SetConnected(stream,baseType);
+
+                  object bridge=bridgeType.GetConstructor(new[]{baseType})
+                      .Invoke(new[]{stream});
+
+                  MethodInfo req=bridgeType.GetMethod(
+                      "SendDevTypeSwVersAuthenRequest",
+                      BindingFlags.Public|BindingFlags.NonPublic|BindingFlags.Instance);
+                  MethodInfo fbl=bridgeType.GetMethod(
+                      "FBL3HEmTva",
+                      BindingFlags.Public|BindingFlags.NonPublic|BindingFlags.Instance);
+
+                  if(req==null||fbl==null)throw new Exception("parser roots missing");
+
+                  Sink.Clear();
+                  InvokeBounded(req,bridge,null,1500,"STARTUP_HELPER");
+                  Thread.Sleep(100);
+                  Sink.Clear();
+
+                  byte[] challenge=FromHex(challengeHex);
+
+                  InvokeBounded(
+                      fbl,bridge,new object[]{stream,challenge,EventArgs.Empty},
+                      3000,"AUTH_CHALLENGE");
+                  Thread.Sleep(150);
+
+                  byte[][] authWrites=Sink.Snapshot();
+                  Log("AUTH_WRITE_COUNT="+authWrites.Length);
+                  for(int i=0;i<authWrites.Length;i++)
+                      Log("AUTH_WRITE_"+i+"="+Hex(authWrites[i]));
+
+                  string authReply=
+                      authWrites.Length>0&&authWrites[0]!=null?Hex(authWrites[0]):"<NONE>";
+
+                  Log("AUTH_REPLY_HEX="+authReply);
+                  Log("EXPECTED_AUTH_REPLY_HEX="+expectedReply);
+                  Log("AUTH_REPLY_MATCH="+String.Equals(
+                      authReply,expectedReply,StringComparison.OrdinalIgnoreCase));
+                  Log("STATE_AFTER_AUTH="+ReadStatus(bridge,bridgeType));
+                  DumpInteresting(bridge,bridgeType,"AFTER_AUTH");
+
+                  Sink.Clear();
+
+                  for(int i=0;i<payloadHex.Length;i++)
+                  {
+                      byte[] payload=FromHex(payloadHex[i]);
+                      string tag="PAYLOAD_"+(i+1);
+
+                      Log(tag+"_LEN="+payload.Length);
+                      Log(tag+"_HEX="+Hex(payload));
+
+                      try
+                      {
+                          InvokeBounded(
+                              fbl,bridge,new object[]{stream,payload,EventArgs.Empty},
+                              3000,tag+"_PARSE");
+                          Log(tag+"_PARSE_RETURNED=true");
+                      }
+                      catch(Exception ex)
+                      {
+                          Exception b=ex.GetBaseException();
+                          Log(tag+"_PARSE_EXCEPTION="+b.GetType().FullName+":"+b.Message);
+                      }
+
+                      Thread.Sleep(120);
+
+                      Log(tag+"_STATE="+ReadStatus(bridge,bridgeType));
+
+                      byte[][] w=Sink.Snapshot();
+                      Log(tag+"_CUMULATIVE_WRITE_COUNT="+w.Length);
+                      for(int k=0;k<w.Length;k++)
+                          Log(tag+"_WRITE_"+k+"="+Hex(w[k]));
+
+                      DumpInteresting(bridge,bridgeType,tag);
+                  }
+
+                  Log("FINAL_STATE="+ReadStatus(bridge,bridgeType));
+
+                  byte[][] finalWrites=Sink.Snapshot();
+                  Log("FINAL_FOLLOWUP_WRITE_COUNT="+finalWrites.Length);
+                  for(int i=0;i<finalWrites.Length;i++)
+                      Log("FINAL_FOLLOWUP_WRITE_"+i+"="+Hex(finalWrites[i]));
+
+                  Log("REPLAY_COMPLETE=true");
+                  Environment.Exit(0);
+              }
+          }
+          '@ | Set-Content "$root\harness\Replay.cs"
+
+          $csc="$env:WINDIR\Microsoft.NET\Framework\v4.0.30319\csc.exe"
+          if(-not(Test-Path $csc)){throw "x86 csc missing"}
+
+          & $csc /nologo /platform:x86 /target:exe `
+            /out:"$root\harness\Replay.exe" `
+            "$root\harness\Replay.cs"
+
+          if($LASTEXITCODE -ne 0){throw "Replay compile failed"}
+
+      - name: Static safety audit
+        shell: pwsh
+        run: |
+          $ErrorActionPreference="Stop"
+          $root="C:\okn_v30"
+          $s=Get-Content "$root\harness\Replay.cs" -Raw
+
+          foreach($bad in @(
+            "HidD_SetOutputReport(","HidD_GetInputReport(",
+            "HidD_SetFeature(","HidD_GetFeature(",
+            "ReadFile(","WriteFile(","CreateFileW("
+          )){
+            if($s.Contains($bad)){throw "forbidden real HID primitive: $bad"}
+          }
+
+          foreach($need in @(
+            "CaptureType",
+            "SendDevTypeSwVersAuthenRequest",
+            "FBL3HEmTva",
+            "REAL_HID_OBJECT_CREATED=NO",
+            "HOST_TO_DSP_IO=NO",
+            "FLASH_ALLOWED=NO"
+          )){
+            if(-not $s.Contains($need)){throw "missing marker: $need"}
+          }
+
+          "STATIC_SAFETY_AUDIT=PASS" |
+            Set-Content "$root\evidence\02_STATIC_SAFETY_AUDIT.txt"
+
+      - name: Replay V29 stream through official parser
+        shell: pwsh
+        run: |
+          $ErrorActionPreference="Continue"
+          $root="C:\okn_v30"
+
+          & "$root\harness\Replay.exe" `
+            "$root\vendor.exe" `
+            "$root\evidence\03_V30_REPLAY.txt" `
+            "$env:V29_CHALLENGE_HEX" `
+            "$env:V29_EXPECTED_AUTH_REPLY_HEX" `
+            "$env:V29_POST_AUTH_PAYLOAD_1" `
+            "$env:V29_POST_AUTH_PAYLOAD_2" `
+            "$env:V29_POST_AUTH_PAYLOAD_3" `
+            "$env:V29_POST_AUTH_PAYLOAD_4"
+
+          $exit=$LASTEXITCODE
+          "HARNESS_EXIT=$exit" | Set-Content "$root\evidence\03A_HARNESS_EXIT.txt"
+
+          if(Test-Path "$root\evidence\03_V30_REPLAY.txt"){
+            Get-Content "$root\evidence\03_V30_REPLAY.txt"
+          }
+
+          exit 0
+
+      - name: Derive V30 decision
+        shell: pwsh
+        run: |
+          $ErrorActionPreference="Stop"
+          $root="C:\okn_v30"
+
+          @'
+          from pathlib import Path
+          import re,json
+
+          ev=Path(r"C:\okn_v30\evidence")
+          p=ev/"03_V30_REPLAY.txt"
+
+          if not p.exists():
+              text=""
+          else:
+              text=p.read_text(errors="ignore")
+
+          def one(pattern,default=""):
+              m=re.search(pattern,text,re.M)
+              return m.group(1) if m else default
+
+          auth_match=one(r'^AUTH_REPLY_MATCH=(True|False)$')
+          state_auth=one(r'^STATE_AFTER_AUTH=(.*)$')
+          final_state=one(r'^FINAL_STATE=(.*)$')
+          final_write_count=int(one(r'^FINAL_FOLLOWUP_WRITE_COUNT=(\d+)$',"0") or 0)
+
+          payload_states=[]
+          for i in range(1,5):
+              payload_states.append(one(rf'^PAYLOAD_{i}_STATE=(.*)$'))
+
+          parse_exceptions=re.findall(r'^PAYLOAD_(\d+)_PARSE_EXCEPTION=(.*)$',text,re.M)
+          interesting=[
+              line for line in text.splitlines()
+              if "_FIELD|" in line or "_PROP|" in line
+          ]
+
+          decision={
+              "revision":"MASTER-V30",
+              "classification":"OFFLINE_REPLAY_REAL_V29_POST_AUTH_STREAM_NOT_FOR_FLASH",
+              "auth_reply_match":auth_match=="True",
+              "state_after_auth":state_auth,
+              "payload_states":payload_states,
+              "final_state":final_state,
+              "final_followup_write_count":final_write_count,
+              "parse_exceptions":parse_exceptions,
+              "interesting_field_or_property_count":len(interesting),
+              "replay_complete":"REPLAY_COMPLETE=true" in text,
+              "real_hid_invoked":False,
+              "host_to_dsp_io":False,
+              "feature_report_invoked":False,
+              "flash_allowed":False
+          }
+
+          if parse_exceptions:
+              status="V29_RESPONSE_REPLAY_HIT_PARSER_EXCEPTION_INSPECT_NEXT"
+          elif final_state and final_state!="UFE_STREAM_GETTING_DEVICE_DESCRIPTION":
+              status="V29_POST_AUTH_STREAM_ADVANCED_VENDOR_STATE_OFFLINE"
+          elif final_write_count>0:
+              status="V29_POST_AUTH_STREAM_TRIGGERED_FOLLOWUP_VENDOR_WRITE_OFFLINE"
+          elif decision["replay_complete"]:
+              status="FOUR_FULL_255_BYTE_CHUNKS_REPLAYED_STATE_STILL_NEEDS_MORE_RESPONSE_DATA"
+          else:
+              status="V30_REPLAY_INCOMPLETE"
+
+          decision["status"]=status
+
+          (ev/"04_V30_DECISION.json").write_text(json.dumps(decision,indent=2)+"\n")
+
+          md=f"""# MASTER V30 FINAL DECISION
+
+          - V29 challenge/reply reproduced by official parser: **{decision['auth_reply_match']}**
+          - State immediately after auth: **{state_auth or '<missing>'}**
+          - State after payloads 1..4: **{payload_states}**
+          - Final state: **{final_state or '<missing>'}**
+          - Parser exceptions: **{len(parse_exceptions)}**
+          - Vendor follow-up writes after response chunks: **{final_write_count}**
+          - Interesting device/description fields seen: **{len(interesting)}**
+          - Real HID invoked: **NO**
+          - Host-to-DSP I/O: **NO**
+          - Flash/erase/write: **NO / NO / NO**
+
+          Status: **{status}**
+
+          This workflow replays the four real post-auth 255-byte payloads captured
+          by V29 into the exact official GoloPine parser offline. It does not contact
+          the board and does not authorize firmware flashing.
+
+          Classification:
+          **OFFLINE_REPLAY_REAL_V29_POST_AUTH_STREAM_NOT_FOR_FLASH**
+          """
+
+          (ev/"05_V30_FINAL_DECISION.md").write_text(md)
+          print(md)
+          '@ | Set-Content "$root\derive.py"
+
+          python "$root\derive.py"
+          if($LASTEXITCODE -ne 0){throw "derive failed"}
+
+          Get-Content "$root\evidence\05_V30_FINAL_DECISION.md" >> $env:GITHUB_STEP_SUMMARY
+
+      - name: Package V30 evidence
+        if: always()
+        shell: pwsh
+        run: |
+          $ErrorActionPreference="Continue"
+          $root="C:\okn_v30"
+
+          if(-not(Test-Path "$root\out")){
+            New-Item -ItemType Directory -Force -Path "$root\out" | Out-Null
+          }
+
+          Copy-Item "$root\evidence\*" "$root\out\" -Force -ErrorAction SilentlyContinue
+
+          foreach($bad in @("vendor.exe","Replay.exe")){
+            if(Test-Path "$root\out\$bad"){Remove-Item -Force "$root\out\$bad"}
+          }
+
+          Get-ChildItem "$root\out" -File | ForEach-Object {
+            "$((Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower())  $($_.Name)"
+          } | Set-Content "$root\out\SHA256SUMS.txt"
+
+      - name: Upload V30 evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: OKN-BP1048P4-MASTER-V30-REAL-V29-POST-AUTH-REPLAY-EVIDENCE
+          path: C:\okn_v30\out\*
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Final fail-closed assertion
+        if: always()
+        shell: pwsh
+        run: |
+          $ErrorActionPreference="Stop"
+
+          foreach($n in @(
+            "LIVE_DSP_CONNECTED","USB_TARGET_ACCESS","HOST_TO_DSP_IO",
+            "REAL_HID_OBJECT_ALLOWED","REAL_HID_CONNECT_ALLOWED",
+            "REAL_HID_SEND_ALLOWED","REAL_HID_READ_ALLOWED","REAL_HID_WRITE_ALLOWED",
+            "FEATURE_REPORT_ALLOWED","FLASH_ALLOWED","ERASE_ALLOWED","WRITE_ALLOWED"
+          )){
+            if((Get-Item "Env:$n").Value -ne "NO"){throw "$n changed"}
+          }
+
+          "MASTER_V30_FAIL_CLOSED=PASS"
+          "REAL_HID_IO=NO"
+          "HOST_TO_DSP_IO=NO"
+          "FLASH_ALLOWED=NO"
