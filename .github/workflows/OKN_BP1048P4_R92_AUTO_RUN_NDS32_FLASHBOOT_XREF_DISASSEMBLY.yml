@@ -1,0 +1,690 @@
+name: OKN BP1048P4 R92 AUTO-RUN NDS32 FlashBoot Xref Disassembly
+
+on:
+  push:
+    branches: [main, master]
+    paths:
+      - '.github/workflows/OKN_BP1048P4_R92_AUTO_RUN_NDS32_FLASHBOOT_XREF_DISASSEMBLY.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: read
+
+concurrency:
+  group: okn-r92-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  SDK_REPO: "https://github.com/leadercxn/bp1048_sdk_v0.1.12.git"
+  SDK_COMMIT: "8105bd864b04995d81c9f9ae77cb158259f39015"
+  R2_REPO: "https://github.com/radareorg/radare2.git"
+  R2_TAG: "6.2.2"
+  OUT: "/tmp/r92"
+  BOARD_USB_ACCESS: "NO"
+  HOST_TO_DEVICE_USB: "NO"
+  FLASH_ERASE_WRITE: "NO"
+  FLASH_ALLOWED: "NO"
+
+jobs:
+  disassemble:
+    name: NDS32 xref analysis of reconstructed FlashBoot64K / STATIC ONLY
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Fail-closed scope gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$BOARD_USB_ACCESS" = "NO"
+          test "$HOST_TO_DEVICE_USB" = "NO"
+          test "$FLASH_ERASE_WRITE" = "NO"
+          test "$FLASH_ALLOWED" = "NO"
+          rm -rf "$OUT"
+          mkdir -p "$OUT/evidence"
+          cat > "$OUT/evidence/00_SCOPE.txt" <<'EOF'
+          REVISION=R92
+          MODE=OFFLINE_STATIC_ONLY
+          TARGET=MVSilicon_BP1048P4
+          INPUT=SDK_EMBEDDED_FLASHBOOT_65536_BYTES
+          BOARD_USB_ACCESS=NO
+          LIVE_USB_COMMANDS=NO
+          AA55_RETEST=NO
+          CONTROL_0X11_LIVE=NO
+          CXXX_LIVE=NO
+          CHIPERAS_LIVE=NO
+          ERASE=NO
+          WRITE=NO
+          FLASH_ALLOWED=NO
+          GOAL=Recover_static_xrefs_and_NDS32_disassembly_for_MVA_parser_and_cmd_cxxx
+          EOF
+
+      - name: Pin exact SDK
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone -q "$SDK_REPO" "$OUT/sdk"
+          git -C "$OUT/sdk" checkout -q "$SDK_COMMIT"
+          test "$(git -C "$OUT/sdk" rev-parse HEAD)" = "$SDK_COMMIT"
+          printf 'SDK_COMMIT=%s\n' "$(git -C "$OUT/sdk" rev-parse HEAD)" \
+            > "$OUT/evidence/01_PIN.txt"
+
+      - name: Reconstruct deterministic BP1048P4 FlashBoot64K
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import os,re,json,hashlib
+
+          root=Path(os.environ["OUT"])/"sdk"
+          ev=Path(os.environ["OUT"])/"evidence"
+          src=(root/"BT_Audio_APP/bt_audio_app_src/device/flash_boot.c").read_text(errors="ignore")
+
+          m=re.search(
+              r'const\s+unsigned\s+char\s+flash_data\s*\[\s*65536\s*\]\s*=\s*\{',
+              src
+          )
+          if not m:
+              raise SystemExit("flash_data[65536] not found")
+          end=src.find("};",m.end())
+          if end<0:
+              raise SystemExit("flash_data terminator not found")
+
+          body=src[m.end():end]
+          body=re.sub(r'/\*[\s\S]*?\*/','',body)
+          body=re.sub(r'//[^\n]*','',body)
+          toks=[x.strip() for x in body.split(",") if x.strip()]
+
+          # Use SD_A15_A16_A17 reference variant as the primary image.
+          # R91 proved the two variants differ only in the UP_PORT configuration input.
+          macros={
+              "CONST_DATA_ADDR":0x198000,
+              "USER_DATA_ADDR":0x3F0000,
+              "AUDIO_EFFECT_ADDR":0x3C8000,
+              "BOOT_UART_CONFIG":0x30,
+              "JUDGEMENT_STANDARD":0x55,
+              "UP_PORT":0x0D,
+          }
+
+          def evbyte(tok):
+              s=tok
+              s=re.sub(r'(?<=\b[0-9A-Fa-fxX])[uUlL]+\b','',s)
+              for k,v in sorted(macros.items(),key=lambda kv:-len(kv[0])):
+                  s=re.sub(rf'\b{re.escape(k)}\b',str(v),s)
+              leftover=re.sub(r'0[xX][0-9A-Fa-f]+','',s)
+              if re.search(r'[A-Za-z_]',leftover):
+                  raise ValueError(f"unresolved: {tok} -> {s}")
+              if not re.fullmatch(r'[\s0-9A-Fa-fxX()+\-*/%<>&|~]+',s):
+                  raise ValueError(f"unsafe: {tok} -> {s}")
+              v=eval(s,{"__builtins__":{}},{})
+              if not isinstance(v,int) or not 0<=v<=255:
+                  raise ValueError((tok,v))
+              return v
+
+          data=bytes(evbyte(x) for x in toks)
+          if len(data)!=65536:
+              raise SystemExit(f"bad length {len(data)}")
+          blob=ev/"flashboot_BP1048P4_SD_A15A16A17.bin"
+          blob.write_bytes(data)
+
+          targets={
+              "MVA_HEADER_ERROR":b"MVA HEADER IS NOT MVB1X",
+              "MVB1X":b"MVB1X",
+              "CMD_CXXX_DEBUG":b"cmd_cxxx :",
+              "MAKE_MVA":b"Make mva upgrade package!",
+              "MAKE_HEADER_01":b"Make header&01pkg OK!",
+              "BOOTDAT":b"bootdat",
+              "CODEDATA":b"codedata",
+              "CONSTDAT":b"constdat",
+              "CNFGDAT":b"cnfgdat",
+              "BTUPDAT":b"btupdat",
+              "UPINFO":b"upinfo",
+              "CXXX_TOKEN":b"cxxx",
+              "CHIPERAS_TOKEN":b"chiperas",
+              "BOOT_LEN_FMT":b"boot_len=%08X",
+              "BOOT_CRC_FMT":b"boot_crc=%08X",
+              "CODE_LEN_FMT":b"code_len=%08X",
+              "CODE_CRC_FMT":b"code_crc=%08X",
+              "CONST_LEN_FMT":b"const_len=%08X",
+              "CONFIG_LEN_FMT":b"config_len=%08X",
+              "CONST_OFFSET_FMT":b"const_offset=%08X",
+              "CONFIG_OFFSET_FMT":b"config_offset=%08X",
+              "JUDGEMENT_FMT":b"JudgementStandard = %02x",
+          }
+
+          rows={}
+          for name,needle in targets.items():
+              offs=[]; start=0
+              while True:
+                  i=data.find(needle,start)
+                  if i<0: break
+                  offs.append(i)
+                  start=i+1
+              rows[name]={
+                  "needle_ascii":needle.decode("ascii",errors="ignore"),
+                  "offsets":offs,
+                  "offsets_hex":[hex(x) for x in offs],
+              }
+
+          result={
+              "bytes":len(data),
+              "sha256":hashlib.sha256(data).hexdigest(),
+              "variant":"BP1048P4_SD_A15A16A17",
+              "macros":{k:hex(v) for k,v in macros.items()},
+              "targets":rows,
+          }
+          (ev/"02_RECONSTRUCTION_AND_TARGETS.json").write_text(
+              json.dumps(result,indent=2,ensure_ascii=False)+'\n'
+          )
+          print(json.dumps(result,indent=2))
+          PY
+
+      - name: Build pinned Radare2 with NDS32 support
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone -q --depth 1 --branch "$R2_TAG" "$R2_REPO" "$OUT/radare2"
+          "$OUT/radare2/sys/install.sh" \
+            --prefix="$OUT/r2prefix" \
+            --without-pull \
+            --install \
+            >"$OUT/r2-build.log" 2>&1
+
+          export PATH="$OUT/r2prefix/bin:$PATH"
+          {
+            r2 -v
+            echo
+            rasm2 -L | grep -i nds32
+          } | tee "$OUT/evidence/03_RADARE2_VERSION_AND_NDS32.txt"
+
+          rasm2 -L | grep -qi nds32
+
+      - name: Compare NDS32 endian modes and collect xrefs
+        shell: bash
+        run: |
+          set -euo pipefail
+          export PATH="$OUT/r2prefix/bin:$PATH"
+
+          python3 - <<'PY'
+          from pathlib import Path
+          import os,json,subprocess,shlex,re,time
+
+          ev=Path(os.environ["OUT"])/"evidence"
+          blob=ev/"flashboot_BP1048P4_SD_A15A16A17.bin"
+          target_doc=json.loads((ev/"02_RECONSTRUCTION_AND_TARGETS.json").read_text())
+          targets=target_doc["targets"]
+
+          def r2_cmd(big, command, timeout=90):
+              args=[
+                  "r2","-2","-q",
+                  "-a","nds32","-b","32","-m","0",
+                  "-e",f"cfg.bigendian={'true' if big else 'false'}",
+                  "-e","scr.color=false",
+                  "-e","asm.bytes=true",
+                  "-e","asm.offset=true",
+                  "-e","anal.hasnext=true",
+                  "-e","anal.depth=256",
+                  "-c",command,
+                  str(blob),
+              ]
+              p=subprocess.run(
+                  args,capture_output=True,text=True,errors="ignore",
+                  timeout=timeout,check=False
+              )
+              return {
+                  "rc":p.returncode,
+                  "stdout":p.stdout,
+                  "stderr":p.stderr,
+                  "args":args[:-1]+[blob.name],
+              }
+
+          # Baseline disassembly to score plausibility.
+          modes={}
+          for big in (True,False):
+              key="big" if big else "little"
+              pd=r2_cmd(big,"pd 192 @ 0",45)
+              modes[key]={
+                  "baseline":pd,
+                  "invalid_count":pd["stdout"].lower().count("invalid"),
+                  "question_count":pd["stdout"].count("?"),
+              }
+
+          # Analyze once per target/mode. Raw image is only 64 KiB so this remains bounded.
+          all_xrefs={}
+          for big in (True,False):
+              mode="big" if big else "little"
+              mode_rows={}
+              for name,info in targets.items():
+                  rows=[]
+                  for off in info["offsets"][:8]:
+                      rr=r2_cmd(big,f"aa; axtj @ {off}",75)
+                      parsed=[]
+                      if rr["rc"]==0:
+                          out=rr["stdout"].strip()
+                          # axtj should be the last JSON value; tolerate leading analysis text.
+                          idx=out.rfind("[")
+                          if idx>=0:
+                              try:
+                                  parsed=json.loads(out[idx:])
+                              except Exception:
+                                  parsed=[]
+                      rows.append({
+                          "target_offset":off,
+                          "target_offset_hex":hex(off),
+                          "xrefs":parsed,
+                          "raw_stdout_tail":rr["stdout"][-12000:],
+                          "stderr_tail":rr["stderr"][-4000:],
+                          "rc":rr["rc"],
+                      })
+                  mode_rows[name]=rows
+              all_xrefs[mode]=mode_rows
+
+          # Count code refs and select the mode with better xref yield / fewer invalids.
+          scores={}
+          for mode,rows in all_xrefs.items():
+              xcount=0
+              for rr in rows.values():
+                  for item in rr:
+                      xcount+=len(item["xrefs"])
+              scores[mode]={
+                  "xref_count":xcount,
+                  "invalid_count":modes[mode]["invalid_count"],
+                  "score":xcount*1000 - modes[mode]["invalid_count"],
+              }
+
+          selected=sorted(
+              scores,
+              key=lambda k:(scores[k]["score"],scores[k]["xref_count"]),
+              reverse=True
+          )[0]
+
+          (ev/"04_ENDIAN_BASELINE.json").write_text(
+              json.dumps(modes,indent=2,ensure_ascii=False)+'\n'
+          )
+          (ev/"05_XREFS_BY_ENDIAN.json").write_text(
+              json.dumps(all_xrefs,indent=2,ensure_ascii=False)+'\n'
+          )
+          (ev/"06_ENDIAN_SELECTION.json").write_text(
+              json.dumps({"scores":scores,"selected":selected},indent=2)+'\n'
+          )
+
+          print(json.dumps({"scores":scores,"selected":selected},indent=2))
+          PY
+
+      - name: Dump disassembly around every high-value xref
+        shell: bash
+        run: |
+          set -euo pipefail
+          export PATH="$OUT/r2prefix/bin:$PATH"
+
+          python3 - <<'PY'
+          from pathlib import Path
+          import os,json,subprocess
+
+          ev=Path(os.environ["OUT"])/"evidence"
+          blob=ev/"flashboot_BP1048P4_SD_A15A16A17.bin"
+          xrefs=json.loads((ev/"05_XREFS_BY_ENDIAN.json").read_text())
+          sel=json.loads((ev/"06_ENDIAN_SELECTION.json").read_text())["selected"]
+          big=(sel=="big")
+
+          priority=[
+              "MVA_HEADER_ERROR","MVB1X","CMD_CXXX_DEBUG","MAKE_MVA",
+              "MAKE_HEADER_01","BOOTDAT","CODEDATA","CONSTDAT","CNFGDAT",
+              "CXXX_TOKEN","CHIPERAS_TOKEN","BOOT_LEN_FMT","BOOT_CRC_FMT",
+              "CODE_LEN_FMT","CODE_CRC_FMT","CONST_LEN_FMT","CONFIG_LEN_FMT",
+              "CONST_OFFSET_FMT","CONFIG_OFFSET_FMT","JUDGEMENT_FMT"
+          ]
+
+          def run(command,timeout=80):
+              args=[
+                  "r2","-2","-q","-a","nds32","-b","32","-m","0",
+                  "-e",f"cfg.bigendian={'true' if big else 'false'}",
+                  "-e","scr.color=false",
+                  "-e","asm.bytes=true",
+                  "-e","asm.offset=true",
+                  "-e","asm.comments=true",
+                  "-c",command,str(blob)
+              ]
+              p=subprocess.run(
+                  args,capture_output=True,text=True,errors="ignore",
+                  timeout=timeout,check=False
+              )
+              return p.stdout,p.stderr,p.returncode
+
+          out=[]
+          seen=set()
+
+          for name in priority:
+              for entry in xrefs.get(sel,{}).get(name,[]):
+                  for xr in entry.get("xrefs",[]):
+                      frm=xr.get("from")
+                      if not isinstance(frm,int):
+                          continue
+                      key=(name,frm)
+                      if key in seen:
+                          continue
+                      seen.add(key)
+
+                      start=max(0,frm-128)
+                      stdout,stderr,rc=run(
+                          f"aa; pd 120 @ {start}; "
+                          f"afij @ {frm}; "
+                          f"px 256 @ {start}"
+                      )
+                      out.append({
+                          "target":name,
+                          "target_offset":entry["target_offset"],
+                          "target_offset_hex":entry["target_offset_hex"],
+                          "xref_from":frm,
+                          "xref_from_hex":hex(frm),
+                          "xref_type":xr.get("type"),
+                          "xref":xr,
+                          "disassembly_and_context":stdout[-50000:],
+                          "stderr_tail":stderr[-4000:],
+                          "rc":rc,
+                      })
+
+          (ev/"07_XREF_DISASSEMBLY.json").write_text(
+              json.dumps(out,indent=2,ensure_ascii=False)+'\n'
+          )
+
+          # Also dump broad code/data neighborhood around parser/debug string cluster.
+          broad=[]
+          for start in (0xB000,0xB800,0xC000,0xC300,0xC700,0xCC00):
+              stdout,stderr,rc=run(f"aa; pd 512 @ {start}",90)
+              broad.append({
+                  "start":start,"start_hex":hex(start),
+                  "stdout":stdout[-120000:],
+                  "stderr":stderr[-4000:],
+                  "rc":rc,
+              })
+          (ev/"08_BROAD_DISASSEMBLY_WINDOWS.json").write_text(
+              json.dumps(broad,indent=2,ensure_ascii=False)+'\n'
+          )
+
+          print(json.dumps({
+              "selected_endian":sel,
+              "xref_contexts":len(out),
+              "broad_windows":len(broad)
+          },indent=2))
+          PY
+
+      - name: Derive conservative MVA/cxxx evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import os,json,re
+
+          ev=Path(os.environ["OUT"])/"evidence"
+          recon=json.loads((ev/"02_RECONSTRUCTION_AND_TARGETS.json").read_text())
+          sel=json.loads((ev/"06_ENDIAN_SELECTION.json").read_text())
+          xrefs=json.loads((ev/"05_XREFS_BY_ENDIAN.json").read_text())
+          dis=json.loads((ev/"07_XREF_DISASSEMBLY.json").read_text())
+
+          mode=sel["selected"]
+
+          def count_x(name):
+              return sum(
+                  len(x.get("xrefs",[]))
+                  for x in xrefs.get(mode,{}).get(name,[])
+              )
+
+          evidence={
+              "flashboot_sha256":recon["sha256"],
+              "selected_endian":mode,
+              "endian_scores":sel["scores"],
+              "MVB1X_literal_offset":recon["targets"]["MVB1X"]["offsets_hex"],
+              "MVA_HEADER_error_xrefs":count_x("MVA_HEADER_ERROR"),
+              "MVB1X_xrefs":count_x("MVB1X"),
+              "cmd_cxxx_debug_xrefs":count_x("CMD_CXXX_DEBUG"),
+              "make_mva_xrefs":count_x("MAKE_MVA"),
+              "make_header01_xrefs":count_x("MAKE_HEADER_01"),
+              "bootdat_xrefs":count_x("BOOTDAT"),
+              "codedata_xrefs":count_x("CODEDATA"),
+              "chiperas_xrefs":count_x("CHIPERAS_TOKEN"),
+              "xref_disassembly_contexts":len(dis),
+              "expected_header_identifier_candidate":"MVB1X",
+              "expected_header_identifier_exactly_proven":False,
+              "mva_header_field_offsets_exactly_proven":False,
+              "cmd_cxxx_non_destructive_readback_proven":False,
+              "live_cxxx_allowed":False,
+              "live_chiperas_allowed":False,
+              "production_readback_proven":False,
+              "flash_allowed":False,
+          }
+
+          # Promotion rule is intentionally strict:
+          # a string saying "MVA HEADER IS NOT MVB1X" is strong evidence that MVB1X
+          # is the expected identifier, but without a decoded comparison / parser
+          # access pattern we do not label the exact header byte offset as proven.
+          (ev/"09_DERIVED_EVIDENCE.json").write_text(
+              json.dumps(evidence,indent=2,ensure_ascii=False)+'\n'
+          )
+
+          md=[
+              "# R92 NDS32 FlashBoot Xref Disassembly","",
+              f"- FlashBoot reference SHA256: `{recon['sha256']}`",
+              f"- selected endian mode: **{mode}**",
+              f"- `MVA HEADER IS NOT MVB1X` xrefs: **{evidence['MVA_HEADER_error_xrefs']}**",
+              f"- literal `MVB1X` xrefs: **{evidence['MVB1X_xrefs']}**",
+              f"- `cmd_cxxx :` xrefs: **{evidence['cmd_cxxx_debug_xrefs']}**",
+              f"- `Make mva upgrade package!` xrefs: **{evidence['make_mva_xrefs']}**",
+              f"- `bootdat` xrefs: **{evidence['bootdat_xrefs']}**",
+              f"- `codedata` xrefs: **{evidence['codedata_xrefs']}**",
+              "",
+              "## Conservative interpretation",
+              "- `MVB1X` is now a strong expected-header-identifier candidate because it appears in the FlashBoot parser error text.",
+              "- Exact header byte offset/magic semantics remain unproven until the comparison path is decoded.",
+              "- `cmd_cxxx` and MVA package-generation code remain static-analysis targets only.",
+              "- `chiperas` is destructive and remains forbidden live.",
+              "- No production USB traffic is generated.",
+              "- `FLASH_ALLOWED=NO`",
+          ]
+          (ev/"10_REPORT.md").write_text("\n".join(md)+'\n')
+
+          print(json.dumps(evidence,indent=2))
+          PY
+
+      - name: Fail-closed safety audit
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$BOARD_USB_ACCESS" = "NO"
+          test "$HOST_TO_DEVICE_USB" = "NO"
+          test "$FLASH_ERASE_WRITE" = "NO"
+          test "$FLASH_ALLOWED" = "NO"
+
+          python3 - <<'PY'
+          from pathlib import Path
+          import os,json
+          ev=Path(os.environ["OUT"])/"evidence"
+          d=json.loads((ev/"09_DERIVED_EVIDENCE.json").read_text())
+          assert d["live_cxxx_allowed"] is False
+          assert d["live_chiperas_allowed"] is False
+          assert d["production_readback_proven"] is False
+          assert d["flash_allowed"] is False
+          result={
+              "offline_static_only":True,
+              "board_usb_access":False,
+              "host_to_device_usb":False,
+              "aa55":False,
+              "control_0x11_live":False,
+              "cxxx_live":False,
+              "chiperas_live":False,
+              "erase":False,
+              "write":False,
+              "flash_allowed":False,
+          }
+          (ev/"11_SAFETY_AUDIT.json").write_text(
+              json.dumps(result,indent=2)+'\n'
+          )
+          print("R92_SAFETY_AUDIT=PASS",json.dumps(result))
+          PY
+
+      - name: Build evidence bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$OUT"
+          sha256sum evidence/* > SHA256SUMS.txt
+          cp SHA256SUMS.txt evidence/
+          zip -9 -r R92_NDS32_FLASHBOOT_XREF_DISASSEMBLY.zip evidence >/dev/null
+          sha256sum R92_NDS32_FLASHBOOT_XREF_DISASSEMBLY.zip \
+            | tee R92_NDS32_FLASHBOOT_XREF_DISASSEMBLY.zip.sha256
+
+      - name: Publish summary
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            cat "$OUT/evidence/10_REPORT.md"
+            echo
+            cat "$OUT/R92_NDS32_FLASHBOOT_XREF_DISASSEMBLY.zip.sha256"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload R92 evidence
+        uses: actions/upload-artifact@v7
+        with:
+          name: R92-NDS32-FLASHBOOT-XREF-DISASSEMBLY
+          path: |
+            /tmp/r92/R92_NDS32_FLASHBOOT_XREF_DISASSEMBLY.zip
+            /tmp/r92/R92_NDS32_FLASHBOOT_XREF_DISASSEMBLY.zip.sha256
+            /tmp/r92/evidence/**
+          if-no-files-found: error
+          retention-days: 30
+
+  diagnose-r92:
+    name: Capture R92 run diagnostics
+    if: ${{ always() }}
+    needs: disassemble
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+
+      - name: Capture exact run state
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BUILD_RESULT: ${{ needs.disassemble.result }}
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/r92diag
+          API="https://api.github.com/repos/$GITHUB_REPOSITORY"
+          AUTH=(-H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" -H "X-GitHub-Api-Version: 2022-11-28")
+
+          curl -fsSL "${AUTH[@]}" \
+            "$API/actions/runs/$GITHUB_RUN_ID/jobs?filter=latest&per_page=100" \
+            -o /tmp/r92diag/jobs.json
+
+          curl -fsSL "${AUTH[@]}" \
+            "$API/actions/runs/$GITHUB_RUN_ID/artifacts?per_page=100" \
+            -o /tmp/r92diag/artifacts.json
+
+          python3 - <<'PY'
+          import json,os
+          from pathlib import Path
+          jobs=json.loads(Path('/tmp/r92diag/jobs.json').read_text()).get('jobs',[])
+          build=next((x for x in jobs if x.get('name')=='NDS32 xref analysis of reconstructed FlashBoot64K / STATIC ONLY'),None)
+          report={
+            'run_id':os.environ.get('GITHUB_RUN_ID'),
+            'run_attempt':os.environ.get('GITHUB_RUN_ATTEMPT'),
+            'repository':os.environ.get('GITHUB_REPOSITORY'),
+            'head_sha':os.environ.get('GITHUB_SHA'),
+            'ref':os.environ.get('GITHUB_REF'),
+            'event':os.environ.get('GITHUB_EVENT_NAME'),
+            'build_result':os.environ.get('BUILD_RESULT'),
+            'build_job':build,
+          }
+          Path('/tmp/r92diag/summary.json').write_text(
+              json.dumps(report,indent=2,ensure_ascii=False)+'\n'
+          )
+          if build and build.get('id'):
+              Path('/tmp/r92diag/build_job_id.txt').write_text(str(build['id']))
+          PY
+
+          : > /tmp/r92diag/build-log-tail.txt
+          if [ -s /tmp/r92diag/build_job_id.txt ]; then
+            JOB_ID="$(cat /tmp/r92diag/build_job_id.txt)"
+            set +e
+            curl -fsSL "${AUTH[@]}" "$API/actions/jobs/$JOB_ID/logs" \
+              -o /tmp/r92diag/build.log
+            RC=$?
+            set -e
+            if [ "$RC" -eq 0 ]; then
+              tail -n 320 /tmp/r92diag/build.log > /tmp/r92diag/build-log-tail.txt
+            else
+              printf 'JOB_LOG_DOWNLOAD_FAILED rc=%s\n' "$RC" \
+                > /tmp/r92diag/build-log-tail.txt
+            fi
+          fi
+
+          {
+            echo '# R92 LAST GITHUB ACTIONS DIAGNOSTIC'
+            echo
+            echo "- Run ID: \`$GITHUB_RUN_ID\`"
+            echo "- Attempt: \`$GITHUB_RUN_ATTEMPT\`"
+            echo "- Event: \`$GITHUB_EVENT_NAME\`"
+            echo "- Ref: \`$GITHUB_REF\`"
+            echo "- Head SHA: \`$GITHUB_SHA\`"
+            echo "- Result: \`$BUILD_RESULT\`"
+            echo
+            echo '## Job / step metadata'
+            echo '~~~json'
+            cat /tmp/r92diag/summary.json
+            echo '~~~'
+            echo
+            echo '## Artifacts'
+            echo '~~~json'
+            cat /tmp/r92diag/artifacts.json
+            echo '~~~'
+            echo
+            echo '## Job log tail'
+            echo '~~~text'
+            cat /tmp/r92diag/build-log-tail.txt
+            echo '~~~'
+          } > /tmp/r92diag/R92_LAST_DIAGNOSTIC.md
+
+      - name: Persist diagnostic to main with race-safe rebase
+        if: ${{ github.event_name != 'pull_request' && github.ref == 'refs/heads/main' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp /tmp/r92diag/R92_LAST_DIAGNOSTIC.md .github/R92_LAST_DIAGNOSTIC.md
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add .github/R92_LAST_DIAGNOSTIC.md
+          if git diff --cached --quiet; then
+            exit 0
+          fi
+          git commit -m "Record R92 Actions diagnostic [skip ci]"
+          git fetch origin main
+          git rebase origin/main
+          git push origin HEAD:main
+
+      - name: Upload diagnostic
+        uses: actions/upload-artifact@v7
+        with:
+          name: R92-RUN-DIAGNOSTIC
+          path: |
+            /tmp/r92diag/R92_LAST_DIAGNOSTIC.md
+            /tmp/r92diag/summary.json
+            /tmp/r92diag/jobs.json
+            /tmp/r92diag/artifacts.json
+            /tmp/r92diag/build-log-tail.txt
+          if-no-files-found: error
+          retention-days: 30
