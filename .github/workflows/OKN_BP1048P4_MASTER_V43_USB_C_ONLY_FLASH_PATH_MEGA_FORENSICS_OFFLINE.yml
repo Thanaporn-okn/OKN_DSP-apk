@@ -1,0 +1,797 @@
+name: OKN BP1048P4 MASTER V43 USB-C ONLY FLASH PATH MEGA FORENSICS OFFLINE
+
+"on":
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/OKN_BP1048P4_MASTER_V43_USB_C_ONLY_FLASH_PATH_MEGA_FORENSICS_OFFLINE.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+env:
+  V41_ARTIFACT_ID: "11301140892"
+  FLASHBOOT_AUDIT_ARTIFACT_ID: "11233786540"
+  FINAL_USB_SPEC_ARTIFACT_ID: "11048996382"
+  RECOVERY_V13_ARTIFACT_ID: "11247972033"
+  RECOVERY_V16_ARTIFACT_ID: "11251221570"
+  RECOVERY_V17_ARTIFACT_ID: "11251820245"
+  UPDATER_V3_ARTIFACT_ID: "11139458303"
+  SDK_BOOT_USB_ARTIFACT_ID: "11045528884"
+  R106_NATIVE_HID_ARTIFACT_ID: "10711684891"
+  R103_MVASSISTANT_ARTIFACT_ID: "10711341378"
+  R102_FAMILY_UPDATER_ARTIFACT_ID: "10708744749"
+  FIRMWARE_CORE_ARTIFACT_ID: "10830737503"
+
+  # Exact V42 on-board evidence supplied after the live one-shot test.
+  V42_EVIDENCE_SHA256: "704408803936378101a175d69621ec763f0bd73bb0a0c5d5a615464a5985e450"
+  V42_EXACT_RUNTIME_FINGERPRINT_OK: "true"
+  V42_OUTPUT_FRAME_HEX: "A55A000016"
+  V42_SET_REPORT_RESULT: "256"
+  V42_FAST_CAPTURE_ITERATIONS: "501"
+  V42_FAST_CAPTURE_POSITIVE: "0"
+  V42_FAST_CAPTURE_ZERO: "501"
+  V42_QUERY_SUCCEEDED: "false"
+  V42_NEW_LIVE_0X11_SENT: "false"
+
+  REQUIRED_PHONE: "Samsung Galaxy S25+"
+  REQUIRED_PATH: "Samsung Galaxy S25+ -> USB-C cable -> DSP board USB-C port only"
+  TARGET_SOC: "MVSilicon BP1048P4"
+  RUNTIME_VID_PID: "6324:1719"
+
+  SOLDERING_ALLOWED: "NO"
+  BOARD_MODIFICATION_ALLOWED: "NO"
+  EXTERNAL_PROGRAMMER_ALLOWED: "NO"
+  JTAG_AICE_SDP_ALLOWED: "NO"
+  NEW_LIVE_0X11_ALLOWED: "NO"
+  FEATURE_REPORT_LIVE_ALLOWED: "NO"
+  FLASH_ALLOWED: "NO"
+  ERASE_ALLOWED: "NO"
+  WRITE_ALLOWED: "NO"
+
+jobs:
+  v43:
+    name: Resolve S25+ USB-C only firmware flashing path OFFLINE
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+
+    steps:
+      - name: Gate 0 - immutable physical path and safety
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          test "$REQUIRED_PHONE" = "Samsung Galaxy S25+"
+          test "$REQUIRED_PATH" = "Samsung Galaxy S25+ -> USB-C cable -> DSP board USB-C port only"
+          test "$SOLDERING_ALLOWED" = "NO"
+          test "$BOARD_MODIFICATION_ALLOWED" = "NO"
+          test "$EXTERNAL_PROGRAMMER_ALLOWED" = "NO"
+          test "$JTAG_AICE_SDP_ALLOWED" = "NO"
+          test "$NEW_LIVE_0X11_ALLOWED" = "NO"
+          test "$FEATURE_REPORT_LIVE_ALLOWED" = "NO"
+          test "$FLASH_ALLOWED" = "NO"
+          test "$ERASE_ALLOWED" = "NO"
+          test "$WRITE_ALLOWED" = "NO"
+
+          rm -rf /tmp/v43
+          mkdir -p /tmp/v43/{downloads,artifacts,evidence,out,candidate}
+
+          cat > /tmp/v43/evidence/00_SCOPE.txt <<EOF
+          REVISION=MASTER-V43
+          MODE=USB_C_ONLY_FLASH_PATH_MEGA_FORENSICS_OFFLINE
+
+          ABSOLUTE_DEPLOYMENT_PATH:
+          $REQUIRED_PATH
+
+          ABSOLUTELY DISALLOWED:
+          - soldering
+          - board modification
+          - JTAG/AICE/SDP/external programmer
+          - new live byte 0x11
+          - live Feature report
+          - flash/erase/write before all production gates pass
+
+          V42_BOARD_EVIDENCE:
+          SHA256=$V42_EVIDENCE_SHA256
+          EXACT_RUNTIME_FINGERPRINT_OK=$V42_EXACT_RUNTIME_FINGERPRINT_OK
+          OUTPUT_FRAME=$V42_OUTPUT_FRAME_HEX
+          SET_REPORT_RESULT=$V42_SET_REPORT_RESULT
+          FAST_CAPTURE_ITERATIONS=$V42_FAST_CAPTURE_ITERATIONS
+          FAST_CAPTURE_POSITIVE=$V42_FAST_CAPTURE_POSITIVE
+          FAST_CAPTURE_ZERO=$V42_FAST_CAPTURE_ZERO
+          QUERY_SUCCEEDED=$V42_QUERY_SUCCEEDED
+          NEW_LIVE_0X11_SENT=$V42_NEW_LIVE_0X11_SENT
+
+          THIS RUN COMBINES:
+          1) runtime -> updater/recovery entry analysis
+          2) recovery USB transport + packet/ACK analysis
+          3) stock backup/readback search
+          4) production flash-layout/image evidence reconciliation
+          5) Android-host feasibility matrix
+          6) firmware candidate bundle
+          7) one final USB-C-only flashing decision
+          EOF
+
+      - name: Gate 1 - download all flash-path evidence
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          get_artifact() {
+            local id="$1"
+            local name="$2"
+
+            mkdir -p "/tmp/v43/artifacts/$name"
+
+            curl -fL --retry 5 --retry-all-errors               -H "Accept: application/vnd.github+json"               -H "Authorization: Bearer $GH_TOKEN"               -H "X-GitHub-Api-Version: 2022-11-28"               "https://api.github.com/repos/${{ github.repository }}/actions/artifacts/${id}/zip"               -o "/tmp/v43/downloads/${name}.zip"
+
+            unzip -q "/tmp/v43/downloads/${name}.zip"               -d "/tmp/v43/artifacts/${name}"
+          }
+
+          get_artifact "$V41_ARTIFACT_ID" v41
+          get_artifact "$FLASHBOOT_AUDIT_ARTIFACT_ID" flashboot_audit
+          get_artifact "$FINAL_USB_SPEC_ARTIFACT_ID" final_usb_spec
+          get_artifact "$RECOVERY_V13_ARTIFACT_ID" recovery_v13
+          get_artifact "$RECOVERY_V16_ARTIFACT_ID" recovery_v16
+          get_artifact "$RECOVERY_V17_ARTIFACT_ID" recovery_v17
+          get_artifact "$UPDATER_V3_ARTIFACT_ID" updater_v3
+          get_artifact "$SDK_BOOT_USB_ARTIFACT_ID" sdk
+          get_artifact "$R106_NATIVE_HID_ARTIFACT_ID" r106
+          get_artifact "$R103_MVASSISTANT_ARTIFACT_ID" r103
+          get_artifact "$R102_FAMILY_UPDATER_ARTIFACT_ID" r102
+          get_artifact "$FIRMWARE_CORE_ARTIFACT_ID" firmware
+
+          cat > /tmp/v43/unpack.py <<'PY'
+          from pathlib import Path
+          import zipfile
+
+          root=Path("/tmp/v43/artifacts")
+          seen=set()
+
+          for _ in range(6):
+              todo=[z for z in root.rglob("*.zip") if z not in seen]
+              if not todo:
+                  break
+
+              for z in todo:
+                  seen.add(z)
+                  d=z.with_suffix(z.suffix+".unpacked")
+                  d.mkdir(parents=True,exist_ok=True)
+
+                  try:
+                      with zipfile.ZipFile(z) as q:
+                          q.extractall(d)
+                  except Exception:
+                      pass
+
+          print("NESTED_ZIP_COUNT="+str(len(seen)))
+          PY
+
+          python3 /tmp/v43/unpack.py             | tee /tmp/v43/evidence/01_UNPACK_SUMMARY.txt
+
+          find /tmp/v43/artifacts -type f -printf '%P\n' | sort             > /tmp/v43/evidence/02_ARTIFACT_INVENTORY.txt
+
+      - name: Gate 2 - runtime to updater/recovery entry analysis
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cat > /tmp/v43/runtime_entry.py <<'PY'
+          from pathlib import Path
+          import json,re
+
+          root=Path("/tmp/v43/artifacts")
+          ev=Path("/tmp/v43/evidence")
+
+          suffixes={".txt",".md",".json",".c",".h",".cs",".il",".java",".log",".asm"}
+          parts=[]
+
+          for p in root.rglob("*"):
+              if p.is_file() and p.suffix.lower() in suffixes:
+                  try:
+                      parts.append(
+                          "===== "+str(p.relative_to(root))+" =====\n"+
+                          p.read_text(errors="ignore")
+                      )
+                  except Exception:
+                      pass
+
+          corpus="\n".join(parts)
+          low=corpus.lower()
+
+          # Known dangerous/upgrade entry evidence.
+          feature_arm=(
+              "pc_upgrade" in low and
+              ("0x55" in low or "0xaa" in low)
+          )
+
+          feature_boot=(
+              "start_up_grate" in low and
+              ("get_report" in low or "feature" in low)
+          )
+
+          flash_boot_en="flash_boot_en" in low
+
+          control11=(
+              "communication_effect_0x11" in low or
+              "control 0x11" in low or
+              "0x11" in low and "flash" in low
+          )
+
+          # Search for explicit alternate entry descriptions that claim both
+          # runtime USB and no Feature/no 0x11.
+          alternate_lines=[]
+          for line in corpus.splitlines():
+              ll=line.lower()
+              if (
+                  ("recovery" in ll or "upgrade" in ll or "boot" in ll) and
+                  ("6324" in ll or "1719" in ll or "runtime" in ll) and
+                  ("no 0x11" in ll or "without 0x11" in ll or
+                   "feature report disabled" in ll or "feature disabled" in ll)
+              ):
+                  alternate_lines.append(line.strip())
+
+          # V34/V41 explicitly report no safe no-0x11 auth/description path.
+          v41s=list(root.rglob("14_V41_FINAL_MATRIX.json"))
+          v41=json.loads(v41s[0].read_text()) if v41s else {}
+
+          safe_alt=False
+
+          # Do not promote prose alone into proof.  A safe alternate path needs
+          # an exact packet/method plus affirmative proven/allowed language.
+          for line in alternate_lines:
+              ll=line.lower()
+              if (
+                  ("proven" in ll or "allowed" in ll) and
+                  "no 0x11" in ll and
+                  "feature" not in ll.replace("feature disabled","")
+              ):
+                  safe_alt=True
+
+          result={
+              "runtime_vid_pid":"6324:1719",
+              "feature_arm_upgrade_static_evidence":feature_arm,
+              "feature_get_can_boot_static_evidence":feature_boot,
+              "flash_boot_en_static_evidence":flash_boot_en,
+              "control_0x11_flash_or_upgrade_evidence":control11,
+              "alternate_no_0x11_no_feature_entry_contexts":alternate_lines[:200],
+              "alternate_no_0x11_no_feature_entry_proven":safe_alt,
+              "v41_safe_auth_without_0x11":
+                  bool(v41.get("gates",{}).get("SAFE_AUTH_WITHOUT_0X11",False)),
+              "v42_version_query_usb_transfer_accepted":True,
+              "v42_version_query_device_response_seen":False,
+              "production_runtime_to_updater_entry_proven":safe_alt,
+              "new_live_0x11_allowed":False,
+              "feature_report_live_allowed":False
+          }
+
+          (ev/"03_RUNTIME_TO_UPDATER_ENTRY.json").write_text(
+              json.dumps(result,indent=2,ensure_ascii=False)+"\n"
+          )
+
+          print(json.dumps({
+              "feature_arm_upgrade_static_evidence":feature_arm,
+              "feature_get_can_boot_static_evidence":feature_boot,
+              "control_0x11_flash_or_upgrade_evidence":control11,
+              "alternate_no_0x11_no_feature_entry_proven":safe_alt,
+              "production_runtime_to_updater_entry_proven":safe_alt
+          },indent=2))
+          PY
+
+          python3 /tmp/v43/runtime_entry.py             | tee /tmp/v43/evidence/04_RUNTIME_ENTRY_SUMMARY.txt
+
+      - name: Gate 3 - recovery USB transport packet and identity proof
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cat > /tmp/v43/recovery_transport.py <<'PY'
+          from pathlib import Path
+          import json,re
+
+          root=Path("/tmp/v43/artifacts")
+          ev=Path("/tmp/v43/evidence")
+
+          parts=[]
+          for group in [
+              "flashboot_audit","final_usb_spec",
+              "recovery_v13","recovery_v16","recovery_v17",
+              "updater_v3","r106","r103","r102"
+          ]:
+              for p in (root/group).rglob("*"):
+                  if p.is_file() and p.suffix.lower() in {
+                      ".txt",".md",".json",".c",".h",".cs",".il",".asm",".log"
+                  }:
+                      try:
+                          parts.append(p.read_text(errors="ignore"))
+                      except Exception:
+                          pass
+
+          corpus="\n".join(parts)
+          low=corpus.lower()
+
+          commands=[
+              "chiperas","codedata","bootdat","constdat",
+              "cnfgdat","btupdat","upinfo","cxxx"
+          ]
+
+          command_presence={
+              c:c in low for c in commands
+          }
+
+          ack_terms=sorted(set(re.findall(
+              r'(?i)\b(?:ACK|NAK|CRC16|FastCRC|checksum)\b',
+              corpus
+          )))
+
+          reference_2244=(
+              "0000:2244" in low or
+              ("pid" in low and "2244" in low)
+          )
+
+          runtime_6324_1719=(
+              "6324" in low and "1719" in low
+          )
+
+          packet_lengths=sorted(set(
+              int(x) for x in re.findall(
+                  r'(?i)(?:packet|report|payload|chunk)[^\n]{0,40}?\b(64|128|256|512|1024|4096)\b',
+                  corpus
+              )
+          ))
+
+          # The historical recovery ID remains reference-only unless a result
+          # explicitly marks it production-proven.
+          production_identity=bool(re.search(
+              r'(?i)production(?:_|\s+)recovery(?:_|\s+)identity(?:_|\s+)(?:proven|ok)\s*[:=]\s*(?:true|yes|1)',
+              corpus
+          ))
+
+          result={
+              "runtime_identity_seen":runtime_6324_1719,
+              "reference_recovery_0000_2244_seen":reference_2244,
+              "production_recovery_identity_proven":production_identity,
+              "known_recovery_command_presence":command_presence,
+              "ack_crc_terms":ack_terms,
+              "packet_lengths_seen":packet_lengths,
+              "flash_writer_vocabulary_complete":
+                  all(command_presence.values()),
+              "classification":
+                  "REFERENCE_RECOVERY_WRITER_EXISTS_BUT_PRODUCTION_RECOVERY_IDENTITY_UNPROVEN"
+                  if reference_2244 and not production_identity else
+                  "REVIEW_REQUIRED"
+          }
+
+          (ev/"05_RECOVERY_USB_TRANSPORT.json").write_text(
+              json.dumps(result,indent=2)+"\n"
+          )
+
+          print(json.dumps(result,indent=2))
+          PY
+
+          python3 /tmp/v43/recovery_transport.py             | tee /tmp/v43/evidence/06_RECOVERY_TRANSPORT_SUMMARY.txt
+
+      - name: Gate 4 - stock backup and readback search
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cat > /tmp/v43/readback.py <<'PY'
+          from pathlib import Path
+          import json,re
+
+          root=Path("/tmp/v43/artifacts")
+          ev=Path("/tmp/v43/evidence")
+
+          parts=[]
+
+          for group in [
+              "flashboot_audit","final_usb_spec","updater_v3",
+              "sdk","r106","r103","r102"
+          ]:
+              for p in (root/group).rglob("*"):
+                  if p.is_file() and p.suffix.lower() in {
+                      ".txt",".md",".json",".c",".h",".cs",".il",".asm",".log"
+                  }:
+                      try:
+                          parts.append(
+                              "===== "+group+"/"+p.name+" =====\n"+
+                              p.read_text(errors="ignore")
+                          )
+                      except Exception:
+                          pass
+
+          corpus="\n".join(parts)
+          low=corpus.lower()
+
+          internal_terms=[
+              x for x in [
+                  "spiflashread","spi_flash_read","flashread",
+                  "readback","verify","memcmp"
+              ] if x in low
+          ]
+
+          # Host-exposed read candidates must look like actual command names,
+          # not internal verification routines.
+          host_cmds=[]
+          for line in corpus.splitlines():
+              ll=line.lower()
+
+              if re.search(
+                  r'\b(readflash|flashread|getflash|dumpflash|dumprom|backupflash|readrom|uploadflash)\b',
+                  ll
+              ):
+                  host_cmds.append(line.strip())
+
+          # Prior reports explicitly state no arbitrary flash-read command.
+          explicit_no_read=any(
+              phrase in low
+              for phrase in [
+                  "no arbitrary flash-read command",
+                  "ไม่มี arbitrary flash-read",
+                  "ยังไม่พบ arbitrary flash-read",
+                  "no host readback",
+                  "stock backup: **ไม่มี**"
+              ]
+          )
+
+          host_read_proven=(
+              len(host_cmds)>0 and
+              not explicit_no_read and
+              bool(re.search(
+                  r'(?i)(proven|verified|handler|dispatch).{0,100}(readflash|flashread|getflash|dumpflash|backupflash)',
+                  corpus
+              ))
+          )
+
+          result={
+              "internal_flash_read_or_verify_terms":internal_terms,
+              "host_read_command_contexts":host_cmds[:250],
+              "prior_explicit_no_arbitrary_readback":explicit_no_read,
+              "pure_read_only_full_stock_backup_command_proven":host_read_proven,
+              "stock_backup_completed":False,
+              "stock_backup_sha256_proven":False,
+              "rollback_image_proven":False
+          }
+
+          (ev/"07_STOCK_BACKUP_READBACK.json").write_text(
+              json.dumps(result,indent=2,ensure_ascii=False)+"\n"
+          )
+
+          print(json.dumps({
+              "internal_flash_read_or_verify_terms":internal_terms,
+              "host_read_command_candidate_count":len(host_cmds),
+              "prior_explicit_no_arbitrary_readback":explicit_no_read,
+              "pure_read_only_full_stock_backup_command_proven":host_read_proven
+          },indent=2))
+          PY
+
+          python3 /tmp/v43/readback.py             | tee /tmp/v43/evidence/08_READBACK_SUMMARY.txt
+
+      - name: Gate 5 - flash layout image and address reconciliation
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cat > /tmp/v43/layout.py <<'PY'
+          from pathlib import Path
+          import json,re
+
+          root=Path("/tmp/v43/artifacts")
+          ev=Path("/tmp/v43/evidence")
+
+          parts=[]
+          for group in [
+              "sdk","flashboot_audit","final_usb_spec",
+              "updater_v3","r106","r103","r102","firmware"
+          ]:
+              for p in (root/group).rglob("*"):
+                  if p.is_file() and p.suffix.lower() in {
+                      ".txt",".md",".json",".c",".h",".ld",".map",".asm",".log"
+                  }:
+                      try:
+                          parts.append(p.read_text(errors="ignore"))
+                      except Exception:
+                          pass
+
+          corpus="\n".join(parts)
+          low=corpus.lower()
+
+          known_map={
+              "code":"0x000000",
+              "const":"0x198000",
+              "audio_effect":"0x3C8000",
+              "flashfs":"0x3D0000",
+              "user_data":"0x3F0000",
+              "bp_data":"0x3F3000",
+              "bt_data":"0x3FB000",
+              "user_config":"0x3FE000",
+              "bt_config":"0x3FF000"
+          }
+
+          map_presence={
+              k:(v.lower() in low)
+              for k,v in known_map.items()
+          }
+
+          staging={
+              "0x100000":"0x100000" in low,
+              "0x120000":"0x120000" in low
+          }
+
+          production_claims=[
+              line.strip()
+              for line in corpus.splitlines()
+              if re.search(
+                  r'(?i)production.{0,80}(layout|memory map|flash map).{0,80}(proven|verified|exact)',
+                  line
+              )
+          ]
+
+          production_proven=bool(production_claims) and not any(
+              "not proven" in x.lower() or
+              "unproven" in x.lower() or
+              "reference" in x.lower()
+              for x in production_claims
+          )
+
+          result={
+              "reference_sdk_map":known_map,
+              "reference_map_values_seen":map_presence,
+              "historical_staging_addresses_seen":staging,
+              "production_layout_claim_contexts":production_claims[:200],
+              "production_flash_layout_proven":production_proven,
+              "sdk_reference_map_safe_to_promote_to_production":False,
+              "bootable_production_image_proven":False,
+              "exact_board_image_acceptance_proven":False
+          }
+
+          (ev/"09_FLASH_LAYOUT_IMAGE.json").write_text(
+              json.dumps(result,indent=2)+"\n"
+          )
+
+          print(json.dumps(result,indent=2))
+          PY
+
+          python3 /tmp/v43/layout.py             | tee /tmp/v43/evidence/10_LAYOUT_SUMMARY.txt
+
+      - name: Gate 6 - Android S25+ USB-C feasibility matrix
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cat > /tmp/v43/android_matrix.py <<'PY'
+          from pathlib import Path
+          import json
+
+          ev=Path("/tmp/v43/evidence")
+
+          entry=json.loads((ev/"03_RUNTIME_TO_UPDATER_ENTRY.json").read_text())
+          rec=json.loads((ev/"05_RECOVERY_USB_TRANSPORT.json").read_text())
+          backup=json.loads((ev/"07_STOCK_BACKUP_READBACK.json").read_text())
+          layout=json.loads((ev/"09_FLASH_LAYOUT_IMAGE.json").read_text())
+
+          matrix={
+              "physical_path":"Samsung Galaxy S25+ -> USB-C cable -> DSP board USB-C port only",
+              "no_soldering":True,
+              "no_board_modification":True,
+              "runtime_usb_6324_1719_proven":True,
+              "runtime_if4_hid_output_transport_proven":True,
+              "v42_one_shot_output_usb_transfer_accepted":True,
+              "v42_device_version_response_seen":False,
+
+              "runtime_to_updater_entry_no_0x11_no_feature_proven":
+                  bool(entry["production_runtime_to_updater_entry_proven"]),
+
+              "production_recovery_identity_proven":
+                  bool(rec["production_recovery_identity_proven"]),
+
+              "reference_recovery_writer_protocol_available":
+                  bool(rec["flash_writer_vocabulary_complete"]),
+
+              "pure_read_only_stock_backup_proven":
+                  bool(backup["pure_read_only_full_stock_backup_command_proven"]),
+
+              "stock_backup_completed":
+                  bool(backup["stock_backup_completed"]),
+
+              "production_flash_layout_proven":
+                  bool(layout["production_flash_layout_proven"]),
+
+              "bootable_production_image_proven":
+                  bool(layout["bootable_production_image_proven"]),
+
+              "rollback_proven":
+                  bool(backup["rollback_image_proven"]),
+
+              "s25_usb_c_flasher_safe_to_build_now":False,
+              "s25_usb_c_flasher_safe_to_execute_now":False,
+              "flash_allowed":False
+          }
+
+          required=[
+              "runtime_to_updater_entry_no_0x11_no_feature_proven",
+              "production_recovery_identity_proven",
+              "pure_read_only_stock_backup_proven",
+              "stock_backup_completed",
+              "production_flash_layout_proven",
+              "bootable_production_image_proven",
+              "rollback_proven"
+          ]
+
+          blockers=[x for x in required if not matrix[x]]
+          matrix["blockers"]=blockers
+
+          if not entry["production_runtime_to_updater_entry_proven"]:
+              next_action="OFFLINE_FIND_USB_C_RUNTIME_TO_UPDATER_ENTRY_WITHOUT_0X11_OR_FEATURE"
+          elif not backup["pure_read_only_full_stock_backup_command_proven"]:
+              next_action="OFFLINE_FIND_OR_BUILD_READ_ONLY_FULL_FLASH_BACKUP_PROTOCOL"
+          elif not layout["production_flash_layout_proven"]:
+              next_action="PROVE_PRODUCTION_FLASH_LAYOUT_BEFORE_WRITER"
+          else:
+              next_action="BUILD_FAIL_CLOSED_S25_USB_C_BACKUP_PREFLIGHT_APK"
+
+          matrix["next_allowed_action"]=next_action
+
+          (ev/"11_ANDROID_USB_C_FLASH_MATRIX.json").write_text(
+              json.dumps(matrix,indent=2)+"\n"
+          )
+
+          print(json.dumps(matrix,indent=2))
+          PY
+
+          python3 /tmp/v43/android_matrix.py             | tee /tmp/v43/evidence/12_ANDROID_MATRIX_SUMMARY.txt
+
+      - name: Gate 7 - package firmware candidate and final USB-C-only decision
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          find /tmp/v43/artifacts/firmware -type f             \( -iname '*.c' -o -iname '*.h' -o -iname '*.o' -o -iname '*.a'                -o -iname '*.json' -o -iname '*.txt' -o -iname '*.map' \)             -print0             | while IFS= read -r -d '' f; do
+                rel="${f#/tmp/v43/artifacts/firmware/}"
+                mkdir -p "/tmp/v43/candidate/$(dirname "$rel")"
+                cp "$f" "/tmp/v43/candidate/$rel"
+              done
+
+          cp             /tmp/v43/evidence/03_RUNTIME_TO_UPDATER_ENTRY.json             /tmp/v43/evidence/05_RECOVERY_USB_TRANSPORT.json             /tmp/v43/evidence/07_STOCK_BACKUP_READBACK.json             /tmp/v43/evidence/09_FLASH_LAYOUT_IMAGE.json             /tmp/v43/evidence/11_ANDROID_USB_C_FLASH_MATRIX.json             /tmp/v43/candidate/
+
+          cat > /tmp/v43/candidate/README_USB_C_ONLY_NOT_FLASHABLE.txt <<'EOF'
+          OKN BP1048P4 V43 — USB-C ONLY FIRMWARE CANDIDATE
+
+          Required physical deployment:
+          Samsung Galaxy S25+ -> USB-C cable -> DSP board USB-C port only
+
+          No soldering.
+          No board modification.
+          No external programmer.
+          No JTAG/AICE/SDP.
+
+          This bundle is NOT a flash image and MUST NOT be flashed yet.
+
+          Current hard blocks:
+          - production no-0x11/no-Feature runtime -> updater entry
+          - production recovery identity
+          - full read-only stock backup protocol and completed backup
+          - exact production flash layout
+          - rollback image/procedure
+          - bootable exact-board firmware image
+
+          FLASH_ALLOWED=NO
+          EOF
+
+          (
+            cd /tmp/v43/candidate
+            find . -type f -print0 | sort -z | xargs -0 sha256sum               > SHA256SUMS.txt
+          )
+
+          tar -C /tmp/v43             -czf /tmp/v43/out/OKN_BP1048P4_V43_USB_C_ONLY_FIRMWARE_CANDIDATE_NOT_FLASHABLE.tar.gz             candidate
+
+          cat > /tmp/v43/final.py <<'PY'
+          from pathlib import Path
+          import json
+
+          ev=Path("/tmp/v43/evidence")
+          m=json.loads((ev/"11_ANDROID_USB_C_FLASH_MATRIX.json").read_text())
+
+          md=f"""# MASTER V43 FINAL DECISION — USB-C FLASH PATH ONLY
+
+          Absolute target path:
+          **Samsung Galaxy S25+ -> USB-C cable -> DSP board USB-C port only**
+
+          Hardware modification:
+          - soldering: **NO**
+          - board modification: **NO**
+          - external programmer/JTAG/AICE/SDP: **NO**
+
+          V42 production-board result:
+          - exact runtime fingerprint: **PASS**
+          - IF4 one-shot Output transfer accepted: **256/256 bytes**
+          - command: **A5 5A 00 00 16**
+          - Input polls: **501**
+          - positive responses: **0**
+          - version response recovered: **NO**
+          - byte 0x11 transmitted: **NO**
+
+          Firmware-download path gates:
+          - runtime USB `6324:1719`: **PROVEN**
+          - runtime IF4 Output transport: **PROVEN at USB transfer level**
+          - production runtime -> updater entry without 0x11/Feature:
+            **{m['runtime_to_updater_entry_no_0x11_no_feature_proven']}**
+          - production recovery identity:
+            **{m['production_recovery_identity_proven']}**
+          - reference recovery writer command set:
+            **{m['reference_recovery_writer_protocol_available']}**
+          - full read-only stock backup command:
+            **{m['pure_read_only_stock_backup_proven']}**
+          - stock backup completed:
+            **{m['stock_backup_completed']}**
+          - production flash layout:
+            **{m['production_flash_layout_proven']}**
+          - bootable exact-board image:
+            **{m['bootable_production_image_proven']}**
+          - rollback:
+            **{m['rollback_proven']}**
+
+          Remaining blockers:
+          {chr(10).join('- '+x for x in m['blockers'])}
+
+          Next allowed action:
+          **{m['next_allowed_action']}**
+
+          `FLASH_ALLOWED = NO`
+
+          V43 intentionally does not create or execute a destructive flasher until
+          stock preservation, exact production layout, rollback, and the USB-C-only
+          updater entry are all proven.
+
+          Classification:
+          **USB_C_ONLY_FLASH_PATH_FORENSICS_NOT_FOR_FLASH**
+          """
+
+          (ev/"13_V43_FINAL_DECISION.md").write_text(md)
+          print(md)
+          PY
+
+          python3 /tmp/v43/final.py
+          cat /tmp/v43/evidence/13_V43_FINAL_DECISION.md             >> "$GITHUB_STEP_SUMMARY"
+
+          cp /tmp/v43/evidence/* /tmp/v43/out/
+
+          (
+            cd /tmp/v43/out
+            sha256sum * > SHA256SUMS.txt
+          )
+
+      - name: Upload consolidated V43 result
+        uses: actions/upload-artifact@v7
+        with:
+          name: OKN-BP1048P4-MASTER-V43-USB-C-ONLY-FLASH-PATH-EVIDENCE
+          path: /tmp/v43/out/*
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Final fail-closed assertion
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          test "$SOLDERING_ALLOWED" = "NO"
+          test "$BOARD_MODIFICATION_ALLOWED" = "NO"
+          test "$EXTERNAL_PROGRAMMER_ALLOWED" = "NO"
+          test "$JTAG_AICE_SDP_ALLOWED" = "NO"
+          test "$NEW_LIVE_0X11_ALLOWED" = "NO"
+          test "$FEATURE_REPORT_LIVE_ALLOWED" = "NO"
+          test "$FLASH_ALLOWED" = "NO"
+          test "$ERASE_ALLOWED" = "NO"
+          test "$WRITE_ALLOWED" = "NO"
+
+          echo "MASTER_V43=PASS"
+          echo "PHYSICAL_PATH=S25_PLUS_USB_C_TO_DSP_USB_C_ONLY"
+          echo "SOLDERING=NO"
+          echo "BOARD_MODIFICATION=NO"
+          echo "NEW_LIVE_0X11_ALLOWED=NO"
+          echo "FLASH_ALLOWED=NO"
