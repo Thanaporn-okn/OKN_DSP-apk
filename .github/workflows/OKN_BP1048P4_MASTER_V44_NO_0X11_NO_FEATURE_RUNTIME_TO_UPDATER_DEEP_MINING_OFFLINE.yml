@@ -1,0 +1,465 @@
+name: OKN BP1048P4 MASTER V44 NO-0X11 NO-FEATURE RUNTIME-TO-UPDATER DEEP MINING OFFLINE
+
+"on":
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/OKN_BP1048P4_MASTER_V44_NO_0X11_NO_FEATURE_RUNTIME_TO_UPDATER_DEEP_MINING_OFFLINE.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+env:
+  V43_ARTIFACT_ID: "11301278054"
+  V34_ARTIFACT_ID: "11298706866"
+  V11_ARTIFACT_ID: "11285140065"
+  V9_3_ARTIFACT_ID: "11233786540"
+  R106_ARTIFACT_ID: "10711684891"
+  R103_ARTIFACT_ID: "10711341378"
+  R102_ARTIFACT_ID: "10708744749"
+  UPDATER_V3_ARTIFACT_ID: "11139458303"
+  RECOVERY_V13_ARTIFACT_ID: "11247972033"
+  RECOVERY_V16_ARTIFACT_ID: "11251221570"
+  RECOVERY_V17_ARTIFACT_ID: "11251820245"
+  AUTH_V28_ARTIFACT_ID: "11296454861"
+  V39_ARTIFACT_ID: "11300245374"
+
+  LIVE_DSP_ALLOWED: "NO"
+  HOST_TO_DSP_IO: "NO"
+  FEATURE_REPORT_ALLOWED: "NO"
+  STARTUP_COMMAND_ALLOWED: "NO"
+  AUTH_REPLY_ALLOWED: "NO"
+  NEW_LIVE_0X11_ALLOWED: "NO"
+  FLASH_ALLOWED: "NO"
+  ERASE_ALLOWED: "NO"
+  WRITE_ALLOWED: "NO"
+
+jobs:
+  v44:
+    name: Exhaustive offline search for non-0x11 non-Feature updater entry
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+
+    steps:
+      - name: Gate 0 - immutable safety
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$LIVE_DSP_ALLOWED" = "NO"
+          test "$HOST_TO_DSP_IO" = "NO"
+          test "$FEATURE_REPORT_ALLOWED" = "NO"
+          test "$STARTUP_COMMAND_ALLOWED" = "NO"
+          test "$AUTH_REPLY_ALLOWED" = "NO"
+          test "$NEW_LIVE_0X11_ALLOWED" = "NO"
+          test "$FLASH_ALLOWED" = "NO"
+          test "$ERASE_ALLOWED" = "NO"
+          test "$WRITE_ALLOWED" = "NO"
+
+          rm -rf /tmp/v44
+          mkdir -p /tmp/v44/{downloads,artifacts,evidence,out,corpus}
+
+          cat > /tmp/v44/evidence/00_SCOPE.txt <<'EOF'
+          REVISION=MASTER-V44
+          MODE=OFFLINE_ONLY
+          TARGET=MVSilicon BP1048P4
+          REQUIRED_PHYSICAL_PATH=Samsung Galaxy S25+ -> USB-C cable -> DSP board USB-C port only
+
+          SINGLE OBJECTIVE:
+          Find a statically proven production-runtime transition from USB 6324:1719
+          into updater/recovery/bootloader mode that does NOT require:
+          - byte 0x11 in any new live request,
+          - HID Feature reports,
+          - legacy destructive flash commands,
+          - startup/auth replay.
+
+          This workflow executes no vendor binary, performs no USB I/O, and creates
+          no live flasher. It mines prior evidence and source/disassembly text only.
+
+          FLASH_ALLOWED=NO
+          EOF
+
+      - name: Gate 1 - download exact evidence set
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          get_artifact() {
+            local id="$1"
+            local name="$2"
+            mkdir -p "/tmp/v44/artifacts/$name"
+            curl -fL --retry 5 --retry-all-errors \
+              -H "Accept: application/vnd.github+json" \
+              -H "Authorization: Bearer $GH_TOKEN" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/artifacts/${id}/zip" \
+              -o "/tmp/v44/downloads/${name}.zip"
+            unzip -q "/tmp/v44/downloads/${name}.zip" -d "/tmp/v44/artifacts/$name"
+          }
+
+          get_artifact "$V43_ARTIFACT_ID" v43
+          get_artifact "$V34_ARTIFACT_ID" v34
+          get_artifact "$V11_ARTIFACT_ID" v11
+          get_artifact "$V9_3_ARTIFACT_ID" v9_3
+          get_artifact "$R106_ARTIFACT_ID" r106
+          get_artifact "$R103_ARTIFACT_ID" r103
+          get_artifact "$R102_ARTIFACT_ID" r102
+          get_artifact "$UPDATER_V3_ARTIFACT_ID" updater_v3
+          get_artifact "$RECOVERY_V13_ARTIFACT_ID" recovery_v13
+          get_artifact "$RECOVERY_V16_ARTIFACT_ID" recovery_v16
+          get_artifact "$RECOVERY_V17_ARTIFACT_ID" recovery_v17
+          get_artifact "$AUTH_V28_ARTIFACT_ID" auth_v28
+          get_artifact "$V39_ARTIFACT_ID" v39
+
+          python3 - <<'PY'
+          from pathlib import Path
+          import zipfile
+          root=Path("/tmp/v44/artifacts")
+          seen=set()
+          for _ in range(6):
+              todo=[p for p in root.rglob("*.zip") if p not in seen]
+              if not todo:
+                  break
+              for z in todo:
+                  seen.add(z)
+                  dest=z.with_suffix(z.suffix+".unpacked")
+                  dest.mkdir(parents=True,exist_ok=True)
+                  try:
+                      with zipfile.ZipFile(z) as q:
+                          q.extractall(dest)
+                  except Exception:
+                      pass
+          print("NESTED_ZIPS",len(seen))
+          PY
+
+          find /tmp/v44/artifacts -type f -printf '%P\n' | sort \
+            > /tmp/v44/evidence/01_ARTIFACT_INVENTORY.txt
+
+      - name: Gate 2 - build provenance-preserving searchable corpus
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import subprocess, os, re, json
+
+          root=Path("/tmp/v44/artifacts")
+          out=Path("/tmp/v44/corpus/all.txt")
+          text_ext={'.txt','.md','.json','.yml','.yaml','.xml','.c','.h','.cpp','.cc',
+                    '.cs','.java','.kt','.dart','.s','.S','.asm','.lst','.map','.log',
+                    '.ini','.cfg','.cmake','.ld','.lds','.py','.sh','.ps1'}
+
+          def add(fp, mode, data):
+              with out.open('a',encoding='utf-8',errors='replace') as w:
+                  w.write(f"\n===== FILE={fp.relative_to(root)} MODE={mode} =====\n")
+                  w.write(data)
+                  if not data.endswith("\n"): w.write("\n")
+
+          for fp in sorted(p for p in root.rglob('*') if p.is_file()):
+              try:
+                  if fp.suffix in text_ext or fp.stat().st_size < 2_000_000:
+                      raw=fp.read_bytes()
+                      if b'\x00' not in raw[:4096]:
+                          try:
+                              add(fp,"TEXT",raw.decode('utf-8',errors='replace'))
+                              continue
+                          except Exception:
+                              pass
+                  for flag,name in [(['strings','-a','-n','4',str(fp)],'ASCII_STRINGS'),
+                                    (['strings','-el','-n','4',str(fp)],'UTF16LE_STRINGS')]:
+                      try:
+                          cp=subprocess.run(flag,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,
+                                            timeout=20,check=False)
+                          s=cp.stdout.decode('utf-8',errors='replace')
+                          if s.strip():
+                              add(fp,name,s)
+                      except Exception:
+                          pass
+              except Exception:
+                  pass
+
+          corpus=out.read_text(encoding='utf-8',errors='replace')
+          stats={
+              "bytes":len(corpus.encode()),
+              "lines":corpus.count("\n"),
+              "runtime_vid_6324_mentions":len(re.findall(r'6324',corpus,re.I)),
+              "runtime_pid_1719_mentions":len(re.findall(r'1719',corpus,re.I)),
+              "reference_recovery_2244_mentions":len(re.findall(r'2244',corpus,re.I)),
+              "feature_mentions":len(re.findall(r'feature',corpus,re.I)),
+              "0x11_mentions":len(re.findall(r'0x11|\\b11h\\b',corpus,re.I)),
+          }
+          Path("/tmp/v44/evidence/02_CORPUS_STATS.json").write_text(json.dumps(stats,indent=2)+"\n")
+          print(json.dumps(stats,indent=2))
+          PY
+
+      - name: Gate 3 - recover control-dispatch and boot-transition candidates
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import re, json
+
+          corpus=Path("/tmp/v44/corpus/all.txt").read_text(encoding='utf-8',errors='replace')
+
+          # Keep exact contexts for human review. These are offline text matches only.
+          terms=[
+            r'UsbLoadAudioMode', r'Communication_Effect', r'start_up_grate',
+            r'start_up_grade', r'pc_upgrade', r'FLASH_BOOT_EN',
+            r'bootloader', r'boot loader', r'upgrade mode', r'updater',
+            r'watchdog', r'wdt', r'softreset', r'soft_reset', r'systemreset',
+            r'system_reset', r'reboot', r'jump.*boot', r'boot.*jump',
+            r'enter.*upgrade', r'enter.*boot', r'enter.*loader',
+            r'HID.*SET_REPORT', r'SET_REPORT.*HID'
+          ]
+
+          hits=[]
+          for pat in terms:
+              for m in re.finditer(pat,corpus,re.I):
+                  a=max(0,m.start()-900); b=min(len(corpus),m.end()+1400)
+                  ctx=corpus[a:b]
+                  hits.append({"term":pat,"context":ctx})
+
+          # De-duplicate near-identical contexts.
+          uniq=[]
+          seen=set()
+          for h in hits:
+              key=re.sub(r'\s+',' ',h["context"])[:700]
+              if key in seen: continue
+              seen.add(key); uniq.append(h)
+
+          Path("/tmp/v44/evidence/03_BOOT_TRANSITION_CONTEXTS.txt").write_text(
+              "\n\n".join(f"=== TERM {h['term']} ===\n{h['context']}" for h in uniq),
+              encoding='utf-8'
+          )
+
+          # Direct control-opcode cases in C/C-like source.
+          cases=[]
+          for m in re.finditer(r'case\s+(0x[0-9A-Fa-f]{1,2}|\d+)\s*:',corpus):
+              token=m.group(1)
+              try: op=int(token,0)
+              except: continue
+              a=m.start(); b=min(len(corpus),a+2200)
+              ctx=corpus[a:b]
+              boot=bool(re.search(r'boot|upgrade|loader|start_up_grate|pc_upgrade|reset|watchdog|wdt',ctx,re.I))
+              feature=bool(re.search(r'feature|SET_REPORT|GET_REPORT',ctx,re.I))
+              destructive=bool(re.search(r'chiperas|codedata|bootdat|constdat|cnfgdat|btupdat|upinfo|cxxx|FlashChipErase|FlashSectorErase',ctx,re.I))
+              cases.append({
+                  "opcode":op,
+                  "opcode_hex":f"0x{op:02X}",
+                  "boot_or_upgrade_term_in_context":boot,
+                  "feature_term_in_context":feature,
+                  "destructive_term_in_context":destructive,
+                  "new_live_0x11_forbidden": op==0x11,
+                  "context":ctx[:2200],
+              })
+
+          # Conservative candidate: direct opcode context indicates boot/upgrade, and
+          # the same local context has no Feature/destructive term, and opcode != 0x11.
+          candidates=[c for c in cases if c["boot_or_upgrade_term_in_context"]
+                      and not c["feature_term_in_context"]
+                      and not c["destructive_term_in_context"]
+                      and c["opcode"] != 0x11]
+
+          Path("/tmp/v44/evidence/04_CONTROL_OPCODE_CASES.json").write_text(
+              json.dumps(cases,indent=2,ensure_ascii=False)+"\n")
+          Path("/tmp/v44/evidence/05_NON_0X11_NON_FEATURE_DIRECT_CANDIDATES.json").write_text(
+              json.dumps(candidates,indent=2,ensure_ascii=False)+"\n")
+
+          print("CONTROL_CASES",len(cases))
+          print("DIRECT_CANDIDATES",len(candidates))
+          PY
+
+      - name: Gate 4 - MVAssistant and Windows packet-builder transition census
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import re, json
+
+          corpus=Path("/tmp/v44/corpus/all.txt").read_text(encoding='utf-8',errors='replace')
+          needles=[
+            "6324","1719","2244","0000:2244","6324:1719",
+            "pc_upgrade","start_up_grate","FLASH_BOOT_EN",
+            "SetFeature","GetFeature","SET_REPORT","GET_REPORT",
+            "recovery","bootloader","updater","upgrade","reset","reboot",
+            "chiperas","codedata","bootdat","constdat","cnfgdat","btupdat","upinfo","cxxx"
+          ]
+          census={}
+          for n in needles:
+              census[n]=len(re.findall(re.escape(n),corpus,re.I))
+
+          # Extract lines that mention a mode/identity transition without immediately
+          # containing the known forbidden mechanisms. This is discovery only, not proof.
+          lines=corpus.splitlines()
+          discovery=[]
+          for i,line in enumerate(lines):
+              if re.search(r'bootloader|recovery|upgrade mode|updater|re-enumer|reenumer|VID|PID|2244',line,re.I):
+                  ctx="\n".join(lines[max(0,i-4):min(len(lines),i+5)])
+                  if not re.search(r'0x11|Feature|SetFeature|GetFeature|chiperas|codedata|bootdat|constdat|cnfgdat|btupdat|upinfo|cxxx',ctx,re.I):
+                      discovery.append(ctx)
+
+          # unique
+          seen=set(); unique=[]
+          for x in discovery:
+              k=re.sub(r'\s+',' ',x)
+              if k in seen: continue
+              seen.add(k); unique.append(x)
+
+          result={
+              "term_census":census,
+              "discovery_context_count":len(unique),
+              "discovery_contexts":unique[:300],
+              "classification":"DISCOVERY_ONLY_NOT_PROOF"
+          }
+          Path("/tmp/v44/evidence/06_PACKET_BUILDER_TRANSITION_CENSUS.json").write_text(
+              json.dumps(result,indent=2,ensure_ascii=False)+"\n")
+          PY
+
+      - name: Gate 5 - reconcile with V43 hard blockers
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import json, re
+
+          root=Path("/tmp/v44/artifacts")
+          v43=None
+          for p in root.rglob("11_ANDROID_USB_C_FLASH_MATRIX.json"):
+              try:
+                  d=json.loads(p.read_text())
+                  if d.get("physical_path","").startswith("Samsung Galaxy S25+"):
+                      v43=d; break
+              except Exception: pass
+          if v43 is None:
+              raise SystemExit("V43 matrix not found")
+
+          candidates=json.loads(Path("/tmp/v44/evidence/05_NON_0X11_NON_FEATURE_DIRECT_CANDIDATES.json").read_text())
+          census=json.loads(Path("/tmp/v44/evidence/06_PACKET_BUILDER_TRANSITION_CENSUS.json").read_text())
+
+          # IMPORTANT: local text proximity is not enough to prove production behavior.
+          # A candidate is only promoted if evidence also explicitly states all required
+          # production conditions. We deliberately require exact phrases; otherwise fail closed.
+          corpus=Path("/tmp/v44/corpus/all.txt").read_text(encoding='utf-8',errors='replace')
+          exact_proof_phrases=[
+              "production runtime to updater entry proven",
+              "production runtime -> updater entry proven",
+              "6324:1719 to 0000:2244 proven",
+              "runtime-to-recovery transition proven"
+          ]
+          explicit_prod_proof=any(p in corpus.lower() for p in exact_proof_phrases)
+
+          direct_candidate_count=len(candidates)
+          production_safe_entry_proven=bool(direct_candidate_count and explicit_prod_proof)
+
+          result={
+              "v43_next_allowed_action":v43.get("next_allowed_action"),
+              "v43_runtime_to_updater_entry_no_0x11_no_feature_proven":
+                  v43.get("runtime_to_updater_entry_no_0x11_no_feature_proven"),
+              "direct_non_0x11_non_feature_candidate_count":direct_candidate_count,
+              "explicit_production_transition_proof_phrase_present":explicit_prod_proof,
+              "production_safe_runtime_to_updater_entry_proven":production_safe_entry_proven,
+              "feature_report_live_allowed":False,
+              "new_live_0x11_allowed":False,
+              "flash_allowed":False
+          }
+          Path("/tmp/v44/evidence/07_RECONCILIATION.json").write_text(
+              json.dumps(result,indent=2)+"\n")
+          print(json.dumps(result,indent=2))
+          PY
+
+      - name: Gate 6 - final decision
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import json
+
+          rec=json.loads(Path("/tmp/v44/evidence/07_RECONCILIATION.json").read_text())
+          packet=json.loads(Path("/tmp/v44/evidence/06_PACKET_BUILDER_TRANSITION_CENSUS.json").read_text())
+
+          proven=bool(rec["production_safe_runtime_to_updater_entry_proven"])
+
+          if proven:
+              status="STATIC_PRODUCTION_ENTRY_CANDIDATE_FOUND_REQUIRES_INDEPENDENT_REVIEW_BEFORE_ANY_LIVE_USE"
+              next_action="INDEPENDENT_OFFLINE_REVIEW_OF_EXACT_FRAME_AND_CALL_PATH"
+          else:
+              status="NO_PRODUCTION_SAFE_NO_0X11_NO_FEATURE_RUNTIME_TO_UPDATER_ENTRY_PROVEN"
+              next_action="OFFLINE_EXPAND_VENDOR_NATIVE_XREF_OR_OBTAIN_OFFICIAL_PRODUCTION_UPDATER_EVIDENCE"
+
+          final={
+              "revision":"MASTER-V44",
+              "production_safe_runtime_to_updater_entry_proven":proven,
+              "direct_candidate_count":rec["direct_non_0x11_non_feature_candidate_count"],
+              "discovery_context_count":packet["discovery_context_count"],
+              "new_live_0x11_allowed":False,
+              "feature_report_live_allowed":False,
+              "host_to_dsp_io":False,
+              "flash_allowed":False,
+              "status":status,
+              "next_allowed_action":next_action
+          }
+          Path("/tmp/v44/evidence/08_V44_FINAL_DECISION.json").write_text(
+              json.dumps(final,indent=2)+"\n")
+
+          md=f"""# MASTER V44 FINAL DECISION
+
+          Scope: exhaustive OFFLINE search for a production runtime (`6324:1719`)
+          transition into updater/recovery that does **not** use byte `0x11`
+          and does **not** use HID Feature reports.
+
+          - direct non-0x11/non-Feature control candidates found: **{final['direct_candidate_count']}**
+          - production-safe runtime -> updater entry proven: **{final['production_safe_runtime_to_updater_entry_proven']}**
+          - discovery-only transition contexts: **{final['discovery_context_count']}**
+          - new live byte 0x11 allowed: **NO**
+          - Feature report live use: **NO**
+          - host-to-DSP I/O in this workflow: **NO**
+          - flash/erase/write: **NO / NO / NO**
+          - `FLASH_ALLOWED = NO`
+
+          Status:
+          **{status}**
+
+          Next allowed action:
+          **{next_action}**
+
+          V44 does not create an APK or flasher and does not promote a text/nearby
+          match into production proof. Any candidate must still have an exact frame,
+          exact call path, exact production identity transition, and independent
+          offline review before live testing can even be considered.
+          """
+          Path("/tmp/v44/evidence/09_V44_FINAL_DECISION.md").write_text(md)
+          print(md)
+          PY
+
+          cp /tmp/v44/evidence/* /tmp/v44/out/
+          (cd /tmp/v44/out && sha256sum * > SHA256SUMS.txt)
+
+      - name: Upload V44 consolidated evidence
+        uses: actions/upload-artifact@v7
+        with:
+          name: OKN-BP1048P4-MASTER-V44-NO-0X11-NO-FEATURE-UPDATER-ENTRY-EVIDENCE
+          path: /tmp/v44/out/*
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Final fail-closed assertion
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$LIVE_DSP_ALLOWED" = "NO"
+          test "$HOST_TO_DSP_IO" = "NO"
+          test "$FEATURE_REPORT_ALLOWED" = "NO"
+          test "$NEW_LIVE_0X11_ALLOWED" = "NO"
+          test "$FLASH_ALLOWED" = "NO"
+          test "$ERASE_ALLOWED" = "NO"
+          test "$WRITE_ALLOWED" = "NO"
+          grep -q '"flash_allowed": false' /tmp/v44/evidence/08_V44_FINAL_DECISION.json
+          echo "MASTER_V44=PASS"
+          echo "FLASH_ALLOWED=NO"
