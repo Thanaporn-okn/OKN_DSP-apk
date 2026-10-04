@@ -1,0 +1,299 @@
+name: OKN BP1048P4 MASTER V21 AUTH NONLINEAR EXACT METHOD RECOVERY
+
+"on":
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  GOLOPINE_WINDOWS_URL: "https://golodsp.com/wp-content/uploads/2026/05/golopine_audio_turning_release_2026-04-08.exe_.zip"
+  EXPECTED_VENDOR_SHA256: "3ca54171c53f7badd963ffe6851b8b3e2faf8aee8ba2afcb7040990e22ae09b2"
+  LIVE_DSP_CONNECTED: "NO"
+  USB_TARGET_ACCESS: "NO"
+  HOST_TO_DSP_IO: "NO"
+  REAL_HID_IO: "NO"
+  FEATURE_REPORT_ALLOWED: "NO"
+  FLASH_ALLOWED: "NO"
+  ERASE_ALLOWED: "NO"
+  WRITE_ALLOWED: "NO"
+
+jobs:
+  master-v21:
+    name: Recover exact managed auth path OFFLINE - no USB - no flash
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Immutable safety gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          for n in LIVE_DSP_CONNECTED USB_TARGET_ACCESS HOST_TO_DSP_IO REAL_HID_IO FEATURE_REPORT_ALLOWED FLASH_ALLOWED ERASE_ALLOWED WRITE_ALLOWED; do
+            test "${!n}" = "NO"
+          done
+          rm -rf /tmp/v21
+          mkdir -p /tmp/v21/{download,pkg,tools,evidence,out}
+          cat > /tmp/v21/evidence/00_V21_SAFETY_AND_INPUT.txt <<'EOF'
+          MODE=OFFLINE_MANAGED_AUTH_METHOD_RECOVERY
+          SOURCE=OFFICIAL_GOLOPINE_WINDOWS_CLIENT_2026_04_08
+          BASELINE_CHALLENGE=D024E38C410000004202B94C65A23F2C640C8F60E133784C7E47463A7A521056
+          BASELINE_AUTH_REPLY=3A5BADF3
+          V20_SINGLE_BIT_VALID=256/256
+          V20_MULTIBIT_AFFINE_MATCH=0/64
+          V20_STATUS=AUTH_TRANSFORM_NONLINEAR_OR_STATEFUL_MORE_OFFLINE_RECOVERY_REQUIRED
+          BOARD_USB_ACCESSED=NO
+          HOST_TO_DSP_IO=NO
+          REAL_HID_IO=NO
+          FLASH_ALLOWED=NO
+          EOF
+
+      - name: Acquire exact official vendor binary and pin SHA256
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 6 --retry-all-errors --connect-timeout 20 --max-time 300 \
+            "$GOLOPINE_WINDOWS_URL" -o /tmp/v21/download/vendor.zip
+          unzip -q /tmp/v21/download/vendor.zip -d /tmp/v21/pkg
+
+          EXE="$(find /tmp/v21/pkg -type f -iname '*.exe' ! -path '*/__MACOSX/*' -printf '%s %p\n' | sort -nr | head -1 | cut -d' ' -f2-)"
+          test -n "$EXE"
+          cp "$EXE" /tmp/v21/vendor.exe
+
+          ACTUAL_SHA="$(sha256sum /tmp/v21/vendor.exe | awk '{print $1}')"
+          test "$ACTUAL_SHA" = "$EXPECTED_VENDOR_SHA256"
+          {
+            echo "SHA256=$ACTUAL_SHA"
+            echo "BYTES=$(stat -c %s /tmp/v21/vendor.exe)"
+            echo "VENDOR_BINARY_EXECUTED=NO"
+            echo "BOARD_USB_ACCESSED=NO"
+          } | tee /tmp/v21/evidence/01_VENDOR_PIN.txt
+
+      - name: Install ILSpy static decompiler
+        shell: bash
+        run: |
+          set -euo pipefail
+          dotnet tool install ilspycmd --tool-path /tmp/v21/tools
+          /tmp/v21/tools/ilspycmd --version | tee /tmp/v21/evidence/02_ILSPY_VERSION.txt
+
+      - name: Decompile only UFEcommandBridge type to C sharp and IL
+        shell: bash
+        run: |
+          set -euo pipefail
+          TYPE='DSTech_AudioDSP_Client.UFEcommandBridge'
+          TOOL=/tmp/v21/tools/ilspycmd
+
+          "$TOOL" -t "$TYPE" /tmp/v21/vendor.exe \
+            > /tmp/v21/evidence/03_UFECOMMANDBRIDGE_CSHARP.txt 2>&1
+
+          if ! "$TOOL" -il -t "$TYPE" /tmp/v21/vendor.exe \
+            > /tmp/v21/evidence/04_UFECOMMANDBRIDGE_IL.txt 2>&1; then
+            "$TOOL" --ilcode -t "$TYPE" /tmp/v21/vendor.exe \
+              > /tmp/v21/evidence/04_UFECOMMANDBRIDGE_IL.txt 2>&1
+          fi
+
+          grep -Fq 'FBL3HEmTva' /tmp/v21/evidence/03_UFECOMMANDBRIDGE_CSHARP.txt \
+            || grep -Fq 'FBL3HEmTva' /tmp/v21/evidence/04_UFECOMMANDBRIDGE_IL.txt
+          grep -Fq 'SendDevTypeSwVersAuthenRequest' /tmp/v21/evidence/03_UFECOMMANDBRIDGE_CSHARP.txt \
+            || grep -Fq 'SendDevTypeSwVersAuthenRequest' /tmp/v21/evidence/04_UFECOMMANDBRIDGE_IL.txt
+
+      - name: Extract auth roots helper callgraph constants and nonlinear evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > /tmp/v21/extract_auth.py <<'PY'
+          from pathlib import Path
+          import re, json, hashlib
+
+          root=Path('/tmp/v21')
+          ev=root/'evidence'
+          cs=(ev/'03_UFECOMMANDBRIDGE_CSHARP.txt').read_text(errors='ignore')
+          il=(ev/'04_UFECOMMANDBRIDGE_IL.txt').read_text(errors='ignore')
+          cs_lines=cs.splitlines()
+          il_lines=il.splitlines()
+
+          roots=['FBL3HEmTva','SendDevTypeSwVersAuthenRequest']
+
+          def contexts(lines, needle, before, after, limit=8):
+              hits=[i for i,x in enumerate(lines) if needle in x]
+              out=[]
+              for i in hits[:limit]:
+                  a=max(0,i-before); b=min(len(lines),i+after)
+                  out.append(
+                      f'===== {needle} hit={i+1} range={a+1}-{b} =====\n' +
+                      '\n'.join(f'{j+1:06d}: {lines[j]}' for j in range(a,b))
+                  )
+              return '\n\n'.join(out)
+
+          chunks=[]
+          for n in roots:
+              chunks.append(contexts(il_lines,n,120,700))
+              chunks.append(contexts(cs_lines,n,80,520))
+          (ev/'05_AUTH_ROOT_CONTEXTS.txt').write_text('\n\n'.join(chunks))
+
+          fbl=context=contexts(il_lines,'FBL3HEmTva',100,1000,limit=4)
+          call_lines=[]
+          helper_names=[]
+          for line in context.splitlines():
+              if re.search(r'\b(call|callvirt|newobj)\b', line):
+                  call_lines.append(line)
+                  m=re.search(r'::([A-Za-z0-9_$<>.=]+)\s*\(', line)
+                  if m:
+                      name=m.group(1)
+                      if name not in helper_names:
+                          helper_names.append(name)
+                  for q in re.findall(r"'([^']+)'", line):
+                      if q not in helper_names:
+                          helper_names.append(q)
+
+          reject_prefix=('get_','set_','ToString','Write','Read','Add','Clear','Invoke','BeginInvoke','EndInvoke')
+          helpers=[]
+          for n in helper_names:
+              if not n or n in roots or n.startswith(reject_prefix):
+                  continue
+              if n not in helpers:
+                  helpers.append(n)
+
+          helper_context=[]
+          kept=[]
+          for n in helpers[:160]:
+              hits=[i for i,x in enumerate(il_lines) if n in x]
+              if not hits:
+                  continue
+              kept.append(n)
+              for i in hits[:4]:
+                  a=max(0,i-60); b=min(len(il_lines),i+320)
+                  helper_context.append(
+                      f'===== HELPER {n} line={i+1} =====\n' +
+                      '\n'.join(f'{j+1:06d}: {il_lines[j]}' for j in range(a,b))
+                  )
+
+          (ev/'06_AUTH_ROOT_CALLS.txt').write_text('\n'.join(call_lines)+'\n')
+          (ev/'07_AUTH_HELPER_CONTEXTS.txt').write_text('\n\n'.join(helper_context))
+
+          combined='\n'.join([context]+helper_context)
+          terms=[
+              'System.Security.Cryptography','MD5','SHA1','SHA256','SHA512',
+              'Aes','Rijndael','DES','HMAC','CRC','BitConverter','BlockCopy',
+              'Random','Guid','DateTime','Environment.TickCount'
+          ]
+          crypto_hits=[]
+          for t in terms:
+              n=combined.lower().count(t.lower())
+              if n:
+                  crypto_hits.append({'term':t,'count':n})
+
+          opcode_patterns={
+              'xor':r'\bxor\b', 'and':r'\band\b', 'or':r'\bor\b',
+              'shl':r'\bshl\b', 'shr':r'\bshr(?:\.un)?\b',
+              'add':r'\badd(?:\.ovf(?:\.un)?)?\b',
+              'sub':r'\bsub(?:\.ovf(?:\.un)?)?\b',
+              'mul':r'\bmul(?:\.ovf(?:\.un)?)?\b',
+              'div':r'\bdiv(?:\.un)?\b', 'rem':r'\brem(?:\.un)?\b',
+              'switch':r'\bswitch\b', 'ldelem':r'\bldelem', 'stelem':r'\bstelem',
+              'branch':r'\bbr(?:true|false|\.s|true\.s|false\.s)?\b'
+          }
+          opcode_census={k:len(re.findall(p,combined,re.I)) for k,p in opcode_patterns.items()}
+
+          constants=[]
+          for line in combined.splitlines():
+              if re.search(r'\bldc\.i4(?:\.s)?\b|\bldc\.i4\.',line):
+                  s=line.strip()
+                  if s not in constants:
+                      constants.append(s)
+
+          keyword_re=re.compile(
+              r'auth|challenge|verify|token|nonce|encrypt|decrypt|hash|crc|md5|sha|aes|rijndael|des|cipher',
+              re.I
+          )
+          keyword_context=[]
+          for i,line in enumerate(il_lines):
+              if keyword_re.search(line):
+                  a=max(0,i-8); b=min(len(il_lines),i+14)
+                  keyword_context.append(
+                      '\n'.join(f'{j+1:06d}: {il_lines[j]}' for j in range(a,b))
+                  )
+          (ev/'08_AUTH_KEYWORD_CONTEXTS.txt').write_text('\n\n'.join(keyword_context[:500]))
+
+          roots_found={n:(n in cs or n in il) for n in roots}
+          model={
+              'revision':'MASTER-V21',
+              'vendor_sha256':hashlib.sha256((root/'vendor.exe').read_bytes()).hexdigest(),
+              'required_roots_found':roots_found,
+              'root_call_instruction_count':len(call_lines),
+              'local_helper_candidates':kept,
+              'local_helper_candidate_count':len(kept),
+              'crypto_framework_hits':crypto_hits,
+              'opcode_census':opcode_census,
+              'constant_instruction_samples':constants[:800],
+              'v20_single_bit_valid':'256/256',
+              'v20_affine_multibit_match':'0/64',
+              'v20_affine_model_valid':False,
+              'real_hid_invoked':False,
+              'host_to_dsp_io':False,
+              'flash_allowed':False,
+          }
+          recovered=all(roots_found.values()) and len(call_lines)>0
+          model['exact_managed_auth_callgraph_extracted']=recovered
+          model['next']='PORT_EXACT_AUTH_TRANSFORM_TO_OFFLINE_VECTOR_HARNESS'
+          (ev/'09_V21_AUTH_METHOD_MODEL.json').write_text(json.dumps(model,indent=2)+'\n')
+
+          result='EXACT_MANAGED_AUTH_CALLGRAPH_EXTRACTED' if recovered else 'MORE_STATIC_METHOD_RECOVERY_REQUIRED'
+          md=f'''# MASTER V21 FINAL DECISION
+
+          - Official vendor SHA pinned: **YES**
+          - FBL3HEmTva found: **{roots_found['FBL3HEmTva']}**
+          - SendDevTypeSwVersAuthenRequest found: **{roots_found['SendDevTypeSwVersAuthenRequest']}**
+          - Root call/newobj instructions captured: **{len(call_lines)}**
+          - Local helper candidates extracted: **{len(kept)}**
+          - Crypto/framework markers: **{crypto_hits}**
+          - Opcode census: **{opcode_census}**
+          - V20 affine/XOR model accepted: **NO**
+          - Real HID invoked: **NO**
+          - Host-to-DSP I/O: **NO**
+          - Flash allowed: **NO**
+
+          Result: **{result}**
+
+          Next gate: recover/port only the exact auth-transform path and prove it against
+          baseline challenge -> 3A5BADF3 plus additional vendor-oracle vectors offline.
+
+          Classification: **OFFLINE_AUTH_REVERSE_EVIDENCE_NOT_FOR_FLASH**
+          '''
+          (ev/'10_V21_FINAL_DECISION.md').write_text(md)
+          print(md)
+          PY
+
+          python3 /tmp/v21/extract_auth.py
+          cat /tmp/v21/evidence/10_V21_FINAL_DECISION.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Package evidence and final fail-closed assertion
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          d=json.load(open('/tmp/v21/evidence/09_V21_AUTH_METHOD_MODEL.json'))
+          assert d['vendor_sha256']=='3ca54171c53f7badd963ffe6851b8b3e2faf8aee8ba2afcb7040990e22ae09b2'
+          assert d['real_hid_invoked'] is False
+          assert d['host_to_dsp_io'] is False
+          assert d['flash_allowed'] is False
+          PY
+
+          cp /tmp/v21/evidence/* /tmp/v21/out/
+          test ! -e /tmp/v21/out/vendor.exe
+          test ! -e /tmp/v21/out/vendor.zip
+          (cd /tmp/v21/out && sha256sum * > SHA256SUMS.txt)
+          echo 'MASTER_V21=PASS'
+          echo 'FLASH_ALLOWED=NO'
+
+      - name: Upload V21 evidence
+        uses: actions/upload-artifact@v7
+        with:
+          name: OKN-BP1048P4-MASTER-V21-AUTH-NONLINEAR-EXACT-METHOD-RECOVERY-EVIDENCE
+          path: /tmp/v21/out/*
+          if-no-files-found: error
+          retention-days: 90
