@@ -1,0 +1,131 @@
+name: OKN Cleanup - Keep V31 V32 AutoBuild
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/OKN_CLEANUP_KEEP_V31_V32_AUTOBUILD_V3.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  cleanup:
+    name: Remove superseded DSP workflows
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 1
+
+      - name: Verify keepers
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          KEEPERS=(
+            ".github/workflows/OKN_BP1048P4_MASTER_V31_FULL_DEVICE_DESCRIPTION_CAPTURE_S25_USB_C_ONLY.yml"
+            ".github/workflows/OKN_BP1048P4_MASTER_V32_FULL_V31_DEVICE_DESCRIPTION_PARSE_OFFLINE.yml"
+            ".github/workflows/OKN_DSP_AutoBuild.yml"
+          )
+
+          for f in "${KEEPERS[@]}"; do
+            test -f "$f" || {
+              echo "ERROR: required keeper is missing: $f"
+              exit 1
+            }
+            echo "KEEP: $f"
+          done
+
+      - name: Delete superseded workflows
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          DELETE_FILES=(
+            ".github/workflows/OKN_BP1048P4_MASTER_V24_AUTH_CORE_EXITFIX_CALLGRAPH_S25_USB_C_ONLY.yml"
+            ".github/workflows/OKN_BP1048P4_MASTER_V25_AUTH_WRITE_STACKTRACE_JIT_S25_USB_C_ONLY.yml"
+            ".github/workflows/OKN_BP1048P4_MASTER_V25_CROSS_SESSION_CHALLENGE_CAPTURE_S25_USB_C_ONLY.yml"
+            ".github/workflows/OKN_BP1048P4_MASTER_V26_V25_CHALLENGE_OFFLINE_VENDOR_PARSER_ORACLE.yml"
+            ".github/workflows/OKN_BP1048P4_MASTER_V27_AUTH_REPLY_TRANSPORT_FRAMING_PROOF_OFFLINE.yml"
+            ".github/workflows/OKN_BP1048P4_MASTER_V28_FIXED_V2_RUNTIME_TRANSPORT_METHOD_DISCOVERY_JIT_OFFLINE.yml"
+            ".github/workflows/OKN_BP1048P4_MASTER_V28_USBHID_HIDINTERFACE_JIT_FRAMING_RECOVERY_OFFLINE.yml"
+            ".github/workflows/OKN_BP1048P4_MASTER_V29_SAME_SESSION_S25_AUTH_DEVICE_DESCRIPTION_GATE.yml"
+            ".github/workflows/OKN_BP1048P4_MASTER_V30_REPLAY_V29_POST_AUTH_STREAM_VENDOR_PARSER_OFFLINE.yml"
+          )
+
+          for f in "${DELETE_FILES[@]}"; do
+            if [[ -e "$f" ]]; then
+              echo "DELETE: $f"
+              rm -f -- "$f"
+            else
+              echo "SKIP (already missing): $f"
+            fi
+          done
+
+      - name: Remove this one-shot workflow
+        shell: bash
+        run: |
+          set -euo pipefail
+          SELF=".github/workflows/OKN_CLEANUP_KEEP_V31_V32_AUTOBUILD_V3.yml"
+          if [[ -e "$SELF" ]]; then
+            echo "DELETE SELF: $SELF"
+            rm -f -- "$SELF"
+          fi
+
+      - name: Final safety verification
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          EXPECTED=(
+            "OKN_BP1048P4_MASTER_V31_FULL_DEVICE_DESCRIPTION_CAPTURE_S25_USB_C_ONLY.yml"
+            "OKN_BP1048P4_MASTER_V32_FULL_V31_DEVICE_DESCRIPTION_PARSE_OFFLINE.yml"
+            "OKN_DSP_AutoBuild.yml"
+          )
+
+          mapfile -t REMAINING < <(
+            find .github/workflows -maxdepth 1 -type f \
+              \( -name '*.yml' -o -name '*.yaml' \) \
+              -printf '%f\n' | sort
+          )
+
+          echo "Remaining workflows:"
+          printf '  %s\n' "${REMAINING[@]}"
+
+          if (( ${#REMAINING[@]} != 3 )); then
+            echo "ERROR: expected exactly 3 workflow files; found ${#REMAINING[@]}"
+            echo "Cleanup will NOT be pushed."
+            exit 1
+          fi
+
+          for name in "${EXPECTED[@]}"; do
+            printf '%s\n' "${REMAINING[@]}" | grep -Fxq "$name" || {
+              echo "ERROR: expected workflow missing: $name"
+              exit 1
+            }
+          done
+
+          echo
+          echo "Git changes:"
+          git status --short
+
+      - name: Commit and push cleanup
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if git diff --quiet && git diff --cached --quiet; then
+            echo "No changes to commit."
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add -A .github/workflows
+          git commit -m "cleanup: keep V31 V32 and AutoBuild only"
+          git push origin "HEAD:${GITHUB_REF_NAME}"
