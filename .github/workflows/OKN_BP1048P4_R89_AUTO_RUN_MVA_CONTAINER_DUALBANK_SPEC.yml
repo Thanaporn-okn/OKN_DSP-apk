@@ -1,0 +1,534 @@
+name: OKN BP1048P4 R89 AUTO-RUN MVA Container and Dual-Bank Spec
+
+on:
+  push:
+    branches: [main, master]
+    paths:
+      - '.github/workflows/OKN_BP1048P4_R89_AUTO_RUN_MVA_CONTAINER_DUALBANK_SPEC.yml'
+      - '**/*.mva'
+      - '**/*.MVA'
+      - '**/*.bin'
+      - '**/*.img'
+      - '**/*.fw'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: read
+
+concurrency:
+  group: okn-r89-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  SDK_REPO: "https://github.com/leadercxn/bp1048_sdk_v0.1.12.git"
+  SDK_COMMIT: "8105bd864b04995d81c9f9ae77cb158259f39015"
+  OUT: "/tmp/r89"
+  BOARD_USB_ACCESS: "NO"
+  HOST_TO_DEVICE_USB: "NO"
+  FLASH_ERASE_WRITE: "NO"
+  FLASH_ALLOWED: "NO"
+
+jobs:
+  analyze:
+    name: Recover MVA container + BP1048P4 dual-bank layout / OFFLINE ONLY
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Fail-closed scope gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$BOARD_USB_ACCESS" = "NO"
+          test "$HOST_TO_DEVICE_USB" = "NO"
+          test "$FLASH_ERASE_WRITE" = "NO"
+          test "$FLASH_ALLOWED" = "NO"
+          rm -rf "$OUT"
+          mkdir -p "$OUT/evidence"
+          cat > "$OUT/evidence/00_SCOPE.txt" <<'EOF'
+          REVISION=R89
+          MODE=OFFLINE_STATIC_ONLY
+          TARGET=MVSilicon_BP1048P4
+          BOARD_USB_ACCESS=NO
+          LIVE_USB_COMMANDS=NO
+          AA55_RETEST=NO
+          CONTROL_0X11_LIVE=NO
+          ERASE=NO
+          WRITE=NO
+          FLASH_ALLOWED=NO
+          GOAL=Recover_MVA_container_crc_dualbank_and_BP1048P4_reference_flash_layout
+          EOF
+
+      - name: Pin exact SDK
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone -q "$SDK_REPO" "$OUT/sdk"
+          git -C "$OUT/sdk" checkout -q "$SDK_COMMIT"
+          test "$(git -C "$OUT/sdk" rev-parse HEAD)" = "$SDK_COMMIT"
+          printf 'SDK_COMMIT=%s\n' "$(git -C "$OUT/sdk" rev-parse HEAD)" \
+            > "$OUT/evidence/01_PIN.txt"
+
+      - name: Recover exact reference layout and MVA rules
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import os,re,json,hashlib,collections
+
+          root=Path(os.environ["OUT"])/"sdk"
+          repo=Path(os.environ["GITHUB_WORKSPACE"])
+          ev=Path(os.environ["OUT"])/"evidence"
+
+          def txt(rel):
+              p=root/rel
+              return p.read_text(errors="ignore") if p.exists() else ""
+
+          flash_rel="BT_Audio_APP/bt_audio_app_src/inc/flash_config.h"
+          boot_rel="BT_Audio_APP/bt_audio_app_src/inc/flash_boot.h"
+          obex_rel="BT_Audio_APP/bt_audio_app_src/apps/bt_obex_upgrade.c"
+          upgrade_rel="BT_Audio_APP/bt_audio_app_src/device/upgrade.c"
+
+          flash=txt(flash_rel)
+          boot=txt(boot_rel)
+          obex=txt(obex_rel)
+          upgrade=txt(upgrade_rel)
+
+          # Active BP1048P4 branch, evaluated from exact reference source.
+          layout={
+            "CODE_ADDR":0x000000,
+            "CONST_DATA_ADDR":0x198000,
+            "AUDIO_EFFECT_ADDR":0x1C8000+0x200000,
+            "FLASHFS_ADDR":0x1D0000+0x200000,
+            "USER_DATA_ADDR":0x1F0000+0x200000,
+            "BP_DATA_ADDR":0x1F3000+0x200000,
+            "BT_DATA_ADDR":0x1FB000+0x200000,
+            "USER_CONFIG_ADDR":0x1FE000+0x200000,
+            "BT_CONFIG_ADDR":0x1FF000+0x200000,
+          }
+
+          layout_rows=[]
+          for k,v in layout.items():
+              layout_rows.append({
+                "symbol":k,
+                "address":v,
+                "hex":f"0x{v:06X}",
+                "source":flash_rel,
+                "reference_only":True,
+              })
+
+          # Find literal source evidence for the active branch.
+          branch_start=flash.find("#ifdef CFG_CHIP_BP1048P4")
+          branch_end=flash.find("#else",branch_start)
+          branch=flash[branch_start:branch_end] if branch_start>=0 and branch_end>=0 else ""
+
+          # CRC rule from exact OBEX source.
+          crc_rule={
+            "algorithm":"CRC-16/CCITT style table update",
+            "polynomial":"0x1021",
+            "initial_value":"0x0000",
+            "coverage":"bytes [0 .. file_size-5], i.e. excludes final 4 bytes",
+            "trailer_length":4,
+            "trailer_byte_order":"byte0=CRC low, byte1=CRC high, byte2=0x00, byte3=0x00",
+            "stored_crc_endianness":"little-endian 16-bit",
+            "staging_offset":"0x100000",
+            "apply_call":"ROM_BankBUpgradeApply(1, FLASH_MVA_UPDATE_START_OFFSET)",
+            "source":obex_rel,
+          }
+
+          # Verify exact source markers rather than assuming.
+          assertions={
+            "cfg_chip_bp1048p4_branch_found":"#ifdef CFG_CHIP_BP1048P4" in flash,
+            "staging_offset_0x100000":"FLASH_MVA_UPDATE_START_OFFSET 0x100000" in obex,
+            "crc_table_poly_0x1021":"0x1021" in obex,
+            "crc_initial_zero":"uint16_t Crc16 = 0" in obex or "uint16_t Crc16 = 0,T" in obex,
+            "crc_excludes_last4":"MvaFileTotalSize - 4" in obex,
+            "trailer_bytes_2_3_zero":"Tmp[2] | Tmp[3]" in obex,
+            "dual_bank_apply":"ROM_BankBUpgradeApply(1, FLASH_MVA_UPDATE_START_OFFSET)" in obex,
+            "flash_boot_enabled":"#define FLASH_BOOT_EN      1" in boot,
+            "pctool_enabled":"PCTOOL_ON" in boot and "UP_PORT" in boot,
+            "judgement_standard_found":"JUDGEMENT_STANDARD" in boot,
+            "mva_header_errors_found":"MVA_HEADER_ERR" in upgrade and "MVA_MAGIC_ERR" in upgrade,
+          }
+
+          # Extract all source contexts related to MVA/boot/code/const/config/dual-bank.
+          needles=[
+            "MVA_HEADER_ERR","MVA_MAGIC_ERR","MVA_BOOT_LEN_ERR","MVA_CODE_LEN_ERR",
+            "MVA_CONST_LEN_ERR","MVA_CONFIG_LEN_ERR","MVA_CONST_OFFSET_ERR",
+            "MVA_CONFIG_OFFEST_ERR","ROM_BankBUpgradeApply",
+            "FLASH_MVA_UPDATE_START_OFFSET","JUDGEMENT_STANDARD",
+            "bootdat","codedata","constdat","cnfgdat","btupdat","upinfo","cxxx",
+            "FLASH_BOOT_EN","UP_PORT","PCTOOL_ON","CFG_CHIP_BP1048P4",
+          ]
+
+          contexts=[]
+          for p in sorted(root.rglob("*")):
+              if not p.is_file() or p.suffix.lower() not in {".c",".h",".s",".ld",".txt",".md"}:
+                  continue
+              try:
+                  lines=p.read_text(errors="ignore").splitlines()
+              except Exception:
+                  continue
+              rel=str(p.relative_to(root))
+              for i,line in enumerate(lines):
+                  hit=[n for n in needles if n.lower() in line.lower()]
+                  if not hit:
+                      continue
+                  lo=max(0,i-4); hi=min(len(lines),i+8)
+                  contexts.append({
+                    "path":rel,"line":i+1,"needles":hit,
+                    "context":"\n".join(f"{j+1}: {lines[j]}" for j in range(lo,hi))
+                  })
+
+          # Search for structs/typedefs/arrays whose names suggest MVA/update header format.
+          symbol_hits=[]
+          symbol_re=re.compile(
+            r'(?im)^\s*(?:typedef\s+)?(?:struct|union|enum)?\s*'
+            r'([A-Za-z_]\w*(?:MVA|UPDAT|UPGRADE|BOOT|HEADER|MAGIC|CRC)[A-Za-z_0-9]*)'
+          )
+          for p in sorted(root.rglob("*")):
+              if not p.is_file() or p.suffix.lower() not in {".c",".h"}:
+                  continue
+              try:t=p.read_text(errors="ignore")
+              except Exception:continue
+              rel=str(p.relative_to(root))
+              for m in symbol_re.finditer(t):
+                  symbol_hits.append({
+                    "path":rel,
+                    "line":t.count("\n",0,m.start())+1,
+                    "symbol":m.group(1),
+                    "excerpt":t[m.start():m.start()+1200],
+                  })
+
+          # CRC checker used only on repo MVA candidates.
+          table_match=re.search(
+              r'static\s+const\s+uint16_t\s+CrcCCITTTable\s*\[\s*256\s*\]\s*=\s*\{([\s\S]*?)\};',
+              obex
+          )
+          table=[]
+          if table_match:
+              table=[int(x,16) for x in re.findall(r'0x[0-9A-Fa-f]{4}',table_match.group(1))]
+
+          def crc16(data):
+              crc=0
+              for b in data:
+                  crc=((crc<<8)&0xFFFF) ^ table[((crc>>8)^b)&0xFF]
+              return crc
+
+          candidates=[]
+          for p in sorted(repo.rglob("*")):
+              if not p.is_file() or ".git" in p.parts or ".github" in p.parts:
+                  continue
+              if p.suffix.lower() != ".mva":
+                  continue
+              data=p.read_bytes()
+              row={
+                "path":str(p.relative_to(repo)),
+                "bytes":len(data),
+                "sha256":hashlib.sha256(data).hexdigest(),
+                "first64_hex":data[:64].hex().upper(),
+              }
+              if len(data)>=4 and len(table)==256:
+                  calc=crc16(data[:-4])
+                  stored=data[-4] | (data[-3]<<8)
+                  row.update({
+                    "calculated_crc16":f"0x{calc:04X}",
+                    "stored_crc16":f"0x{stored:04X}",
+                    "trailer_hex":data[-4:].hex().upper(),
+                    "trailer_reserved_zero":data[-2:]==b"\x00\x00",
+                    "crc_match":calc==stored and data[-2:]==b"\x00\x00",
+                  })
+              candidates.append(row)
+
+          # Find explicit MVA file references in source.
+          mva_literals=[]
+          lit_re=re.compile(r'["\']([^"\']*\.mva)["\']',re.I)
+          for p in sorted(root.rglob("*")):
+              if not p.is_file() or p.suffix.lower() not in {".c",".h",".txt",".md"}:
+                  continue
+              try:t=p.read_text(errors="ignore")
+              except Exception:continue
+              for m in lit_re.finditer(t):
+                  mva_literals.append({
+                    "path":str(p.relative_to(root)),
+                    "line":t.count("\n",0,m.start())+1,
+                    "literal":m.group(1),
+                  })
+
+          decision={
+            "sdk_commit":os.environ["SDK_COMMIT"],
+            "bp1048p4_reference_layout":layout_rows,
+            "crc_rule":crc_rule,
+            "assertions":assertions,
+            "source_context_count":len(contexts),
+            "header_symbol_hits":len(symbol_hits),
+            "mva_filename_literals":mva_literals,
+            "repo_mva_candidates":candidates,
+            "production_exact_layout_proven":False,
+            "production_stock_image_present":bool(candidates),
+            "production_readback_proven":False,
+            "flash_allowed":False,
+          }
+
+          (ev/"02_BP1048P4_REFERENCE_LAYOUT.json").write_text(json.dumps(layout_rows,indent=2)+'\n')
+          (ev/"03_MVA_CRC_RULE.json").write_text(json.dumps(crc_rule,indent=2)+'\n')
+          (ev/"04_SOURCE_ASSERTIONS.json").write_text(json.dumps(assertions,indent=2)+'\n')
+          (ev/"05_MVA_UPDATE_CONTEXTS.json").write_text(json.dumps(contexts,indent=2,ensure_ascii=False)+'\n')
+          (ev/"06_HEADER_SYMBOL_HITS.json").write_text(json.dumps(symbol_hits,indent=2,ensure_ascii=False)+'\n')
+          (ev/"07_MVA_FILENAME_LITERALS.json").write_text(json.dumps(mva_literals,indent=2,ensure_ascii=False)+'\n')
+          (ev/"08_REPO_MVA_CANDIDATES.json").write_text(json.dumps(candidates,indent=2,ensure_ascii=False)+'\n')
+          (ev/"09_DECISION.json").write_text(json.dumps(decision,indent=2,ensure_ascii=False)+'\n')
+
+          # Preserve focused exact source excerpts for auditing.
+          excerpts={
+            flash_rel:flash[:12000],
+            boot_rel:boot[:12000],
+            obex_rel:obex[:30000],
+            upgrade_rel:upgrade[:18000],
+          }
+          (ev/"10_FOCUSED_SOURCE_EXCERPTS.json").write_text(json.dumps(excerpts,indent=2,ensure_ascii=False)+'\n')
+
+          md=[
+            "# R89 MVA Container + BP1048P4 Dual-Bank Reference Spec","",
+            f"- SDK commit: `{os.environ['SDK_COMMIT']}`",
+            "",
+            "## BP1048P4 reference layout",
+          ]
+          for r in layout_rows:
+              md.append(f"- `{r['symbol']}` = **{r['hex']}**")
+          md += [
+            "",
+            "## MVA CRC / staging",
+            "- staging offset: `0x100000`",
+            "- CRC polynomial: `0x1021`",
+            "- CRC initial value: `0x0000`",
+            "- CRC covers every byte except the final 4 bytes",
+            "- trailer: `CRC_LO CRC_HI 00 00`",
+            "- apply call: `ROM_BankBUpgradeApply(1, FLASH_MVA_UPDATE_START_OFFSET)`",
+            "",
+            "## Repository .mva candidates",
+          ]
+          if candidates:
+              for c in candidates:
+                  md += [
+                    f"### {c['path']}",
+                    f"- bytes: {c['bytes']}",
+                    f"- SHA256: `{c['sha256']}`",
+                    f"- CRC match: `{c.get('crc_match')}`",
+                    f"- trailer: `{c.get('trailer_hex')}`",""
+                  ]
+          else:
+              md += ["- **No actual `.mva` file is present in the repository.**",""]
+
+          md += [
+            "## Gate",
+            "- All addresses are reference-SDK evidence, not proof of the exact production image/layout.",
+            "- No board USB traffic is generated.",
+            "- No update command is sent.",
+            "- No erase/write/flash is performed.",
+            "- `FLASH_ALLOWED=NO`",
+          ]
+          (ev/"11_REPORT.md").write_text("\n".join(md)+'\n')
+
+          print(json.dumps({
+            "layout":{k:f"0x{v:06X}" for k,v in layout.items()},
+            "crc_rule":crc_rule,
+            "assertions":assertions,
+            "repo_mva_candidates":len(candidates),
+            "header_symbol_hits":len(symbol_hits),
+          },indent=2))
+          PY
+
+      - name: Fail-closed safety audit
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$BOARD_USB_ACCESS" = "NO"
+          test "$HOST_TO_DEVICE_USB" = "NO"
+          test "$FLASH_ERASE_WRITE" = "NO"
+          test "$FLASH_ALLOWED" = "NO"
+          python3 - <<'PY'
+          from pathlib import Path
+          import os,json
+          ev=Path(os.environ["OUT"])/"evidence"
+          d=json.loads((ev/"09_DECISION.json").read_text())
+          assert d["production_readback_proven"] is False
+          assert d["flash_allowed"] is False
+          result={
+            "offline_static_only":True,
+            "board_usb_access":False,
+            "host_to_device_usb":False,
+            "aa55":False,
+            "control_0x11_live":False,
+            "erase":False,
+            "write":False,
+            "flash_allowed":False,
+          }
+          (ev/"12_SAFETY_AUDIT.json").write_text(json.dumps(result,indent=2)+'\n')
+          print("R89_SAFETY_AUDIT=PASS",json.dumps(result))
+          PY
+
+      - name: Build evidence bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$OUT"
+          sha256sum evidence/* > SHA256SUMS.txt
+          cp SHA256SUMS.txt evidence/
+          zip -9 -r R89_MVA_CONTAINER_DUALBANK_SPEC.zip evidence >/dev/null
+          sha256sum R89_MVA_CONTAINER_DUALBANK_SPEC.zip \
+            | tee R89_MVA_CONTAINER_DUALBANK_SPEC.zip.sha256
+
+      - name: Publish summary
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            cat "$OUT/evidence/11_REPORT.md"
+            echo
+            cat "$OUT/R89_MVA_CONTAINER_DUALBANK_SPEC.zip.sha256"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload R89 evidence
+        uses: actions/upload-artifact@v7
+        with:
+          name: R89-MVA-CONTAINER-DUALBANK-SPEC
+          path: |
+            /tmp/r89/R89_MVA_CONTAINER_DUALBANK_SPEC.zip
+            /tmp/r89/R89_MVA_CONTAINER_DUALBANK_SPEC.zip.sha256
+            /tmp/r89/evidence/**
+          if-no-files-found: error
+          retention-days: 30
+
+  diagnose-r89:
+    name: Capture R89 run diagnostics
+    if: ${{ always() }}
+    needs: analyze
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+
+      - name: Capture exact run state
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BUILD_RESULT: ${{ needs.analyze.result }}
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/r89diag
+          API="https://api.github.com/repos/$GITHUB_REPOSITORY"
+          AUTH=(-H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" -H "X-GitHub-Api-Version: 2022-11-28")
+
+          curl -fsSL "${AUTH[@]}" \
+            "$API/actions/runs/$GITHUB_RUN_ID/jobs?filter=latest&per_page=100" \
+            -o /tmp/r89diag/jobs.json
+
+          curl -fsSL "${AUTH[@]}" \
+            "$API/actions/runs/$GITHUB_RUN_ID/artifacts?per_page=100" \
+            -o /tmp/r89diag/artifacts.json
+
+          python3 - <<'PY'
+          import json,os
+          from pathlib import Path
+          jobs=json.loads(Path('/tmp/r89diag/jobs.json').read_text()).get('jobs',[])
+          build=next((x for x in jobs if x.get('name')=='Recover MVA container + BP1048P4 dual-bank layout / OFFLINE ONLY'),None)
+          report={
+            'run_id':os.environ.get('GITHUB_RUN_ID'),
+            'run_attempt':os.environ.get('GITHUB_RUN_ATTEMPT'),
+            'repository':os.environ.get('GITHUB_REPOSITORY'),
+            'head_sha':os.environ.get('GITHUB_SHA'),
+            'ref':os.environ.get('GITHUB_REF'),
+            'event':os.environ.get('GITHUB_EVENT_NAME'),
+            'build_result':os.environ.get('BUILD_RESULT'),
+            'build_job':build,
+          }
+          Path('/tmp/r89diag/summary.json').write_text(
+              json.dumps(report,indent=2,ensure_ascii=False)+'\n'
+          )
+          if build and build.get('id'):
+              Path('/tmp/r89diag/build_job_id.txt').write_text(str(build['id']))
+          PY
+
+          : > /tmp/r89diag/build-log-tail.txt
+          if [ -s /tmp/r89diag/build_job_id.txt ]; then
+            JOB_ID="$(cat /tmp/r89diag/build_job_id.txt)"
+            set +e
+            curl -fsSL "${AUTH[@]}" "$API/actions/jobs/$JOB_ID/logs" \
+              -o /tmp/r89diag/build.log
+            RC=$?
+            set -e
+            if [ "$RC" -eq 0 ]; then
+              tail -n 260 /tmp/r89diag/build.log > /tmp/r89diag/build-log-tail.txt
+            else
+              printf 'JOB_LOG_DOWNLOAD_FAILED rc=%s\n' "$RC" > /tmp/r89diag/build-log-tail.txt
+            fi
+          fi
+
+          {
+            echo '# R89 LAST GITHUB ACTIONS DIAGNOSTIC'
+            echo
+            echo "- Run ID: \`$GITHUB_RUN_ID\`"
+            echo "- Attempt: \`$GITHUB_RUN_ATTEMPT\`"
+            echo "- Event: \`$GITHUB_EVENT_NAME\`"
+            echo "- Ref: \`$GITHUB_REF\`"
+            echo "- Head SHA: \`$GITHUB_SHA\`"
+            echo "- Result: \`$BUILD_RESULT\`"
+            echo
+            echo '## Job / step metadata'
+            echo '~~~json'
+            cat /tmp/r89diag/summary.json
+            echo '~~~'
+            echo
+            echo '## Artifacts'
+            echo '~~~json'
+            cat /tmp/r89diag/artifacts.json
+            echo '~~~'
+            echo
+            echo '## Job log tail'
+            echo '~~~text'
+            cat /tmp/r89diag/build-log-tail.txt
+            echo '~~~'
+          } > /tmp/r89diag/R89_LAST_DIAGNOSTIC.md
+
+      - name: Persist diagnostic to main with race-safe rebase
+        if: ${{ github.event_name != 'pull_request' && github.ref == 'refs/heads/main' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp /tmp/r89diag/R89_LAST_DIAGNOSTIC.md .github/R89_LAST_DIAGNOSTIC.md
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add .github/R89_LAST_DIAGNOSTIC.md
+          if git diff --cached --quiet; then
+            exit 0
+          fi
+          git commit -m "Record R89 Actions diagnostic [skip ci]"
+          git fetch origin main
+          git rebase origin/main
+          git push origin HEAD:main
+
+      - name: Upload diagnostic
+        uses: actions/upload-artifact@v7
+        with:
+          name: R89-RUN-DIAGNOSTIC
+          path: |
+            /tmp/r89diag/R89_LAST_DIAGNOSTIC.md
+            /tmp/r89diag/summary.json
+            /tmp/r89diag/jobs.json
+            /tmp/r89diag/artifacts.json
+            /tmp/r89diag/build-log-tail.txt
+          if-no-files-found: error
+          retention-days: 30
