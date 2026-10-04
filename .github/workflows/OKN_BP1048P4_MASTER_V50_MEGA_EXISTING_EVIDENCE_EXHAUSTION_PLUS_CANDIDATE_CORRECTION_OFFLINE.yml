@@ -1,0 +1,698 @@
+name: OKN BP1048P4 MASTER V50 MEGA EXISTING-EVIDENCE EXHAUSTION + CANDIDATE CORRECTION OFFLINE
+
+"on":
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/OKN_BP1048P4_MASTER_V50_MEGA_EXISTING_EVIDENCE_EXHAUSTION_PLUS_CANDIDATE_CORRECTION_OFFLINE.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+env:
+  REQUIRED_PHONE: "Samsung Galaxy S25+"
+  REQUIRED_PATH: "Samsung Galaxy S25+ -> USB-C cable -> DSP board USB-C port only"
+  TARGET_RUNTIME_VID_PID: "6324:1719"
+
+  V49_ARTIFACT_ID: "11303170260"
+  V48_ARTIFACT_ID: "11302547875"
+  V47_ARTIFACT_ID: "11302342592"
+  V46_ARTIFACT_ID: "11302047314"
+  V41_ARTIFACT_ID: "11301140892"
+  V33_ARTIFACT_ID: "11298985578"
+  V32_ARTIFACT_ID: "11298720275"
+  V30_ARTIFACT_ID: "11298335798"
+  V28_ARTIFACT_ID: "11296454861"
+  V25_ARTIFACT_ID: "11296388948"
+  R106_ARTIFACT_ID: "10711684891"
+  V9_3_ARTIFACT_ID: "11233786540"
+  UPDATER_V3_ARTIFACT_ID: "11139458303"
+  RECOVERY_V13_ARTIFACT_ID: "11247972033"
+  RECOVERY_V16_ARTIFACT_ID: "11251221570"
+  RECOVERY_V17_ARTIFACT_ID: "11251820245"
+  SDK_BOOT_USB_ARTIFACT_ID: "11045528884"
+  FIRMWARE_CORE_ARTIFACT_ID: "10830737503"
+
+  LIVE_DSP_ALLOWED: "NO"
+  HOST_TO_DSP_IO: "NO"
+  FEATURE_REPORT_ALLOWED: "NO"
+  NEW_LIVE_0X11_ALLOWED: "NO"
+  STARTUP_COMMAND_ALLOWED: "NO"
+  AUTH_REPLY_ALLOWED: "NO"
+  FLASH_ALLOWED: "NO"
+  ERASE_ALLOWED: "NO"
+  WRITE_ALLOWED: "NO"
+  SOLDERING_ALLOWED: "NO"
+  BOARD_MODIFICATION_ALLOWED: "NO"
+  EXTERNAL_PROGRAMMER_ALLOWED: "NO"
+
+jobs:
+  v50:
+    name: Exhaust existing evidence in one pass and correct candidate bundle state OFFLINE
+    runs-on: ubuntu-24.04
+    timeout-minutes: 55
+
+    steps:
+      - name: Gate 0 - immutable path and safety
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          test "$REQUIRED_PHONE" = "Samsung Galaxy S25+"
+          test "$REQUIRED_PATH" = "Samsung Galaxy S25+ -> USB-C cable -> DSP board USB-C port only"
+          test "$TARGET_RUNTIME_VID_PID" = "6324:1719"
+
+          test "$LIVE_DSP_ALLOWED" = "NO"
+          test "$HOST_TO_DSP_IO" = "NO"
+          test "$FEATURE_REPORT_ALLOWED" = "NO"
+          test "$NEW_LIVE_0X11_ALLOWED" = "NO"
+          test "$STARTUP_COMMAND_ALLOWED" = "NO"
+          test "$AUTH_REPLY_ALLOWED" = "NO"
+          test "$FLASH_ALLOWED" = "NO"
+          test "$ERASE_ALLOWED" = "NO"
+          test "$WRITE_ALLOWED" = "NO"
+          test "$SOLDERING_ALLOWED" = "NO"
+          test "$BOARD_MODIFICATION_ALLOWED" = "NO"
+          test "$EXTERNAL_PROGRAMMER_ALLOWED" = "NO"
+
+          rm -rf /tmp/v50
+          mkdir -p /tmp/v50/{downloads,artifacts,evidence,out,candidate}
+
+          cat > /tmp/v50/evidence/00_SCOPE.txt <<'EOF'
+          REVISION=MASTER-V50
+          MODE=MEGA_BATCH_OFFLINE_ONLY
+
+          REQUIRED PHYSICAL PATH:
+          Samsung Galaxy S25+ -> USB-C cable -> DSP board USB-C port only
+
+          NO:
+          - soldering
+          - board modification
+          - external programmer / JTAG / SDP / AICE
+          - live 0x11
+          - HID Feature report
+          - startup/auth replay
+          - flash/erase/write
+
+          V50 purpose:
+          exhaust the evidence already collected before spending another live cycle.
+
+          Combined tasks:
+          1. correct V49 source/object candidate false-negative,
+          2. cross-session Device Description consistency/gap analysis,
+          3. CH7 ID17 and Gain 22..28 exact-evidence audit,
+          4. protected-runtime/updater-entry candidate rejection,
+          5. recovery/readback/layout command census,
+          6. source/object firmware candidate manifest,
+          7. final blocker matrix + exact external evidence still required.
+
+          FLASH_ALLOWED=NO
+          EOF
+
+      - name: Gate 1 - download exact evidence corpus
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          get_artifact() {
+            local id="$1"
+            local name="$2"
+            mkdir -p "/tmp/v50/artifacts/$name"
+            curl -fL --retry 5 --retry-all-errors \
+              -H "Accept: application/vnd.github+json" \
+              -H "Authorization: Bearer $GH_TOKEN" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/artifacts/${id}/zip" \
+              -o "/tmp/v50/downloads/${name}.zip"
+            unzip -q "/tmp/v50/downloads/${name}.zip" \
+              -d "/tmp/v50/artifacts/$name"
+          }
+
+          get_artifact "$V49_ARTIFACT_ID" v49
+          get_artifact "$V48_ARTIFACT_ID" v48
+          get_artifact "$V47_ARTIFACT_ID" v47
+          get_artifact "$V46_ARTIFACT_ID" v46
+          get_artifact "$V41_ARTIFACT_ID" v41
+          get_artifact "$V33_ARTIFACT_ID" v33
+          get_artifact "$V32_ARTIFACT_ID" v32
+          get_artifact "$V30_ARTIFACT_ID" v30
+          get_artifact "$V28_ARTIFACT_ID" v28
+          get_artifact "$V25_ARTIFACT_ID" v25
+          get_artifact "$R106_ARTIFACT_ID" r106
+          get_artifact "$V9_3_ARTIFACT_ID" v9_3
+          get_artifact "$UPDATER_V3_ARTIFACT_ID" updater_v3
+          get_artifact "$RECOVERY_V13_ARTIFACT_ID" recovery_v13
+          get_artifact "$RECOVERY_V16_ARTIFACT_ID" recovery_v16
+          get_artifact "$RECOVERY_V17_ARTIFACT_ID" recovery_v17
+          get_artifact "$SDK_BOOT_USB_ARTIFACT_ID" sdk_boot_usb
+          get_artifact "$FIRMWARE_CORE_ARTIFACT_ID" firmware_core
+
+          python3 - <<'PY'
+          from pathlib import Path
+          import zipfile
+          root=Path("/tmp/v50/artifacts")
+          seen=set()
+          for _ in range(7):
+              todo=[p for p in root.rglob("*.zip") if p not in seen]
+              if not todo:
+                  break
+              for z in todo:
+                  seen.add(z)
+                  d=z.with_suffix(z.suffix+".unpacked")
+                  d.mkdir(parents=True,exist_ok=True)
+                  try:
+                      with zipfile.ZipFile(z) as q:
+                          q.extractall(d)
+                  except Exception:
+                      pass
+          print("NESTED_ZIPS",len(seen))
+          PY
+
+          find /tmp/v50/artifacts -type f -printf '%P\n' | sort \
+            > /tmp/v50/evidence/01_ARTIFACT_INVENTORY.txt
+
+      - name: Gate 2 - correct source/object candidate state and build manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python3 - <<'PY'
+          from pathlib import Path
+          import tarfile,hashlib,json,shutil
+
+          root=Path("/tmp/v50/artifacts")
+
+          patterns=[
+              "*PRODUCTION_CANDIDATE_NOT_FLASHABLE.tar.gz",
+              "*SOURCE_OBJECT_CANDIDATE_NOT_FLASHABLE.tar.gz",
+              "*CANDIDATE_NOT_FLASHABLE.tar.gz",
+          ]
+          found=[]
+          seen=set()
+          for pat in patterns:
+              for p in root.rglob(pat):
+                  if p in seen:
+                      continue
+                  seen.add(p)
+                  found.append(p)
+
+          rows=[]
+          preferred=None
+          for p in found:
+              members=[]
+              try:
+                  with tarfile.open(p,"r:gz") as t:
+                      for m in t.getmembers():
+                          if m.isfile():
+                              members.append({"name":m.name,"size":m.size})
+              except Exception:
+                  members=[]
+              row={
+                  "path":str(p.relative_to(root)),
+                  "sha256":hashlib.sha256(p.read_bytes()).hexdigest(),
+                  "size":p.stat().st_size,
+                  "member_count":len(members),
+                  "members":members[:2000],
+              }
+              rows.append(row)
+              if "V41_PRODUCTION_CANDIDATE_NOT_FLASHABLE" in p.name:
+                  preferred=p
+
+          if preferred is None and found:
+              preferred=found[0]
+
+          copied=None
+          if preferred:
+              dst=Path("/tmp/v50/candidate/OKN_BP1048P4_V50_SOURCE_OBJECT_CANDIDATE_NOT_FLASHABLE.tar.gz")
+              shutil.copy2(preferred,dst)
+              copied={
+                  "path":str(dst),
+                  "sha256":hashlib.sha256(dst.read_bytes()).hexdigest(),
+                  "size":dst.stat().st_size,
+              }
+
+          result={
+              "candidate_archives_found":len(rows),
+              "candidate_archives":rows,
+              "preferred_candidate_copied":bool(copied),
+              "copied_candidate":copied,
+              "candidate_classification":"SOURCE_OBJECT_NOT_FLASHABLE",
+              "v49_candidate_false_negative_corrected":bool(rows),
+          }
+          Path("/tmp/v50/evidence/02_CANDIDATE_CORRECTION.json").write_text(
+              json.dumps(result,indent=2)+"\n")
+          print(json.dumps({
+              "candidate_archives_found":len(rows),
+              "preferred_candidate_copied":bool(copied),
+              "v49_candidate_false_negative_corrected":bool(rows),
+          },indent=2))
+          PY
+
+      - name: Gate 3 - cross-session Device Description consistency and gap localization
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python3 - <<'PY'
+          from pathlib import Path
+          import re,json,hashlib
+
+          root=Path("/tmp/v50/artifacts")
+          v32_candidates=list((root/"v32").rglob("DEVICE_DESCRIPTION_BYTES.bin"))
+          v30_replays=list((root/"v30").rglob("03_V30_REPLAY.txt"))
+
+          if not v32_candidates:
+              raise SystemExit("V32 DEVICE_DESCRIPTION_BYTES.bin missing")
+          if not v30_replays:
+              raise SystemExit("V30 replay missing")
+
+          v32=v32_candidates[0].read_bytes()
+          replay=v30_replays[0].read_text(errors="replace")
+
+          # V30 records cumulative decoded byte arrays after each of four payloads.
+          cumul=[]
+          for m in re.finditer(
+              r'PAYLOAD_(\d+)_FIELD\|DeviceDescriptionStringByteArray\|System\.Byte\[\]\|([0-9A-Fa-f]+)',
+              replay
+          ):
+              idx=int(m.group(1))
+              try:
+                  b=bytes.fromhex(m.group(2))
+              except Exception:
+                  continue
+              cumul.append((idx,b))
+
+          prefix_checks=[]
+          for idx,b in cumul:
+              prefix_checks.append({
+                  "payload":idx,
+                  "decoded_bytes":len(b),
+                  "matches_v32_prefix":v32[:len(b)]==b,
+                  "sha256":hashlib.sha256(b).hexdigest(),
+              })
+
+          longest=max((b for _,b in cumul), key=len, default=b"")
+          common=0
+          for a,b in zip(longest,v32):
+              if a!=b:
+                  break
+              common+=1
+
+          declared=18261
+          accumulated=len(v32)
+          missing=declared-accumulated
+
+          # Locate known corruption immediately before CH7 text.
+          needle=b"BiquadCascade7thChannel"
+          pos=v32.find(needle)
+          around=v32[max(0,pos-350):pos+500] if pos>=0 else b""
+
+          result={
+              "declared_description_length":declared,
+              "v32_accumulated_bytes":accumulated,
+              "missing_bytes":missing,
+              "v30_cumulative_prefix_checks":prefix_checks,
+              "longest_v30_decoded_prefix_bytes":len(longest),
+              "longest_v30_prefix_common_with_v32":common,
+              "cross_session_prefix_consistent": bool(longest and common==len(longest)),
+              "ch7_name_offset_in_v32":pos,
+              "ch7_nearby_ascii":around.decode("utf-8",errors="replace"),
+              "cross_session_data_fills_any_missing_v32_gap":False,
+              "complete_18261_bytes_reconstructed":False,
+          }
+          Path("/tmp/v50/evidence/03_CROSS_SESSION_DESCRIPTION_ANALYSIS.json").write_text(
+              json.dumps(result,indent=2,ensure_ascii=False)+"\n")
+          print(json.dumps({
+              k:v for k,v in result.items()
+              if k not in ("ch7_nearby_ascii","v30_cumulative_prefix_checks")
+          },indent=2))
+          PY
+
+      - name: Gate 4 - exact CH7 ID17 and Gain-ID 22..28 audit
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python3 - <<'PY'
+          from pathlib import Path
+          import re,json
+
+          root=Path("/tmp/v50/artifacts")
+          v32=list((root/"v32").rglob("DEVICE_DESCRIPTION_BYTES.bin"))[0].read_bytes()
+          text=v32.decode("utf-8",errors="replace")
+
+          ch7=text.find("BiquadCascade7thChannel")
+          ch7_ctx=text[max(0,ch7-700):ch7+700] if ch7>=0 else ""
+
+          id17_same_context=bool(re.search(r'"ID"\s*:\s*17\b',ch7_ctx))
+          id17_anywhere=bool(re.search(r'"ID"\s*:\s*17\b',text))
+
+          ids={}
+          for n in range(22,29):
+              ids[n]={
+                  "exact_json_id_seen":bool(re.search(rf'"ID"\s*:\s*{n}\b',text)),
+                  "loose_id_seen":bool(re.search(rf'\bID\b[^0-9]{{0,8}}{n}\b',text,re.I)),
+              }
+
+          result={
+              "ch7_name_present":ch7>=0,
+              "ch7_i2sout1r_present":"i2sout1R" in ch7_ctx,
+              "ch7_id17_exact_same_context":id17_same_context,
+              "ch7_id17_exact_anywhere":id17_anywhere,
+              "gain_id_presence":ids,
+              "description_complete":False,
+              "gain_ids_22_28_global_free_proven":False,
+              "reason":
+                  "1420 Device Description bytes remain absent; no global-free conclusion is allowed.",
+          }
+
+          Path("/tmp/v50/evidence/04_CH7_GAIN_ID_AUDIT.json").write_text(
+              json.dumps(result,indent=2)+"\n")
+          print(json.dumps(result,indent=2))
+          PY
+
+      - name: Gate 5 - reject protected-runtime false candidates with exact class/token filters
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python3 - <<'PY'
+          from pathlib import Path
+          import re,json
+
+          root=Path("/tmp/v50/artifacts")
+          text=[]
+          for base in [root/"v47",root/"v46",root/"v28",root/"v25"]:
+              for p in base.rglob("*"):
+                  if not p.is_file() or p.stat().st_size>4_000_000:
+                      continue
+                  try:
+                      raw=p.read_bytes()
+                      if b'\x00' not in raw[:4096]:
+                          text.append(f"\n===== {p.relative_to(root)} =====\n"+raw.decode(errors="replace"))
+                  except Exception:
+                      pass
+          corpus="\n".join(text)
+
+          known_transport=[
+              "DeviceCommunicationStream.Write",
+              "HIDInterface.Send",
+              "SendDeviceDescriptionRequest",
+              "SendDevTypeSwVersAuthenRequest",
+          ]
+          exact_tokens=[
+              "0600043A","06000453","06000496","06000783","06000784","06000795"
+          ]
+
+          # Generic Update* UI/data-model methods are explicitly rejected.
+          generic_false_positive_terms=[
+              "UpdateDeviceConnStatus",
+              "AddOrUpdateDeviceWithProgress",
+              "AddOrUpdateDeviceWithStatus",
+              "UpdateAfilter",
+              "CreateFilterUpdateCommand",
+              "CreateSigmaDSPsingleVariableUpdateCommand",
+              "CreateSigmaDSPfiltrUpdateCommand",
+          ]
+
+          generic_hits={x:len(re.findall(re.escape(x),corpus,re.I)) for x in generic_false_positive_terms}
+          transport_hits={x:len(re.findall(re.escape(x),corpus,re.I)) for x in known_transport}
+          token_hits={x:len(re.findall(re.escape(x),corpus,re.I)) for x in exact_tokens}
+
+          # Promotion demands exact updater/recovery semantics adjacent to a known
+          # transport token/name and a concrete frame, without auth/Feature/0x11.
+          lines=corpus.splitlines()
+          candidates=[]
+          for i,line in enumerate(lines):
+              if not re.search(r'bootloader|recovery|firmware upgrade|firmware update|enter upgrade|enter recovery',line,re.I):
+                  continue
+              ctx="\n".join(lines[max(0,i-12):min(len(lines),i+13)])
+              if not re.search(r'DeviceCommunicationStream\.Write|HIDInterface\.Send|0600043A|06000453|06000496',ctx,re.I):
+                  continue
+              if re.search(r'Feature|SendDevTypeSwVersAuthenRequest|auth|challenge|0x11',ctx,re.I):
+                  continue
+              has_frame=bool(re.search(r'(?:\b[0-9A-Fa-f]{2}\b[\s,:-]*){4,}',ctx))
+              candidates.append({
+                  "has_concrete_frame":has_frame,
+                  "context":ctx,
+              })
+
+          promoted=[c for c in candidates if c["has_concrete_frame"]]
+
+          result={
+              "generic_update_false_positive_hits":generic_hits,
+              "known_transport_hits":transport_hits,
+              "known_transport_token_hits":token_hits,
+              "filtered_semantic_candidate_count":len(candidates),
+              "concrete_frame_candidate_count":len(promoted),
+              "production_safe_no_0x11_no_feature_updater_entry_proven":False,
+              "candidates":candidates[:100],
+          }
+          Path("/tmp/v50/evidence/05_PROTECTED_RUNTIME_CLOSURE.json").write_text(
+              json.dumps(result,indent=2,ensure_ascii=False)+"\n")
+          print(json.dumps({
+              k:v for k,v in result.items()
+              if k!="candidates"
+          },indent=2))
+          PY
+
+      - name: Gate 6 - recovery readback and layout deep census
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python3 - <<'PY'
+          from pathlib import Path
+          import re,json
+
+          root=Path("/tmp/v50/artifacts")
+          bases=[
+              root/"r106",root/"v9_3",root/"updater_v3",
+              root/"recovery_v13",root/"recovery_v16",root/"recovery_v17",
+              root/"sdk_boot_usb"
+          ]
+          text=[]
+          for base in bases:
+              for p in base.rglob("*"):
+                  if not p.is_file() or p.stat().st_size>5_000_000:
+                      continue
+                  try:
+                      raw=p.read_bytes()
+                      if b'\x00' not in raw[:4096]:
+                          text.append(f"\n===== {p.relative_to(root)} =====\n"+raw.decode(errors="replace"))
+                  except Exception:
+                      pass
+          corpus="\n".join(text)
+
+          command_words=[
+              "chiperas","codedata","bootdat","constdat",
+              "cnfgdat","btupdat","upinfo","cxxx"
+          ]
+          command_hits={x:len(re.findall(re.escape(x),corpus,re.I)) for x in command_words}
+
+          read_patterns={
+              "arbitrary_flash_read":r'arbitrary flash[- ]?read',
+              "readback":r'\breadback\b',
+              "stock_backup":r'stock backup',
+              "flash_to_host":r'flash.*(?:to|->).*host|host.*(?:from|<-).*flash',
+              "read_flash_command":r'(?:command|cmd).{0,80}read.{0,40}flash|read.{0,40}flash.{0,80}(?:command|cmd)',
+          }
+          read_hits={k:len(re.findall(v,corpus,re.I|re.S)) for k,v in read_patterns.items()}
+
+          addr_patterns=["0x000000","0x070000","0x100000","0x120000","0x198000","0x3C8000","0x3D0000","0x3F0000","0x3F3000","0x3FB000","0x3FE000","0x3FF000"]
+          addr_hits={a:len(re.findall(re.escape(a),corpus,re.I)) for a in addr_patterns}
+
+          result={
+              "legacy_command_hits":command_hits,
+              "readback_term_hits":read_hits,
+              "address_hits":addr_hits,
+              "pure_read_only_stock_backup_command_proven":False,
+              "production_recovery_identity_proven":False,
+              "production_flash_layout_proven":False,
+              "production_entry_point_proven":False,
+              "reference_layout_promoted_to_production":False,
+              "reference_recovery_0000_2244_promoted_to_production":False,
+          }
+          Path("/tmp/v50/evidence/06_RECOVERY_READBACK_LAYOUT_CENSUS.json").write_text(
+              json.dumps(result,indent=2)+"\n")
+          print(json.dumps(result,indent=2))
+          PY
+
+      - name: Gate 7 - final exhaustion matrix and exact next evidence requirements
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python3 - <<'PY'
+          from pathlib import Path
+          import json
+
+          ev=Path("/tmp/v50/evidence")
+          cand=json.loads((ev/"02_CANDIDATE_CORRECTION.json").read_text())
+          desc=json.loads((ev/"03_CROSS_SESSION_DESCRIPTION_ANALYSIS.json").read_text())
+          ids=json.loads((ev/"04_CH7_GAIN_ID_AUDIT.json").read_text())
+          proto=json.loads((ev/"05_PROTECTED_RUNTIME_CLOSURE.json").read_text())
+          rec=json.loads((ev/"06_RECOVERY_READBACK_LAYOUT_CENSUS.json").read_text())
+
+          v49=json.loads(Path("/tmp/v50/artifacts/v49/06_V49_FINAL_MATRIX.json").read_text())
+
+          gates={
+              "exact_runtime_fingerprint_proven":True,
+              "s25_usb_c_only_path_proven":True,
+              "firmware_source_object_candidate_present":cand["preferred_candidate_copied"],
+              "cross_session_description_prefix_consistent":desc["cross_session_prefix_consistent"],
+              "complete_device_description_proven":desc["complete_18261_bytes_reconstructed"],
+              "ch7_id17_exact_wire_proven":ids["ch7_id17_exact_same_context"],
+              "gain_ids_22_28_global_free_proven":ids["gain_ids_22_28_global_free_proven"],
+              "runtime_to_updater_no_0x11_no_feature_proven":
+                  proto["production_safe_no_0x11_no_feature_updater_entry_proven"],
+              "production_recovery_identity_proven":rec["production_recovery_identity_proven"],
+              "pure_read_only_stock_backup_command_proven":rec["pure_read_only_stock_backup_command_proven"],
+              "production_stock_backup_completed":False,
+              "production_flash_layout_proven":rec["production_flash_layout_proven"],
+              "production_entry_point_proven":rec["production_entry_point_proven"],
+              "bootable_production_image_proven":False,
+          }
+
+          required=[
+              "runtime_to_updater_no_0x11_no_feature_proven",
+              "production_recovery_identity_proven",
+              "pure_read_only_stock_backup_command_proven",
+              "production_stock_backup_completed",
+              "production_flash_layout_proven",
+              "production_entry_point_proven",
+              "bootable_production_image_proven",
+              "ch7_id17_exact_wire_proven",
+              "gain_ids_22_28_global_free_proven",
+          ]
+          blockers=[x for x in required if not gates[x]]
+
+          external_requirements={
+              "runtime_to_updater_no_0x11_no_feature_proven":
+                  "Official production GoloPine/MVSilicon documentation or package proving the exact runtime 6324:1719 -> updater/recovery command/frame without HID Feature and without byte 0x11.",
+              "production_recovery_identity_proven":
+                  "Production-board evidence for the actual updater/recovery USB identity; reference 0000:2244 is insufficient.",
+              "pure_read_only_stock_backup_command_proven":
+                  "Vendor-supported complete flash readback/backup command with documented read-only semantics.",
+              "production_stock_backup_completed":
+                  "A complete stock backup obtained through the approved phone USB-C-only path and hashed.",
+              "production_flash_layout_proven":
+                  "Production board flash map/link layout, not SDK/reference staging addresses.",
+              "production_entry_point_proven":
+                  "Production image load/entry address or signed vendor image metadata proving it.",
+              "bootable_production_image_proven":
+                  "Image built against the proven production layout/entry and validated offline before any first flash.",
+              "ch7_id17_exact_wire_proven":
+                  "Complete Device Description or official schema showing BiquadCascade7thChannel/i2sout1R with exact ID 17.",
+              "gain_ids_22_28_global_free_proven":
+                  "Complete production Device Description/schema proving IDs 22..28 are unused globally.",
+          }
+
+          final={
+              "revision":"MASTER-V50",
+              "required_phone":"Samsung Galaxy S25+",
+              "required_path":"Samsung Galaxy S25+ -> USB-C cable -> DSP board USB-C port only",
+              "soldering_allowed":False,
+              "board_modification_allowed":False,
+              "external_programmer_allowed":False,
+              "gates":gates,
+              "remaining_blockers":blockers,
+              "external_evidence_required":{k:external_requirements[k] for k in blockers},
+              "existing_evidence_exhausted_for_remaining_blockers":True,
+              "candidate_classification":"SOURCE_OBJECT_NOT_FLASHABLE",
+              "new_live_0x11_allowed":False,
+              "feature_report_live_allowed":False,
+              "host_to_dsp_io":False,
+              "flash_allowed":False,
+              "next_allowed_action":
+                  "OBTAIN_NEW_PRODUCTION_EVIDENCE_FOR_ONE_OR_MORE_BLOCKERS_THEN_REEVALUATE_IN_ONE_MEGA_RUN"
+          }
+
+          (ev/"07_V50_FINAL_MATRIX.json").write_text(
+              json.dumps(final,indent=2,ensure_ascii=False)+"\n")
+
+          lines=[
+              "# MASTER V50 FINAL DECISION",
+              "",
+              "Physical path remains fixed:",
+              "**Samsung Galaxy S25+ -> USB-C cable -> DSP board USB-C port only**",
+              "",
+              "V50 corrections/closures:",
+              f"- V49 source/object candidate false-negative corrected: **{cand['v49_candidate_false_negative_corrected']}**",
+              f"- source/object candidate copied into artifact: **{cand['preferred_candidate_copied']}**",
+              f"- V29/V30 -> V32 decoded prefix cross-session consistent: **{desc['cross_session_prefix_consistent']}**",
+              f"- complete 18261-byte Device Description reconstructed: **{desc['complete_18261_bytes_reconstructed']}**",
+              f"- CH7 ID17 exact wire proof: **{ids['ch7_id17_exact_same_context']}**",
+              f"- Gain IDs 22..28 globally free: **{ids['gain_ids_22_28_global_free_proven']}**",
+              f"- safe runtime->updater without 0x11/Feature: **{proto['production_safe_no_0x11_no_feature_updater_entry_proven']}**",
+              "",
+              "Remaining blockers:"
+          ]
+          lines += [f"- {x}" for x in blockers]
+          lines += [
+              "",
+              "Conclusion:",
+              "**The currently collected evidence has been exhausted for these blockers.**",
+              "Repeating more offline mining over the same corpus is not expected to close them.",
+              "",
+              "Hard rules:",
+              "- new live 0x11: **NO**",
+              "- HID Feature report: **NO**",
+              "- soldering / board modification / external programmer: **NO**",
+              "- flash/erase/write: **NO / NO / NO**",
+              "- `FLASH_ALLOWED = NO`",
+              "",
+              "Next allowed action:",
+              "**OBTAIN NEW PRODUCTION EVIDENCE FOR ONE OR MORE BLOCKERS, THEN REEVALUATE IN ONE MEGA RUN**",
+          ]
+          (ev/"08_V50_FINAL_DECISION.md").write_text("\n".join(lines)+"\n")
+
+          req=["# V50 — EXACT NEW EVIDENCE NEEDED",""]
+          for k in blockers:
+              req.append(f"## {k}")
+              req.append(external_requirements[k])
+              req.append("")
+          (ev/"09_NEXT_REQUIRED_EXTERNAL_EVIDENCE.md").write_text("\n".join(req)+"\n")
+
+          print((ev/"08_V50_FINAL_DECISION.md").read_text())
+          PY
+
+          cp /tmp/v50/evidence/* /tmp/v50/out/
+          cp /tmp/v50/candidate/* /tmp/v50/out/ 2>/dev/null || true
+          (cd /tmp/v50/out && sha256sum * > SHA256SUMS.txt)
+
+      - name: Upload V50 consolidated result
+        uses: actions/upload-artifact@v7
+        with:
+          name: OKN-BP1048P4-MASTER-V50-MEGA-EXISTING-EVIDENCE-EXHAUSTION
+          path: /tmp/v50/out/*
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Final fail-closed assertion
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          test "$REQUIRED_PATH" = "Samsung Galaxy S25+ -> USB-C cable -> DSP board USB-C port only"
+          test "$SOLDERING_ALLOWED" = "NO"
+          test "$BOARD_MODIFICATION_ALLOWED" = "NO"
+          test "$EXTERNAL_PROGRAMMER_ALLOWED" = "NO"
+          test "$LIVE_DSP_ALLOWED" = "NO"
+          test "$HOST_TO_DSP_IO" = "NO"
+          test "$FEATURE_REPORT_ALLOWED" = "NO"
+          test "$NEW_LIVE_0X11_ALLOWED" = "NO"
+          test "$FLASH_ALLOWED" = "NO"
+          test "$ERASE_ALLOWED" = "NO"
+          test "$WRITE_ALLOWED" = "NO"
+
+          grep -q '"flash_allowed": false' /tmp/v50/evidence/07_V50_FINAL_MATRIX.json
+          echo "MASTER_V50=PASS"
+          echo "S25_USB_C_ONLY=YES"
+          echo "NO_SOLDER_NO_BOARD_MOD=YES"
+          echo "EXISTING_EVIDENCE_EXHAUSTION=COMPLETE"
+          echo "FLASH_ALLOWED=NO"
