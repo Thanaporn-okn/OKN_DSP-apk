@@ -1,0 +1,874 @@
+name: OKN BP1048P4 MASTER V24 FIXED V2 AUTH INTERMEDIATE TRACE + POSTPROCESS RECOVERY
+
+"on":
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  GOLOPINE_WINDOWS_URL: "https://golodsp.com/wp-content/uploads/2026/05/golopine_audio_turning_release_2026-04-08.exe_.zip"
+  EXPECTED_VENDOR_SHA256: "3ca54171c53f7badd963ffe6851b8b3e2faf8aee8ba2afcb7040990e22ae09b2"
+  BASELINE_CHALLENGE_HEX: "D024E38C410000004202B94C65A23F2C640C8F60E133784C7E47463A7A521056"
+  EXPECTED_BASELINE_REPLY_HEX: "3A5BADF3"
+
+  REQUIRED_PHONE: "Samsung Galaxy S25+"
+  REQUIRED_PHYSICAL_PATH: "Samsung Galaxy S25+ -> USB-C cable -> DSP board USB-C port only"
+
+  LIVE_DSP_CONNECTED: "NO"
+  USB_TARGET_ACCESS: "NO"
+  HOST_TO_DSP_IO: "NO"
+  REAL_HID_OBJECT_ALLOWED: "NO"
+  REAL_HID_CONNECT_ALLOWED: "NO"
+  REAL_HID_SEND_ALLOWED: "NO"
+  REAL_HID_READ_ALLOWED: "NO"
+  REAL_HID_WRITE_ALLOWED: "NO"
+  FEATURE_REPORT_ALLOWED: "NO"
+  FLASH_ALLOWED: "NO"
+  ERASE_ALLOWED: "NO"
+  WRITE_ALLOWED: "NO"
+
+jobs:
+  master-v24:
+    name: Trace real parser auth intermediates OFFLINE - FIXED V2 bounded 16-probe
+    runs-on: windows-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Safety gate and workspace
+        shell: pwsh
+        run: |
+          $ErrorActionPreference="Stop"
+
+          foreach($n in @(
+            "LIVE_DSP_CONNECTED","USB_TARGET_ACCESS","HOST_TO_DSP_IO",
+            "REAL_HID_OBJECT_ALLOWED","REAL_HID_CONNECT_ALLOWED",
+            "REAL_HID_SEND_ALLOWED","REAL_HID_READ_ALLOWED","REAL_HID_WRITE_ALLOWED",
+            "FEATURE_REPORT_ALLOWED","FLASH_ALLOWED","ERASE_ALLOWED","WRITE_ALLOWED"
+          )){
+            if((Get-Item "Env:$n").Value -ne "NO"){ throw "$n must remain NO" }
+          }
+
+          $root="C:\okn_v24"
+          if(Test-Path $root){ Remove-Item -Recurse -Force $root }
+          New-Item -ItemType Directory -Force -Path `
+            "$root\download","$root\pkg","$root\harness","$root\evidence","$root\out","$root\nuget" | Out-Null
+
+          @"
+          REVISION=MASTER-V24
+          MODE=OFFLINE_AUTH_INTERMEDIATE_TRACE_AND_POSTPROCESS_RECOVERY
+          REQUIRED_PHONE=$env:REQUIRED_PHONE
+          REQUIRED_PATH=$env:REQUIRED_PHYSICAL_PATH
+          SOLDERING_REQUIRED=NO
+          BOARD_MODIFICATION_REQUIRED=NO
+          LIVE_DSP_CONNECTED=NO
+          USB_TARGET_ACCESS=NO
+          HOST_TO_DSP_IO=NO
+          REAL_HID_OBJECT_ALLOWED=NO
+          FEATURE_REPORT_ALLOWED=NO
+          FLASH_ALLOWED=NO
+          ERASE_ALLOWED=NO
+          WRITE_ALLOWED=NO
+          BASELINE_CHALLENGE_HEX=$env:BASELINE_CHALLENGE_HEX
+          EXPECTED_BASELINE_REPLY_HEX=$env:EXPECTED_BASELINE_REPLY_HEX
+          "@ | Set-Content "$root\evidence\00_SAFETY_AND_INPUT.txt"
+
+      - name: Acquire exact official GoloPine binary
+        shell: pwsh
+        run: |
+          $ErrorActionPreference="Stop"
+          $root="C:\okn_v24"
+
+          curl.exe -fL --retry 6 --retry-all-errors --retry-delay 2 `
+            --connect-timeout 20 --max-time 300 `
+            $env:GOLOPINE_WINDOWS_URL -o "$root\download\vendor.zip"
+          if($LASTEXITCODE -ne 0){ throw "vendor download failed" }
+
+          Expand-Archive -Force "$root\download\vendor.zip" "$root\pkg"
+
+          $exe=Get-ChildItem "$root\pkg" -Recurse -File -Filter *.exe |
+            Where-Object {$_.FullName -notmatch '\\__MACOSX\\' -and $_.Name -notlike '._*'} |
+            Sort-Object Length -Descending | Select-Object -First 1
+
+          if(-not $exe){ throw "vendor EXE missing" }
+          Copy-Item $exe.FullName "$root\vendor.exe" -Force
+
+          $sha=(Get-FileHash "$root\vendor.exe" -Algorithm SHA256).Hash.ToLower()
+          if($sha -ne $env:EXPECTED_VENDOR_SHA256){ throw "vendor SHA256 changed: $sha" }
+
+          @"
+          SHA256=$sha
+          ORIGINAL_BINARY_MODIFIED=NO
+          SOURCE_URL=$env:GOLOPINE_WINDOWS_URL
+          "@ | Set-Content "$root\evidence\01_VENDOR_IDENTITY.txt"
+
+      - name: Acquire Harmony runtime patch library
+        shell: pwsh
+        run: |
+          $ErrorActionPreference="Stop"
+          $root="C:\okn_v24"
+
+          $url="https://api.nuget.org/v3-flatcontainer/lib.harmony/2.3.3/lib.harmony.2.3.3.nupkg"
+          curl.exe -fL --retry 5 --retry-all-errors $url -o "$root\nuget\harmony.nupkg"
+          if($LASTEXITCODE -ne 0){ throw "Harmony download failed" }
+
+          Copy-Item "$root\nuget\harmony.nupkg" "$root\nuget\harmony.zip"
+          Expand-Archive -Force "$root\nuget\harmony.zip" "$root\nuget\harmony"
+
+          $dll=Get-ChildItem "$root\nuget\harmony" -Recurse -File -Filter 0Harmony.dll |
+            Where-Object {$_.FullName -match '\\net4(7|8)'} |
+            Sort-Object FullName |
+            Select-Object -First 1
+
+          if(-not $dll){
+            $dll=Get-ChildItem "$root\nuget\harmony" -Recurse -File -Filter 0Harmony.dll |
+              Select-Object -First 1
+          }
+          if(-not $dll){ throw "0Harmony.dll missing" }
+
+          Copy-Item $dll.FullName "$root\harness\0Harmony.dll" -Force
+
+          @"
+          HARMONY_PATH=$($dll.FullName)
+          HARMONY_SHA256=$((Get-FileHash "$root\harness\0Harmony.dll" -Algorithm SHA256).Hash.ToLower())
+          "@ | Set-Content "$root\evidence\02_HARMONY_IDENTITY.txt"
+
+      - name: Build x86 parser trace harness
+        shell: pwsh
+        run: |
+          $ErrorActionPreference="Stop"
+          $root="C:\okn_v24"
+
+          @'
+          using System;
+          using System.IO;
+          using System.Linq;
+          using System.Text;
+          using System.Reflection;
+          using System.Reflection.Emit;
+          using System.Runtime.CompilerServices;
+          using System.Collections.Generic;
+          using System.Threading;
+          using HarmonyLib;
+
+          public static class CaptureSink
+          {
+              public static readonly List<byte[]> Writes=new List<byte[]>();
+              public static void Clear(){ lock(Writes){ Writes.Clear(); } }
+              public static void Record(byte[] b)
+              {
+                  lock(Writes){ Writes.Add(b==null?null:(byte[])b.Clone()); }
+              }
+              public static byte[][] Snapshot()
+              {
+                  lock(Writes){ return Writes.Select(x=>x==null?null:(byte[])x.Clone()).ToArray(); }
+              }
+          }
+
+          public sealed class YeaTrace
+          {
+              public string InputHex;
+              public int Result;
+          }
+
+          public static class TraceHooks
+          {
+              public static readonly List<YeaTrace> Records=new List<YeaTrace>();
+
+              public static void Clear(){ lock(Records){ Records.Clear(); } }
+
+              public static void Prefix(object[] __args)
+              {
+                  byte[] b=null;
+                  if(__args!=null)
+                  {
+                      foreach(object a in __args)
+                      {
+                          b=a as byte[];
+                          if(b!=null)break;
+                      }
+                  }
+                  lock(Records)
+                  {
+                      Records.Add(new YeaTrace{
+                          InputHex=b==null?"<NULL>":BitConverter.ToString(b).Replace("-",""),
+                          Result=Int32.MinValue
+                      });
+                  }
+              }
+
+              public static void Postfix(ref int __result)
+              {
+                  lock(Records)
+                  {
+                      for(int i=Records.Count-1;i>=0;i--)
+                      {
+                          if(Records[i].Result==Int32.MinValue)
+                          {
+                              Records[i].Result=__result;
+                              return;
+                          }
+                      }
+                  }
+              }
+
+              public static YeaTrace[] Snapshot()
+              {
+                  lock(Records)
+                  {
+                      return Records.Select(x=>new YeaTrace{InputHex=x.InputHex,Result=x.Result}).ToArray();
+                  }
+              }
+          }
+
+          class TraceProbe
+          {
+              static readonly List<string> L=new List<string>();
+              static string OutPath;
+
+              static void Log(string s)
+              {
+                  L.Add(s);
+                  File.AppendAllText(OutPath,s+Environment.NewLine);
+              }
+
+              static string Hex(byte[] b)
+              {
+                  if(b==null)return "<NULL>";
+                  return BitConverter.ToString(b).Replace("-","");
+              }
+
+              static byte[] HexToBytes(string s)
+              {
+                  byte[] b=new byte[s.Length/2];
+                  for(int i=0;i<b.Length;i++) b[i]=Convert.ToByte(s.Substring(i*2,2),16);
+                  return b;
+              }
+
+              static object InvokeBounded(MethodInfo m,object target,object[] args,int timeoutMs,string label)
+              {
+                  object result=null;
+                  Exception error=null;
+                  Thread th=new Thread(delegate(){
+                      try{ result=m.Invoke(target,args); }
+                      catch(Exception ex){ error=ex; }
+                  });
+                  th.IsBackground=true;
+                  th.Start();
+                  if(!th.Join(timeoutMs))
+                  {
+                      Log(label+"_TIMEOUT_MS="+timeoutMs);
+                      try{ th.Abort(); }catch{}
+                      return null;
+                  }
+                  if(error!=null) throw error;
+                  return result;
+              }
+
+              static void EmitDefaultReturn(ILGenerator il,Type ret)
+              {
+                  if(ret==typeof(void)){ il.Emit(OpCodes.Ret); return; }
+                  if(ret.IsValueType)
+                  {
+                      LocalBuilder loc=il.DeclareLocal(ret);
+                      il.Emit(OpCodes.Ldloca_S,loc);
+                      il.Emit(OpCodes.Initobj,ret);
+                      il.Emit(OpCodes.Ldloc,loc);
+                      il.Emit(OpCodes.Ret);
+                      return;
+                  }
+                  il.Emit(OpCodes.Ldnull);
+                  il.Emit(OpCodes.Ret);
+              }
+
+              static MethodAttributes Visibility(MethodInfo m)
+              {
+                  MethodAttributes a=MethodAttributes.Virtual|MethodAttributes.HideBySig;
+                  if(m.IsPublic)a|=MethodAttributes.Public;
+                  else if(m.IsFamily)a|=MethodAttributes.Family;
+                  else if(m.IsFamilyOrAssembly)a|=MethodAttributes.FamORAssem;
+                  else if(m.IsAssembly)a|=MethodAttributes.Assembly;
+                  else a|=MethodAttributes.Private;
+                  if(m.IsSpecialName)a|=MethodAttributes.SpecialName;
+                  return a;
+              }
+
+              static Type BuildCaptureStream(Type baseType)
+              {
+                  AssemblyName an=new AssemblyName("OKN_V24_CAPTURE_STREAM");
+                  AssemblyBuilder ab=AppDomain.CurrentDomain.DefineDynamicAssembly(an,AssemblyBuilderAccess.Run);
+                  ModuleBuilder mb=ab.DefineDynamicModule("main");
+                  TypeBuilder tb=mb.DefineType(
+                      "OKN.CaptureDeviceCommunicationStream",
+                      TypeAttributes.Public|TypeAttributes.Class,
+                      baseType
+                  );
+
+                  ConstructorInfo bc=baseType.GetConstructor(
+                      BindingFlags.Public|BindingFlags.NonPublic|BindingFlags.Instance,
+                      null,Type.EmptyTypes,null
+                  );
+                  if(bc==null)throw new Exception("DeviceCommunicationStream parameterless ctor missing");
+
+                  ConstructorBuilder cb=tb.DefineConstructor(
+                      MethodAttributes.Public,CallingConventions.Standard,Type.EmptyTypes
+                  );
+                  ILGenerator ci=cb.GetILGenerator();
+                  ci.Emit(OpCodes.Ldarg_0);
+                  ci.Emit(OpCodes.Call,bc);
+                  ci.Emit(OpCodes.Ret);
+
+                  MethodInfo[] all=baseType.GetMethods(
+                      BindingFlags.Public|BindingFlags.NonPublic|BindingFlags.Instance
+                  );
+
+                  MethodInfo[] selected=all.Where(m =>
+                      m.IsVirtual && !m.IsFinal &&
+                      (m.IsAbstract ||
+                       m.Name=="Write" || m.Name=="WriteLine" ||
+                       m.Name=="ReadBytes" || m.Name=="ReadLine" ||
+                       m.Name=="Connect" || m.Name=="Disconnect")
+                  ).GroupBy(m=>m.ToString()).Select(g=>g.First()).ToArray();
+
+                  foreach(MethodInfo m in selected)
+                  {
+                      Type[] ps=m.GetParameters().Select(x=>x.ParameterType).ToArray();
+                      MethodBuilder b=tb.DefineMethod(m.Name,Visibility(m),m.ReturnType,ps);
+                      ILGenerator il=b.GetILGenerator();
+
+                      if(m.Name=="Write" && ps.Length==1 && ps[0]==typeof(byte[]))
+                      {
+                          il.Emit(OpCodes.Ldarg_1);
+                          il.Emit(OpCodes.Call,typeof(CaptureSink).GetMethod("Record"));
+                          EmitDefaultReturn(il,m.ReturnType);
+                      }
+                      else
+                      {
+                          EmitDefaultReturn(il,m.ReturnType);
+                      }
+                      tb.DefineMethodOverride(b,m);
+                  }
+                  return tb.CreateType();
+              }
+
+              static void SetConnected(object stream,Type baseType)
+              {
+                  Type et=baseType.GetNestedType("ConnectionStatus",BindingFlags.Public|BindingFlags.NonPublic);
+                  if(et==null || !et.IsEnum)return;
+                  object connected=Enum.Parse(et,"Connected");
+
+                  FieldInfo f=baseType.GetFields(
+                      BindingFlags.Public|BindingFlags.NonPublic|BindingFlags.Instance
+                  ).FirstOrDefault(x=>x.FieldType==et);
+
+                  if(f!=null){ f.SetValue(stream,connected); return; }
+
+                  MethodInfo up=baseType.GetMethod(
+                      "UpdateDeviceConnStatus",
+                      BindingFlags.Public|BindingFlags.NonPublic|BindingFlags.Instance
+                  );
+                  if(up!=null)up.Invoke(stream,new object[]{connected});
+              }
+
+              static string StreamStatus(object bridge,Type bridgeType)
+              {
+                  PropertyInfo p=bridgeType.GetProperty(
+                      "StreamStatus",
+                      BindingFlags.Public|BindingFlags.NonPublic|BindingFlags.Instance
+                  );
+                  if(p!=null)
+                  {
+                      try{ return Convert.ToString(p.GetValue(bridge,null)); }catch{}
+                  }
+
+                  foreach(FieldInfo f in bridgeType.GetFields(
+                      BindingFlags.Public|BindingFlags.NonPublic|BindingFlags.Instance
+                  ))
+                  {
+                      if(f.FieldType.IsEnum && f.FieldType.Name.IndexOf("UFEStreamStatus",StringComparison.OrdinalIgnoreCase)>=0)
+                      {
+                          try{ return Convert.ToString(f.GetValue(bridge)); }catch{}
+                      }
+                  }
+                  return "<UNKNOWN>";
+              }
+
+              static object NewPreparedBridge(Type baseType,Type captureType,Type bridgeType,out object stream)
+              {
+                  stream=Activator.CreateInstance(captureType);
+                  SetConnected(stream,baseType);
+
+                  ConstructorInfo bc=bridgeType.GetConstructor(new[]{baseType});
+                  if(bc==null)throw new Exception("UFEcommandBridge ctor missing");
+
+                  object bridge=bc.Invoke(new[]{stream});
+
+                  MethodInfo req=bridgeType.GetMethod(
+                      "SendDevTypeSwVersAuthenRequest",
+                      BindingFlags.Public|BindingFlags.NonPublic|BindingFlags.Instance
+                  );
+                  if(req==null)throw new Exception("startup helper missing");
+
+                  CaptureSink.Clear();
+                  InvokeBounded(req,bridge,null,1500,"STARTUP_HELPER");
+                  Thread.Sleep(80);
+                  CaptureSink.Clear();
+                  return bridge;
+              }
+
+              static void RunCase(
+                  Type baseType,Type captureType,Type bridgeType,MethodInfo fbl,
+                  byte[] challenge,string tag)
+              {
+                  object stream;
+                  object bridge=NewPreparedBridge(baseType,captureType,bridgeType,out stream);
+
+                  TraceHooks.Clear();
+                  CaptureSink.Clear();
+
+                  Log(tag+"_INPUT_HEX="+Hex(challenge));
+
+                  try
+                  {
+                      InvokeBounded(fbl,bridge,new object[]{stream,challenge,EventArgs.Empty},2500,tag+"_FBL");
+                      Log(tag+"_FBL_RETURNED=true");
+                  }
+                  catch(Exception ex)
+                  {
+                      Exception b=ex.GetBaseException();
+                      Log(tag+"_FBL_EXCEPTION="+b.GetType().FullName+":"+b.Message);
+                  }
+
+                  Thread.Sleep(120);
+
+                  YeaTrace[] yt=TraceHooks.Snapshot();
+                  byte[][] wr=CaptureSink.Snapshot();
+
+                  Log(tag+"_YEA_CALL_COUNT="+yt.Length);
+                  for(int i=0;i<yt.Length;i++)
+                  {
+                      Log(tag+"_YEA_"+i+"_INPUT_HEX="+yt[i].InputHex);
+                      Log(tag+"_YEA_"+i+"_RESULT_I32="+yt[i].Result);
+                      Log(tag+"_YEA_"+i+"_RESULT_HEX="+unchecked((uint)yt[i].Result).ToString("X8"));
+                  }
+
+                  Log(tag+"_FOLLOWUP_WRITE_COUNT="+wr.Length);
+                  for(int i=0;i<wr.Length;i++) Log(tag+"_FOLLOWUP_WRITE_"+i+"="+Hex(wr[i]));
+                  Log(tag+"_STREAM_STATUS="+StreamStatus(bridge,bridgeType));
+              }
+
+              static byte[] MakeProbe(byte[] baseline,int index)
+              {
+                  byte[] m=(byte[])baseline.Clone();
+                  uint state=0xA5C31F27u ^ ((uint)index*0x9E3779B9u);
+                  int flips=3+(index%13);
+                  for(int k=0;k<flips;k++)
+                  {
+                      state=unchecked(state*1664525u+1013904223u);
+                      int bit=(int)((state>>8)&255u);
+                      m[bit/8]^=(byte)(1<<(bit%8));
+                  }
+                  return m;
+              }
+
+              static void Main(string[] a)
+              {
+                  if(a.Length<3)throw new Exception("args: vendor.exe output.txt baselineHex");
+                  string exe=Path.GetFullPath(a[0]);
+                  OutPath=Path.GetFullPath(a[1]);
+                  byte[] baseline=HexToBytes(a[2]);
+                  Directory.SetCurrentDirectory(Path.GetDirectoryName(exe));
+                  File.WriteAllText(OutPath,"");
+
+                  Log("MODE=OFFLINE_AUTH_INTERMEDIATE_TRACE");
+                  Log("REVISION=MASTER_V24_FIXED_V2");
+                  Log("PROBE_COUNT=16");
+                  Log("REAL_HID_OBJECT_CREATED=NO");
+                  Log("REAL_HID_CONNECT_INVOKED=NO");
+                  Log("REAL_HID_SEND_INVOKED=NO");
+                  Log("REAL_HID_WRITE_INVOKED=NO");
+                  Log("REAL_HID_READ_INVOKED=NO");
+                  Log("HOST_TO_DSP_IO=NO");
+                  Log("FLASH_ALLOWED=NO");
+
+                  Assembly asm=Assembly.LoadFile(exe);
+                  RuntimeHelpers.RunModuleConstructor(asm.ManifestModule.ModuleHandle);
+
+                  Type baseType=asm.GetType("DSTech_AudioDSP_Client.DeviceCommunicationStream",true);
+                  Type bridgeType=asm.GetType("DSTech_AudioDSP_Client.UFEcommandBridge",true);
+                  Type captureType=BuildCaptureStream(baseType);
+
+                  MethodInfo yea=bridgeType.GetMethod(
+                      "yEA33sF0N1",
+                      BindingFlags.NonPublic|BindingFlags.Instance
+                  );
+                  if(yea==null)throw new Exception("yEA33sF0N1 missing");
+
+                  MethodInfo fbl=bridgeType.GetMethod(
+                      "FBL3HEmTva",
+                      BindingFlags.NonPublic|BindingFlags.Instance
+                  );
+                  if(fbl==null)throw new Exception("FBL3HEmTva missing");
+
+                  Log("YEA_METHOD_TOKEN=0x"+yea.MetadataToken.ToString("X8"));
+                  Log("FBL_METHOD_TOKEN=0x"+fbl.MetadataToken.ToString("X8"));
+
+                  var harmony=new Harmony("okn.bp1048p4.v24.authtrace");
+                  var pre=new HarmonyMethod(typeof(TraceHooks).GetMethod("Prefix"));
+                  var post=new HarmonyMethod(typeof(TraceHooks).GetMethod("Postfix"));
+                  harmony.Patch(yea,pre,post);
+                  Log("HARMONY_YEA_PATCH=SUCCESS");
+
+                  RunCase(baseType,captureType,bridgeType,fbl,(byte[])baseline.Clone(),"BASELINE");
+
+                  for(int i=0;i<16;i++)
+                  {
+                      RunCase(
+                          baseType,captureType,bridgeType,fbl,
+                          MakeProbe(baseline,i),
+                          "PROBE_"+i.ToString("D2")
+                      );
+                  }
+
+                  Log("TRACE_COMPLETE=true");
+              }
+          }
+          '@ | Set-Content "$root\harness\TraceProbe.cs"
+
+          $csc="$env:WINDIR\Microsoft.NET\Framework\v4.0.30319\csc.exe"
+          if(-not(Test-Path $csc)){ throw "x86 csc missing" }
+
+          & $csc /nologo /platform:x86 /target:exe `
+            /reference:"$root\harness\0Harmony.dll" `
+            /out:"$root\harness\TraceProbe.exe" `
+            "$root\harness\TraceProbe.cs"
+          if($LASTEXITCODE -ne 0){ throw "TraceProbe compile failed" }
+
+          @"
+          TRACEPROBE_SHA256=$((Get-FileHash "$root\harness\TraceProbe.exe" -Algorithm SHA256).Hash.ToLower())
+          HARMONY_SHA256=$((Get-FileHash "$root\harness\0Harmony.dll" -Algorithm SHA256).Hash.ToLower())
+          "@ | Set-Content "$root\evidence\03_HARNESS_HASHES.txt"
+
+      - name: Static safety audit
+        shell: pwsh
+        run: |
+          $ErrorActionPreference="Stop"
+          $root="C:\okn_v24"
+          $s=Get-Content "$root\harness\TraceProbe.cs" -Raw
+
+          foreach($bad in @(
+            "HidD_SetOutputReport(","HidD_GetInputReport(",
+            "HidD_SetFeature(","HidD_GetFeature(",
+            "ReadFile(","WriteFile(","CreateFileW("
+          )){
+            if($s.Contains($bad)){ throw "forbidden native HID primitive: $bad" }
+          }
+
+          foreach($need in @(
+            "BuildCaptureStream",
+            "SendDevTypeSwVersAuthenRequest",
+            "FBL3HEmTva",
+            "yEA33sF0N1",
+            "Harmony",
+            "REAL_HID_OBJECT_CREATED=NO",
+            "HOST_TO_DSP_IO=NO",
+            "FLASH_ALLOWED=NO"
+          )){
+            if(-not $s.Contains($need)){ throw "required marker missing: $need" }
+          }
+
+          "STATIC_SAFETY_AUDIT=PASS" | Set-Content "$root\evidence\04_STATIC_SAFETY_AUDIT.txt"
+
+      - name: Run parser with yEA intermediate tracing
+        shell: pwsh
+        run: |
+          $ErrorActionPreference="Stop"
+          $root="C:\okn_v24"
+
+          Copy-Item "$root\harness\0Harmony.dll" "$root\0Harmony.dll" -Force
+
+          $p=Start-Process `
+            -FilePath "$root\harness\TraceProbe.exe" `
+            -ArgumentList @(
+              "$root\vendor.exe",
+              "$root\evidence\05_AUTH_INTERMEDIATE_TRACE.txt",
+              $env:BASELINE_CHALLENGE_HEX
+            ) `
+            -WorkingDirectory $root `
+            -RedirectStandardOutput "$root\evidence\05A_STDOUT.txt" `
+            -RedirectStandardError "$root\evidence\05B_STDERR.txt" `
+            -PassThru
+
+          if(-not $p.WaitForExit(600000)){
+            Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
+            Write-Host "TraceProbe exceeded 10-minute guard; dumping partial evidence"
+            Get-Content "$root\evidence\05_AUTH_INTERMEDIATE_TRACE.txt" -Tail 200 -ErrorAction SilentlyContinue
+            throw "TraceProbe timed out after 10 minutes"
+          }
+
+          if($p.ExitCode -ne 0){
+            Get-Content "$root\evidence\05A_STDOUT.txt" -ErrorAction SilentlyContinue
+            Get-Content "$root\evidence\05B_STDERR.txt" -ErrorAction SilentlyContinue
+            throw "TraceProbe failed exit=$($p.ExitCode)"
+          }
+
+          $ev=Get-Content "$root\evidence\05_AUTH_INTERMEDIATE_TRACE.txt" -Raw
+          if($ev -notmatch 'HARMONY_YEA_PATCH=SUCCESS'){ throw "yEA hook not active" }
+          if($ev -notmatch 'TRACE_COMPLETE=true'){ throw "trace incomplete" }
+
+      - name: Derive auth postprocess relation
+        shell: pwsh
+        run: |
+          $ErrorActionPreference="Stop"
+          $root="C:\okn_v24"
+
+          @'
+          from pathlib import Path
+          import re,json,struct
+
+          root=Path(r"C:\okn_v24")
+          ev=root/"evidence"
+          text=(ev/"05_AUTH_INTERMEDIATE_TRACE.txt").read_text(errors="ignore")
+          lines=text.splitlines()
+
+          tags=["BASELINE"]+[f"PROBE_{i:02d}" for i in range(16)]
+
+          def val(prefix):
+              for x in lines:
+                  if x.startswith(prefix):
+                      return x.split("=",1)[1]
+              return None
+
+          cases=[]
+          for tag in tags:
+              inp=val(tag+"_INPUT_HEX=")
+              state=val(tag+"_STREAM_STATUS=")
+              n=int(val(tag+"_YEA_CALL_COUNT=") or 0)
+              w=int(val(tag+"_FOLLOWUP_WRITE_COUNT=") or 0)
+              y=[]
+              for i in range(n):
+                  ih=val(f"{tag}_YEA_{i}_INPUT_HEX=")
+                  rh=val(f"{tag}_YEA_{i}_RESULT_HEX=")
+                  y.append({"input_hex":ih,"result_hex":rh})
+              writes=[]
+              for i in range(w):
+                  writes.append(val(f"{tag}_FOLLOWUP_WRITE_{i}="))
+              out=writes[0] if writes else None
+              cases.append({
+                  "tag":tag,
+                  "input_hex":inp,
+                  "stream_status":state,
+                  "yea":y,
+                  "writes":writes,
+                  "output_hex":out
+              })
+
+          def u32(h):
+              if not h or not re.fullmatch(r"[0-9A-Fa-f]{8}",h): return None
+              return int(h,16)
+
+          accepted=[c for c in cases if c["output_hex"] and c["stream_status"]=="UFE_STREAM_GETTING_DEVICE_DESCRIPTION"]
+          baseline=cases[0]
+
+          # Verify known V18/V20 oracle baseline.
+          baseline_oracle_ok=(
+              baseline["output_hex"]=="3A5BADF3" and
+              baseline["stream_status"]=="UFE_STREAM_GETTING_DEVICE_DESCRIPTION"
+          )
+
+          max_calls=max([len(c["yea"]) for c in cases] or [0])
+          relations=[]
+
+          def rol(v,n):
+              n%=32
+              return ((v<<n)|(v>>(32-n))) & 0xffffffff if n else v & 0xffffffff
+
+          def ror(v,n):
+              n%=32
+              return ((v>>n)|(v<<(32-n))) & 0xffffffff if n else v & 0xffffffff
+
+          # Test simple stable transforms from each traced yEA result to parser output.
+          for idx in range(max_calls):
+              rows=[]
+              for c in accepted:
+                  if idx>=len(c["yea"]): continue
+                  yi=u32(c["yea"][idx]["result_hex"])
+                  po=u32(c["output_hex"])
+                  if yi is None or po is None: continue
+                  rows.append((yi,po,c["tag"]))
+              if len(rows)<8: continue
+
+              def add(name,ok,detail=None):
+                  if ok:
+                      relations.append({"yea_call_index":idx,"relation":name,"detail":detail,"cases":len(rows)})
+
+              add("IDENTITY",all(y==o for y,o,_ in rows))
+              add("BSWAP32",all(int.from_bytes(y.to_bytes(4,"big"),"little")==o for y,o,_ in rows))
+              add("BITWISE_NOT",all(((~y)&0xffffffff)==o for y,o,_ in rows))
+
+              xors={o^y for y,o,_ in rows}
+              add("XOR_CONST",len(xors)==1, None if len(xors)!=1 else f"{next(iter(xors)):08X}")
+
+              adds={(o-y)&0xffffffff for y,o,_ in rows}
+              add("ADD_CONST",len(adds)==1, None if len(adds)!=1 else f"{next(iter(adds)):08X}")
+
+              subs={(y-o)&0xffffffff for y,o,_ in rows}
+              add("SUB_CONST",len(subs)==1, None if len(subs)!=1 else f"{next(iter(subs)):08X}")
+
+              for n in range(1,32):
+                  if all(rol(y,n)==o for y,o,_ in rows):
+                      add("ROL",True,str(n))
+                  if all(ror(y,n)==o for y,o,_ in rows):
+                      add("ROR",True,str(n))
+
+              # Endian + XOR const.
+              bx=set()
+              for y,o,_ in rows:
+                  b=int.from_bytes(y.to_bytes(4,"big"),"little")
+                  bx.add(o^b)
+              add("BSWAP32_XOR_CONST",len(bx)==1,None if len(bx)!=1 else f"{next(iter(bx)):08X}")
+
+          yea_call_counts={c["tag"]:len(c["yea"]) for c in cases}
+          yea_calls_present=sum(1 for c in cases if c["yea"])
+          accepted_count=len(accepted)
+
+          # Check whether parser uses a stable-length transformed byte array as yEA input.
+          yea_input_lengths={}
+          for c in cases:
+              for i,y in enumerate(c["yea"]):
+                  h=y.get("input_hex")
+                  if h and re.fullmatch(r"[0-9A-Fa-f]+",h) and len(h)%2==0:
+                      yea_input_lengths.setdefault(str(i),set()).add(len(h)//2)
+
+          yea_input_lengths={k:sorted(v) for k,v in yea_input_lengths.items()}
+
+          if not baseline_oracle_ok:
+              status="BASELINE_PARSER_ORACLE_REGRESSION"
+          elif yea_calls_present==0:
+              status="HARMONY_ACTIVE_BUT_YEA_NOT_CALLED_TRACE_OTHER_AUTH_HELPERS"
+          elif relations:
+              status="YEA_INTERMEDIATE_AND_STABLE_POSTPROCESS_RELATION_RECOVERED_OFFLINE"
+          else:
+              status="YEA_INTERMEDIATE_RECOVERED_POSTPROCESS_STILL_NONTRIVIAL_TRACE_NEXT_LAYER"
+
+          decision={
+              "revision":"MASTER-V24",
+              "classification":"OFFLINE_AUTH_INTERMEDIATE_TRACE_NOT_FOR_FLASH",
+              "baseline_oracle_ok":baseline_oracle_ok,
+              "baseline_output_hex":baseline["output_hex"],
+              "baseline_state":baseline["stream_status"],
+              "case_count":len(cases),
+              "accepted_case_count":accepted_count,
+              "yea_calls_present_case_count":yea_calls_present,
+              "max_yea_calls_per_case":max_calls,
+              "yea_call_counts":yea_call_counts,
+              "yea_input_lengths":yea_input_lengths,
+              "stable_relations":relations,
+              "real_hid_invoked":False,
+              "host_to_dsp_io":False,
+              "feature_report_invoked":False,
+              "flash_allowed":False,
+              "safe_for_live_auth":False,
+              "stock_backup_path_proven":False,
+              "flash_layout_proven":False,
+              "rollback_path_proven":False,
+              "status":status
+          }
+
+          (ev/"06_V24_DECISION.json").write_text(json.dumps(decision,indent=2)+"\n")
+
+          relation_lines="\n".join(
+              f"- yEA[{r['yea_call_index']}] {r['relation']} detail={r['detail']} cases={r['cases']}"
+              for r in relations
+          ) or "- none"
+
+          md=f"""# MASTER V24 FINAL DECISION
+
+          - Baseline parser reply: **{baseline["output_hex"]}**
+          - Expected baseline parser reply: **3A5BADF3**
+          - Baseline post-auth state: **{baseline["stream_status"]}**
+          - Parser oracle baseline valid: **{baseline_oracle_ok}**
+          - Cases executed: **{len(cases)}**
+          - Cases reaching GET DEVICE DESCRIPTION: **{accepted_count}**
+          - Cases where yEA was traced: **{yea_calls_present}**
+          - Max yEA calls per parser case: **{max_calls}**
+          - Real HID invoked: **NO**
+          - Host-to-DSP I/O: **NO**
+          - Feature report invoked: **NO**
+          - Flash/erase/write: **NO / NO / NO**
+          - Safe for live auth: **NO**
+          - Stock backup/layout/rollback proven: **NO / NO / NO**
+
+          Stable yEA -> parser-output relations:
+          {relation_lines}
+
+          Status: **{status}**
+
+          If a stable relation is recovered across the full deterministic probe set,
+          the next step is one additional offline cross-vector verification before any
+          Samsung S25+ live auth attempt. If no relation is recovered, trace the next
+          parser helper layer instead. Flash remains locked either way.
+
+          Classification: **OFFLINE_AUTH_INTERMEDIATE_TRACE_NOT_FOR_FLASH**
+          """
+          (ev/"07_V24_FINAL_DECISION.md").write_text(md)
+          print(md)
+          '@ | Set-Content "$root\derive.py"
+
+          python "$root\derive.py"
+          if($LASTEXITCODE -ne 0){ throw "V24 derive failed" }
+
+          Get-Content "$root\evidence\07_V24_FINAL_DECISION.md" >> $env:GITHUB_STEP_SUMMARY
+
+      - name: Package evidence
+        shell: pwsh
+        run: |
+          $ErrorActionPreference="Stop"
+          $root="C:\okn_v24"
+
+          Copy-Item "$root\evidence\*" "$root\out\" -Force
+
+          # Never upload official vendor binary, Harmony binary, or executable harness.
+          foreach($bad in @("vendor.exe","0Harmony.dll","TraceProbe.exe")){
+            if(Test-Path "$root\out\$bad"){ throw "binary leak: $bad" }
+          }
+
+          Get-ChildItem "$root\out" -File | ForEach-Object {
+            "$((Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower())  $($_.Name)"
+          } | Set-Content "$root\out\SHA256SUMS.txt"
+
+      - name: Upload V24 evidence
+        uses: actions/upload-artifact@v7
+        with:
+          name: OKN-BP1048P4-MASTER-V24-AUTH-INTERMEDIATE-TRACE-EVIDENCE
+          path: C:\okn_v24\out\*
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Final fail-closed assertion
+        shell: pwsh
+        run: |
+          $ErrorActionPreference="Stop"
+          $root="C:\okn_v24"
+
+          foreach($n in @(
+            "LIVE_DSP_CONNECTED","USB_TARGET_ACCESS","HOST_TO_DSP_IO",
+            "REAL_HID_OBJECT_ALLOWED","REAL_HID_CONNECT_ALLOWED",
+            "REAL_HID_SEND_ALLOWED","REAL_HID_READ_ALLOWED","REAL_HID_WRITE_ALLOWED",
+            "FEATURE_REPORT_ALLOWED","FLASH_ALLOWED","ERASE_ALLOWED","WRITE_ALLOWED"
+          )){
+            if((Get-Item "Env:$n").Value -ne "NO"){ throw "$n changed" }
+          }
+
+          $d=Get-Content "$root\evidence\06_V24_DECISION.json" -Raw | ConvertFrom-Json
+          if($d.real_hid_invoked -ne $false){ throw "unexpected HID state" }
+          if($d.host_to_dsp_io -ne $false){ throw "unexpected host-to-DSP state" }
+          if($d.feature_report_invoked -ne $false){ throw "unexpected feature state" }
+          if($d.flash_allowed -ne $false){ throw "unexpected flash state" }
+          if($d.safe_for_live_auth -ne $false){ throw "V24 must remain offline-only" }
+
+          "MASTER_V24=PASS"
+          "REAL_HID_IO=NO"
+          "HOST_TO_DSP_IO=NO"
+          "FEATURE_REPORT=NO"
+          "FLASH_ALLOWED=NO"
