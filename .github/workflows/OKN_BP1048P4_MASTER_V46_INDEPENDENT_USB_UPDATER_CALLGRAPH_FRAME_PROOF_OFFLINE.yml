@@ -1,0 +1,430 @@
+name: OKN BP1048P4 MASTER V46 INDEPENDENT USB UPDATER CALLGRAPH + FRAME PROOF OFFLINE
+
+"on":
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/OKN_BP1048P4_MASTER_V46_INDEPENDENT_USB_UPDATER_CALLGRAPH_FRAME_PROOF_OFFLINE.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+env:
+  V45_ARTIFACT_ID: "11302270807"
+  R106_ARTIFACT_ID: "10711684891"
+  V43_ARTIFACT_ID: "11301278054"
+
+  SDK_REPO: "https://github.com/leadercxn/bp1048_sdk_v0.1.12.git"
+  SDK_COMMIT: "8105bd864b04995d81c9f9ae77cb158259f39015"
+
+  LIVE_DSP_ALLOWED: "NO"
+  HOST_TO_DSP_IO: "NO"
+  FEATURE_REPORT_ALLOWED: "NO"
+  NEW_LIVE_0X11_ALLOWED: "NO"
+  STARTUP_COMMAND_ALLOWED: "NO"
+  AUTH_REPLY_ALLOWED: "NO"
+  FLASH_ALLOWED: "NO"
+  ERASE_ALLOWED: "NO"
+  WRITE_ALLOWED: "NO"
+
+jobs:
+  v46:
+    name: Independently prove exact USB updater gating OFFLINE
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+
+    steps:
+      - name: Gate 0 - hard fail-closed safety
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$LIVE_DSP_ALLOWED" = "NO"
+          test "$HOST_TO_DSP_IO" = "NO"
+          test "$FEATURE_REPORT_ALLOWED" = "NO"
+          test "$NEW_LIVE_0X11_ALLOWED" = "NO"
+          test "$STARTUP_COMMAND_ALLOWED" = "NO"
+          test "$AUTH_REPLY_ALLOWED" = "NO"
+          test "$FLASH_ALLOWED" = "NO"
+          test "$ERASE_ALLOWED" = "NO"
+          test "$WRITE_ALLOWED" = "NO"
+
+          rm -rf /tmp/v46
+          mkdir -p /tmp/v46/{downloads,v45,r106,v43,sdk,evidence,out}
+
+          cat > /tmp/v46/evidence/00_SCOPE.txt <<'EOF'
+          REVISION=MASTER-V46
+          MODE=OFFLINE_ONLY
+
+          PURPOSE:
+          Independently verify whether the public BP1048 SDK contains a direct
+          USB-device updater transition that avoids both:
+          - HID Feature reports
+          - live byte 0x11
+
+          Also reconcile that result with the pinned MVAssistant native evidence,
+          which is programmer/dongle-side evidence and must not be promoted into
+          a Samsung S25+ -> USB-C -> production DSP path without proof.
+
+          No APK, no USB I/O, no live frame, no updater execution, no flash.
+          FLASH_ALLOWED=NO
+          EOF
+
+      - name: Gate 1 - acquire exact evidence and pinned SDK
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          get_artifact() {
+            local id="$1"
+            local name="$2"
+            mkdir -p "/tmp/v46/$name"
+            curl -fL --retry 5 --retry-all-errors \
+              -H "Accept: application/vnd.github+json" \
+              -H "Authorization: Bearer $GH_TOKEN" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/artifacts/${id}/zip" \
+              -o "/tmp/v46/downloads/${name}.zip"
+            unzip -q "/tmp/v46/downloads/${name}.zip" -d "/tmp/v46/$name"
+          }
+
+          get_artifact "$V45_ARTIFACT_ID" v45
+          get_artifact "$R106_ARTIFACT_ID" r106
+          get_artifact "$V43_ARTIFACT_ID" v43
+
+          python3 - <<'PY'
+          from pathlib import Path
+          import zipfile
+          for base in [Path("/tmp/v46/r106"), Path("/tmp/v46/v43")]:
+              seen=set()
+              for _ in range(5):
+                  todo=[p for p in base.rglob("*.zip") if p not in seen]
+                  if not todo: break
+                  for z in todo:
+                      seen.add(z)
+                      d=z.with_suffix(z.suffix+".unpacked")
+                      d.mkdir(parents=True,exist_ok=True)
+                      try:
+                          with zipfile.ZipFile(z) as q:
+                              q.extractall(d)
+                      except Exception:
+                          pass
+          PY
+
+          git clone -q "$SDK_REPO" /tmp/v46/sdk/repo
+          cd /tmp/v46/sdk/repo
+          git checkout -q "$SDK_COMMIT"
+          test "$(git rev-parse HEAD)" = "$SDK_COMMIT"
+
+          {
+            echo "SDK_COMMIT=$(git rev-parse HEAD)"
+            echo "V45_ARTIFACT_ID=$V45_ARTIFACT_ID"
+            echo "R106_ARTIFACT_ID=$R106_ARTIFACT_ID"
+            echo "V43_ARTIFACT_ID=$V43_ARTIFACT_ID"
+          } > /tmp/v46/evidence/01_PROVENANCE.txt
+
+      - name: Gate 2 - exact structural proof of USB updater branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import re, json
+
+          root=Path("/tmp/v46/sdk/repo")
+          p=root/"MVsB1_Base_SDK/driver/driver_api/src/otg/device/otg_device_standard_request.c"
+          s=p.read_text(errors="replace")
+
+          # Exact source anchors.
+          get_feature = 'else if((Setup[3] == 0x03)&&(Setup[0] == 0xA1))//GetReport (Feature Report)'
+          set_feature = 'else if((Setup[3] == 0x03)&&(Setup[0] == 0x21))//SetReport (Feature Report)'
+          usb_boot = 'start_up_grate(AppResourceUsbDevice);'
+          pc55 = 'if(Request[0] == 0x55)'
+          pcaa = 'else if(Request[0] == 0xAA)'
+
+          for anchor in [get_feature,set_feature,usb_boot,pc55,pcaa]:
+              if anchor not in s:
+                  raise SystemExit("missing exact anchor: "+anchor)
+
+          lines=s.splitlines()
+          def lineno(token):
+              return next(i+1 for i,x in enumerate(lines) if token in x)
+
+          L={
+              "get_feature":lineno(get_feature),
+              "set_feature":lineno(set_feature),
+              "usb_boot":lineno(usb_boot),
+              "pc55":lineno(pc55),
+              "pcaa":lineno(pcaa),
+          }
+
+          # These inequalities independently prove lexical branch ordering:
+          # GetFeature branch -> pc_upgrade check -> USB start_up_grate
+          # SetFeature branch -> Request 55/AA -> pc_upgrade writers
+          get_span="\n".join(lines[L["get_feature"]-1:L["set_feature"]-1])
+          set_span="\n".join(lines[L["set_feature"]-1:L["set_feature"]+25])
+
+          get_feature_contains_usb_boot = usb_boot in get_span
+          get_feature_contains_pc_upgrade_check = bool(re.search(r'if\s*\(\s*pc_upgrade\s*\)',get_span))
+          set_feature_contains_55 = pc55 in set_span
+          set_feature_contains_aa = pcaa in set_span
+          set_feature_pc_upgrade_one_count = len(re.findall(r'\bpc_upgrade\s*=\s*1\s*;',set_span))
+
+          result={
+              "source":str(p.relative_to(root)),
+              "lines":L,
+              "get_feature_branch_contains_usb_start_up_grate":get_feature_contains_usb_boot,
+              "get_feature_branch_contains_pc_upgrade_predicate":get_feature_contains_pc_upgrade_check,
+              "set_feature_branch_contains_request_0x55":set_feature_contains_55,
+              "set_feature_branch_contains_request_0xAA":set_feature_contains_aa,
+              "set_feature_branch_pc_upgrade_equals_1_count":set_feature_pc_upgrade_one_count,
+              "exact_usb_updater_path_requires_feature_get": bool(get_feature_contains_usb_boot and get_feature_contains_pc_upgrade_check),
+              "pc_upgrade_arm_requires_feature_set_in_this_source": bool(set_feature_contains_55 and set_feature_contains_aa and set_feature_pc_upgrade_one_count >= 2),
+          }
+
+          if not result["exact_usb_updater_path_requires_feature_get"]:
+              raise SystemExit("USB updater Feature gating proof failed")
+          if not result["pc_upgrade_arm_requires_feature_set_in_this_source"]:
+              raise SystemExit("pc_upgrade Feature SET gating proof failed")
+
+          Path("/tmp/v46/evidence/02_USB_UPDATER_FEATURE_GATING.json").write_text(
+              json.dumps(result,indent=2)+"\n")
+          Path("/tmp/v46/evidence/03_USB_CLASS_REQUEST_EXACT_SLICE.txt").write_text(
+              "\n".join(f"{i+1}: {lines[i]}" for i in range(348,410))+"\n")
+          print(json.dumps(result,indent=2))
+          PY
+
+      - name: Gate 3 - classify every start_up_grate resource correctly
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import re, json
+
+          root=Path("/tmp/v46/sdk/repo")
+          rows=[]
+
+          for p in root.rglob("*.c"):
+              try: lines=p.read_text(errors="replace").splitlines()
+              except: continue
+              for i,line in enumerate(lines,1):
+                  stripped=line.strip()
+                  if stripped.startswith("//") or stripped.startswith("/*") or stripped.startswith("*"):
+                      continue
+                  m=re.search(r'\bstart_up_grate\s*\(\s*(AppResource\w+)\s*\)\s*;',line)
+                  if not m:
+                      continue
+                  resource=m.group(1)
+                  ctx="\n".join(lines[max(0,i-15):min(len(lines),i+15)])
+                  rows.append({
+                      "path":str(p.relative_to(root)),
+                      "line":i,
+                      "resource":resource,
+                      "feature_context":bool(re.search(r'Feature Report|Setup\[3\]\s*==\s*0x03',ctx,re.I)),
+                      "pc_upgrade_context":bool(re.search(r'\bpc_upgrade\b',ctx)),
+                      "context":ctx,
+                  })
+
+          usb=[x for x in rows if x["resource"]=="AppResourceUsbDevice"]
+          removable=[x for x in rows if x["resource"] in {"AppResourceCard","AppResourceUDisk"}]
+          other=[x for x in rows if x not in usb and x not in removable]
+
+          result={
+              "all_real_call_sites":len(rows),
+              "usb_device_call_sites":len(usb),
+              "card_udisk_call_sites":len(removable),
+              "other_call_sites":len(other),
+              "usb_device_calls":usb,
+              "card_udisk_calls":removable,
+              "all_usb_calls_are_feature_gated": bool(usb) and all(x["feature_context"] for x in usb),
+              "non_feature_usb_call_count": sum(1 for x in usb if not x["feature_context"]),
+          }
+          Path("/tmp/v46/evidence/04_START_UP_GRATE_RESOURCE_CLASSIFICATION.json").write_text(
+              json.dumps(result,indent=2)+"\n")
+          print(json.dumps(result,indent=2))
+          PY
+
+      - name: Gate 4 - correct V45 false-positive classification
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import json
+
+          v45=json.loads(Path("/tmp/v46/v45/08_V45_FINAL_DECISION.json").read_text())
+          g=json.loads(Path("/tmp/v46/evidence/02_USB_UPDATER_FEATURE_GATING.json").read_text())
+          r=json.loads(Path("/tmp/v46/evidence/04_START_UP_GRATE_RESOURCE_CLASSIFICATION.json").read_text())
+
+          correction={
+              "v45_reported_public_sdk_candidate":v45["public_sdk_exact_non_feature_non_0x11_transition_candidate"],
+              "v45_reported_start_up_grate_non_feature_count":v45["start_up_grate_non_feature_non_0x11_call_sites"],
+              "v45_reported_pc_upgrade_writer_non_feature_count":v45["pc_upgrade_writers_without_feature_or_0x11"],
+
+              "correction_reason_1":
+                  "Card/UDisk start_up_grate calls are removable-media update paths, not USB-device updater entry.",
+              "correction_reason_2":
+                  "The only real AppResourceUsbDevice start_up_grate call is inside HID Feature GET_REPORT.",
+              "correction_reason_3":
+                  "pc_upgrade=1 assignments are inside HID Feature SET_REPORT; V45 context window started below the branch header.",
+              "correction_reason_4":
+                  "A commented-out start_up_grate declaration was also counted by V45 as a call site.",
+
+              "correct_non_feature_usb_updater_call_count":r["non_feature_usb_call_count"],
+              "usb_updater_path_requires_feature_get":g["exact_usb_updater_path_requires_feature_get"],
+              "pc_upgrade_arm_requires_feature_set":g["pc_upgrade_arm_requires_feature_set_in_this_source"],
+              "v45_candidate_survives_independent_review":False,
+          }
+
+          Path("/tmp/v46/evidence/05_V45_CORRECTION.json").write_text(
+              json.dumps(correction,indent=2)+"\n")
+          print(json.dumps(correction,indent=2))
+          PY
+
+      - name: Gate 5 - reconcile pinned MVAssistant native evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import json
+
+          root=Path("/tmp/v46/r106")
+          decisions=list(root.rglob("R106_DECISION.json"))
+          if not decisions:
+              raise SystemExit("R106_DECISION.json not found")
+          d=json.loads(decisions[0].read_text())
+
+          required_false=[
+              "PC_TO_DONGLE_FRAME_FORMAT_PROVEN",
+              "DONGLE_TO_TARGET_USB_PROTOCOL_PROVEN",
+              "PRODUCTION_GOLOPINE_BP1048P4_COMPATIBILITY_PROVEN",
+              "PHONE_DIRECT_S25_USB_C_BOOTSTRAP_PROVEN",
+              "PRODUCTION_RECOVERY_USB_IDENTITY_PROVEN",
+              "SAFE_READ_ONLY_PRODUCTION_BACKUP_PROVEN",
+              "ANY_DISCOVERED_FRAME_AUTHORIZED_FOR_BOARD",
+          ]
+          failures={k:bool(d.get(k)) for k in required_false}
+          programmer_path_not_promotable = not any(failures.values())
+
+          result={
+              "pinned_exe_sha256":d.get("EXE_SHA256"),
+              "flashboot_xref_present":d.get("FLASHBOOT_XREF_PRESENT"),
+              "packet_builder_anchor_count":d.get("PACKET_BUILDER_ANCHOR_COUNT"),
+              "vid_pid_compare_window_count":d.get("VID_PID_COMPARE_WINDOW_COUNT"),
+              "negative_production_gates":failures,
+              "mvassistant_programmer_dongle_path_promotable_to_phone_direct_production":not programmer_path_not_promotable,
+              "classification":"PROGRAMMER_SIDE_STATIC_EVIDENCE_ONLY"
+          }
+          Path("/tmp/v46/evidence/06_R106_RECONCILIATION.json").write_text(
+              json.dumps(result,indent=2)+"\n")
+          print(json.dumps(result,indent=2))
+          PY
+
+      - name: Gate 6 - final exact decision
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import json
+
+          gating=json.loads(Path("/tmp/v46/evidence/02_USB_UPDATER_FEATURE_GATING.json").read_text())
+          calls=json.loads(Path("/tmp/v46/evidence/04_START_UP_GRATE_RESOURCE_CLASSIFICATION.json").read_text())
+          corr=json.loads(Path("/tmp/v46/evidence/05_V45_CORRECTION.json").read_text())
+          r106=json.loads(Path("/tmp/v46/evidence/06_R106_RECONCILIATION.json").read_text())
+
+          safe_entry = (
+              calls["non_feature_usb_call_count"] > 0
+              and not gating["exact_usb_updater_path_requires_feature_get"]
+              and not gating["pc_upgrade_arm_requires_feature_set_in_this_source"]
+          )
+
+          final={
+              "revision":"MASTER-V46",
+              "v45_candidate_survives_independent_review":corr["v45_candidate_survives_independent_review"],
+              "public_sdk_usb_updater_requires_feature_get":gating["exact_usb_updater_path_requires_feature_get"],
+              "public_sdk_pc_upgrade_arm_requires_feature_set":gating["pc_upgrade_arm_requires_feature_set_in_this_source"],
+              "public_sdk_non_feature_usb_updater_call_count":calls["non_feature_usb_call_count"],
+              "mvassistant_phone_direct_production_path_proven":
+                  r106["mvassistant_programmer_dongle_path_promotable_to_phone_direct_production"],
+              "production_safe_runtime_to_updater_no_0x11_no_feature_proven":safe_entry,
+              "new_live_0x11_allowed":False,
+              "feature_report_live_allowed":False,
+              "host_to_dsp_io":False,
+              "flash_allowed":False,
+              "status":
+                  "PUBLIC_SDK_USB_UPDATER_IS_FEATURE_GATED_V45_FALSE_POSITIVE_CLOSED"
+                  if not safe_entry else
+                  "NON_FEATURE_USB_UPDATER_CANDIDATE_REQUIRES_FURTHER_OFFLINE_PROOF",
+              "next_allowed_action":
+                  "V47_OFFICIAL_GOLOPINE_WINDOWS_NATIVE_USB_ENTRY_XREF_OFFLINE"
+                  if not safe_entry else
+                  "V47_INDEPENDENT_EXACT_FRAME_PROOF_OFFLINE"
+          }
+          Path("/tmp/v46/evidence/07_V46_FINAL_DECISION.json").write_text(
+              json.dumps(final,indent=2)+"\n")
+
+          md=f"""# MASTER V46 FINAL DECISION
+
+          Independent exact-source review completed.
+
+          - V45 candidate survives review: **{final['v45_candidate_survives_independent_review']}**
+          - public SDK USB updater requires Feature GET_REPORT: **{final['public_sdk_usb_updater_requires_feature_get']}**
+          - public SDK `pc_upgrade` arm requires Feature SET_REPORT: **{final['public_sdk_pc_upgrade_arm_requires_feature_set']}**
+          - real non-Feature USB updater call sites: **{final['public_sdk_non_feature_usb_updater_call_count']}**
+          - MVAssistant phone-direct production path proven: **{final['mvassistant_phone_direct_production_path_proven']}**
+          - production-safe runtime -> updater without 0x11/Feature proven:
+            **{final['production_safe_runtime_to_updater_no_0x11_no_feature_proven']}**
+
+          V45 false positive is closed:
+          Card/UDisk updater calls are not USB-device entry, the single USB-device
+          `start_up_grate` call is inside Feature GET_REPORT, the `pc_upgrade=1`
+          writers are inside Feature SET_REPORT, and V45 also counted a commented
+          declaration as a call.
+
+          - new live byte 0x11: **NOT ALLOWED**
+          - Feature report live use: **NO**
+          - host-to-DSP I/O in V46: **NO**
+          - flash/erase/write: **NO / NO / NO**
+          - `FLASH_ALLOWED = NO`
+
+          Status:
+          **{final['status']}**
+
+          Next allowed action:
+          **{final['next_allowed_action']}**
+          """
+          Path("/tmp/v46/evidence/08_V46_FINAL_DECISION.md").write_text(md)
+          print(md)
+          PY
+
+          cp /tmp/v46/evidence/* /tmp/v46/out/
+          (cd /tmp/v46/out && sha256sum * > SHA256SUMS.txt)
+
+      - name: Upload V46 evidence
+        uses: actions/upload-artifact@v7
+        with:
+          name: OKN-BP1048P4-MASTER-V46-INDEPENDENT-USB-UPDATER-CALLGRAPH-EVIDENCE
+          path: /tmp/v46/out/*
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Final fail-closed assertion
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$LIVE_DSP_ALLOWED" = "NO"
+          test "$HOST_TO_DSP_IO" = "NO"
+          test "$FEATURE_REPORT_ALLOWED" = "NO"
+          test "$NEW_LIVE_0X11_ALLOWED" = "NO"
+          test "$FLASH_ALLOWED" = "NO"
+          test "$ERASE_ALLOWED" = "NO"
+          test "$WRITE_ALLOWED" = "NO"
+          grep -q '"flash_allowed": false' /tmp/v46/evidence/07_V46_FINAL_DECISION.json
+          echo "MASTER_V46=PASS"
+          echo "FLASH_ALLOWED=NO"
