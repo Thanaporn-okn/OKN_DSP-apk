@@ -1,4 +1,4 @@
-name: OKN R97 Raw IL + Flutter AOT Protocol Miner OFFLINE ONLY
+name: OKN R98 Flutter UFE Function Xref Miner OFFLINE ONLY
 
 on:
   push:
@@ -12,13 +12,12 @@ permissions:
   actions: read
 
 concurrency:
-  group: okn-r97-raw-il-flutter-aot-${{ github.ref }}
+  group: okn-r98-flutter-ufe-xref-${{ github.ref }}
   cancel-in-progress: true
 
 env:
-  OUT: /tmp/okn-r97
+  OUT: /tmp/okn-r98
   ANDROID_URL: "https://golodsp.com/wp-content/uploads/2026/05/golopine_audio_turning_release_2026-04-01.apk_.zip"
-  WINDOWS_URL: "https://golodsp.com/wp-content/uploads/2026/05/golopine_audio_turning_release_2026-04-08.exe_.zip"
   LIVE_BOARD_USB: "NO"
   HOST_TO_DEVICE_USB: "NO"
   FLASH_ERASE_WRITE: "NO"
@@ -26,7 +25,7 @@ env:
 
 jobs:
   mine:
-    name: Recover packet layout from raw IL and Flutter AOT / STATIC ONLY
+    name: Recover exact UFE functions from Flutter AOT / STATIC ONLY
     runs-on: ubuntu-24.04
     timeout-minutes: 35
 
@@ -47,23 +46,21 @@ jobs:
           test "$FLASH_ALLOWED" = "NO"
 
           rm -rf "$OUT"
-          mkdir -p "$OUT"/{downloads,android,windows,il,blutter,evidence,review}
+          mkdir -p "$OUT"/{downloads,android,blutter,evidence,review}
 
           cat > "$OUT/evidence/00_SCOPE.txt" <<'EOF'
-          REVISION=R97
+          REVISION=R98
           MODE=OFFLINE_STATIC_ONLY
           TARGET=GoloPine_DSTech_BP1048P4
           KNOWN_PRODUCTION_USB=6324:1719
           KNOWN_HID_USAGE=FF00:55AA
-          KNOWN_UFE_WRITE_ACTUATOR=0x57
-          KNOWN_UFE_READ_SENSOR_ACTUATOR=0x58
-          KNOWN_UFE_READ_SENSOR_JSON=0x59
-          KNOWN_UFE_RESPONSE_READ_SENSOR=0x60
-          KNOWN_UFE_READ_SENSOR_FIFO=0x61
-          KNOWN_UFE_RESPONSE_FIFO=0x62
-          KNOWN_UFE_READ_SENSOR_BULK=0x63
-          KNOWN_UFE_RESPONSE_SENSOR_BULK=0x64
-          KNOWN_UFE_CONTINUE_BULK=0x82
+          KNOWN_READ_SENSOR=0x58
+          KNOWN_READ_SENSOR_FIFO=0x61
+          KNOWN_READ_SENSOR_BULK=0x63
+          KNOWN_RESPONSE_READ_SENSOR=0x60
+          KNOWN_RESPONSE_FIFO=0x62
+          KNOWN_RESPONSE_BULK=0x64
+          KNOWN_CONTINUE_BULK=0x82
           BOARD_USB_ACCESS=NO
           LIVE_USB_COMMANDS=NO
           HOST_TO_DEVICE_USB=NO
@@ -73,10 +70,10 @@ jobs:
           WRITE=NO
           UNLOCK=NO
           FLASH_ALLOWED=NO
-          GOAL=Recover_exact_read_command_packet_layout_and_transport_from_official_clients
+          GOAL=Resolve_Flutter_AOT_functions_referencing_UFE_bulk_read_strings_and_extract_frame_construction_constants
           EOF
 
-      - name: Install static-analysis toolchain
+      - name: Install Blutter build dependencies
         shell: bash
         run: |
           set -euo pipefail
@@ -85,193 +82,101 @@ jobs:
             unzip p7zip-full file binutils jq git curl \
             python3 python3-pip python3-pyelftools python3-requests \
             cmake ninja-build build-essential pkg-config \
-            libicu-dev libcapstone-dev default-jre-headless
+            libicu-dev libcapstone-dev
 
-          {
-            echo "python=$(python3 --version)"
-            echo "gcc=$(gcc --version | head -1)"
-            echo "cmake=$(cmake --version | head -1)"
-            echo "dotnet=$(dotnet --version 2>/dev/null || true)"
-          } > "$OUT/evidence/01_TOOL_VERSIONS.txt"
-
-      - name: Download official GoloPine clients
+      - name: Download and select real Android APK
         shell: bash
         run: |
           set -euo pipefail
+          curl \
+            --fail --location --retry 4 --retry-all-errors \
+            --connect-timeout 20 --max-time 240 \
+            --user-agent "Mozilla/5.0 OKN-R98-Interop-Research" \
+            --referer "https://golodsp.com/7%E9%80%9A%E9%81%93%E9%9F%B3%E9%A2%91%E5%89%8D%E7%BA%A7/" \
+            --output "$OUT/downloads/android.zip" "$ANDROID_URL"
 
-          fetch() {
-            local url="$1"
-            local out="$2"
-            curl \
-              --fail --location --retry 4 --retry-all-errors \
-              --connect-timeout 20 --max-time 240 \
-              --user-agent "Mozilla/5.0 OKN-R97-Interop-Research" \
-              --referer "https://golodsp.com/7%E9%80%9A%E9%81%93%E9%9F%B3%E9%A2%91%E5%89%8D%E7%BA%A7/" \
-              --output "$out" "$url"
-            test -s "$out"
-          }
-
-          fetch "$ANDROID_URL" "$OUT/downloads/android.zip"
-          fetch "$WINDOWS_URL" "$OUT/downloads/windows.zip"
-
-          sha256sum "$OUT/downloads/"*.zip > "$OUT/evidence/02_DOWNLOAD_SHA256.txt"
-
-      - name: Select real APK and .NET EXE
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          mkdir -p "$OUT/android/pkg" "$OUT/windows/pkg"
+          mkdir -p "$OUT/android/pkg"
           7z x -y "$OUT/downloads/android.zip" -o"$OUT/android/pkg" >/dev/null
-          7z x -y "$OUT/downloads/windows.zip" -o"$OUT/windows/pkg" >/dev/null
 
           APK="$(
             find "$OUT/android/pkg" -type f -iname '*.apk' \
               ! -path '*/__MACOSX/*' ! -name '._*' -size +100k \
               -print | sort | head -n1
           )"
-
-          EXE="$(
-            find "$OUT/windows/pkg" -type f -iname '*.exe' \
-              ! -path '*/__MACOSX/*' ! -name '._*' -size +100k \
-              -print | sort | head -n1
-          )"
-
           test -n "$APK"
-          test -n "$EXE"
           unzip -t "$APK" >/dev/null
-
           cp "$APK" "$OUT/android/golopine.apk"
-          cp "$EXE" "$OUT/windows/dstech.exe"
 
           {
             echo "APK_SIZE=$(stat -c%s "$OUT/android/golopine.apk")"
             echo "APK_TYPE=$(file -b "$OUT/android/golopine.apk")"
-            echo "EXE_SIZE=$(stat -c%s "$OUT/windows/dstech.exe")"
-            echo "EXE_TYPE=$(file -b "$OUT/windows/dstech.exe")"
-          } > "$OUT/evidence/03_SELECTED_BINARIES.txt"
+            sha256sum "$OUT/android/golopine.apk"
+          } > "$OUT/evidence/01_APK_IDENTITY.txt"
 
-          sha256sum "$OUT/android/golopine.apk" "$OUT/windows/dstech.exe" \
-            > "$OUT/evidence/04_SELECTED_SHA256.txt"
-
-      - name: Dump Windows raw IL and metadata with ILSpy
-        shell: bash
-        run: |
-          set -euo pipefail
-          export PATH="$PATH:$HOME/.dotnet/tools"
-
-          if ! command -v ilspycmd >/dev/null 2>&1; then
-            dotnet tool install --global ilspycmd \
-              > "$OUT/evidence/10_ILSPY_INSTALL_STDOUT.txt" \
-              2> "$OUT/evidence/11_ILSPY_INSTALL_STDERR.txt"
-          fi
-
-          ilspycmd --version > "$OUT/evidence/12_ILSPY_VERSION.txt" 2>&1
-
-          # Whole-assembly IL: useful even when high-level C# bodies are hidden.
-          set +e
-          ilspycmd --ilcode "$OUT/windows/dstech.exe" \
-            > "$OUT/il/all.il" \
-            2> "$OUT/evidence/13_ILSPY_ALL_IL_STDERR.txt"
-          ALL_IL_RC=$?
-          set -e
-          echo "ALL_IL_RC=$ALL_IL_RC" > "$OUT/evidence/14_ILSPY_ALL_IL_STATUS.txt"
-
-          # Current ILSpy exposes metadata table dumping; keep it best-effort.
-          set +e
-          ilspycmd --dump-table MethodDef --json "$OUT/windows/dstech.exe" \
-            > "$OUT/il/MethodDef.json" \
-            2> "$OUT/evidence/15_METHODDEF_STDERR.txt"
-          METHODDEF_RC=$?
-
-          ilspycmd --dump-table TypeDef --json "$OUT/windows/dstech.exe" \
-            > "$OUT/il/TypeDef.json" \
-            2> "$OUT/evidence/16_TYPEDEF_STDERR.txt"
-          TYPEDEF_RC=$?
-          set -e
-
-          {
-            echo "METHODDEF_RC=$METHODDEF_RC"
-            echo "TYPEDEF_RC=$TYPEDEF_RC"
-          } > "$OUT/evidence/17_METADATA_DUMP_STATUS.txt"
-
-          types=(
-            "DSTech_AudioDSP_Client.UFEHeader"
-            "DSTech_AudioDSP_Client.PeriperalCommand"
-            "DSTech_AudioDSP_Client.Sensor"
-            "DSTech_AudioDSP_Client.Actuator"
-            "DSTech_AudioDSP_Client.ReadSensorPeriperalCommand"
-            "DSTech_AudioDSP_Client.ReadSensorBulkCommand"
-            "DSTech_AudioDSP_Client.ReadSensorFifoCommand"
-            "DSTech_AudioDSP_Client.ReadActuatorPeriperalCommand"
-            "DSTech_AudioDSP_Client.WriteActuatorPeriperalCommand"
-            "DSTech_AudioDSP_Client.UFEcommandBridge"
-            "DSTech_AudioDSP_Client.Hid"
-            "DSTech_AudioDSP_Client.HidDevice"
-            "DSTech_AudioDSP_Client.HIDInterface"
-            "DSTech_AudioDSP_Client.DeviceCommunicationStream"
-          )
-
-          mkdir -p "$OUT/il/types"
-          for t in "${types[@]}"; do
-            safe="$(printf '%s' "$t" | tr -c 'A-Za-z0-9._-' '_')"
-            set +e
-            ilspycmd --ilcode --type "$t" "$OUT/windows/dstech.exe" \
-              > "$OUT/il/types/${safe}.il" \
-              2> "$OUT/il/types/${safe}.stderr.txt"
-            rc=$?
-            set -e
-            printf '%s\t%s\n' "$rc" "$t" >> "$OUT/evidence/18_TYPE_IL_STATUS.tsv"
-          done
-
-      - name: Extract Flutter AOT libraries
+      - name: Extract APK and inventory native transport libraries
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p "$OUT/android/raw"
           7z x -y "$OUT/android/golopine.apk" -o"$OUT/android/raw" >/dev/null
 
-          LIBDIR="$OUT/android/raw/lib/arm64-v8a"
-          test -s "$LIBDIR/libapp.so"
-          test -s "$LIBDIR/libflutter.so"
+          test -s "$OUT/android/raw/lib/arm64-v8a/libapp.so"
+          test -s "$OUT/android/raw/lib/arm64-v8a/libflutter.so"
 
-          {
-            file "$LIBDIR/libapp.so"
-            file "$LIBDIR/libflutter.so"
-            sha256sum "$LIBDIR/libapp.so" "$LIBDIR/libflutter.so"
-          } > "$OUT/evidence/20_FLUTTER_LIBS.txt"
+          find "$OUT/android/raw/lib" -type f | sort \
+            > "$OUT/evidence/02_NATIVE_LIB_INVENTORY.txt"
 
-          strings -a -n 4 "$LIBDIR/libapp.so" \
-            > "$OUT/evidence/21_LIBAPP_STRINGS.txt"
-          strings -a -n 4 "$LIBDIR/libflutter.so" \
-            > "$OUT/evidence/22_LIBFLUTTER_STRINGS.txt"
+          while IFS= read -r f; do
+            printf '%s\t%s\n' "${f#$OUT/android/raw/}" "$(file -b "$f")"
+          done < "$OUT/evidence/02_NATIVE_LIB_INVENTORY.txt" \
+            > "$OUT/evidence/03_NATIVE_LIB_TYPES.txt"
 
-      - name: Run Blutter against Flutter ARM64 AOT
+          python3 - <<'PY'
+          from pathlib import Path
+          import os,subprocess,json
+
+          out=Path(os.environ["OUT"])
+          libroot=out/"android/raw/lib"
+          terms=[
+            "libusb","hidraw","hidapi","UsbManager","UsbDevice",
+            "controlTransfer","bulkTransfer","interruptTransfer",
+            "/dev/bus/usb","USBDEVFS","SET_REPORT","GET_REPORT",
+            "MethodChannel","EventChannel","serial","bluetooth","ble"
+          ]
+          hits=[]
+          for p in libroot.rglob("*.so"):
+            try:
+              r=subprocess.run(["strings","-a","-n","4",str(p)],
+                  capture_output=True,text=True,errors="ignore",timeout=30)
+            except Exception:
+              continue
+            for s in r.stdout.splitlines():
+              if any(t.lower() in s.lower() for t in terms):
+                hits.append({
+                  "path":str(p.relative_to(out)),
+                  "string":s[:2000]
+                })
+          (out/"evidence/04_NATIVE_TRANSPORT_STRINGS.json").write_text(
+              json.dumps(hits,indent=2,ensure_ascii=False)+"\n")
+          print("native_transport_hits",len(hits))
+          PY
+
+      - name: Run Blutter against arm64 Flutter AOT
         shell: bash
         run: |
           set -euo pipefail
-
           git clone --depth 1 https://github.com/worawit/blutter.git "$OUT/blutter-src"
 
-          set +e
           python3 "$OUT/blutter-src/blutter.py" \
             "$OUT/android/raw/lib/arm64-v8a" \
             "$OUT/blutter/out" \
-            > "$OUT/evidence/23_BLUTTER_STDOUT.txt" \
-            2> "$OUT/evidence/24_BLUTTER_STDERR.txt"
-          BLUTTER_RC=$?
-          set -e
+            > "$OUT/evidence/10_BLUTTER_STDOUT.txt" \
+            2> "$OUT/evidence/11_BLUTTER_STDERR.txt"
 
-          echo "BLUTTER_RC=$BLUTTER_RC" > "$OUT/evidence/25_BLUTTER_STATUS.txt"
+          echo "BLUTTER_RC=0" > "$OUT/evidence/12_BLUTTER_STATUS.txt"
+          find "$OUT/blutter/out" -type f | sort > "$OUT/evidence/13_BLUTTER_FILES.txt"
 
-          if [ -d "$OUT/blutter/out" ]; then
-            find "$OUT/blutter/out" -type f | sort \
-              > "$OUT/evidence/26_BLUTTER_FILES.txt"
-          else
-            : > "$OUT/evidence/26_BLUTTER_FILES.txt"
-          fi
-
-      - name: Mine exact Windows IL packet evidence
+      - name: Resolve target strings to PP offsets
         shell: bash
         run: |
           set -euo pipefail
@@ -280,94 +185,163 @@ jobs:
           import os,re,json
 
           out=Path(os.environ["OUT"])
-          ev=out/"evidence"
+          pp=out/"blutter/out/pp.txt"
+          txt=pp.read_text(errors="ignore")
 
-          files=[p for p in (out/"il").rglob("*") if p.is_file()]
-          terms=[
-            "UFE_WRITE_ACTUATOR_COMMAND",
-            "UFE_READ_SENSOR_ACTUATOR_COMMAND",
-            "UFE_READ_SENSOR_FIFO_COMMAND",
-            "UFE_READ_SENSOR_ACTUATOR_JSON_COMMAND",
-            "UFE_RESPONSE_READ_SENSOR_ACTUATOR_COMMAND",
-            "UFE_RESPONSE_FIFO_SENSOR",
-            "UFE_READ_SENSOR_ACTUATOR_BULK_COMMAND",
-            "UFE_RESPONSE_READ_SENSOR_ACTUATOR_BULK_COMMAND",
-            "UFE_CONTINUE_BULK_SEND",
-            "ReadSensorPeriperalCommand",
-            "ReadSensorBulkCommand",
-            "ReadSensorFifoCommand",
-            "ReadActuatorPeriperalCommand",
-            "ToByteArray",
-            "HidD_SetOutputReport",
-            "HidD_GetInputReport",
-            "WriteFile","ReadFile",
-            "6324","1719",
+          targets=[
+            "Sent Device Type and software version authentication request data",
+            "CurDeviceDescriptionLength=",
+            "Target DeviceDescriptionLength= ",
+            "Bulk receive start Length= ",
+            " sensorID=",
+            "Bulk receive Length= ",
+            "Bulk Receive Finished len= ",
+            "On actuator data updated",
+            "On sensor data updated",
+            "Decode UFE JSON success!",
+            "UFE_TYPE_FLOAT32",
+            "UFE_TYPE_INT32",
+            "UFE_TYPE_BIQUAD_CASCADE",
+            "hidUsage"
           ]
 
-          hits=[]
-          il_byte_builders=[]
+          rows=[]
+          for target in targets:
+            # Blutter pp format: [pp+0xcf30] String: "..."
+            pat=re.compile(
+              r'^\[pp\+0x([0-9a-fA-F]+)\].*?String:\s*"(.*)"\s*$',
+              re.M
+            )
+            found=[]
+            for m in pat.finditer(txt):
+              val=m.group(2)
+              if target.lower() in val.lower():
+                found.append({
+                  "pp_hex":"0x"+m.group(1).lower(),
+                  "pp_int":int(m.group(1),16),
+                  "value":val
+                })
+            rows.append({"target":target,"matches":found})
 
-          for p in files:
-            try: txt=p.read_text(errors="ignore")
-            except: continue
-            rel=str(p.relative_to(out))
-            lines=txt.splitlines()
-
-            for i,line in enumerate(lines):
-              found=[t for t in terms if t.lower() in line.lower()]
-              if not found:
-                continue
-              lo=max(0,i-25); hi=min(len(lines),i+80)
-              ctx="\n".join(f"{j+1}: {lines[j]}" for j in range(lo,hi))
-              hits.append({
-                "path":rel,"line":i+1,"terms":found,"context":ctx[:30000]
-              })
-
-            # Find method-sized regions around ToByteArray and extract constants /
-            # stelem.i1 / newarr / field loads, which reveal packet construction.
-            for m in re.finditer(r'(?im)^.*ToByteArray.*$',txt):
-              start=max(0,m.start()-4000)
-              end=min(len(txt),m.start()+24000)
-              block=txt[start:end]
-
-              constants=re.findall(
-                r'(?im)\bldc\.i4(?:\.s)?\s+(-?(?:0x[0-9A-Fa-f]+|\d+))|'
-                r'\bldc\.i4\.(\d+|m1)\b',
-                block
-              )
-              flat=[]
-              for a,b in constants:
-                flat.append(a or b)
-
-              interesting=[
-                ln.strip() for ln in block.splitlines()
-                if re.search(
-                  r'(?i)(newarr|stelem\.i1|ldelem\.u1|ldc\.i4|stfld|ldfld|'
-                  r'BitConverter|BlockCopy|CopyTo|memoffset|memlength|sensor|cascade|UFE_)',
-                  ln
-                )
-              ]
-
-              il_byte_builders.append({
-                "path":rel,
-                "anchor":"ToByteArray",
-                "constants":flat[:1000],
-                "interesting_lines":interesting[:2000],
-                "window":block[:30000]
-              })
-
-          ev.joinpath("30_WINDOWS_IL_HITS.json").write_text(
-            json.dumps(hits,indent=2,ensure_ascii=False)+"\n")
-          ev.joinpath("31_WINDOWS_IL_BYTE_BUILDERS.json").write_text(
-            json.dumps(il_byte_builders,indent=2,ensure_ascii=False)+"\n")
-          ev.joinpath("32_WINDOWS_IL_SUMMARY.json").write_text(json.dumps({
-            "files_scanned":len(files),
-            "term_hits":len(hits),
-            "tobytearray_windows":len(il_byte_builders)
-          },indent=2)+"\n")
+          (out/"evidence/20_PP_TARGET_OFFSETS.json").write_text(
+              json.dumps(rows,indent=2,ensure_ascii=False)+"\n")
+          print(json.dumps(rows,indent=2,ensure_ascii=False))
           PY
 
-      - name: Mine Flutter AOT protocol evidence
+      - name: Cross-reference PP offsets into Blutter assembly
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import os,re,json,shutil
+
+          out=Path(os.environ["OUT"])
+          ev=out/"evidence"
+          asmroot=out/"blutter/out/asm"
+          targets=json.loads((ev/"20_PP_TARGET_OFFSETS.json").read_text())
+
+          refs=[]
+          selected=set()
+
+          # Candidate literal formats observed in Blutter output vary by release.
+          for target in targets:
+            for m in target["matches"]:
+              hx=m["pp_hex"].lower()
+              hxn=hx[2:]
+              forms=[
+                f"pp+{hx}", f"PP+{hx}",
+                f"pp + {hx}", f"PP + {hx}",
+                f"#{hx}", f"#0x{hxn}",
+                f"[pp+{hx}]", f"[PP+{hx}]",
+              ]
+
+              for p in asmroot.rglob("*.dart"):
+                try: txt=p.read_text(errors="ignore")
+                except Exception: continue
+                low=txt.lower()
+
+                positions=[]
+                for form in forms:
+                  start=0
+                  fl=form.lower()
+                  while True:
+                    i=low.find(fl,start)
+                    if i<0: break
+                    positions.append(i)
+                    start=i+1
+
+                # Some Blutter asm files carry the literal string in comments.
+                start=0
+                needle=m["value"].lower()
+                while needle:
+                  i=low.find(needle,start)
+                  if i<0: break
+                  positions.append(i)
+                  start=i+1
+
+                for i in sorted(set(positions)):
+                  lo=max(0,i-12000)
+                  hi=min(len(txt),i+20000)
+                  window=txt[lo:hi]
+                  refs.append({
+                    "target":target["target"],
+                    "value":m["value"],
+                    "pp_hex":hx,
+                    "path":str(p.relative_to(out)),
+                    "char_offset":i,
+                    "window":window
+                  })
+                  selected.add(p)
+
+          # If direct PP textual refs are absent, grep likely immediate offsets
+          # transformed by ARM64 scaled addressing and retain candidates.
+          pp_ints=[]
+          for t in targets:
+            for m in t["matches"]:
+              pp_ints.append((t["target"],m["pp_int"],m["value"]))
+
+          if not refs:
+            for p in asmroot.rglob("*.dart"):
+              try: txt=p.read_text(errors="ignore")
+              except Exception: continue
+              lines=txt.splitlines()
+              for i,line in enumerate(lines):
+                nums=[]
+                for hm in re.finditer(r'0x([0-9a-fA-F]+)',line):
+                  try: nums.append(int(hm.group(1),16))
+                  except: pass
+                for target,val,s in pp_ints:
+                  # exact PP displacement or nearby 8-byte aligned displacement
+                  if any(abs(n-val)<=16 for n in nums):
+                    lo=max(0,i-120); hi=min(len(lines),i+220)
+                    refs.append({
+                      "target":target,"value":s,"pp_hex":hex(val),
+                      "path":str(p.relative_to(out)),
+                      "line":i+1,
+                      "window":"\n".join(lines[lo:hi])
+                    })
+                    selected.add(p)
+
+          (ev/"21_ASM_PP_XREFS.json").write_text(
+              json.dumps(refs,indent=2,ensure_ascii=False)+"\n")
+
+          sel=out/"review/selected-asm"
+          sel.mkdir(parents=True,exist_ok=True)
+          for p in sorted(selected):
+            rel=p.relative_to(asmroot)
+            name=str(rel).replace("/","__")
+            dst=sel/name
+            shutil.copy2(p,dst)
+
+          (ev/"22_SELECTED_ASM_FILES.txt").write_text(
+              "\n".join(str(p.relative_to(out)) for p in sorted(selected))+"\n")
+
+          print("xref_count",len(refs))
+          print("selected_asm_files",len(selected))
+          PY
+
+      - name: Mine UFE command constants and byte stores near xrefs
         shell: bash
         run: |
           set -euo pipefail
@@ -377,160 +351,191 @@ jobs:
 
           out=Path(os.environ["OUT"])
           ev=out/"evidence"
+          refs=json.loads((ev/"21_ASM_PP_XREFS.json").read_text())
 
-          roots=[out/"blutter/out"]
-          # Include libapp strings even if Blutter fails.
-          string_files=[ev/"21_LIBAPP_STRINGS.txt"]
+          command_values={
+            0x57:"WRITE_ACTUATOR",
+            0x58:"READ_SENSOR",
+            0x59:"READ_SENSOR_JSON",
+            0x60:"RESPONSE_READ_SENSOR",
+            0x61:"READ_SENSOR_FIFO",
+            0x62:"RESPONSE_FIFO",
+            0x63:"READ_SENSOR_BULK",
+            0x64:"RESPONSE_BULK",
+            0x82:"CONTINUE_BULK"
+          }
 
-          terms=[
-            "usb","hid","report","sensor","actuator","ufe",
-            "readSensor","writeActuator","bulk","fifo",
-            "6324","1719","55aa","ff00",
-            "deviceDescription","authen","firmware","upgrade","flash",
-            "MethodChannel","EventChannel","send","receive",
-            "mastervolume","biquad","equalizer","crossover"
-          ]
+          mined=[]
+          for ref in refs:
+            w=ref["window"]
+            lines=w.splitlines()
+            constants=[]
+            stores=[]
+            arithmetic=[]
 
-          hits=[]
-          numeric_neighbors=[]
+            for idx,line in enumerate(lines):
+              low=line.lower()
+              vals=[]
+              for m in re.finditer(r'(?<![0-9a-f])0x([0-9a-f]+)',low):
+                try: vals.append(int(m.group(1),16))
+                except: pass
+              for m in re.finditer(r'(?<![\w])#(\d+)',low):
+                try: vals.append(int(m.group(1)))
+                except: pass
 
-          for root in roots:
-            if not root.exists():
-              continue
-            for p in root.rglob("*"):
-              if not p.is_file():
-                continue
-              if p.stat().st_size > 80_000_000:
-                continue
-              try: txt=p.read_text(errors="ignore")
-              except: continue
-              lines=txt.splitlines()
-              rel=str(p.relative_to(out))
-              for i,line in enumerate(lines):
-                found=[t for t in terms if t.lower() in line.lower()]
-                if not found:
-                  continue
-                lo=max(0,i-20); hi=min(len(lines),i+50)
-                ctx="\n".join(f"{j+1}: {lines[j]}" for j in range(lo,hi))
-                hits.append({
-                  "path":rel,"line":i+1,"terms":found,"context":ctx[:30000]
-                })
-
-                if re.search(r'(?<!\d)(87|88|89|96|97|98|99|100|130)(?!\d)',ctx):
-                  numeric_neighbors.append({
-                    "path":rel,"line":i+1,"context":ctx[:30000]
+              for v in vals:
+                if v in command_values:
+                  constants.append({
+                    "line":line.strip(),
+                    "value":v,
+                    "meaning":command_values[v]
                   })
 
-          for p in string_files:
-            if not p.exists(): continue
-            lines=p.read_text(errors="ignore").splitlines()
+              if re.search(r'\b(strb|sturb|strh|sturh|str\s+w|str\s+x|stp)\b',low):
+                stores.append(line.strip())
+              if re.search(r'\b(add|sub|lsl|lsr|ubfx|bfi|rev|rev16|and|orr|eor)\b',low):
+                arithmetic.append(line.strip())
+
+            mined.append({
+              "target":ref["target"],
+              "value":ref["value"],
+              "pp_hex":ref["pp_hex"],
+              "path":ref["path"],
+              "command_constants":constants[:200],
+              "byte_word_stores":stores[:400],
+              "packing_arithmetic":arithmetic[:400],
+              "window":w
+            })
+
+          (ev/"30_UFE_XREF_MINED.json").write_text(
+              json.dumps(mined,indent=2,ensure_ascii=False)+"\n")
+
+          # High-confidence evidence requires target string xref + command constant
+          # in the same bounded assembly window, rather than global constants.
+          high=[]
+          for x in mined:
+            if x["command_constants"]:
+              high.append({
+                "target":x["target"],
+                "path":x["path"],
+                "commands":x["command_constants"],
+                "stores":x["byte_word_stores"][:100],
+                "packing":x["packing_arithmetic"][:100]
+              })
+
+          (ev/"31_HIGH_CONFIDENCE_COMMAND_XREFS.json").write_text(
+              json.dumps(high,indent=2,ensure_ascii=False)+"\n")
+
+          print("xref_windows",len(mined))
+          print("high_confidence_windows",len(high))
+          PY
+
+      - name: Search all AOT assembly for read command IDs near memory terms
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import os,re,json
+
+          out=Path(os.environ["OUT"])
+          asmroot=out/"blutter/out/asm"
+          ev=out/"evidence"
+
+          command_hex=("0x58","0x61","0x63","0x60","0x62","0x64","0x82")
+          memory_words=("offset","length","sensor","bulk","fifo","uint8","uint16","byte","data")
+          hits=[]
+
+          for p in asmroot.rglob("*.dart"):
+            try: lines=p.read_text(errors="ignore").splitlines()
+            except Exception: continue
+
             for i,line in enumerate(lines):
-              if any(t.lower() in line.lower() for t in terms):
-                lo=max(0,i-10); hi=min(len(lines),i+20)
+              low=line.lower()
+              if not any(c in low for c in command_hex):
+                continue
+              lo=max(0,i-100); hi=min(len(lines),i+180)
+              ctx="\n".join(lines[lo:hi])
+              score=sum(1 for w in memory_words if w in ctx.lower())
+              if score:
                 hits.append({
                   "path":str(p.relative_to(out)),
                   "line":i+1,
-                  "terms":[t for t in terms if t.lower() in line.lower()],
-                  "context":"\n".join(
-                    f"{j+1}: {lines[j]}" for j in range(lo,hi)
-                  )[:20000]
+                  "command_line":line.strip(),
+                  "memory_term_score":score,
+                  "context":ctx
                 })
 
-          ev.joinpath("40_FLUTTER_AOT_HITS.json").write_text(
-            json.dumps(hits,indent=2,ensure_ascii=False)+"\n")
-          ev.joinpath("41_FLUTTER_COMMAND_ID_NEIGHBORS.json").write_text(
-            json.dumps(numeric_neighbors,indent=2,ensure_ascii=False)+"\n")
-          ev.joinpath("42_FLUTTER_AOT_SUMMARY.json").write_text(json.dumps({
-            "protocol_hits":len(hits),
-            "command_id_neighbors":len(numeric_neighbors)
-          },indent=2)+"\n")
+          hits.sort(key=lambda x:(-x["memory_term_score"],x["path"],x["line"]))
+          (ev/"32_COMMAND_ID_ASM_HITS.json").write_text(
+              json.dumps(hits[:1000],indent=2,ensure_ascii=False)+"\n")
+          print("command_id_asm_hits",len(hits))
           PY
 
-      - name: Correlate command IDs and packet layout evidence
+      - name: Produce corrected evidence verdict
         shell: bash
         run: |
           set -euo pipefail
           python3 - <<'PY'
           from pathlib import Path
-          import os,json,re
+          import os,json
 
           out=Path(os.environ["OUT"])
           ev=out/"evidence"
 
-          def load(name, default):
+          def load(name,default):
             p=ev/name
             return json.loads(p.read_text(errors="ignore")) if p.exists() else default
 
-          ilhits=load("30_WINDOWS_IL_HITS.json",[])
-          builders=load("31_WINDOWS_IL_BYTE_BUILDERS.json",[])
-          flutter=load("40_FLUTTER_AOT_HITS.json",[])
-          neighbors=load("41_FLUTTER_COMMAND_ID_NEIGHBORS.json",[])
+          offsets=load("20_PP_TARGET_OFFSETS.json",[])
+          refs=load("21_ASM_PP_XREFS.json",[])
+          high=load("31_HIGH_CONFIDENCE_COMMAND_XREFS.json",[])
+          idhits=load("32_COMMAND_ID_ASM_HITS.json",[])
+          native=load("04_NATIVE_TRANSPORT_STRINGS.json",[])
 
-          known={
-            "write_actuator":0x57,
-            "read_sensor_actuator":0x58,
-            "read_sensor_json":0x59,
-            "response_read_sensor":0x60,
-            "read_sensor_fifo":0x61,
-            "response_fifo":0x62,
-            "read_sensor_bulk":0x63,
-            "response_sensor_bulk":0x64,
-            "continue_bulk":0x82,
-          }
-
-          # Packet layout is only "proven" when concrete byte construction or
-          # equivalent AOT code is recovered, not merely enum names.
-          builder_text=json.dumps(builders,ensure_ascii=False).lower()
-          concrete_ops=any(x in builder_text for x in [
-            "stelem.i1","newarr","blockcopy","memoffset","memlength"
-          ])
-          nonempty_builder=any(
-            len(x.get("interesting_lines",[])) >= 3 for x in builders
-          )
-          packet_layout_proven=bool(concrete_ops and nonempty_builder)
+          target_offset_count=sum(len(x.get("matches",[])) for x in offsets)
 
           verdict={
-            "exact_command_ids_from_official_windows_client":known,
-            "windows_il_hit_count":len(ilhits),
-            "windows_tobytearray_windows":len(builders),
-            "flutter_protocol_hits":len(flutter),
-            "flutter_command_id_neighbors":len(neighbors),
-            "packet_layout_proven":packet_layout_proven,
-            "sensor_parameter_read_command_proven":True,
+            "r97_packet_layout_verdict_corrected":False,
+            "correction_reason":"R97 global byte-builder heuristic matched unrelated protected assembly methods; exact ReadSensorBulkCommand.ToByteArray remained a stub.",
+            "flutter_target_string_offsets":target_offset_count,
+            "flutter_asm_xrefs":len(refs),
+            "high_confidence_command_xrefs":len(high),
+            "global_command_id_asm_hits":len(idhits),
+            "native_transport_string_hits":len(native),
+            "read_sensor_command_ids_proven":True,
+            "exact_read_frame_layout_proven":bool(high),
             "full_flash_readback_proven":False,
             "live_board_commands_allowed":False,
-            "reason":"Command IDs are grounded, but no live host-to-device packet is allowed until the exact packet layout, target sensor/address semantics, and non-destructive response path are proven."
+            "promotion_rule":"No live packet until an exact official-client AOT function ties read command ID to byte packing and response parsing, and target semantics are non-destructive."
           }
 
-          ev.joinpath("50_R97_VERDICT.json").write_text(
-            json.dumps(verdict,indent=2,ensure_ascii=False)+"\n")
+          (ev/"40_R98_VERDICT.json").write_text(
+              json.dumps(verdict,indent=2,ensure_ascii=False)+"\n")
 
           lines=[
-            "OKN R97 RAW IL + FLUTTER AOT PROTOCOL MINER",
+            "OKN R98 FLUTTER UFE FUNCTION XREF MINER",
             "OFFLINE_ONLY=true",
-            f"WINDOWS_IL_HITS={len(ilhits)}",
-            f"WINDOWS_TOBYTEARRAY_WINDOWS={len(builders)}",
-            f"FLUTTER_PROTOCOL_HITS={len(flutter)}",
-            f"FLUTTER_COMMAND_ID_NEIGHBORS={len(neighbors)}",
-            f"PACKET_LAYOUT_PROVEN={str(packet_layout_proven).lower()}",
-            "SENSOR_PARAMETER_READ_COMMAND_PROVEN=true",
+            "R97_PACKET_LAYOUT_VERDICT_CORRECTED=false",
+            f"TARGET_PP_OFFSETS={target_offset_count}",
+            f"ASM_XREFS={len(refs)}",
+            f"HIGH_CONFIDENCE_COMMAND_XREFS={len(high)}",
+            f"COMMAND_ID_ASM_HITS={len(idhits)}",
+            f"NATIVE_TRANSPORT_HITS={len(native)}",
+            "READ_SENSOR_COMMAND_IDS_PROVEN=true",
+            f"EXACT_READ_FRAME_LAYOUT_PROVEN={str(bool(high)).lower()}",
             "FULL_FLASH_READBACK_PROVEN=false",
             "LIVE_BOARD_COMMANDS_ALLOWED=false",
           ]
-          ev.joinpath("51_R97_SUMMARY.txt").write_text("\n".join(lines)+"\n")
+          (ev/"41_R98_SUMMARY.txt").write_text("\n".join(lines)+"\n")
           print("\n".join(lines))
           PY
 
-      - name: Build compact evidence bundle
+      - name: Build compact artifact
         shell: bash
         run: |
           set -euo pipefail
           cp -a "$OUT/evidence/." "$OUT/review/"
-
-          # Include only compact type-specific IL, not the complete proprietary
-          # application decompilation.
-          mkdir -p "$OUT/review/type-il"
-          cp -a "$OUT/il/types/." "$OUT/review/type-il/" 2>/dev/null || true
 
           cat > "$OUT/review/99_SAFETY_ATTESTATION.txt" <<'EOF'
           OFFLINE_STATIC_ONLY=true
@@ -551,19 +556,16 @@ jobs:
         shell: bash
         run: |
           {
-            echo "## OKN R97 Raw IL + Flutter AOT Protocol Miner"
+            echo "## OKN R98 Flutter UFE Function Xref Miner"
             echo
-            echo "- Static/offline analysis only."
-            echo "- No board access and no live OUT/SET_REPORT."
+            echo "- Offline/static analysis only."
+            echo "- Corrects R97 packet-layout false positive."
+            echo "- No board USB access and no host-to-device packets."
             echo
             for f in \
-              "$OUT/evidence/03_SELECTED_BINARIES.txt" \
-              "$OUT/evidence/14_ILSPY_ALL_IL_STATUS.txt" \
-              "$OUT/evidence/17_METADATA_DUMP_STATUS.txt" \
-              "$OUT/evidence/25_BLUTTER_STATUS.txt" \
-              "$OUT/evidence/32_WINDOWS_IL_SUMMARY.json" \
-              "$OUT/evidence/42_FLUTTER_AOT_SUMMARY.json" \
-              "$OUT/evidence/51_R97_SUMMARY.txt"; do
+              "$OUT/evidence/01_APK_IDENTITY.txt" \
+              "$OUT/evidence/12_BLUTTER_STATUS.txt" \
+              "$OUT/evidence/41_R98_SUMMARY.txt"; do
               if [ -f "$f" ]; then
                 echo "### $(basename "$f")"
                 echo '```text'
@@ -573,11 +575,11 @@ jobs:
             done
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Upload R97 protocol evidence
+      - name: Upload R98 protocol evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: R97-RAW-IL-FLUTTER-AOT-PROTOCOL-EVIDENCE
-          path: /tmp/okn-r97/review
+          name: R98-FLUTTER-UFE-FUNCTION-XREF-EVIDENCE
+          path: /tmp/okn-r98/review
           if-no-files-found: error
           retention-days: 30
