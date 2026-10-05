@@ -1,4 +1,4 @@
-name: OKN R108 MEGA Resource Decryptor + Stub Body Recovery OFFLINE ONLY
+name: OKN R109 MEGA Static Decrypt + Method Store Recovery OFFLINE ONLY
 
 on:
   push:
@@ -12,7 +12,7 @@ permissions:
   actions: read
 
 concurrency:
-  group: okn-r108-resource-decryptor-${{ github.ref }}
+  group: okn-r109-static-decrypt-${{ github.ref }}
   cancel-in-progress: true
 
 env:
@@ -24,14 +24,14 @@ env:
 
 jobs:
   recover:
-    name: Recover protector crypto/resource pipeline / STATIC ONLY
+    name: Static decryptor + protected method store recovery
     runs-on: ubuntu-24.04
-    timeout-minutes: 40
+    timeout-minutes: 45
     env:
-      OUT: /tmp/r108
+      OUT: /tmp/r109
 
     steps:
-      - name: Fail-closed safety gate
+      - name: Fail-closed offline safety gate
         shell: bash
         run: |
           set -euo pipefail
@@ -39,27 +39,36 @@ jobs:
           test "$HOST_TO_DEVICE_USB" = "NO"
           test "$FLASH_ERASE_WRITE" = "NO"
           test "$FLASH_ALLOWED" = "NO"
+
           rm -rf "$OUT"
-          mkdir -p "$OUT"/{downloads,pkg,il,evidence,resources,review}
+          mkdir -p "$OUT"/{downloads,pkg,il,evidence,resources,fieldrva,decrypted,review}
+
           cat > "$OUT/evidence/00_SCOPE.txt" <<'EOF'
-          REVISION=R108
+          REVISION=R109
           MODE=OFFLINE_STATIC_ONLY
           TARGET_EXECUTED=false
           BOARD_USB_ACCESS=NO
           HOST_TO_DEVICE_USB=NO
           FLASH_ERASE_WRITE=NO
           FLASH_ALLOWED=NO
-          GOAL=Recover_resource_decryption_and_stub_method_body_restoration_pipeline
+          TARGET_METHOD=UpdateCommandThread
+          TARGET_METHOD_TOKEN=0x0600082C
+          TARGET_METHOD_RID=2092
+          TARGET_METHOD_RVA=0xA3F4
+          TARGET_PROTECTOR_METHOD=N9jju8llVi
+          TARGET_RESOURCE=h15IL2i6yy2BZV8RqM.YuRwd1JALC4oy32W66
+          GOAL=Recover_crypto_material_method_store_format_and_UpdateCommandThread_body_statically
           EOF
 
-      - name: Install static-analysis tools
+      - name: Install static analysis and crypto tools
         shell: bash
         run: |
           set -euo pipefail
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends \
-            unzip p7zip-full file binutils jq curl mono-utils python3 python3-pip
-          python3 -m pip install --break-system-packages --quiet pefile dnfile
+            unzip p7zip-full file binutils jq curl mono-utils python3 python3-pip gzip
+          python3 -m pip install --break-system-packages --quiet \
+            pefile dnfile pycryptodome
 
       - name: Download official Windows client
         shell: bash
@@ -67,19 +76,27 @@ jobs:
           set -euo pipefail
           curl --fail --location --retry 4 --retry-all-errors \
             --connect-timeout 20 --max-time 240 \
-            --user-agent "Mozilla/5.0 OKN-R108-Static-Research" \
+            --user-agent "Mozilla/5.0 OKN-R109-Static-Research" \
             --referer "https://golodsp.com/7%E9%80%9A%E9%81%93%E9%9F%B3%E9%A2%91%E5%89%8D%E7%BA%A7/" \
             --output "$OUT/downloads/windows.zip" "$WINDOWS_URL"
+
           7z x -y "$OUT/downloads/windows.zip" -o"$OUT/pkg" >/dev/null
-          EXE="$(find "$OUT/pkg" -type f -iname '*.exe' ! -path '*/__MACOSX/*' ! -name '._*' -size +100k | sort | head -n1)"
+
+          EXE="$(
+            find "$OUT/pkg" -type f -iname '*.exe' \
+              ! -path '*/__MACOSX/*' ! -name '._*' -size +100k \
+              | sort | head -n1
+          )"
           test -n "$EXE"
           cp "$EXE" "$OUT/dstech.exe"
+
           {
             file "$OUT/dstech.exe"
             sha256sum "$OUT/dstech.exe"
+            stat -c 'SIZE=%s' "$OUT/dstech.exe"
           } > "$OUT/evidence/01_IDENTITY.txt"
 
-      - name: Dump raw IL and decompiled C sharp
+      - name: Dump complete IL
         shell: bash
         run: |
           set -euo pipefail
@@ -87,13 +104,20 @@ jobs:
           if ! command -v ilspycmd >/dev/null 2>&1; then
             dotnet tool install --global ilspycmd >/dev/null
           fi
-          ilspycmd --ilcode "$OUT/dstech.exe" > "$OUT/il/all.il" \
-            2> "$OUT/evidence/10_ILSPY_IL_STDERR.txt"
-          ilspycmd --project --outputdir "$OUT/csharp" "$OUT/dstech.exe" \
-            > "$OUT/evidence/11_ILSPY_CSHARP_STDOUT.txt" \
-            2> "$OUT/evidence/12_ILSPY_CSHARP_STDERR.txt"
 
-      - name: Extract all five managed resource blobs via raw COR20 parser
+          ilspycmd --ilcode "$OUT/dstech.exe" \
+            > "$OUT/il/all.il" \
+            2> "$OUT/evidence/10_ILSPY_STDERR.txt"
+
+          gzip -9 -c "$OUT/il/all.il" > "$OUT/review/all.il.gz"
+
+          {
+            echo "IL_BYTES=$(stat -c%s "$OUT/il/all.il")"
+            echo "IL_GZIP_BYTES=$(stat -c%s "$OUT/review/all.il.gz")"
+            echo "IL_METHOD_MARKERS=$(grep -c '^[[:space:]]*\\.method' "$OUT/il/all.il" || true)"
+          } > "$OUT/evidence/11_IL_IDENTITY.txt"
+
+      - name: Extract managed resource blobs
         shell: bash
         run: |
           set -euo pipefail
@@ -101,227 +125,705 @@ jobs:
           from pathlib import Path
           import os,struct,json,re,hashlib
           import pefile,dnfile
-          out=Path(os.environ['OUT']);ev=out/'evidence';rd=out/'resources';exe=out/'dstech.exe'
-          raw=exe.read_bytes(); pe=pefile.PE(str(exe),fast_load=False); dn=dnfile.dnPE(str(exe))
+
+          out=Path(os.environ["OUT"])
+          ev=out/"evidence"
+          rd=out/"resources"
+          exe=out/"dstech.exe"
+          raw=exe.read_bytes()
+
+          pe=pefile.PE(str(exe),fast_load=False)
+          dn=dnfile.dnPE(str(exe))
+
           com=pe.OPTIONAL_HEADER.DATA_DIRECTORY[14]
-          coff=pe.get_offset_from_rva(int(com.VirtualAddress))
-          rrva,rsize=struct.unpack_from('<II',raw,coff+24)
-          roff=pe.get_offset_from_rva(rrva)
-          table=getattr(getattr(getattr(dn,'net',None),'mdtables',None),'ManifestResource',None)
+          cor_off=pe.get_offset_from_rva(int(com.VirtualAddress))
+          resources_rva,resources_size=struct.unpack_from("<II",raw,cor_off+24)
+          resources_off=pe.get_offset_from_rva(resources_rva)
+
+          table=getattr(getattr(getattr(dn,"net",None),"mdtables",None),"ManifestResource",None)
           rows=[]
-          for rid,r in enumerate(getattr(table,'rows',[]) if table else [],1):
-            name=str(r.Name); rel=int(r.Offset or 0); pos=roff+rel
-            n=struct.unpack_from('<I',raw,pos)[0]
+
+          for rid,r in enumerate(getattr(table,"rows",[]) if table else [],1):
+            name=str(r.Name)
+            rel=int(r.Offset or 0)
+            pos=resources_off+rel
+            n=struct.unpack_from("<I",raw,pos)[0]
             data=raw[pos+4:pos+4+n]
-            safe=re.sub(r'[^A-Za-z0-9._-]+','_',name)
-            dst=rd/f'{rid:03d}_{safe}.bin'; dst.write_bytes(data)
-            rows.append({'rid':rid,'name':name,'offset':rel,'length':n,'file':dst.name,
-                         'sha256':hashlib.sha256(data).hexdigest()})
-          (ev/'20_RESOURCE_MAP.json').write_text(json.dumps(rows,indent=2,ensure_ascii=False)+'\n')
-          print('resources',len(rows))
-          PY
+            safe=re.sub(r"[^A-Za-z0-9._-]+","_",name)
+            path=rd/f"{rid:03d}_{safe}.bin"
+            path.write_bytes(data)
+            rows.append({
+              "rid":rid,"name":name,"offset":rel,"length":len(data),
+              "file":path.name,"sha256":hashlib.sha256(data).hexdigest(),
+              "head64":data[:64].hex().upper()
+            })
 
-      - name: Index IL methods using robust brace-depth parser
-        shell: bash
-        run: |
-          set -euo pipefail
-          python3 - <<'PY'
-          from pathlib import Path
-          import os,re,json
-          out=Path(os.environ['OUT']);ev=out/'evidence'
-          lines=(out/'il/all.il').read_text(errors='ignore').splitlines()
+          (ev/"20_RESOURCE_MAP.json").write_text(
+            json.dumps(rows,indent=2,ensure_ascii=False)+"\n")
 
-          methods=[]; i=0
-          while i < len(lines):
-            if not re.match(r'^\s*\.method\b',lines[i]):
-              i+=1; continue
-            start=i; header=[lines[i]]; i+=1
-            # collect header until opening brace
-            while i<len(lines) and '{' not in lines[i]:
-              header.append(lines[i]); i+=1
-            if i>=len(lines): break
-            header.append(lines[i])
-            depth=lines[i].count('{')-lines[i].count('}')
-            body=[*header]; i+=1
-            while i<len(lines) and depth>0:
-              body.append(lines[i])
-              depth += lines[i].count('{')-lines[i].count('}')
-              i+=1
-            text='\n'.join(body)
-            # Find end-comment first, then fallback to method header last identifier.
-            m=re.search(r'// end of method\s+(.+?)\s*$',text,re.M)
-            key=m.group(1).strip() if m else ''
-            if not key:
-              hm=re.search(r'\.method[\s\S]{0,800}?\s([A-Za-z0-9_.$<>`\'"-]+)\s*\(',text)
-              key=hm.group(1) if hm else f'method_at_line_{start+1}'
-            methods.append({'key':key,'line':start+1,'text':text})
-
-          (ev/'30_IL_METHOD_COUNT.txt').write_text(f'METHODS_PARSED={len(methods)}\n')
-
-          terms=[
-            'GetManifestResourceStream','RijndaelManaged','CryptoStream','DeflateStream',
-            'GZipStream','AssemblyResolve','PrepareMethod','GetFunctionPointer',
-            'VirtualProtect','VirtualAlloc','Marshal::Copy','Marshal.Copy',
-            'LoadLibrary','GetProcAddress','RuntimeHelpers'
-          ]
-          resources=json.loads((ev/'20_RESOURCE_MAP.json').read_text())
-          names=[r['name'] for r in resources]
-          selected=[]
-          for m in methods:
-            text=m['text']; low=text.lower()
-            hits=[t for t in terms if t.lower() in low]
-            rn=[n for n in names if n.lower() in low]
-            if hits or rn:
-              selected.append({'key':m['key'],'line':m['line'],'api_hits':hits,
-                               'resource_name_hits':rn,'text':text})
-          (ev/'31_RESOURCE_CRYPTO_METHODS.json').write_text(
-            json.dumps(selected,indent=2,ensure_ascii=False)+'\n')
-          print('parsed_methods',len(methods))
-          print('resource_crypto_methods',len(selected))
-          PY
-
-      - name: Recover crypto constants and byte arrays from selected methods
-        shell: bash
-        run: |
-          set -euo pipefail
-          python3 - <<'PY'
-          from pathlib import Path
-          import os,re,json
-          out=Path(os.environ['OUT']);ev=out/'evidence'
-          methods=json.loads((ev/'31_RESOURCE_CRYPTO_METHODS.json').read_text())
-          rows=[]
-          for m in methods:
-            text=m['text']
-            ints=[]
-            for mm in re.finditer(r'\bldc\.i4(?:\.s)?\s+(-?(?:0x[0-9A-Fa-f]+|\d+))',text):
-              try: v=int(mm.group(1),0)
-              except: continue
-              ints.append({'value':v,'hex':hex(v & 0xffffffff),'line_fragment':mm.group(0)})
-            strings=re.findall(r'\bldstr\s+"([^"]*)"',text)
-            newarr=re.findall(r'newarr\s+([^\n]+)',text)
-            stelem=[]
-            lines=text.splitlines()
-            for i,line in enumerate(lines):
-              if 'stelem.i1' in line or 'stelem.i4' in line:
-                lo=max(0,i-5);hi=min(len(lines),i+3)
-                stelem.append('\n'.join(lines[lo:hi]))
-            calls=re.findall(r'\bcall(?:virt)?\s+([^\n]+)',text)
-            rows.append({'key':m['key'],'api_hits':m['api_hits'],'resource_name_hits':m['resource_name_hits'],
-                         'constants':ints[:2000],'strings':strings[:500],
-                         'newarr':newarr[:200],'stelem_windows':stelem[:500],'calls':calls[:2000],
-                         'text':text})
-          (ev/'32_CRYPTO_CONSTANTS.json').write_text(json.dumps(rows,indent=2,ensure_ascii=False)+'\n')
-          PY
-
-      - name: Rank likely resource decryptor and method restorer
-        shell: bash
-        run: |
-          set -euo pipefail
-          python3 - <<'PY'
-          from pathlib import Path
-          import os,json
-          out=Path(os.environ['OUT']);ev=out/'evidence'
-          rows=json.loads((ev/'32_CRYPTO_CONSTANTS.json').read_text())
-          ranked=[]
+          print("resources",len(rows))
           for r in rows:
-            blob=(r.get('text') or '').lower(); score=0; reasons=[]
-            weights=[
-              ('getmanifestresourcestream',12),('rijndael',10),('cryptostream',9),
-              ('deflatestream',9),('preparemethod',14),('getfunctionpointer',14),
-              ('virtualprotect',14),('marshal',8),('assemblyresolve',5),
-              ('binaryreader',4),('memorystream',3)
-            ]
-            for term,w in weights:
-              if term in blob: score+=w;reasons.append(term)
-            if r.get('resource_name_hits'): score+=12*len(r['resource_name_hits']);reasons.append('exact_resource_name')
-            ranked.append({'key':r['key'],'score':score,'reasons':reasons,
-                           'resource_name_hits':r.get('resource_name_hits',[]),
-                           'api_hits':r.get('api_hits',[]),
-                           'constants':r.get('constants',[])[:300],
-                           'strings':r.get('strings',[])[:100],
-                           'calls':r.get('calls',[])[:300],
-                           'stelem_windows':r.get('stelem_windows',[])[:100],
-                           'text':r.get('text','')})
-          ranked.sort(key=lambda x:(-x['score'],x['key']))
-          (ev/'40_RANKED_PROTECTOR_METHODS.json').write_text(json.dumps(ranked,indent=2,ensure_ascii=False)+'\n')
-          (ev/'41_TOP_PROTECTOR_METHODS.json').write_text(json.dumps(ranked[:30],indent=2,ensure_ascii=False)+'\n')
-          print('ranked',len(ranked))
-          if ranked:
-            print('top',ranked[0]['key'],ranked[0]['score'],ranked[0]['reasons'])
+            print(r["rid"],r["length"],r["name"])
           PY
 
-      - name: Search resource blobs for repeating-block crypto structure and embedded method tables
+      - name: Parse all IL methods robustly and extract target helper closure
         shell: bash
         run: |
           set -euo pipefail
           python3 - <<'PY'
           from pathlib import Path
-          import os,json,math,collections,struct,hashlib
-          out=Path(os.environ['OUT']);ev=out/'evidence';rd=out/'resources'
-          rows=[]
-          for p in sorted(rd.glob('*.bin')):
-            data=p.read_bytes()
-            blocks=[data[i:i+16] for i in range(0,len(data)-15,16)]
-            dup=len(blocks)-len(set(blocks))
-            # Search for plausible 4-byte RID/token tables and known UpdateCommandThread token/RID.
-            probes=[]
-            for name,v in [('RID_2092',2092),('TOKEN_0600082C',0x0600082C),('RVA_A3F4',0xA3F4)]:
-              for endian,fmt in [('LE','<I'),('BE','>I')]:
-                pat=struct.pack(fmt,v)
-                pos=data.find(pat)
-                if pos>=0: probes.append({'name':name,'endian':endian,'offset':pos})
-            rows.append({'file':p.name,'size':len(data),'mod16':len(data)%16,
-                         'duplicate_16byte_blocks':dup,'probe_hits':probes,
-                         'sha256':hashlib.sha256(data).hexdigest()})
-          (ev/'50_RESOURCE_STRUCTURE.json').write_text(json.dumps(rows,indent=2)+'\n')
-          PY
+          import os,re,json,collections
 
-      - name: Build conservative R108 verdict
-        shell: bash
-        run: |
-          set -euo pipefail
-          python3 - <<'PY'
-          from pathlib import Path
-          import os,json
-          out=Path(os.environ['OUT']);ev=out/'evidence';review=out/'review'
-          ranked=json.loads((ev/'40_RANKED_PROTECTOR_METHODS.json').read_text())
-          rstruct=json.loads((ev/'50_RESOURCE_STRUCTURE.json').read_text())
-          resource_crypto=json.loads((ev/'31_RESOURCE_CRYPTO_METHODS.json').read_text())
-          high=[x for x in ranked if x['score']>=12]
-          verdict={
-            'resource_crypto_methods':len(resource_crypto),
-            'high_value_protector_methods':len(high),
-            'top_method':ranked[0] if ranked else None,
-            'resource_structure':rstruct,
-            'resource_decryption_algorithm_recovered':False,
-            'protected_update_body_recovered':False,
-            'firmware_readback_primitive_proven':False,
-            'full_flash_readback_proven':False,
-            'live_board_commands_allowed':False,
-            'next_gate':'Use the highest-ranked exact IL method to reproduce key/IV derivation and decrypt the matching manifest resource statically; then map recovered method bodies back to MethodDef RID 2092.'
-          }
-          (review/'60_R108_VERDICT.json').write_text(json.dumps(verdict,indent=2,ensure_ascii=False)+'\n')
-          lines=[
-            'OKN R108 RESOURCE DECRYPTOR + STUB BODY RECOVERY',
-            'OFFLINE_ONLY=true',
-            f'RESOURCE_CRYPTO_METHODS={len(resource_crypto)}',
-            f'HIGH_VALUE_PROTECTOR_METHODS={len(high)}',
-            'RESOURCE_DECRYPTION_ALGORITHM_RECOVERED=false',
-            'PROTECTED_UPDATE_BODY_RECOVERED=false',
-            'FIRMWARE_READBACK_PRIMITIVE_PROVEN=false',
-            'FULL_FLASH_READBACK_PROVEN=false',
-            'LIVE_BOARD_COMMANDS_ALLOWED=false'
+          out=Path(os.environ["OUT"])
+          ev=out/"evidence"
+          lines=(out/"il/all.il").read_text(errors="ignore").splitlines()
+
+          methods=[]
+          i=0
+          while i<len(lines):
+            if not re.match(r'^\s*\.method\b',lines[i]):
+              i+=1
+              continue
+
+            start=i
+            buf=[lines[i]]
+            i+=1
+            while i<len(lines) and "{" not in lines[i]:
+              buf.append(lines[i]); i+=1
+            if i>=len(lines): break
+            buf.append(lines[i])
+            depth=lines[i].count("{")-lines[i].count("}")
+            i+=1
+            while i<len(lines) and depth>0:
+              buf.append(lines[i])
+              depth += lines[i].count("{")-lines[i].count("}")
+              i+=1
+
+            text="\n".join(buf)
+            end=re.search(r'// end of method\s+(.+?)\s*$',text,re.M)
+            key=end.group(1).strip() if end else f"method_at_{start+1}"
+            methods.append({"key":key,"line":start+1,"text":text})
+
+          by={m["key"]:m for m in methods}
+          simple=collections.defaultdict(list)
+          for m in methods:
+            simple[m["key"].split("::")[-1]].append(m)
+
+          call_re=re.compile(
+            r'\bcall(?:virt)?\s+[^\n]*?'
+            r'([A-Za-z0-9_.$<>`/+\'"-]+)::([A-Za-z0-9_.$<>`\'"-]+)\s*\('
+          )
+
+          seed_names=[
+            "N9jju8llVi","ziUjWiyQoN","P9qj5Kx99X","t2QjAoPE2q",
+            "trEuKPNkgB3p5fLuROn","Q2CVcdNXO7dpP5ufbGy","VnHlfpNorSGR6U9GUOp",
+            "v4OJaAhFeRY6ZLdwU7P","j3nmKNhYKinv9gbwl75","HrXMLmhEkdhLuD3wdnt",
+            "sB3UoOhBdwvI167Dv5t","gH6uphNOsYQyRXDZmHu","yedj03pwm9",
+            "Udvj2O2k24","q7pjhICQsP","aFOdrihC0M6LDv9TOro",
+            "it3eekNKjtbEQVI5up2","rYJfrbhT5j16r2Rs8VK",
+            "zfos5ENLukrcbiO4qNQ","omTjeHNp0inHSoSsOBH",
+            "fX136sh7mQQ8tIupxUo","tFjbT6Nj4GDWeki27kh","ayhyp5hj3R0itGWa7hr"
           ]
-          (review/'61_R108_SUMMARY.txt').write_text('\n'.join(lines)+'\n')
-          (review/'62_TOP_PROTECTOR_METHODS.json').write_text(json.dumps(ranked[:30],indent=2,ensure_ascii=False)+'\n')
-          print('\n'.join(lines))
+
+          selected={}
+          queue=[]
+          for name in seed_names:
+            for m in simple.get(name,[]):
+              queue.append((m,0))
+
+          while queue:
+            m,depth=queue.pop(0)
+            if m["key"] in selected or depth>3:
+              continue
+            selected[m["key"]]=m
+            for cm in call_re.finditer(m["text"]):
+              method_name=cm.group(2)
+              for target in simple.get(method_name,[])[:20]:
+                # Restrict recursive closure to protector class / small wrappers.
+                if (
+                  "q71r2Rj8SiD9GF1BI50" in target["key"]
+                  or depth<1
+                ):
+                  queue.append((target,depth+1))
+
+          (ev/"30_METHOD_PARSE_SUMMARY.json").write_text(
+            json.dumps({
+              "method_count":len(methods),
+              "selected_helper_count":len(selected),
+              "seed_names":seed_names
+            },indent=2)+"\n")
+
+          (ev/"31_TARGET_HELPER_METHODS.json").write_text(
+            json.dumps(list(selected.values()),indent=2,ensure_ascii=False)+"\n")
+
+          # Compact wrapper inference based only on explicit framework calls.
+          wrappers=[]
+          framework_terms={
+            "CreateDecryptor":"CREATE_DECRYPTOR",
+            "CreateEncryptor":"CREATE_ENCRYPTOR",
+            "set_Key":"SET_KEY",
+            "set_IV":"SET_IV",
+            "set_Mode":"SET_CIPHER_MODE",
+            "GetManifestResourceStream":"GET_RESOURCE_STREAM",
+            "MemoryStream::.ctor":"NEW_MEMORY_STREAM",
+            "ToArray":"STREAM_TO_ARRAY",
+            "CryptoStream::.ctor":"NEW_CRYPTO_STREAM",
+            "PrepareMethod":"PREPARE_METHOD",
+            "GetFunctionPointer":"GET_FUNCTION_POINTER",
+            "VirtualProtect":"VIRTUAL_PROTECT",
+            "Marshal::Copy":"MARSHAL_COPY",
+          }
+
+          for m in selected.values():
+            hits=[meaning for term,meaning in framework_terms.items() if term in m["text"]]
+            if hits:
+              wrappers.append({
+                "key":m["key"],
+                "framework_semantics":hits,
+                "text":m["text"]
+              })
+
+          (ev/"32_WRAPPER_SEMANTICS.json").write_text(
+            json.dumps(wrappers,indent=2,ensure_ascii=False)+"\n")
           PY
 
-      - name: Copy compact evidence and safety attestation
+      - name: Extract FieldRVA blobs and exact P9q AES key IV
         shell: bash
         run: |
           set -euo pipefail
-          cp -a "$OUT/evidence/." "$OUT/review/"
+          python3 - <<'PY'
+          from pathlib import Path
+          import os,re,json,hashlib
+          import pefile,dnfile
+
+          out=Path(os.environ["OUT"])
+          ev=out/"evidence"
+          exe=out/"dstech.exe"
+          raw=exe.read_bytes()
+
+          pe=pefile.PE(str(exe),fast_load=False)
+          dn=dnfile.dnPE(str(exe))
+
+          helpers=json.loads((ev/"31_TARGET_HELPER_METHODS.json").read_text())
+          p9=next((m["text"] for m in helpers if m["key"].endswith("::P9qj5Kx99X")),"")
+
+          refs=[]
+          for m in re.finditer(
+            r"__StaticArrayInitTypeSize=(\d+)'[^:]*::'([0-9A-F]{64})'",
+            p9
+          ):
+            refs.append({"size":int(m.group(1)),"field_name":m.group(2)})
+
+          fieldrva_table=getattr(getattr(getattr(dn,"net",None),"mdtables",None),"FieldRva",None)
+          all_rows=[]
+
+          for fr in getattr(fieldrva_table,"rows",[]) if fieldrva_table else []:
+            try:
+              fld=fr.Field.row
+            except Exception:
+              try: fld=fr.Field
+              except Exception: fld=None
+            name=str(getattr(fld,"Name",""))
+            rva=int(getattr(fr,"Rva",0) or 0)
+            if not name or not rva:
+              continue
+            try:
+              off=pe.get_offset_from_rva(rva)
+            except Exception:
+              continue
+
+            # Save a bounded raw window for future static analysis.
+            data=raw[off:off+512]
+            path=out/"fieldrva"/f"{name}.bin"
+            path.write_bytes(data)
+            all_rows.append({
+              "name":name,"rva":rva,"rva_hex":hex(rva),
+              "file_offset":off,"file_offset_hex":hex(off),
+              "window_file":path.name,"window_sha256":hashlib.sha256(data).hexdigest()
+            })
+
+          by={r["name"]:r for r in all_rows}
+          exact=[]
+
+          for ref in refs:
+            row=by.get(ref["field_name"])
+            if not row:
+              exact.append({**ref,"found":False})
+              continue
+            off=row["file_offset"]
+            data=raw[off:off+ref["size"]]
+            path=out/"fieldrva"/f"P9Q_{ref['size']}_{ref['field_name']}.bin"
+            path.write_bytes(data)
+            exact.append({
+              **ref,"found":True,"rva_hex":row["rva_hex"],
+              "file_offset_hex":row["file_offset_hex"],
+              "data_hex":data.hex().upper(),
+              "sha256":hashlib.sha256(data).hexdigest(),
+              "file":path.name
+            })
+
+          (ev/"40_FIELDRVA_INDEX.json").write_text(
+            json.dumps(all_rows,indent=2)+"\n")
+          (ev/"41_P9Q_STATIC_ARRAY_REFS.json").write_text(
+            json.dumps(refs,indent=2)+"\n")
+          (ev/"42_P9Q_KEY_IV_BYTES.json").write_text(
+            json.dumps(exact,indent=2)+"\n")
+
+          print("p9_static_refs",len(refs))
+          for x in exact:
+            print(x.get("size"),x.get("found"),x.get("data_hex"))
+          PY
+
+      - name: Test exact P9q AES decryption against every resource
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import os,json,hashlib,math,collections,re,zlib,gzip,bz2,lzma
+          from Crypto.Cipher import AES
+          from Crypto.Util.Padding import unpad
+
+          out=Path(os.environ["OUT"])
+          ev=out/"evidence"
+          resources=json.loads((ev/"20_RESOURCE_MAP.json").read_text())
+          arrays=json.loads((ev/"42_P9Q_KEY_IV_BYTES.json").read_text())
+
+          key=next((bytes.fromhex(x["data_hex"]) for x in arrays if x.get("found") and x["size"]==32),None)
+          iv=next((bytes.fromhex(x["data_hex"]) for x in arrays if x.get("found") and x["size"]==16),None)
+
+          def entropy(data):
+            if not data: return 0.0
+            c=collections.Counter(data); n=len(data)
+            return -sum((v/n)*math.log2(v/n) for v in c.values())
+
+          def markers(data):
+            terms=[]
+            if data.startswith(b"MZ"): terms.append("MZ")
+            if data.startswith(b"BSJB"): terms.append("BSJB")
+            if data.startswith(b"PK\x03\x04"): terms.append("ZIP")
+            if data.startswith(b"\x1f\x8b"): terms.append("GZIP")
+            if b"UpdateCommandThread" in data: terms.append("UpdateCommandThread")
+            if b"clrjit.dll" in data: terms.append("clrjit.dll")
+            if b"System.Reflection" in data: terms.append("System.Reflection")
+            if b"\x2c\x08\x00\x06" in data: terms.append("TOKEN_0600082C_LE")
+            return terms
+
+          rows=[]
+          if key is None or iv is None:
+            rows.append({"error":"P9q_key_or_iv_not_recovered"})
+          else:
+            for r in resources:
+              src=out/"resources"/r["file"]
+              data=src.read_bytes()
+
+              item={
+                "resource":r["name"],"input_size":len(data),
+                "input_mod16":len(data)%16
+              }
+
+              if len(data)%16:
+                item["cbc_test"]="skipped_not_block_aligned"
+                rows.append(item)
+                continue
+
+              try:
+                raw=AES.new(key,AES.MODE_CBC,iv).decrypt(data)
+                item["raw_entropy"]=entropy(raw)
+                item["raw_head64"]=raw[:64].hex().upper()
+                item["raw_markers"]=markers(raw)
+
+                raw_path=out/"decrypted"/f"{r['rid']:03d}_p9q_cbc_raw.bin"
+                raw_path.write_bytes(raw)
+                item["raw_file"]=raw_path.name
+
+                try:
+                  plain=unpad(raw,16)
+                  item["pkcs7_valid"]=True
+                  item["plain_size"]=len(plain)
+                  item["plain_entropy"]=entropy(plain)
+                  item["plain_head64"]=plain[:64].hex().upper()
+                  item["plain_markers"]=markers(plain)
+                  plain_path=out/"decrypted"/f"{r['rid']:03d}_p9q_cbc_unpadded.bin"
+                  plain_path.write_bytes(plain)
+                  item["plain_file"]=plain_path.name
+                except Exception:
+                  item["pkcs7_valid"]=False
+              except Exception as e:
+                item["error"]=type(e).__name__+":"+str(e)
+
+              rows.append(item)
+
+          (ev/"43_P9Q_DECRYPT_TESTS.json").write_text(
+            json.dumps(rows,indent=2,ensure_ascii=False)+"\n")
+          print(json.dumps(rows,indent=2,ensure_ascii=False))
+          PY
+
+      - name: Resolve N9j crypto wrappers and key IV local origins
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import os,re,json
+
+          out=Path(os.environ["OUT"])
+          ev=out/"evidence"
+          helpers=json.loads((ev/"31_TARGET_HELPER_METHODS.json").read_text())
+          n9=next((m["text"] for m in helpers if m["key"].endswith("::N9jju8llVi")),"")
+          zi=next((m["text"] for m in helpers if m["key"].endswith("::ziUjWiyQoN")),"")
+
+          targets=[
+            "trEuKPNkgB3p5fLuROn","Q2CVcdNXO7dpP5ufbGy","VnHlfpNorSGR6U9GUOp",
+            "v4OJaAhFeRY6ZLdwU7P","j3nmKNhYKinv9gbwl75","HrXMLmhEkdhLuD3wdnt"
+          ]
+          target_defs={}
+          for name in targets:
+            matches=[m for m in helpers if m["key"].endswith("::"+name)]
+            target_defs[name]=matches
+
+          def context(text,needle,before=50,after=80):
+            lines=text.splitlines()
+            outrows=[]
+            for i,l in enumerate(lines):
+              if needle in l:
+                outrows.append("\n".join(lines[max(0,i-before):min(len(lines),i+after)]))
+            return outrows
+
+          result={
+            "wrapper_definitions":target_defs,
+            "n9_create_transform_context":context(n9,"VnHlfpNorSGR6U9GUOp",80,80),
+            "n9_crypto_stream_context":context(n9,"CryptoStream::.ctor",80,100),
+            "n9_key_local_assignment_context":context(n9,"stloc.s 47",80,80),
+            "n9_iv_local_assignment_context":context(n9,"stloc.s 8",25,25),
+            "zi_create_transform_context":context(zi,"HrXMLmhEkdhLuD3wdnt",80,80),
+            "zi_crypto_stream_context":context(zi,"CryptoStream::.ctor",80,100),
+          }
+
+          (ev/"50_N9_ZI_CRYPTO_TRACE.json").write_text(
+            json.dumps(result,indent=2,ensure_ascii=False)+"\n")
+          PY
+
+      - name: Build N9j flattened-state graph and shortest paths to crypto stages
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import os,re,json,collections
+
+          out=Path(os.environ["OUT"])
+          ev=out/"evidence"
+          helpers=json.loads((ev/"31_TARGET_HELPER_METHODS.json").read_text())
+          n9=next((m["text"] for m in helpers if m["key"].endswith("::N9jju8llVi")),"")
+          lines=n9.splitlines()
+
+          # Extract main switch table after ldloc 95.
+          switch_line=next((l for l in lines if "switch (" in l and "IL_" in l),None)
+          targets=re.findall(r'IL_[0-9A-Fa-f]+',switch_line or "")
+          label_to_state={lab:i for i,lab in enumerate(targets)}
+
+          labels={}
+          for i,l in enumerate(lines):
+            m=re.match(r'\s*(IL_[0-9A-Fa-f]+):',l)
+            if m: labels[m.group(1)]=i
+
+          # State blocks are bounded by next main-switch target label.
+          ordered=sorted(
+            ((labels[lab],lab,state) for lab,state in label_to_state.items() if lab in labels),
+            key=lambda x:x[0]
+          )
+          edges=collections.defaultdict(set)
+          block_info={}
+
+          def ldc_value(line):
+            s=line.strip()
+            m=re.search(r'\bldc\.i4\.(\d+)\b',s)
+            if m: return int(m.group(1))
+            if "ldc.i4.m1" in s: return -1
+            m=re.search(r'\bldc\.i4(?:\.s)?\s+(-?\d+)',s)
+            if m: return int(m.group(1))
+            return None
+
+          for pos,(start,lab,state) in enumerate(ordered):
+            end=ordered[pos+1][0] if pos+1<len(ordered) else min(len(lines),start+500)
+            block=lines[start:end]
+            nexts=[]
+
+            # Pattern A: ldc N ; stloc 95 ; br IL_000e
+            for j in range(len(block)-2):
+              v=ldc_value(block[j])
+              if v is None: continue
+              if re.search(r'\bstloc(?:\.s)?\s+95\b',block[j+1]):
+                if 0<=v<len(targets):
+                  nexts.append(v)
+
+            # Pattern B: ldc N ; br IL_0012 (push state directly into switch)
+            for j in range(len(block)-1):
+              v=ldc_value(block[j])
+              if v is None: continue
+              if "br IL_0012" in block[j+1] and 0<=v<len(targets):
+                nexts.append(v)
+
+            # Direct branch to a main switch target.
+            for l in block:
+              bm=re.search(r'\bbr(?:true|false|\.s)?\s+(IL_[0-9A-Fa-f]+)',l)
+              if bm and bm.group(1) in label_to_state:
+                nexts.append(label_to_state[bm.group(1)])
+
+            for n in nexts:
+              edges[state].add(n)
+
+            block_info[state]={
+              "label":lab,
+              "line_start":start+1,
+              "next_states":sorted(set(nexts)),
+              "contains_resource":"h15IL2i6yy2BZV8RqM.YuRwd1JALC4oy32W66" in "\n".join(block),
+              "contains_transform":"VnHlfpNorSGR6U9GUOp" in "\n".join(block),
+              "contains_crypto_stream":"CryptoStream::.ctor" in "\n".join(block),
+              "contains_key_alias":"stloc.s 47" in "\n".join(block),
+              "contains_iv_alias":"stloc.s 8" in "\n".join(block),
+            }
+
+          starts=[392]
+          goals={
+            "resource":[s for s,b in block_info.items() if b["contains_resource"]],
+            "transform":[s for s,b in block_info.items() if b["contains_transform"]],
+            "crypto_stream":[s for s,b in block_info.items() if b["contains_crypto_stream"]],
+            "key_alias":[s for s,b in block_info.items() if b["contains_key_alias"]],
+          }
+
+          def shortest(start,goalset):
+            q=collections.deque([start]); prev={start:None}
+            goal=None
+            while q:
+              x=q.popleft()
+              if x in goalset:
+                goal=x; break
+              for y in edges.get(x,()):
+                if y not in prev:
+                  prev[y]=x; q.append(y)
+            if goal is None: return None
+            path=[]
+            cur=goal
+            while cur is not None:
+              path.append(cur); cur=prev[cur]
+            return list(reversed(path))
+
+          paths={name:shortest(392,set(gs)) for name,gs in goals.items()}
+
+          result={
+            "switch_state_count":len(targets),
+            "initial_state":392,
+            "edge_count":sum(len(v) for v in edges.values()),
+            "goal_states":goals,
+            "shortest_paths":paths,
+            "blocks":block_info
+          }
+
+          (ev/"51_N9_STATE_GRAPH.json").write_text(
+            json.dumps(result,indent=2)+"\n")
+          print("states",len(targets),"edges",result["edge_count"])
+          print("paths",json.dumps(paths))
+          PY
+
+      - name: Collect candidate N9 key IV byte writes along recovered paths
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import os,re,json,collections
+
+          out=Path(os.environ["OUT"])
+          ev=out/"evidence"
+          helpers=json.loads((ev/"31_TARGET_HELPER_METHODS.json").read_text())
+          graph=json.loads((ev/"51_N9_STATE_GRAPH.json").read_text())
+          n9=next((m["text"] for m in helpers if m["key"].endswith("::N9jju8llVi")),"")
+          lines=n9.splitlines()
+
+          label_to_line={}
+          for i,l in enumerate(lines):
+            m=re.match(r'\s*(IL_[0-9A-Fa-f]+):',l)
+            if m: label_to_line[m.group(1)]=i
+
+          blocks=graph["blocks"]
+
+          # Candidate source arrays observed before CreateDecryptor:
+          # local47 aliases local17; local8 often aliases local100.
+          source_locals={"key_candidate":"17","iv_candidate":"100"}
+
+          def ldc(line):
+            s=line.strip()
+            m=re.search(r'\bldc\.i4\.(\d+)\b',s)
+            if m:return int(m.group(1))
+            if "ldc.i4.m1" in s:return -1
+            m=re.search(r'\bldc\.i4(?:\.s)?\s+(-?\d+)',s)
+            if m:return int(m.group(1))
+            return None
+
+          # Analyze all direct constant writes and path-restricted writes.
+          def collect(allowed_states=None):
+            vals={name:collections.defaultdict(list) for name in source_locals}
+
+            for state_s,b in blocks.items():
+              state=int(state_s)
+              if allowed_states is not None and state not in allowed_states:
+                continue
+              start=b["line_start"]-1
+              # bound until next main state label by using a conservative 80 lines.
+              section=lines[start:min(len(lines),start+120)]
+
+              for arrname,loc in source_locals.items():
+                for i,l in enumerate(section):
+                  if not re.search(rf'\bldloc(?:\.s)?\s+{loc}\b',l):
+                    continue
+                  if i+1>=len(section): continue
+                  idx=ldc(section[i+1])
+                  if idx is None or not (0<=idx<64): continue
+
+                  stack=[]
+                  val=None
+                  for j in range(i+2,min(len(section),i+8)):
+                    op=section[j].strip()
+                    c=ldc(op)
+                    if c is not None:
+                      stack.append(c); continue
+                    if re.search(r'\badd\b',op) and len(stack)>=2:
+                      b2=stack.pop(); a=stack.pop(); stack.append(a+b2); continue
+                    if re.search(r'\bsub\b',op) and len(stack)>=2:
+                      b2=stack.pop(); a=stack.pop(); stack.append(a-b2); continue
+                    if "conv.u1" in op:
+                      if stack: stack[-1]&=255
+                      continue
+                    if "stelem.i1" in op:
+                      if stack: val=stack[-1]&255
+                      break
+                    break
+
+                  if val is not None:
+                    vals[arrname][idx].append({
+                      "value":val,"state":state,"label":b["label"]
+                    })
+            return vals
+
+          path_states=set()
+          for p in graph.get("shortest_paths",{}).values():
+            if p: path_states.update(p)
+
+          allvals=collect(None)
+          pathvals=collect(path_states)
+
+          def summarize(vals):
+            outd={}
+            for name,d in vals.items():
+              outd[name]={}
+              for idx,items in sorted(d.items()):
+                ctr=collections.Counter(x["value"] for x in items)
+                outd[name][str(idx)]={
+                  "counts":dict(sorted(ctr.items())),
+                  "items":items
+                }
+            return outd
+
+          result={
+            "path_states":sorted(path_states),
+            "all_direct_constant_writes":summarize(allvals),
+            "path_direct_constant_writes":summarize(pathvals)
+          }
+
+          (ev/"52_N9_KEY_IV_WRITE_CANDIDATES.json").write_text(
+            json.dumps(result,indent=2)+"\n")
+          PY
+
+      - name: Build final R109 verdict and package analysis corpus
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import os,json,shutil
+
+          out=Path(os.environ["OUT"])
+          ev=out/"evidence"
+          review=out/"review"
+
+          def load(name,default):
+            try:return json.loads((ev/name).read_text(errors="ignore"))
+            except:return default
+
+          arrays=load("42_P9Q_KEY_IV_BYTES.json",[])
+          decrypt=load("43_P9Q_DECRYPT_TESTS.json",[])
+          wrappers=load("32_WRAPPER_SEMANTICS.json",[])
+          state=load("51_N9_STATE_GRAPH.json",{})
+          writes=load("52_N9_KEY_IV_WRITE_CANDIDATES.json",{})
+
+          key_ok=any(x.get("found") and x.get("size")==32 for x in arrays)
+          iv_ok=any(x.get("found") and x.get("size")==16 for x in arrays)
+          meaningful_p9=any(
+            x.get("pkcs7_valid") or x.get("raw_markers") or x.get("plain_markers")
+            for x in decrypt if isinstance(x,dict)
+          )
+
+          verdict={
+            "complete_il_packaged":True,
+            "fieldrva_windows_packaged":True,
+            "resource_blobs_packaged":True,
+            "p9q_key_recovered":key_ok,
+            "p9q_iv_recovered":iv_ok,
+            "p9q_meaningful_resource_decrypt":meaningful_p9,
+            "wrapper_semantics_count":len(wrappers),
+            "n9_switch_state_count":state.get("switch_state_count",0),
+            "n9_graph_edge_count":state.get("edge_count",0),
+            "n9_shortest_paths":state.get("shortest_paths",{}),
+            "n9_key_iv_candidates_collected":bool(writes),
+            "protected_update_body_recovered":False,
+            "firmware_readback_primitive_proven":False,
+            "full_flash_readback_proven":False,
+            "live_board_commands_allowed":False,
+            "next_gate":"Use the packaged all.il, exact wrapper semantics, FieldRVA bytes and N9 state graph to solve the live N9j key/IV path and decrypt the 607967-byte protected-method resource. Then locate MethodDef RID 2092 in the decoded store."
+          }
+
+          (review/"60_R109_VERDICT.json").write_text(
+            json.dumps(verdict,indent=2,ensure_ascii=False)+"\n")
+
+          lines=[
+            "OKN R109 STATIC DECRYPT + METHOD STORE RECOVERY",
+            "OFFLINE_ONLY=true",
+            f"P9Q_KEY_RECOVERED={str(key_ok).lower()}",
+            f"P9Q_IV_RECOVERED={str(iv_ok).lower()}",
+            f"P9Q_MEANINGFUL_RESOURCE_DECRYPT={str(meaningful_p9).lower()}",
+            f"WRAPPER_SEMANTICS_COUNT={len(wrappers)}",
+            f"N9_SWITCH_STATES={state.get('switch_state_count',0)}",
+            f"N9_GRAPH_EDGES={state.get('edge_count',0)}",
+            "PROTECTED_UPDATE_BODY_RECOVERED=false",
+            "FIRMWARE_READBACK_PRIMITIVE_PROVEN=false",
+            "FULL_FLASH_READBACK_PROVEN=false",
+            "LIVE_BOARD_COMMANDS_ALLOWED=false"
+          ]
+          (review/"61_R109_SUMMARY.txt").write_text("\n".join(lines)+"\n")
+
+          # Copy compact evidence plus the static corpus required for deeper
+          # local analysis after this run.
+          for p in ev.iterdir():
+            if p.is_file():
+              shutil.copy2(p,review/p.name)
+
+          (review/"resources").mkdir(exist_ok=True)
+          for p in (out/"resources").glob("*.bin"):
+            shutil.copy2(p,review/"resources"/p.name)
+
+          (review/"fieldrva").mkdir(exist_ok=True)
+          for p in (out/"fieldrva").glob("*.bin"):
+            shutil.copy2(p,review/"fieldrva"/p.name)
+
+          (review/"decrypted").mkdir(exist_ok=True)
+          for p in (out/"decrypted").glob("*.bin"):
+            shutil.copy2(p,review/"decrypted"/p.name)
+
+          print("\n".join(lines))
+          PY
+
           cat > "$OUT/review/99_SAFETY_ATTESTATION.txt" <<'EOF'
           OFFLINE_STATIC_ONLY=true
           TARGET_EXECUTED=false
@@ -331,31 +833,36 @@ jobs:
           FLASH_ERASE_WRITE=false
           FULL_FLASH_READBACK_PROVEN=false
           EOF
-          (cd "$OUT/review" && find . -type f -print0 | sort -z | xargs -0 sha256sum) > "$OUT/review/SHA256SUMS.txt"
+
+          (
+            cd "$OUT/review"
+            find . -type f -print0 | sort -z | xargs -0 sha256sum
+          ) > "$OUT/review/SHA256SUMS.txt"
 
       - name: Publish summary
         if: always()
         shell: bash
         run: |
           {
-            echo "## OKN R108 MEGA Resource Decryptor + Stub Body Recovery"
+            echo "## OKN R109 MEGA Static Decrypt + Method Store Recovery"
             echo
-            echo "- Offline/static only; target EXE is never executed."
-            echo "- Fixes R107 IL method-parser failure."
-            echo "- Correlates exact manifest resource names with Rijndael/CryptoStream/Deflate/PrepareMethod helpers."
+            echo "- Offline/static only; official client is never executed."
+            echo "- Packages complete compressed IL, all managed resources and FieldRVA windows."
+            echo "- Recovers exact static AES key/IV where possible and tests resources."
+            echo "- Builds a flattened-state graph for N9j protected method restoration."
             echo
-            if [ -f "$OUT/review/61_R108_SUMMARY.txt" ]; then
+            if [ -f "$OUT/review/61_R109_SUMMARY.txt" ]; then
               echo '```text'
-              cat "$OUT/review/61_R108_SUMMARY.txt"
+              cat "$OUT/review/61_R109_SUMMARY.txt"
               echo '```'
             fi
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Upload R108 final evidence
+      - name: Upload R109 complete static-analysis corpus
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: R108-RESOURCE-DECRYPTOR-STUB-RECOVERY-EVIDENCE
-          path: /tmp/r108/review
+          name: R109-STATIC-DECRYPT-METHOD-STORE-CORPUS
+          path: /tmp/r109/review
           if-no-files-found: error
           retention-days: 30
