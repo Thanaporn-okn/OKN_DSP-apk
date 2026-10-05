@@ -1,4 +1,4 @@
-name: OKN R112 MULTI-PATH N9 Crypto Reachability OFFLINE ONLY
+name: OKN R113 EXACT Wrapper + Goal-Directed N9 Crypto Recovery OFFLINE ONLY
 
 on:
   push:
@@ -12,7 +12,7 @@ permissions:
   actions: read
 
 concurrency:
-  group: okn-r112-multipath-n9-${{ github.ref }}
+  group: okn-r113-goal-n9-${{ github.ref }}
   cancel-in-progress: true
 
 env:
@@ -24,11 +24,11 @@ env:
 
 jobs:
   recover:
-    name: Multi-path exact N9 parser, crypto reachability and h15 recovery
+    name: Exact-wrapper goal-directed N9 crypto recovery
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     env:
-      OUT: /tmp/r112
+      OUT: /tmp/r113
 
     steps:
       - name: Fail-closed static-only safety gate
@@ -44,7 +44,7 @@ jobs:
           mkdir -p "$OUT"/{downloads,pkg,il,resources,decrypted,evidence,review}
 
           cat > "$OUT/evidence/00_SCOPE.txt" <<'EOF'
-          REVISION=R112
+          REVISION=R113
           MODE=OFFLINE_STATIC_ONLY
           TARGET_EXECUTED=false
           BOARD_USB_ACCESS=NO
@@ -239,51 +239,102 @@ jobs:
               raise SystemExit("corrected switch mapping gate failed")
           PY
 
-      - name: Extract exact opaque-predicate and wrapper semantics
+      - name: Extract and prove exact wrapper method definitions
         shell: bash
         run: |
           set -euo pipefail
           python3 - <<'PY'
           from pathlib import Path
-          import os,re,json
+          import os,json,re
 
           out=Path(os.environ["OUT"])
           il=(out/"il/all.il").read_text(errors="ignore")
+          ev=out/"evidence"
 
           names=[
-              "zfos5ENLukrcbiO4qNQ","WbRj7RycxdawMtIuobL","fX136sh7mQQ8tIupxUo",
-              "omTjeHNp0inHSoSsOBH","KTbwe7yfoqkIHrkHFxb","ayhyp5hj3R0itGWa7hr",
-              "tFjbT6Nj4GDWeki27kh","gH6uphNOsYQyRXDZmHu","qfkv4ZNDynVciIciQy6",
-              "oNNQE6NTi9uesXTTGZJ","B5fr4WNvBYuVpLZQQQQ","sWg0PuN2fLSfxi2LB0D",
-              "trEuKPNkgB3p5fLuROn","Q2CVcdNXO7dpP5ufbGy","VnHlfpNorSGR6U9GUOp",
-              "RMHoOvNN1BGBrZfKGy1","it3eekNKjtbEQVI5up2","HVJrNANRJZcM7WNOuLw"
+            "zfos5ENLukrcbiO4qNQ","omTjeHNp0inHSoSsOBH",
+            "tFjbT6Nj4GDWeki27kh","gH6uphNOsYQyRXDZmHu",
+            "qfkv4ZNDynVciIciQy6","oNNQE6NTi9uesXTTGZJ",
+            "B5fr4WNvBYuVpLZQQQQ","sWg0PuN2fLSfxi2LB0D",
+            "uKbcISNmDSreine16Qp","trEuKPNkgB3p5fLuROn",
+            "Q2CVcdNXO7dpP5ufbGy","VnHlfpNorSGR6U9GUOp",
+            "RMHoOvNN1BGBrZfKGy1","it3eekNKjtbEQVI5up2",
+            "HVJrNANRJZcM7WNOuLw"
           ]
 
-          rows=[]
+          methods={}
           for name in names:
-              pos=il.find(name+"(")
-              if pos<0:
-                  rows.append({"name":name,"found":False}); continue
-              start=il.rfind(".method",0,pos)
-              endc=il.find("// end of method",pos)
-              end=il.find("\n",endc) if endc>=0 else min(len(il),pos+10000)
-              text=il[start:end]
-              rows.append({"name":name,"found":True,"text":text})
+            end_tag="// end of method q71r2Rj8SiD9GF1BI50::"+name
+            e=il.find(end_tag)
+            if e < 0:
+              raise SystemExit("wrapper end marker missing: "+name)
+            s=il.rfind(".method",0,e)
+            if s < 0:
+              raise SystemExit("wrapper start missing: "+name)
+            nl=il.find("\n",e)
+            if nl < 0: nl=len(il)
+            methods[name]=il[s:nl]
 
-          known={
-              "zfos5ENLukrcbiO4qNQ":True,
-              "WbRj7RycxdawMtIuobL":True,
-              "fX136sh7mQQ8tIupxUo":True,
-              "omTjeHNp0inHSoSsOBH":None,
-              "KTbwe7yfoqkIHrkHFxb":None,
-              "ayhyp5hj3R0itGWa7hr":None,
-              "tFjbT6Nj4GDWeki27kh":4
+          proofs={
+            "zfos_is_constant_true":(
+              methods["zfos5ENLukrcbiO4qNQ"].count("ldnull") >= 2
+              and "ceq" in methods["zfos5ENLukrcbiO4qNQ"]
+              and "ret" in methods["zfos5ENLukrcbiO4qNQ"]
+            ),
+            "omt_is_constant_null":(
+              "ldnull" in methods["omTjeHNp0inHSoSsOBH"]
+              and "ret" in methods["omTjeHNp0inHSoSsOBH"]
+              and "call " not in methods["omTjeHNp0inHSoSsOBH"]
+            ),
+            "tf_reads_intptr_size":(
+              "System.IntPtr::get_Size()" in methods["tFjbT6Nj4GDWeki27kh"]
+            ),
+            "resource_wrapper_is_GetManifestResourceStream":(
+              "GetManifestResourceStream" in methods["gH6uphNOsYQyRXDZmHu"]
+            ),
+            "qfkv_is_BinaryReader_ReadInt32":(
+              "::sXXetjyGMH()" in methods["qfkv4ZNDynVciIciQy6"]
+            ),
+            "base_stream_wrapper":(
+              "::mpep2xkqqr()" in methods["oNNQE6NTi9uesXTTGZJ"]
+            ),
+            "length_wrapper":(
+              "System.IO.Stream::get_Length()" in methods["B5fr4WNvBYuVpLZQQQQ"]
+            ),
+            "readbytes_wrapper":(
+              "::FtHelxtJIP(int32)" in methods["sWg0PuN2fLSfxi2LB0D"]
+            ),
+            "position_setter_wrapper":(
+              "System.IO.Stream::set_Position(int64)" in methods["uKbcISNmDSreine16Qp"]
+            ),
+            "cipher_mode_setter":(
+              "SymmetricAlgorithm::set_Mode" in methods["Q2CVcdNXO7dpP5ufbGy"]
+            ),
+            "create_decryptor_proven":(
+              "SymmetricAlgorithm::CreateDecryptor(uint8[], uint8[])"
+              in methods["VnHlfpNorSGR6U9GUOp"]
+            ),
+            "crypto_write_wrapper":(
+              "System.IO.Stream::Write(uint8[], int32, int32)"
+              in methods["RMHoOvNN1BGBrZfKGy1"]
+            ),
+            "flush_final_block_wrapper":(
+              "CryptoStream::FlushFinalBlock()" in methods["it3eekNKjtbEQVI5up2"]
+            ),
+            "memory_to_array_wrapper":(
+              "MemoryStream::ToArray()" in methods["HVJrNANRJZcM7WNOuLw"]
+            ),
           }
 
-          (out/"evidence/22_WRAPPER_IL.json").write_text(
-              json.dumps(rows,indent=2,ensure_ascii=False)+"\n")
-          (out/"evidence/23_KNOWN_STATIC_WRAPPER_VALUES.json").write_text(
-              json.dumps(known,indent=2)+"\n")
+          if not all(proofs.values()):
+            raise SystemExit("exact wrapper proof gate failed: "+json.dumps(proofs))
+
+          (ev/"22_EXACT_WRAPPER_METHODS.json").write_text(
+            json.dumps(methods,indent=2,ensure_ascii=False)+"\n")
+          (ev/"23_EXACT_WRAPPER_PROOFS.json").write_text(
+            json.dumps(proofs,indent=2)+"\n")
+
+          print(json.dumps(proofs,indent=2))
           PY
 
       - name: Run bounded concrete symbolic IL emulator
@@ -410,15 +461,9 @@ jobs:
 
           def known_call(s,name,args):
               if name=="zfos5ENLukrcbiO4qNQ":
-                  mode=os.environ.get("ZFOS_MODE","true")
-                  if mode=="true": return True
-                  if mode=="false": return False
-                  return U("opaque_zfos")
+                  return True
               if name=="omTjeHNp0inHSoSsOBH":
-                  mode=os.environ.get("OMT_MODE","null")
-                  if mode=="null": return None
-                  if mode=="truthy": return "truthy"
-                  return U("opaque_omt")
+                  return None
               if name in TRUE_FUN:return True
               if name in NULL_FUN:return None
               if name=="tFjbT6Nj4GDWeki27kh":return 4
@@ -518,8 +563,8 @@ jobs:
           active=collections.deque([initial])
           finished=[]
           seen={}
-          MAX_PATHS=384
-          MAX_STEPS=900000
+          MAX_PATHS=1024
+          MAX_STEPS=2500000
           total_steps=0
 
           def key(s):
@@ -532,7 +577,7 @@ jobs:
                   return type(v).__name__
               focus=[8,12,17,29,47,55,71,78,95,100,114]
               return (s.ip,tuple(arrsig(s.locals[i]) for i in focus),
-                      s.statics.get("NaheA732Kj"),len(s.milestones))
+                      s.statics.get("NaheA732Kj"))
 
           while active and total_steps<MAX_STEPS:
               s=active.popleft()
@@ -624,7 +669,23 @@ jobs:
                       v=pop(s)
                       ts=re.findall(r'IL_[0-9A-Fa-f]+',arg)
                       if isinstance(v,int) and 0<=v<len(ts):
+                          # The R112 search was dominated by a repeated state cycle
+                          # after key/IV aliases.  Three visits are enough for the
+                          # legitimate setup loops seen before the crypto gate.
+                          seen_count=sum(1 for x in s.trace if x["state"]==v)
+                          if seen_count >= 3:
+                              s.milestones.append({
+                                  "kind":"STATE_CYCLE_PRUNED",
+                                  "state":v,"step":s.steps
+                              })
+                              finished.append(s)
+                              break
                           s.trace.append({"state":v,"target":ts[v],"step":s.steps})
+                          if v in (626,631,289,292,402,40,281):
+                              s.milestones.append({
+                                  "kind":"CRYPTO_GATE_STATE",
+                                  "state":v,"target":ts[v],"step":s.steps
+                              })
                           s.ip=label[ts[v]]
                       else:s.ip=nxt
                       continue
@@ -718,7 +779,21 @@ jobs:
                           active.append(x)
                   # Keep bounded symbolic search.
                   if len(active)>MAX_PATHS:
-                      ordered=sorted(active,key=lambda z:(-len(set(x["state"] for x in z.trace)),-len(z.milestones),z.unknown_branches,len(z.trace)))
+                      def crypto_progress(z):
+                          states={x["state"] for x in z.trace}
+                          score=0
+                          for st,w in ((626,10),(631,20),(289,30),(292,40),(402,100),(40,120),(281,200)):
+                              if st in states: score+=w
+                          return score
+                      ordered=sorted(
+                          active,
+                          key=lambda z:(
+                              -crypto_progress(z),
+                              -len(set(x["state"] for x in z.trace)),
+                              z.unknown_branches,
+                              len(z.trace)
+                          )
+                      )
                       active=collections.deque(ordered[:MAX_PATHS])
               else:
                   # preserve states that hit budget for another quantum
@@ -777,31 +852,18 @@ jobs:
           print(json.dumps(summary,indent=2))
           PY
 
-          mkdir -p "$OUT/evidence/scenarios"
-          for SPEC in             "ztrue_onull:true:null"             "zfalse_onull:false:null"             "ztrue_otruthy:true:truthy"             "zfalse_otruthy:false:truthy"
-          do
-            NAME="${SPEC%%:*}"
-            REST="${SPEC#*:}"
-            Z="${REST%%:*}"
-            O="${REST#*:}"
+          echo "EXACT_WRAPPERS: zfos=true omT=null"
+          set +e
+          timeout 300s python3 "$OUT/n9_emulator.py" \
+            > "$OUT/evidence/32_VM_STDOUT.txt" \
+            2> "$OUT/evidence/33_VM_STDERR.txt"
+          RC=$?
+          set -e
+          echo "VM_RC=$RC" > "$OUT/evidence/34_VM_STATUS.txt"
 
-            rm -f "$OUT/evidence/30_VM_SUMMARY.json" "$OUT/evidence/31_VM_INTERESTING_PATHS.json"
-            echo "SCENARIO=$NAME ZFOS_MODE=$Z OMT_MODE=$O"
-
-            set +e
-            ZFOS_MODE="$Z" OMT_MODE="$O"               timeout 150s python3 "$OUT/n9_emulator.py"               > "$OUT/evidence/scenarios/${NAME}_stdout.txt"               2> "$OUT/evidence/scenarios/${NAME}_stderr.txt"
-            RC=$?
-            set -e
-
-            echo "RC=$RC" > "$OUT/evidence/scenarios/${NAME}_status.txt"
-
-            if [ -f "$OUT/evidence/30_VM_SUMMARY.json" ]; then
-              cp "$OUT/evidence/30_VM_SUMMARY.json"                 "$OUT/evidence/scenarios/${NAME}_summary.json"
-            fi
-            if [ -f "$OUT/evidence/31_VM_INTERESTING_PATHS.json" ]; then
-              cp "$OUT/evidence/31_VM_INTERESTING_PATHS.json"                 "$OUT/evidence/scenarios/${NAME}_paths.json"
-            fi
-          done
+          if [ "$RC" -eq 124 ]; then
+            echo "VM_TIMEOUT=true" >> "$OUT/evidence/34_VM_STATUS.txt"
+          fi
 
       - name: Static fallback slice for key IV and h15 reader position
         shell: bash
@@ -853,7 +915,7 @@ jobs:
           print("key_iv_write_sites",len(writes))
           PY
 
-      - name: Prove key IV aliases and correlate all VM scenarios
+      - name: Prove aliases and report exact crypto-gate reachability
         shell: bash
         run: |
           set -euo pipefail
@@ -865,90 +927,72 @@ jobs:
           ev=out/"evidence"
           n9=(ev/"20_N9_METHOD.il").read_text(errors="ignore")
 
-          alias_patterns={
-            "key_local17_to_local47":(
-              r"IL_2f34:\s+ldloc 17\s+IL_2f38:\s+stloc\.s 47"
-            ),
-            "iv_local100_to_local8":(
-              r"IL_111e:\s+ldloc 100\s+IL_1122:\s+stloc\.s 8"
-            ),
-            "create_decryptor_uses_local47_local8":(
+          alias_proof={
+            "key_local17_to_local47":bool(re.search(
+              r"IL_2f34:\s+ldloc 17\s+IL_2f38:\s+stloc\.s 47",n9,re.M)),
+            "iv_local100_to_local8":bool(re.search(
+              r"IL_111e:\s+ldloc 100\s+IL_1122:\s+stloc\.s 8",n9,re.M)),
+            "create_decryptor_uses_local47_local8":bool(re.search(
               r"IL_23ed:[\s\S]{0,300}?ldloc\.s 47"
               r"[\s\S]{0,80}?ldloc\.s 8"
-              r"[\s\S]{0,160}?VnHlfpNorSGR6U9GUOp"
-            ),
+              r"[\s\S]{0,160}?VnHlfpNorSGR6U9GUOp",n9,re.M)),
           }
 
-          aliases={k:bool(re.search(p,n9,re.M)) for k,p in alias_patterns.items()}
+          try:
+            summary=json.loads((ev/"30_VM_SUMMARY.json").read_text())
+          except:
+            summary={}
 
-          scenarios=[]
-          for p in sorted((ev/"scenarios").glob("*_summary.json")):
-            name=p.name.removesuffix("_summary.json")
-            s=json.loads(p.read_text())
-            paths_file=ev/"scenarios"/f"{name}_paths.json"
-            paths=json.loads(paths_file.read_text()) if paths_file.exists() else []
+          try:
+            paths=json.loads((ev/"31_VM_INTERESTING_PATHS.json").read_text())
+          except:
+            paths=[]
 
-            hit626=any(626 in x.get("trace_states",[]) for x in paths)
-            hit631=any(631 in x.get("trace_states",[]) for x in paths)
-            hit402=any(402 in x.get("trace_states",[]) for x in paths)
-            hit281=any(281 in x.get("trace_states",[]) for x in paths)
+          states=(626,631,289,292,402,40,281)
+          hit={str(st):False for st in states}
+          candidates=[]
 
-            candidates=[]
-            for x in paths:
-              key=x.get("key_local17_hex")
-              iv=x.get("iv_local100_hex")
-              if key and iv:
-                candidates.append({
-                  "key_hex":key,
-                  "iv_hex":iv,
-                  "score":x.get("score"),
-                  "unknown_branches":x.get("unknown_branches"),
-                  "hit_state626":626 in x.get("trace_states",[]),
-                  "hit_state631":631 in x.get("trace_states",[]),
-                  "hit_state402":402 in x.get("trace_states",[]),
-                  "hit_state281":281 in x.get("trace_states",[]),
-                })
+          for p in paths:
+            trace=p.get("trace_states",[])
+            for st in states:
+              if st in trace: hit[str(st)]=True
+            k=p.get("key_local17_hex")
+            iv=p.get("iv_local100_hex")
+            if k and iv:
+              candidates.append({
+                "key_hex":k,"iv_hex":iv,
+                "score":p.get("score"),
+                "unknown_branches":p.get("unknown_branches"),
+                "states_hit":[st for st in states if st in trace],
+              })
 
-            # deduplicate key/IV pairs
-            seen=set(); uniq=[]
-            for c in candidates:
-              k=(c["key_hex"],c["iv_hex"])
-              if k in seen: continue
-              seen.add(k); uniq.append(c)
-
-            scenarios.append({
-              "scenario":name,
-              "summary":s,
-              "hit_state626_key_alias":hit626,
-              "hit_state631_iv_alias":hit631,
-              "hit_state402_create_decryptor":hit402,
-              "hit_state281_crypto_stream":hit281,
-              "candidate_key_iv_pairs":uniq[:20],
-            })
+          uniq=[]
+          seen=set()
+          for c in candidates:
+            t=(c["key_hex"],c["iv_hex"])
+            if t in seen: continue
+            seen.add(t); uniq.append(c)
 
           result={
-            "static_alias_proof":aliases,
-            "scenarios":scenarios,
-            "any_scenario_reached_create_decryptor":any(
-              x["summary"].get("reached_create_decryptor",False) or
-              x["hit_state402_create_decryptor"]
-              for x in scenarios
+            "exact_wrapper_semantics":{
+              "zfos":True,
+              "omT":None,
+              "VnH":"CreateDecryptor"
+            },
+            "static_alias_proof":alias_proof,
+            "vm_summary":summary,
+            "critical_state_hits":hit,
+            "candidate_key_iv_pairs":uniq[:20],
+            "create_decryptor_reached":(
+              summary.get("reached_create_decryptor",False) or hit["402"]
             ),
-            "any_scenario_reached_aes":any(
-              x["summary"].get("reached_aes_decrypt",False)
-              for x in scenarios
-            ),
+            "crypto_stream_reached":hit["281"],
+            "aes_decrypt_reached":summary.get("reached_aes_decrypt",False),
           }
 
-          (ev/"45_MULTIPATH_CORRELATION.json").write_text(
+          (ev/"45_EXACT_CRYPTO_GATE_REPORT.json").write_text(
             json.dumps(result,indent=2,ensure_ascii=False)+"\n")
-
-          print(json.dumps({
-            "static_alias_proof":aliases,
-            "scenario_count":len(scenarios),
-            "create_reached":result["any_scenario_reached_create_decryptor"],
-            "aes_reached":result["any_scenario_reached_aes"],
-          },indent=2))
+          print(json.dumps(result,indent=2,ensure_ascii=False))
           PY
 
       - name: Validate any recovered plaintext and search method-store mappings
@@ -1013,7 +1057,7 @@ jobs:
           sw=load("21_EXACT_SWITCH_MAP.json",{})
           vm=load("30_VM_SUMMARY.json",{})
           hyp=load("11_H15_HEADER15_HYPOTHESIS.json",{})
-          multi=load("45_MULTIPATH_CORRELATION.json",{})
+          multi=load("45_EXACT_CRYPTO_GATE_REPORT.json",{})
           store=load("50_METHOD_STORE_SEARCH.json",{})
 
           verdict={
@@ -1026,8 +1070,8 @@ jobs:
               "header15_proven_by_execution_path":False,
               "vm_reached_resource_open":vm.get("reached_resource_open",False),
               "vm_reached_local12":vm.get("reached_local12",False),
-              "vm_reached_create_decryptor":multi.get("any_scenario_reached_create_decryptor",vm.get("reached_create_decryptor",False)),
-              "vm_reached_aes_decrypt":multi.get("any_scenario_reached_aes",vm.get("reached_aes_decrypt",False)),
+              "vm_reached_create_decryptor":multi.get("create_decryptor_reached",vm.get("reached_create_decryptor",False)),
+              "vm_reached_aes_decrypt":multi.get("aes_decrypt_reached",vm.get("reached_aes_decrypt",False)),
               "protected_update_body_recovered":store.get("update_method_body_recovered",False),
               "firmware_readback_primitive_proven":False,
               "full_flash_readback_proven":False,
@@ -1035,11 +1079,11 @@ jobs:
               "next_gate":"If the VM reaches CreateDecryptor, independently verify the exact reader offset and key/IV before accepting decrypted bytes. If it stops earlier, use the packaged exact trace and static write sites to extend only the missing wrapper/native semantics."
           }
 
-          (review/"60_R112_VERDICT.json").write_text(
+          (review/"60_R113_VERDICT.json").write_text(
               json.dumps(verdict,indent=2,ensure_ascii=False)+"\n")
 
           lines=[
-              "OKN R112 EXACT N9 IL EMULATOR",
+              "OKN R113 EXACT N9 IL EMULATOR",
               "OFFLINE_ONLY=true",
               f"EXACT_SWITCH_MAPPING_CORRECTED={str(verdict['exact_switch_mapping_corrected']).lower()}",
               f"SWITCH_TARGET_COUNT={verdict['switch_target_count']}",
@@ -1056,7 +1100,7 @@ jobs:
               "FULL_FLASH_READBACK_PROVEN=false",
               "LIVE_BOARD_COMMANDS_ALLOWED=false"
           ]
-          (review/"61_R112_SUMMARY.txt").write_text("\n".join(lines)+"\n")
+          (review/"61_R113_SUMMARY.txt").write_text("\n".join(lines)+"\n")
 
           for p in ev.iterdir():
               if p.is_file():shutil.copy2(p,review/p.name)
@@ -1088,17 +1132,17 @@ jobs:
         shell: bash
         run: |
           {
-            echo "## OKN R112 MEGA Exact N9 IL Emulator"
+            echo "## OKN R113 MEGA Exact N9 IL Emulator"
             echo
             echo "- Static/offline only; official EXE is never executed."
             echo "- Uses deterministic N9 method slicing; avoids the catastrophic R110 regex."
             echo "- Models the real h15 resource and BinaryReader position."
-            echo "- Runs four explicit zfos/omT opaque-predicate scenarios and correlates their reachability."
+            echo "- Uses wrapper bodies proven from official IL and prunes the post-alias state cycle."
             echo "- No DSP/USB activity."
             echo
-            if [ -f "$OUT/review/61_R112_SUMMARY.txt" ]; then
+            if [ -f "$OUT/review/61_R113_SUMMARY.txt" ]; then
               echo '```text'
-              cat "$OUT/review/61_R112_SUMMARY.txt"
+              cat "$OUT/review/61_R113_SUMMARY.txt"
               echo '```'
             fi
           } >> "$GITHUB_STEP_SUMMARY"
@@ -1107,9 +1151,9 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: R112-MULTIPATH-N9-CRYPTO-EVIDENCE
+          name: R113-GOAL-DIRECTED-N9-CRYPTO-EVIDENCE
           path: |
-            /tmp/r112/review
-            /tmp/r112/evidence
+            /tmp/r113/review
+            /tmp/r113/evidence
           if-no-files-found: warn
           retention-days: 30
