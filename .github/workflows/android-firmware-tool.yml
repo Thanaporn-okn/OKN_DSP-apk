@@ -1,41 +1,40 @@
-name: OKN Android Firmware Tool R94 READ-ONLY HID Matrix
+name: OKN R95 GoloPine Protocol Miner OFFLINE ONLY
 
 on:
   push:
     branches: [main, master]
     paths:
       - '.github/workflows/android-firmware-tool.yml'
-  pull_request:
-    branches: [main]
-    paths:
-      - '.github/workflows/android-firmware-tool.yml'
   workflow_dispatch:
 
 permissions:
   contents: read
+  actions: read
 
 concurrency:
-  group: okn-android-firmware-tool-${{ github.ref }}
+  group: okn-r95-golopine-protocol-miner-${{ github.ref }}
   cancel-in-progress: true
 
 env:
-  PROJECT_DIR: /tmp/okn-android-firmware-tool
-  PROJECT_TGZ_SHA256: 8c6b96d41ef11b8d57347cfd1ad6b6f4ae67a5bb4c6eec18c6e4115a0ccb8747
-  SDK_REPO: https://github.com/leadercxn/bp1048_sdk_v0.1.12.git
-  SDK_COMMIT: 8105bd864b04995d81c9f9ae77cb158259f39015
-  READ_ONLY_FIRST: "YES"
-  USB_VENDOR_OUT_ALLOWED: "NO"
-  HID_SET_REPORT_ALLOWED: "NO"
-  FLASH_ERASE_ALLOWED: "NO"
-  FLASH_WRITE_ALLOWED: "NO"
-  UNLOCK_ALLOWED: "NO"
-  FULL_FLASH_READBACK_PROVEN: "NO"
+  OUT: /tmp/okn-r95
+  ANDROID_URL_PRIMARY: "https://golodsp.com/wp-content/uploads/2026/05/golopine_audio_turning_release_2026-04-01.apk_.zip"
+  ANDROID_URL_FALLBACK: "https://golodsp.com/wp-content/uploads/2026/02/1Android-APP-golopine-tuning-250401.zip"
+  WINDOWS_URL_PRIMARY: "https://golodsp.com/wp-content/uploads/2026/05/golopine_audio_turning_release_2026-04-08.exe_.zip"
+  WINDOWS_URL_FALLBACK: "https://golodsp.com/wp-content/uploads/2026/02/4-27Nov2025_Windows-DSTech_AudioDSP_Client.zip"
+  TARGET_VID: "6324"
+  TARGET_PID: "1719"
+  TARGET_USAGE_PAGE: "FF00"
+  TARGET_USAGE: "55AA"
+  LIVE_BOARD_USB: "NO"
+  HOST_TO_DEVICE_USB: "NO"
+  FLASH_ERASE_WRITE: "NO"
+  FLASH_ALLOWED: "NO"
 
 jobs:
-  build-test-package:
-    name: Build + test read-only S25+ USB firmware tool
+  mine:
+    name: Mine official GoloPine/DSTech clients for protocol evidence
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 25
 
     steps:
       - name: Checkout repository
@@ -44,859 +43,528 @@ jobs:
           fetch-depth: 1
           persist-credentials: false
 
-      - name: Fail-closed scope gate
+      - name: Fail-closed offline-only scope gate
         shell: bash
         run: |
           set -euo pipefail
-          test "$READ_ONLY_FIRST" = "YES"
-          test "$USB_VENDOR_OUT_ALLOWED" = "NO"
-          test "$HID_SET_REPORT_ALLOWED" = "NO"
-          test "$FLASH_ERASE_ALLOWED" = "NO"
-          test "$FLASH_WRITE_ALLOWED" = "NO"
-          test "$UNLOCK_ALLOWED" = "NO"
-          test "$FULL_FLASH_READBACK_PROVEN" = "NO"
-          rm -rf "$PROJECT_DIR"
-          mkdir -p "$PROJECT_DIR/ci-output/evidence" "$PROJECT_DIR/ci-output/logs" "$PROJECT_DIR/ci-output/reports"
-          cat > "$PROJECT_DIR/ci-output/evidence/00_SAFETY_GATE.txt" <<'EOF'
-          TARGET=MVSilicon BP1048P4 family project evidence
-          PHONE=Samsung Galaxy S25+
-          PHYSICAL_PATH=Samsung Galaxy S25+ -> USB-C cable -> DSP board USB-C port only
-          SOLDERING=NO
-          BOARD_MODIFICATION=NO
-          JTAG_SWD_UART_TESTPOINT=NO
-          EXTERNAL_PROGRAMMER=NO
-          READ_ONLY_FIRST=YES
-          USB_VENDOR_OUT_COMMANDS=NO
-          HID_SET_REPORT=NO
-          ERASE=NO
-          FLASH_WRITE=NO
-          UNLOCK=NO
-          FULL_FLASH_READBACK_PROVEN=NO
-          PRODUCTION_USB_ID=6324:1719
-          PRODUCTION_MANUFACTURER=JMDSTECH
-          PRODUCTION_PRODUCT=DSTech_DSP_ComboDigitalArchitect
-          PRODUCTION_IF3=HID_INTERRUPT_IN_0x81_64B
-          PRODUCTION_IF4=VENDOR_HID_CONTROL_ONLY_FF00_55AA
-          IF4_INPUT_BYTES=256
-          IF4_OUTPUT_BYTES=256
-          IF4_FEATURE_BYTES=8
-          GET_REPORT_OUTPUT_CURRENT_VALUE=DEVICE_TO_HOST_READ_ONLY
+          test "$LIVE_BOARD_USB" = "NO"
+          test "$HOST_TO_DEVICE_USB" = "NO"
+          test "$FLASH_ERASE_WRITE" = "NO"
+          test "$FLASH_ALLOWED" = "NO"
+          rm -rf "$OUT"
+          mkdir -p "$OUT"/{downloads,android,windows,evidence,decompiled}
+          cat > "$OUT/evidence/00_SCOPE.txt" <<'EOF'
+          REVISION=R95
+          MODE=OFFLINE_STATIC_ONLY
+          TARGET=MVSilicon_BP1048P4_GoloPine_DSTech
+          PRODUCTION_USB_FINGERPRINT=6324:1719
+          PRODUCTION_IF4_USAGE_PAGE=FF00
+          PRODUCTION_IF4_USAGE=55AA
+          BOARD_USB_ACCESS=NO
+          LIVE_USB_COMMANDS=NO
+          HOST_TO_DEVICE_USB=NO
           SET_REPORT=NO
           OUTPUT_TRANSFER=NO
-          FORCE_KERNEL_DETACH=NO
+          ERASE=NO
+          WRITE=NO
+          UNLOCK=NO
+          RESET_PROTECTION=NO
+          FLASH_ALLOWED=NO
+          GOAL=Recover_vendor_protocol_from_official_GoloPine_Android_and_DSTech_Windows_clients
           EOF
 
-      - name: Reconstruct complete Android project embedded in this one YML
+      - name: Install static-analysis utilities
         shell: bash
         run: |
           set -euo pipefail
-          cat > /tmp/okn-r94-project.tgz.b64 <<'R94_PROJECT_B64'
-          H4sIAAAAAAAAA+w8a3PayJb5zK/oZWpmTAJCAgTYDr5XBhEzwUDxyEzmUVigxuhaSKwkHLz3pmp/
-          xP7C/SV7TncLJAF+ZBLPrVr3hxj14/Tp8z79iJR/9c2LLMuFiqriXyzJv+y3ohbKslouFVh9WZGL
-          r4j67VF79WrlB4ZHyHNM9e9YpPz7TvfnzrjX7w679W5bWphffQ5kcLlUOsT/klwsxvmvQHf5FZG/
-          OiZ7yv9z/n9Hep57Sx2SJytnyX/Cn8CdujaZGdPAJ//73/9D+selVOq7TeeZ5y5IMKfY1VxNA8t1
-          chPX8EwyGpyTqbEMVh5NpXKkv3ICa0FZtWVS+AjuTshVuVgonSgV5fhKgk6XhrPCqWCMlxcQiR94
-          lnPtQ+efLhuDoV6/uAIcr+Annc5JY9AjdXcxcRvWtRUYtuZN51ZApwED2Dc+EZP6U89aBq5HBhda
-          rqCWAVS9olfLilZuFqr6ebVY0JVySZUbRa2onpdLdVWtnOtaSZfrdUVtNhX9/LhUL6l6sVStV0uy
-          rDDorWaRWD65aDWI4ZiErpeuT33iOpRYTkA9b7UMSKtDqGMuXaghV/K6qlxlSbmUm9wFlCyMNVka
-          0xsaZIlCFj4fdmvYHHpJQM+SueETx90C2q4py6a2gDseXbpesGe5COWqUlUVuaIq50WlUa8X5FK9
-          Ua5rhaYuF4pNWa03q6XzilooVLRC5Viv6krzXGtWoE9RKyjn5eZViNLuNCaduvBJApeASJhQM/KN
-          a0p6+A8sudmUZVg0r4RvVdU0+G45y1VAED+khZ8l3VWQqGlSA2WBVHlFiEJY/U4fjvt6r9sfEqDZ
-          CoHLRFYI/lskcon9qMK/V+QTEBD0e2JTYkw91/cJta7nAazGMP3TDaWuymq5US0Xz0sFrVg5LhSA
-          BHJBq+h6vV4snDe06rGq6sfn5ePjQqlYhg6Vc/m4WJXLx+cFuamXGJl6hu9bt5ThylcZwdS0TGBl
-          IBQG0AEJuLNdA5joME2aWZ4fhKojMWUDpeOisfRoYKCSpVLDOZ8A0ObCJMgn+MM02Afoc9cPcoGb
-          M+mtBdNN3cUCJWY6NxyH2iC0lh8AqScw1HRhxOvXgN3r10JJZ3cAwjdmDK3FJ8OjOSQZcZfIc4kA
-          Fh6ducAMxJEBwMX5IAdxhHyJtAJimCbI4pYawBgrmIc4B3fLzTJ816b2HcoUmw8Jw1fwo0+mK88D
-          5ETXnBjNROAUeoK4M+NjAxtg9H+uKNATKvl4pAXShBxdTRZ93jqEiWvyWlOuMkBwVGuPLgzLAV3+
-          5FATpI9ojum5lgmz31APCYdab3rAZg8Ufg/jGEEWBtAvCOgCDMEVIGQtWshGsHH0yJoVs2BYbZ9m
-          rhj5HYrAroCaU1oLvBW9OiXWjLBh0NGygU0bC7B0bRvMIq7Lv7GWS2ryGf3Asu1wTp+zbuo6gefa
-          OTBFiDWTeTLhbAvmRsCn4KKmr5e2NbUCoL2QUtBpNODvqEM9a0pmK9vOzYC2cwZoAuaLuIj41gMg
-          +VEPND694U2swDO8O2S/R30/b1PnOuDjQ0mC7kNE5QqM+WLlWFMm5mN9NgNbPpbXCtrNK01TVfw7
-          Xa/X8BdMjUGaiMu56wb51dI0QBE4REYZJrjQy0Z1BAQnQLLNVCC4ILwOKIUHFgyWcEc+tBr5HpDo
-          CsORk0KhVLpCONyyMzlg4hVZKnN2Qkurx8SdzYAtNALbdey7VKpnOShIg8Z7poEWLLSqyOrErJZL
-          E7l0fKyaVWV6PDs2aKUynShqtaAez4rHsqJeMSZYaGG3UBkDcrZx566C/OUHjXgrmwo1Bln0keo0
-          5KA7A7yYiNI1eNco+hwCEnJJvYUFdguF2SWfPHCieTaLlPqrQ5OX8gxFyvd1rXGpf4u4PywPxP9F
-          paQm8r9KsVx8if+fo3xHuu87LJxuCk9Phi6E/izgF96P+dULdJ4UDZLD4gnbBgsNBgTt7MBY+Cvw
-          Su8M21jfkUFBfYPex4EeYP1MCwwtehawowApV0dLg2YJZ91kDVCN/lwK04x4WsEzEeFkWczUP5bR
-          P4HpPmGme5tSJDKKSAKBQZpILx5OJHikf8J8JwtX7g/ut0E9xPlhJBsG9izMF3EshyicM++BgUH2
-          YKT/iLD6YJR+8nXjbYAPldQEZkJIuvLQuR2MvkM4O7HwZuh/Uc/lczIKo0uCuBikhZoY5IigFeE0
-          VxjebCKKMCrdxiJh5BYmsdsIGrvk0B2zSID6qZQi8XzUgX5AozuWS3mxnBGIUJDIIIAWFD9EfjDU
-          hqMB5KD4Ue92mq13o742bHU7IrTCOaRUUeIx4gZUnjMlF0mdEEJDH9T7rd6w248NL0ksv1w5LDgD
-          GiEw7N9qtHUxebhXA587tF0YkDevWdTNA0sWV8LkgTGdY7YGeidCWR7GSilVYmyKAEGdZpCzkBfE
-          w24SDbtfv+Z5qJAUKRrjH/H+GRZJ8fA0HomfxnMHa7G06QInGmwRwUjPId3RkADfHX+G6JYloodm
-          6NdWj+tmmMlBOLO1EhPbnUipikS6IjwLxSYP2jezrgG2Yd+BELJFzOma3Fr0E86BsjOAKDK4IwsI
-          Ku1UquNibmJS3JTICqsFTdZMhKxZ8tNQe5cf/NzIj7T+EEL2NSg2wEepu/aMxYKCKm+XFonpo8vL
-          hrk0Vgr5h66e4YOBYNFZFmTDdqc3WeCEjzsI15DKsCgVYmFMKJEC4UBX8N8UPM+J1IWLA3JmQ3bM
-          JJiWbXQL9Wq1xPz5zic4JYDB7Rw7zA1Zjnlr+Rbm1xtNDFNNHjAzVfyrndxLOVikPLdrUrAOvtUc
-          D8R/ilqsJOO/cuUl/nuWcjj6u+w29BomB+Nup/1x3Gz1B8PUUOszD3TR7ei1PWFfqnfxcdCqa+1x
-          Txte1ERcN8e90dyZCPM2YV8KHFljVEcXOoYmcHG1TRQXbbvUOqOmVh+O+nq/FgZz0Q7iZ+2hmC46
-          BrxsDXzruNUZ6v3+qAcetjPGWG5cLp3HO5ZqH/ROo9sfY3/w/MN+t82JMhpo73RYKvyDcZn4xpAs
-          BcMAYm8UGvzx+cehPqiBk2JNYN8PtjV1Ddcab6ymBt12Q++3Ou9qnW4Kvc0YvM0Yvc0YOgx7XVgK
-          Num/wIo6yIJ+911fu7wEqkH11vfgl5h/2Nc6gybvsPXdIXb1Ub+vd4bjD1p7FJWFhv6hVdfHw+74
-          ogtCofe1gY4Qfu63huzHqNPu1t/jr2a3Dz0b+lCrX4zfA156e9zotz7wKZujdnvcbGuDizFCP9fq
-          7xFrIHeiFVtGvRpC1RupfvUY+gPaegeADxrvx23tI+Bca3Xq7VFDb4y1wVgDEoAsDoBrsATEm427
-          /KCN6/36uD9q69v+3Waz3erovFsKxH+s/8IooV/2hh/Hda3HOHLOEWDbdKyXNgIibFp1WK0uRvI+
-          f7V6P1ikvLFcfuMz4C84/y2XX85/n6Vw/k9Wlm1KEKaaNv36czzg/+VKIcF/RVEgJHjx/89Qlvbq
-          GvPmf6YIFMskaYjfJYNv/EggG7ZIcNKpz6mUqBe9HWNB/aUBeRgb5N440mSpyKXqsuRVlTTrAw1L
-          y6YD84YU1RSrMunMWNlBnedgHBSWyGQt8x6QWBaWgyALx5sa4OI1DcQ8YSXkOri1XceDAQhpEtUd
-          wJ+kj0uSzAF/TkVR7i4REz+CoO+uIJeCyGIJSE4s24L08Cfj1vjAwUng1AYYMSiVBFaPHvIZiWzS
-          JeSAkN9aNJw9oH7QCjM1RiGS/sfKsYIT/m9JUopSAVn0VP5z/fe96Tf0AU+3/5WSWnix/89RtvzH
-          /bNvIwRP5r8iFyvlF/4/R0nwX+z4XxqONQObI60X9p+f4wH/X5CL5QT/S0q5/OL/n6O8/RuwOHSI
-          tbQCvpCA63FxA76WXgWzXDX9t7PU24WQCALdHf9EBAK19DwIlif5vD+d04XhbwIH8KEgWDd5j/p5
-          UZc+Y67s7cqnfm7Gd4y3vp/3OcGQopYOocwNz8RNCWnlTyTcbUzvDMCLHpZHARPMt9Ikf8ad+NtI
-          NLEzyLBt99M5296spdldjF3AtjGhdi19cH9kd4S/WrIrL/3AFtgIXDg+08C6Bfe/qdldtnQJKqiJ
-          fum9HfFKghdslru3j22snOn8EmKeWtoHNtp06C6juDB88ODJCXIzyw6odxZr2+ALYcZ+xvDBEu8j
-          XWqtDqP8DhCgP70WJyyHwYS9pLY26tQv9P4OsLf5BLpfcS0xIRMrwt0oscmhDXHrQm88FacFDYyc
-          aQTGDjp/Do2D4EDVWHxaS/8ddDTPD1vGHLkY8m/zoSwKjcxHdAVUPR/q+tm///bFS/mTJeH//wG5
-          yVcPAp8e/ylFpfIS/z1H2cd/dN5fc46n878gV9QX/j9HOcR/9+brJYNfwP9yufTC/+co9/E/svP2
-          p2Th6fwvlWTlhf/PUR7L/zq/VKOJGzMSdnzsHPfn/0qxUFHi/C/IRfVl//9ZCl5ZxJuEe3bbT1Mp
-          a8EueyGzpVVg2ZLmecZd2/KD0922tuXcUPPC8OeXxnJv+/5h7tSw6Z4GBiWVf/2a9PAaYnjHPry0
-          dUKs8I6bu6QOf/2BF494Hb5FwYcw4SVC8jqfWq4mNr5lsPBeFn8okpBrsd++9KxbfFOQaD3KkH+K
-          QwIBysfd+CkZsMdqIWpHgPlbXpVl1xt/++OMXUbzM5HTBN7hHE/ecAmrgNQA9U/x+qPM6WYAdMED
-          GVjXEduWOO8hq3oldo8Oj89zeHrNyAA5YwPPxgk/z//dSR+Aww7Jf9X77P6FVq/rg0Gt031Ef3bU
-          PxDZ6b1D+qPOsHWpj5t97VLfHtvXNJWoGhHXKUhb75Ce9rHd1RpEKZOjTT+Cizolne6QaKTd+qDD
-          kMtLrdPI/O7wSTez2i7wIHADYG6NyFts8JLd1HV8CwhKzd02NqTp4WnWbqONJzh+EG8Q/BZt7Byp
-          RtLpbYeoBKDci48zkIM71BDB65jKvD07iq4GL2GiJEm6E3h3O/JEyQmXKYli+4AGR5moeEXQdDh+
-          VLqmwXt6F5UpLBwimYRdPuDVzmQna0aOOBzAHK8J/utfOGL7gY0S2tLA/9kK5kdppgy+5efTgBde
-          d7acFY0D3TLlzZt4C+fimxqZSPzV0C42YQs5C/kAy4+wazMywSZE9DQ860tQas5ZM/InQvN15xps
-          juTPjYJaPprsUA5Zh5udy1VAWzNtAlYnOEIoWXKDN56QyRubiQzOSIZpMkpGeY0lqjPNVluvpTPh
-          N+sefvz4u/NjAo/oUH5baDs2JMNjxw8uNFhqBACu5pGDORUlkNyFERxxwy6NBlmS1lHLex/H563h
-          YNwD+4Fo1r6X1BnoMN6FDTx3eQcEziTJgjo4C3XTnxqOeFLM9ZWRBpQii2hk9siQUGuQJA7k8MJj
-          dmowbnZHnUaEDHx4khAxaFFFD98vA9LgTBz2BpU3+UeArZolhdI9XNAG9VZrDChFWSlASr4FPiZz
-          H0+Y7RAyvQZDIUZmdueIgjccK0DQ63thR0AkWiM6FZOoEdjr/sfDHkLcnxJXtn7Vo2TfmohDOEUh
-          DbtDrb29j5VQBSYQjwcTF4gknOZeedgHrY13JgfDEK0IoIhh+gJAO+sLzeAjQEWu1rUu8c5iu/Ve
-          b28uujV2oZKzGimrarF8UAXYu5UV30mm7zx3tUy40wMeLe4fmV/jdvWwY0P7H/VVQiXAFSjJrlgS
-          WCWdTZI4jVGv3aprQ328Ywy3PjSzAwLLBgZBEz5IjhTo3qden1O7v/Yj967fHfWiUySWeWgWJF7I
-          1LeCpwmiRSfs6L8MxcXHfq3jxm/9R54Fs9foYGiosdg+wbijgRRX/L3gNXbVtsbuyXj4wL2YTzxJ
-          Yc9R8uLpt3iSkg9fKGHU74u3OjkMyVf+5qnaKTHd7eP0+NsS9nSCP6vwxPthP4HuZ0Jtnz5EnhB/
-          w7ul5JY9jPPzc4qPMfy8ML74RGxJwifU13i3KMvuGuGKjWt8vRSwl8I2BoWeeKObxRc7Dj63sdgr
-          ZyPynmk6p9Mbf7VIorz5xR9aMXQDl2tYGNeFaYxIdEQegyq862MjYWR2Ey1mdxOYqBQxt+2uHHOP
-          CcA2i9XDnzdEJW+j0Zr15s0+dT+a/Gb9QX4gBVXNkP+AwWtIICDuxHoAosTbVO1QzCmSAfb4DqZl
-          gwti8G5PQGrTq3iwV5hzYG9Yz26sisN5p7PNSvcZqkfEUnvNTponV0NwWWgaGpDi2rT2vY9Jc01e
-          f/9LuGT8kAu/IKa1702MvfbC46y2suGwLA7IZHbN5n4af96hEGWCwOnICZHbsOzJ4eQOFnz5j1w0
-          nx9/wBxhE9OvMVZ87++lyl6KZDks9pYry9eIwqeUk6RimpB0OxZGpZdGMJcWxvpIzm4IU7hPmRmo
-          +3TYdFdomTchtdDXmHJG0ydEORNCl6V4+gsjpyJXxS9whn8klJmZfYwxYYbpb2vO0j+iaxUIYWIV
-          A7+xBQ6Mnu7TeUcgt1/KBNwlwD3ivzP43xiFv/dnjnOSg4icvMZABChvu9dHywyM2nwVJDlzH/3n
-          99E+lgHsxv0b04mrXlhOG0WImRlrYcXMZwzQdm8olkomtyNCSwze8aGtpC3n+P+gcxKXD8F8YGtN
-          dNhn+IBBa4wKiwXyww/QF6y4UoBQAuYPNfhoOje8zDqhDXs8KkPKXvlz4aWY5wNA2Q2ZOIl2LRCi
-          gTYjjABrITEn4ChvHo6tEuPfhsOfhs3W094nHrd4dzoKOMnmpFNlcz4oLLgEJDqXd04EPgAZs29x
-          zMiaJhu1jQwi68EGnwZtDlG+N2gQ4cEmfQy/oygK+viSR5c2/jc46d9/h7wf/oW/mUitx2u9WKXD
-          KzdRzucvuOj8UvaWJ57/DCCypU86/Hn18PvPipI8/6uUy8rL+c9zlCee/zx0xsPPbA6fszD5SRyy
-          8G7xrfC9pyeHN813wcXtKDj2Qy4xdppz50znnuuAFTO5sYZsc2/6gxf7kiY4uT2OfcLvMMDaWli+
-          d4/wOWDsLU1t16EbQ/z5MHL7aOQ7xtKfu8FRPJC4j6zbyOIAUZlf/vMHEehvcKnb7ZNs7KwhsfC4
-          hz7kWw/xLJY9YDZNo+iAKGx2trBpzybJPROEQN3rIV3HKS3QRPiHku1DGE9tangxYJygov40hvw+
-          t/zl7vCx9j+8//wlFwDut/8FCBrl5Pm/+n/sPWtzG0dy+ZxfsUKVpYUIggRJ60FyZYPAQkIMEgwe
-          Ei2dDgUCS2olcIHsAhR5pKrsy1XspJIvia9STqqS+FKpVCV1VXfnc0L9G5Z/Sbp7Hjs7u4uHrXK+
-          CGWLwO5MT09PT093T0/P2ofv5f9P8Xmn+/9T9/eTVgWdq7SVgSuYqkRHD1kHd4CrLdxynTebXia6
-          RujtzruxH5X+YsqLt/gYFNWJ98obvgZSuqiw6pN/FlxhApA3g3YGtGUmuqywXyTCCciqYp9jaQEl
-          rBE+iaKaZk7+gMiESrWx+6TYsA0RLkAhCssGP2VPW/rp20FaKAIPgBe5BdLrNettzDWwV9y1k3a1
-          JD3n2R9pVp/G91doiZ6+mzp1JzVtW5nYaQ6IP3p7lTWUtiWECT46gE/nkX0wDesXzpkZAC8Lhl/N
-          cS+W65lQnasynE7ZuchdqTd2iy3K1KBuuVJHH4HNOzeJMsXGbuexXWpRto4ItK5/8pg884sBrFSQ
-          oCU7Ait9JD7Irx8BxUeO33N4M0Chs0plPkLAXKm/i/ZWV+PtyQbZ48a9+w2RWJR5OFhlOU+UGvPu
-          bDMIwAL3VtPGR2xsgxBvR/o43+62urMdLLyzHaQTRa2/W3xYLXWapeJeVNrg1shu99jt8Y4S1aTo
-          fX6xena3krtl38rdqsH/lVtvcGrWKouAuLUPNT+5lYMhXMd/NhDG0+r+TBiZ8tGk6WRQqd7BjHqo
-          YmfKlXbTnl21uFdu1KvlG1pt/rizU6+3ZgPZfdx0QSoMPQ0KPK/WqqX6XqfZwuw1syGxwDYNDHs4
-          NwzMhga/Y7gUqTflYmtuSLgriL8TQJXqZRtAFReA5QUpaAGBmovh5R0dp4DaqzxcBNLhmFIoJ9Gq
-          1d5fBNJk5HpHwwRA7f3qXqU+f9/Ozs6SOnZwcLAQB7B8eDonAQNgnCEsk/PCEjnxNEhCz1lk/I/c
-          Yw0KyyU5N4wR5f3TYOw37KatjlOiXCsVG4/hfWevDtpB2Rmz/KzDoyMAGFDq6Bcg0Fkqyi1j1PXH
-          Ls92PcG9dcxHIfJLg/bu4EFUJXFnf9ibsEyCK+FFEtGM0/kpYaL3NzoPi4CXXJTYZriW65oQEKGF
-          EXTHL5xzsddP7ccvp0hMYu4b3Ql0wYf1wWCpxFcoIkDDdeG9dMUXEVlqY9p1xKk0Vf2P0CuWA4tZ
-          RarWIB/Oo3pEAaKKTimspoxYpALKwk6xXG5YqH3gZ/6aIPk6JEd5/cL9ewvUL7bL1XrHrlRA7RMQ
-          1kuLQKBAqEpTVi4vgj6ssI0I9uuVRarv7GuV1xep3NIq7yyKOBc+EoC9WOt69coC1VGiN1ugaoFE
-          AssQ5BcO/UKsw5O5WfD/cuHOSqlUbbU6+/Xap3h1wOpaoVPdq7Y6jCE79gEle+tUqpgcb2ORNlqN
-          YrVmN7CdTq1O+eMeVTsAcxaqSh5BPcEd5R3QIthhzRo4XY98zf3dU7TshRwAqVMbvnb8UjdwQgsg
-          m8djDizgOn9y2k3DBTuBEWloHOuGkWhsWryYYtIZ28bGtHgxhV6d0iO79IlV3Wu2K5VqqYq5BJFf
-          4xFhundc2Z/F6JGzEVuqLIbJMxWdZWNDxv5cGmZSgXVZYHvbuKd2DYOBugMMcej5vcKdUs8dj2Hc
-          +IKrNaNUFAOFa7F/6vSfYiZry0hoe+05BTHgTmzC2wJ7u6C5T2xfrJXaNQz2QXYs3KFIlo0Dsvex
-          Sylm/nSgTbCbkwCKAUjzHahjjppI4zFAQVtWYTOVVPOsRwgTp5BI1tjZLbZKj9TQYBo4K+QOIPEP
-          aYSYlOlE0BZm0GapkbsUd9J1PcdfZvQyehgLwdQNdxzmrmbqBtMxemqur7y6Z01/lEC7KMdFdAAe
-          eqZFifFK8TMqGKOmBhJJdwyDoXlkpkXjbRteYgQeNvtzMfvcyHTSI504yEOXnZmhL1gMv8QBC+AA
-          28S/N43VM1y6WRxf1viIP4eWClnj5waT61mw/MPHCWFpCMkiv0ulMjsGhOt2UGuOOAfFK5UWW8WO
-          wWCc/zTnQFZGXZGTYGs2iLhzQIHxtLpPyWmL1T27kQot7iZQQJC7YB4gSQ4DBY7qOGDx5Rqo8OyO
-          ZWzgvDUPn60KrrJQkyjypwX1aaXCn66pT9fu8Kfr6lO7HMenuV9sNFVcRIFG8Umn3ui09+gyxMwc
-          XBD1Js4MssNlR7YWWw8VjOgMW4AxbZP1tYED1F4F+84/VR4krUOAHNgyMImg6gOKQeSbbDWkDTzc
-          hmcb4lkCgPGLyQmeADOhqZtGoZZFyVqoxUiVtn5kghEtGPcOWF568YMQ64wG3QkFjGN4JjXVYVHS
-          8BuWl2CEXcyxwjlWYKptRVTi9IgE1Q0TdmRNE4tnD58NI3qCfLokeWx7+57+bi18V7ijv1wPX8rT
-          PMkIK+NEc0gizb+NpnDOSAYMixBQ1ByTpLi1uuVui+JbJMYJFkpsEKcj+JsGhD9Fi2+mURv6JaYE
-          g4ddy4XHJQ+dgb6gvcBLDFNixLE/S6I/25akCbA0VtteX9tKWKsErYevrLA7MeAvAfjLkFgvFWIt
-          vXx+wxo9e/kc9/gACiMVDyjUg5sxfPAVFZytZDHHMs4Bae98QAoWUSbnwtpMHVta2oqtUyl8xWjM
-          tmOiU4FdP2NEHAi8hK/uGCqKg7McZJX9w+Z5MHZO8l3c8+1RLHEuyPm51ZwINYy7R/xpzLNgZDJI
-          8alxyVYkKhlHlgcjbx5me8/ObqbFIcPAU2HSnDZ7OOym92A1eyECii0ZTrwSHkt4sWyNbqtBwyth
-          yDCM22JxwqIlvmsTHTiKuF2YKCQSPdE3SQjsnEm0gFWRQfZUonBQsFzkV28r/Z2C/IJBznNGOFvx
-          +OZ4MKw1K6qZBzVDxy8ogNk6xa7jhYrm2QNrfe3mzbNtC6OUk4KUeWAyBejSjhiG32IPeLQvQgmj
-          aR9Y7DETC2/UiGKl1DYrlA4zHt2UQPIwcDgeMhyPGBaED+l+ATipEcIPLHh/82YMzbS44Fg4cCKW
-          qYHAF8nhv4nRv0nBvzz2933Y77v/LBr/1eB+cxhbzNp4Pk8c2Mz43w/1+K+1wvv435/mM1f8V2KO
-          ynZwWKYck1uziu12PWjC1+LJ3GG+4qqBYfIqPCON2fjyweWK2xfCX2h8bsDuJxfPhQCiE6Ey2Hfl
-          9m0mq28bReNoQidI3Why9d12s2Uc4hVYeLMWpg7ld1nhLX0eXuUGmiUm0XQEJO2W4XCTCYUkiFa8
-          iRZ1T7pIlt3HynLD5zkEAWiPsteEt6FRhcNzdlYVeyMvvpU3bVEe/hVxfpUDWqG/goINJ5gM8Hj2
-          ycgMR8Q4YX/xOkE+mLwjOQPHBm+xG7se0SQLmPjD14Fhn/UcSo3PyanG82nNhat9JPZPGkOTXg86
-          tZVcihQauhwwpYAYXQqiml4G6IP3JSqedl4qirCpYZZTkMhF28tpoHUjBIctz8Fg4gq9q7IMu/7Q
-          0nsawqDmEITWT1mCYwBFZDfFe2E6pK+b88r/R87ZY3Y53oKHP/5kdv7vtTsb+vmPwocb7+X/T/FZ
-          9PzHlGBeySJaFK98PivK1gdt3PHjnnAwTsnHOD0SVnjXtvHng0zEXFQ85K6nbmblIn5z2VDq2co5
-          gmGlh2F4dMQ84PiFHOv4ZckyCtPyLUwJ9UN/mpHJIRj9gHEUy27Qc91ZeEZwVTYACncSdwAEJdE1
-          Sf0w3LjfHUcFfY1eUm0B4VRslI0SD4AvSJO1AyTJadLhdPwQKQSc0/C46ik/roobDGT/nRqbxq28
-          no0DP4kpIBKwzMBPfV8zEY1bRmIzidR0kcHvRsIb49XfpDFTxrg0lAhYRCJtV+xNbGqF+bW8aHhl
-          Pp9HR6GHqUb6/M7UTaUdLxu2v2JMj5/OsIVvgVib9zbgu/zMu/6rVxO82/OfsOTr9l/hLhZ/v/7/
-          BJ+F7D9glbxggpjV1/W8ITOf8s3JCKMUgxqI+3g5BDJw/HHZ7Q6Gx4nv90E0wKSv0gULsRK4LY/3
-          Ruz4w26/1w3GDafn4L3GqSVL+PcsHdKMhtjrCl2lECuEUg3txHxp4gfD+PsfazRr5TwwGdu+G3s+
-          DPK0yCe/8PqDeJPwhrn4S3i7c+w1WryYei1fB0mNLt7ScDA58YJYQVwB8qjixd68dvto4u5MxmO0
-          F5PfApc4Xb9GgZ5pZZo9fzgYTGsDz2NOfT/s4vE03QWB+h55nVlqqSblr9rSS1H2qZR36RU9eIu6
-          RYAd4OmpSux3sHAi3NjTX7ij/FN3RIdy019HsfvTj8XUfNL1PfLXZ/oOPOB3/GWT9HpV9NO15phY
-          Vz6I6vpJJ/aK4Q2/+3Zjt9rEG+/w9FmCzMlHS2nH9iLQUZVsFh/bMh0eXgZvGXfurRZm1Krv23sd
-          eUaNqqzNqLJbPOhUd8PreLHWhnHbKKyuiT9b0c0SxcsCM3pLf8e9LYEzoNil6HvBy3jel/G0+pal
-          uV2NPiTV3PFP3AAvcmo4fzFxYGb3K0Pc61vWKML6FTmSH9C/zGRQXySfrk910Pn6AwZxb8gcc3p5
-          Hbp+1sxw6I9GWoZDTPqr/T/jDccKRU5Zf1yHJz7IOGGP0j4Lko8Km3zZoDgw+Jsz2EJgsIt/kjIW
-          3Uhk9jwMR3cQmPy+IxBHRQpLV4Jmogq94o6DjkB59osD0LR/4bQ69rseC5IM29lh7+wzILji+Mvb
-          B61GUcGw87BR3GvZ5RyLC9BamMlY4oMn6tkBTgV0w262ay0rAyajQHEJ3YxmXzfakIKiCMZLYtAC
-          M+4v5ExB43GL80Xe9YCpgE3PAVbClvmcfAPzk62D/y9sIwKK2DkJdfAEk8SJpIykwnDaVVGC6xjk
-          LGVHluMjClGIBB5TxqAOE39k9RAHsn5ntsqu+J7RqigkW03mLAv4iiHEuTF1aD9WVU1owwtGTs89
-          cp1+wzl2AZwvRrAy6B5nWNJOZfz8IT8Ew4ewBAJs7JhMYaJlIOLZDSaAcF4WY+/D4RmvwvgpKlXe
-          GXRHAeLSHWA+RXUogekw3CqkaRavr6W6Tcen2c75iNZEjKkFMisA2BTgDKsLThPA55hQz5GXeHOT
-          sl0oHnBVqTUmRxyQ+jSC7hFuDHOOnIv9flBlwSBK5Qieo0Q8E4WuFsFOyrG4bzePR2Oqey3yB63r
-          M9LXWMdUBEQOOhOLXdeKq+tQDlDOGWIkG3bJrgIOGG3M74mP9DXR1fSu0Yk4fZR4jFALN3zcXpKJ
-          YeRzEzlJ9dNAMYwLqPuu2Doz1fJI7la1VKwl1NkHjkC/ztpGTvyncqdUgcbueCC4XDzU8aAyCJSS
-          sqTf2Wh8/9lvlJsSHlXLoNi1GtWDTBqwJsYxrBV0/AF3hgeWTUQbz0HOwBqLhEj/zGt2T4IJrAQP
-          u4Pu2bnRXPtwyfj+r/4eL3RYLtE37BT7df32s+urf7x+++X11R+ur76+vvr99du/hi8/86IXBC4Z
-          meu3v7q++oaK/hOWu/rq+urz66t/v776jugRvn/7Ob5BOFDwt1jk7d9Ccb3UX15f/Q2UMv6sVXy4
-          0nxSXmkXG62V67e/vL76Z6r0uWjgG0LzGwXYvxG+vyGU4eHnCfjWcKsUermJu4893x2BEIPnIr8v
-          JQVutoqtdhOe4hAqWYLZ5iWQijZhFyBSCMNkFlMWBg9RFJUNnnMYphcZWmmwNWJh579Tsw6vGPV2
-          ywBtzAuOQJ6tGI7fhRm/wrIQw9+JhytHAoqSm2WyFKL0f1xf/Q63WAy+94JYXX17ffUFx1tcm0KD
-          +jVh9q9YC0cDSn5HWIb9XKHOfEvd+yV16Q+8Gfz+n+LOjcTZgAwdyTPQ75tYIJcpZA08TQ/d2G/U
-          W/VSvWaUq81SHeTDp5nc6fIDZbFXoIcA1rIwb/+8bTdbdL+JYiFibZ/pDvtS0JnJUEDSc2NRuy+l
-          uVfcbz6qtwgaT17dlOm0EmFtZEV2E4Ig4PIUJwSIZ3fhC3MKnA+zBjMsw6wpKwY7Vkc5xBlKL4bD
-          wBEckALpTjYh8YrJEcqqGFVP2C2yMwDezRqP7APjcdV+YjfYML0Yvla28xJr3csabGULb6HB/AVY
-          HTQ1zHZt0yW2T91RCoT7WQMPyrVBgrdrtbBT33/2lUF5yMsEDU/zljGgIRlKqWYXG1i+WBOjQ9Uu
-          SCuSubW4diqcCHQCqkN1QzX1TaKID8YzBHwwVsV7JTx8fAxq4yZMJJgPusGcF8EqOOWnzLVAtQK5
-          m2AGOryUwKkaNMmkQs8eV/zTiiL6teHx5hR8eA1141S67ECVx69iQ1I+5wjy1xIUwsWnzrjE/K+s
-          w1RIHQg2cHhuHJaDRksMlvaeXXJQrNXqT2BA2WXPsULybGYTzOKW/fBTK7MUGxmMN9JO55uqtcyV
-          qSnWRRnjhobnZvZi7J9fTLypqhqwXQ+PopktjLvBUTLcY2+IN2FcvDFSACiq4fT6wpKRKG1pwb7M
-          Z0vzKaYa8phTg6xbYpS6VwJD+BUGpzoeJlzMXnAAhxSzy37wAT9EvioOBiAYA0HBQ8lrCJT/1qCa
-          MPwRpjuE32yr8FCLSA0dKKHzRFjhFA2baA48sMAY4BBdtMD3u34PbDigXYoHhZktOdlcnlymEq1F
-          gOhBtcQzxJ5hHC25/k4Ca6qNuTxe3RIRFcPXVuphhGcfrN7pnwTPDTyDcxLkEO2JV/faLnAMML8J
-          oB4grfjcvmGRL0bIBnGsc/h6iQmqN3oPOBLo6lEcWkT+vsWAiaCNzNas80XGMzyNuon/GG4f07fT
-          /dkfBM8zuT6lkgRshn4VJin7vc+yP4QPGAL6bzxbbWZj7C8PupjhUV9NyciGZpqSW1P29AHe92Dh
-          bo5sCxnZjAkfxfzlOZGWoKbIgxSWDmnos+sZiIQ53+kNYeqfs194OJW+RcPiFfpvInA6CYCH9rQ4
-          FKzdF2siXYGUWRKuukSnm+aaMoHq42FvOKh0e+Mg7wb8Jglz1hBls6JT/dkweY/nASqIo0ANfUmK
-          T1EUZEz+kfi5aXK0xHP2a9MMR8iyCh8h3TaJoSNeB1M0wLn9gtG1hff4tMgH0N6rglZb+7SDmlKr
-          WqmGSgf3C7/RuKVp1+xSy+bjIhrIxrhKlOvs1ss2stSw7yQWBzSRSV90A0V/DgsmunSLNVwxPxVe
-          Y+nO465CMz5X+BPgw6RWEo+biABLRFyXHz+CzbjEoZOe8o6nO+trG53C3cL9zNaPZTh+olTmj2jY
-          zM7pUBKKtbWNDSnsMvzAaadZ3XtYs8mBBWZSuVrG+33KdrPUqO5jKjs0VDJJ60OC5XOhKiYJPDjG
-          jVAzQ1b479FODI3VfyEjMWL8h0YiWoRgbP4vM9yp1ldgFCqcOmOM09GP1khZKy4v42zaFwTHjqb4
-          ki1N+ItZmMLS3MyMz0OuPvSYQsN+pXgemX+LAivMY/lVrDSR4AZj5FqRB7RrI7YfSGGKrV69w1y0
-          Cui4DzuUqQuWkHYD+K51mVBit90q7tRA0UihlNbOVspuDtGHUUeuDTg0cV7s50Zu8soas7Hn5dqp
-          zKqMFoC4MU2sXcxgVjlLfksOkavrq78jB8mvydpXXSLk7PpKbJqS0wgmDD78FTnBmGPoCwU3MtIU
-          FYuvq5wmuEdah/VE0iZEKq6eSbJ8RnPyCyAIxbSzC6IECOat+i+iExT5MoP6Ti4zfOUt+/fuLvOG
-          M1l2f2fcFmCprDRvxoWM2kVr3tIviBapbZm1HSjOFCW+12KVwywCephEvt2qdO5ltxgUTCEe3isK
-          wytQX+Zwxmdj0AYxtafCvMK0J59Is9oUeV2X1HjEaeVFItel6QlcY8ODF4BKPgI++SMNA+MKYKXf
-          XV/9N/AtMVRPcI/CWJkUrVR3Bl0Iw0YVTHzec/lEEQ/leqm9C6IB5hdaUCW0alGL40Xx4qiHdVin
-          sDCTEy4ZZecjIMztldsZHAbgDxH6ASKDH5twc5GQCl3UCw0a5iLe8DZwxmSuEJeH7BQ6DvhpcYsN
-          usy1HosPHeR5gpaAWfC0THaEL6+zYz+s7nEpjtvJM4rbe+WIC0EjvdIJYAOb3y63Mxgeqrijrs3x
-          f7Wps37+lcPT4+uBA+aryNW5wNkrmezlZfQp1z0T3gjfOF61GzvIH1V546f/k1gs7qhT9kB1v0eK
-          rjuXxCap9C1OBCYqQXyxRpMU4JkyXdsHm61xio+cpWzfAqT9P9AUnVf4M5ynyX4NtdRsV0fm1FlC
-          qQ8SOFDruy6rtSiN7sTrvWA477u9V/FzAekIqpT6lhRCpkPOWH+QMFDw17RL9DVti9BPkIlY70tG
-          6nDsZXv6WhmNTJh34dSn243pRL68NG7MQWWiJS0bxXarzvdz5fJRwXRY5ZhXUpI4dS1PUMxpFwl5
-          T9xqCRT9kjgM6PcF+/E/0Spstaf9GyiBsXHIrnyb54tM0nmJpEikN4vwVSotSLVOJEWUDDxSIcaf
-          6pY111vubyx3J+Oh1AAczjpSh0kVbknsP8caWoJOoFX2Y1bR7ojd0AqiaOUX7iiDL0GpYX5BDoH5
-          BFvVVs3O4VZ2Bz3cqJcgEWnJEvsqeQYidVHWoyOlOjHFRS3gCCC040mCtAR2eI79xlf0k1ON9J8L
-          4VLWQKjVlapMSyNfgXh2w2KhYp36J5eXpB6qTsKttu8aE9+1SG1DSwX+mgQCn0aKhi4IhGtZMUpo
-          YsWRCx2AyoaacYypNAcHgx5VfjTQLDBXamtR+OzlDMVbg8DJoMiiMbGfDPM1XM86lpsnMArDAUWw
-          5Ycjx1PKES5biQHQMiFH4tskBQbaZCNAp4RZiM5g4Bx3B00MkpKHhs0MXY/kIhoZaQscTo4smZCG
-          biR+viUvVrVWc35UaLx+4Q4c0/Qt18sToaF+NospXKjCkuUjB9D3B3rk7mwEMeOm4cBvpx9glO+u
-          u2ME3SNnfI5qOiCNkS20XY/tYjocNf0LfkSvLHaCSRIRBli5TMoCFvLPyStAI6HYOCLf9IrLd2rp
-          ho7c4fRCyx7lCUUbiL7NsqqE0cPIY5cpQ+j/tfc0zYkk2fk8v6KWQw/qBcS3kNTqdQFFix0ECkAz
-          s7EzQSAoJKYRsBSo1dMzB5+8jvDBB9sXRzjCB1+8sWeH/53fy6/KrMosCkmtHXup2J0WVZkvM1++
-          zHzv5fsAMWdOov8HvnGh6TogMYkCW6Wka42IJJ16YbMDyVRBYrlOLL8Tv2buY8pxxq69xIxaLlf5
-          MDpwut1OFzrqRvSHXpFb6oFK+8eEaOwHwXENr3xgeaH9HvHbZ4oeThV6taY/+WJBc9rgVzZESd+Z
-          UOrARU49TKyRfnkTiFg4RW4C1P8c0BgwVI396tUoc7e4d/sL2FU8IpDQeFsjMh7i5tGcj92HZMD1
-          I1Nv9i5b9u9IkhWy9U7fnmUP5rQi89RDlU/E1SOTQOZRSoawgcIntqYmH85CYhU0bVoypI9QZ6vu
-          k6szLTbxAhwN2U7C8EoyCevN/Dpub/y1qe4BAIHeLCi5eE58z93k/Dpl0oqoGphQii6ugpl8SNEl
-          zcN/XT9J7yKGxAepaF9W13xnENHxQ4qXlb+JoEUJivfUGSwZtnICiAS64YZONUj5JF3EKakDQ9OE
-          dEGTrE095265/oiLYAsHzremP5Of/0Okn5D46ptiSeSiumd72jBWqDoIZdkTSfZOQin2cD37+fQU
-          fYCYKtgXRe5kT7jcfgdn9Znkl+tDkdxyiRu+dxYoxfP1Bb14MVzkGbkFFs34ESOYX78MIFXMHmOW
-          7J+D8y9ZsiUnuDlZWJLu8oe4CA8SKU+JTWUiCwkqN1dAa03ZduHgk+bC27c8vT/TmNOs7yMMaOhH
-          ybQ1V06R/8r1mIWDbB9DWwpZxnj3vqXp/cEpiZDme05mOO2QwgQ6DpAZpeJvajhzT+8jFh6JQsMs
-          MUCySNCDIYPISrLr+zAqfdY4zHg+myRNNwwmNFapjdeg3cHsBZctB7kLSTEbQ46UDnKhmvlXsmT/
-          jiig/pMc4XiPdWIRrQRd1X/PJG1fg6HoZiWRW9ZahGRps/bELD/H37iCetI7FwQllkHrLFJe/G5+
-          ed5pO2caQ2P4ZPfPdV9QiU1tjuEPYYD83ZzfnALswWWzfoY3qCd4gwqfwnefvBTegZ7gHahcSkpe
-          ETefH1SvHJPQ/BgavDdotkls/zpLWUFzmUnB9znpiF4OfntR7/Wd2vkA/nFHt/DP5QAI+XpRn95M
-          QXCwV6PbKcrG382bDUSo/c4ZXMJ/zjDJgfTyrFSybfq72b68YmLGGXC89GXnqq9523BsIozS1xXo
-          8lWrRRNRhDIF6GzRRKQrNL6Jbb6Ghc87gJp+h5ucQAP1Tpfg327XezwtgW+yzN+wcUAL7R7MHH/t
-          W07zkcJBz2BDK6Q17B+bGadr9xxelw6XZvbj6RBOFbFWEUpXww9mwVYRUAnHHPB+tX6cLsk2G3if
-          BLDB/Qg+kp0aqqQSuMAob4N/HZwqH7n6iaR9xTKBS4twwJXdDnnu4Wv96PLOk9/yoX2Kvr7Qqza0
-          SD/+6NKXVEqVD176fjRbeC4tqo7Hh/rrBJPb6LBMQp0CG8QxLhQxGCxuo4wCbH8ynU+922SE/MW2
-          baq31IleFFXUBAfaRZxNYwuC7KSJIwjy8+P5BUE5tiefAw3NpiRxQWFegvHYzLRCuf8tVEIclLar
-          DELkozHr8C2zP8XkWRJoHS2ELgs3rs3S8hlx6cROkGoXNNRZ0mg/jbT33ZwoDv5MHFP+SG5c/41w
-          7f8sAyRz+Q/keorcyjKflf/mBzxl/f/ELzsA4D8x34olsxPys0kJc5mQKwpz1VC9bf4FnTeIBwjN
-          OXVIE1BZSwxKlYjJt4XxT0nXNxslsQ8yd8P3LuU/0ajES9G3Laf9rn8+6J3DghAw2WV4E9aGt4+7
-          +v/5iRv/x+TB/wzxX/O5Ui4U/7V4tI//8xLPi8Z/jQz/KoccMVGbHxfV2xYkNuSkL0WN9VN3J0DI
-          pFz2QMeAgyiV4M7nIYDhqLM+XJYywFAzEJc2nLIiQUXgEzmDoi+G/juRQf+LyLN/JE59/2iBgHUC
-          ApYlBBzJOxDkDeueGK0Sf8mQZ2HyisQPvcT/oHBjHVr0DUo28IPcGVkYhfTQotwJ+9Fwh6RLlQPF
-          KMJiZxuen4a77FAf8JRM309JkhBruLqewmwCJyPF0eXRbiW3RQ0i/Etu/6D17xSMZ224Q+gu7N+r
-          Sx6SAXZBOKYeIm6bbX5d6p1Kbp8pxesTEzTncinLtkullIW5TlNqx4gLqMz9CN3Fn/iV/n9kRJYa
-          LYk9Z+DfEHkiUxeInEsInuQCTyRSgrL3Qft+6U/c8181id8tAOCW8x9O/ULg/M9mC/v4fy/yRJ//
-          mqNZIYRA9C/lmxTt9/DQuvQPMtSpoi54jeHDWKbg648WVV1miepSXB3Jpi40srkaOdiP0CXpIzGW
-          7QMehKexalyyGnhqnooOn09RkzMdDWeHK5GRmLsF+f1HLXEG+JU1H8kCc2nBEbZeD0e37lg+wUmC
-          wC2jkBSmpFO4QLYMg1fh40D16qkuzLJfB46qQQ1YHYxjVoiHJazSbA+ajfhVmGqRVCn6mHUIBtkx
-          aa0/LkHed2eLD2jYaBFnuCZUaqMD8Ak7lVD3TORogu7Ixnt9u123u3Wug4Q+Vy8IXipbEClqNtt9
-          p9uw1cq5mJVhzJcdgCDXzUfXFbMh1bFzW6ZQNOjHw0DfDEY0MTuLdSU3I1G/vEN9GqvgqmuzLLcM
-          RCUGCUpNf/O13bpyKP3mtvUf6zKdswFEHkGIpQwLg25e2N/XgkPDdUuYNPEK034KEcPdslaxF5L2
-          W4x8C6Xwas16y/ErxSARrMTDZ/gVC/44uzQ0CVlR07l1O725JRenKf4F8JDFL7jYSKKkpBRiBVff
-          fCEVBVb07mA7CuilB0OCNAfZWNPI7gw01fNxqvNrFE39giAB886pBHQU2RVM5ZU7G6hQibkxU6GS
-          XGuKunir7c9cA8RBd0VyaXnSkYgHycZzV196Fr0LD2W0Z0KheZaYqOl8e0m9QTHTpbRmqNGWdSY4
-          /ETtyKmUc3a5ka841Uoh7+TKxVK2XrALpWq5WCuVjqqOXXSytVqu1GjknOpxsVYsOYVipVYpZrO5
-          hBkpwb7gPRibg3A/jiqlXPaolKsWcvVaLZ8t1urlmp1vONl8oZEt1RqVYvWolM8f2fmjY6fi5BpV
-          u3EEZQp2PlctN3bsB5/bcEfKpXK9Ui5Ui3m7cHScz0Mj2bx95Di1WiFfrduV41LJOa6Wj4/zxUIZ
-          ChxVs8eFSrZ8XM1nG04x4U9zH3O5TPy5hum7c63JanGHLBSsQZjfH9zRWph5nxISCM69UAWMFpvZ
-          GDMQ8wZAPltN3XsXRP4CEA2LVSQt8mt3NASKImDfu6u5OyO743hFAiFCdUx3PCafRTqercTl3+RC
-          s+YZhflxjmpZpwwfgG4K5WouVyjnq7lKLluuNxqFeg3oJ2tXCjm7UK1Uy7V68bhebRTtY9vJ1woJ
-          7XL2tTDcB5jkGJiOae6I5XSsEWDhM8bVl3nGV6+wrPwW+CnViNzULvcO3qFhmc2TWpZYuReSnOPK
-          f6H7vx1EwGj5rwQ7fSko/xX3+t+XeV5C/0uL1RbzuTuiiaO2VHDm4+VCFzs+WLDJ96hHh1MPxkBX
-          dNSeO9qsMOEBu22sT29cb60Jtk2su3Uxvc+H3q0+fHd0tO8vSJKy1xYPhgfzM5uRjMnWh+n61hpa
-          k+F0liYXsWNrtZm5J5ZL5CosTBSNLKDsdE5TiFEGGP5othFwUhWsDjJwOLmYCI0wgbLmkmmOgVFL
-          WS6bGPYLdZYpGrkuxQLXpRA4yQCdsqjp7GZFc6qNbodw8KUsgDVZrEZueuyiiGwtli4tAefM60Od
-          yiEUFfqTvB/7aeNaixvUbX7Shc45Dd6+0waionSbomTrSrGmZ+Qf9ZwKhWZV20xpWkip8ORzhGT8
-          orFjRYfFex7EW+qm+EZBwUfeR/lkM4cckoPfEssWZt0ZCCyGwYxIRe8g4sxkUG/dB3Py33BCJ8kk
-          KGBHe63NcSTSRL+28sG8TDQvrnWCDcPGECu/UCIFNV5ZmH7+IOyEDFDCOWrMY+e+EI8aPtp2qIZK
-          ysZk3WEkG+UVGnQ053hFgblUgSdLQ+tB20nukI8Z5MaZMamYvA4UioX6cjFs7yQhffxkpEcjniDf
-          IlY/lmL2E4qoS1FLeVRqBjTAaHxRZjxBe051lqmnloiMJMcwCWYt86dYZwTbbH/ttPvoQcgUWO2r
-          Vktv8mo0M5WWcBi/CowEbQT50jMSWmvJ/1BibPmbrIdv/fghZxg7TIEYDJFjhYJxWcF4JuH6cmgu
-          Vl4c9bUF8Pn4WhsORg4QSJYLQ+uF3b5q2DWU8bokFH3Ax4a0AdvyBprA3XglbLckvDLK8r1a1gfa
-          BsgFMrcug7bWUdZhcgNyj5n1qrGzDKW79pOBfZYusvB5xi5+7a5YNNbY3WMgn6V7PafbtFvG3vXc
-          1XQ4a2/urkks09hdpGB37qF6EPGkhNlT+OeNnsThUzgPn8z1WpivQK2anOucsmPtBWQ/aDZgrY/d
-          B1zmdAsYztb4D2HF8A9vc032ALzrwT84T4gfE2GIc9jISQ/J0id/2hi0fQ4MR89dr8n2zcsIBFA8
-          hqGpxXqb6xErGfjCb6LEFy5SMNQGzxS29zaEghUHj9Mq+o42ARawrDTGBXwK9Q0jTbBmSf8xDcEq
-          Mw11ST/URwxN2ewUynpPKes9UJZu9PBFn+BRkr0sFzM9KrWT7zVBA3ajL0JjziUchITAOKUNx+PV
-          WfaBZHMcT1f4CrXY+O/d8AHjZ7lrWgGQAItYT2o+gRBaew8SypLQG0B3KSrpi/p05bLcGvwV8c/X
-          EBw+tMQF7wiJCS8qNlmXwjTl05VzKdHVRENXFBH4/j2lM95BLaGZiU3US4YGShsiWN0NJl/fBEMy
-          soLjDeXoCDNIpkgdj2eXRPiex3NLJG+PlpmIbrHdCcR9i9mu+FOjGrFGVLAjLg0sbq0cvwT7OoqJ
-          ERr0aWe0REgbfrDkiFBLuo0VXZLazBnEdz2p2317S6Wwd8mFY7d79PBloe7UOyQBMDDM4ZibtPeI
-          cdLFEPash+QI2MtgYe4mO8SI2sSzuTv8UBdKdE+XkQcLs2xFqNCFn3761Kxuq5U8azHcE1RI+3p6
-          j/r7IxjNpiJESZEVPKkvyPCoXvkwJ1yMPS46Gbcu9/HHfAyxK50735IaKPYTX5uY9cT9zIXdr50b
-          dy3VMin6oosnJ4LOBycdH3TCw/0cLePYv2/ZJUrLnWOW9iV6Q5xPx13+EpDnRWL/0u72oDvSlTW1
-          uGdTIIDr+vM0TpE/u3KM/EGy1vIqSOgq1oUFw4El/I31MJGxeFj6UXf58EVsNnQcEofjgfUbuQy6
-          1kvfTtgtqq4hXPAwT/KqhaWOhpas9a0ZmI1pnyNWVTa4k/38RWiniBu6NiQ4h84jPk4GoTkp8IOV
-          b2vB0gopTCdFmIIJ8B4+LYxTgZkN2fJooJI81QiM7X8//YSwd6YcPfUybLNu4FUtViEnbvudMbpW
-          ZM5uBWdFjjP/QIDOx6UO7YSaogXHm1Fljm7xYpDMEYnUARQdCrrNZwCL/spXHsIQWT+I+TanCiil
-          qU/Gwk93dgdJbTu4JVQUwgNEbuQSghEWKR6JAn0WZDVG1MnMqHY7fP3a6mlSAh1aIZskYjR2CnLs
-          zELfsmZbGGJ7GbxxQHCBqMQGZkHLsCk21OqV73CMvqqrxYw4vUNJP1IjvX5JU0NpdtozZZxk0RUQ
-          clRK01q6BdevwUxMhZslhtv5lHWUzSoa7ogBsHxIaeWSRzMQZSqeeTwh0zPdsHJ8WGEFzJQeq1Pz
-          sTrdXQEzDXHYEVicTkLCoEITOgVNqIaZYCKQHDByfBTdMCRLMneIhhR8v6BaIox1vS4icibcpaQ7
-          NF9UBLQMMWbROJPO5eDRTUaTQQQpqCarj6YERg0hnYuWJkzKAimdcXAKDbuv7B4tYgcvboCP1HdR
-          fqTwhqjTSMkv6A+iMaZ/EiVNPJhUqqLVkM1YbNYXyl0qv/9jt2jkJ630vSTsY2eICDqiaOizcyup
-          9Fn0V/QV+2ldw/8yvCN+J6RrWzynKaaIbogGYqRiCXshWjnLPuB7JhRl1otz94HdvUmlDuDD1XLp
-          rmpDOLoF2arZJkBW1snEDCPuAxAdjJlaVMDAlx87kySMZRUgIF9+pjNPKur0CPiZLA9FeKXBC0id
-          yEqy8BoqHgqrHHGtrhFIzOyEdMCkFJlpG3+BqgTdTgZsn6Re0OxK2t0oYKN91QZOHbjwerxjfJcT
-          RjVCjwKvtRtXzqBjOPPz6omPKBx6ePwI4RNIEBU14vcbapMLAqd4FZQv/WCV8rIFuLHW7GNQFqfO
-          7ugzmc6r9SSMYphL/I/YTnIlZUPntyd6Cgo3JwhJzg2+kieMW1eOZkPYuYgM5EcsJ3gm+whMWmgj
-          Cast8fEBoWQBf/sM24M+6Xn0wMgABo1Ot4aRnls9h4yBtWKQ0PhXk1i6nWzM8xqPhGLU30ZOZhDx
-          SUt+diAz+dmV5AwEFwQbFPL1wik+MSbUzxwG/3iM+NgPifx2HmHXaTk2ozgOe/tYdCr+R57GOE/m
-          8zjyEKLavNBZpD2+NXpu4ym/jRQkrfdjqkcpvmMBiOQj+FT4tc+CerKQG56O6HhP0Aifm+Q3mu13
-          Tveyi/y9UKQHgZsN+FWNuZm8YnbfVyNGdL8oR26L03+zR0mc7gf1SvTDa/ShoL44Y2u69tzZBFgI
-          4i1BLHAXc+Yisdos16hUEraxSfQWPCwXqwfU+JY7cCi+OgDfpibIX3rcEyPohTEFnt5bUPPdFXDv
-          aPo6RytfxYDW9TJWc83aIEGweAPsKEkvp0tXypJ9yL3ghmMPgA/X1niBTiSE35+iDSpNHWXB1sXC
-          PbAArxYXuXkLy8VsRiPQoveAZ42nHlrLjNEYGKQ/NFPeEE8V7tCSxpAB7th3smO2wfyoJ0hH/GKq
-          UTJKji6Dnk6j+95NSxdQiRfiq8T9paiyJQSIrAovPFEVHlSBF7aqwLeYBiqwfEVtrdPudzstXH1V
-          x3Cny8SYd7jQZy7VlhdSFtl0fPlAW0EYrmyvBCQGpw8Gd/MYq03efKoAT1BOWYV8yioXfw7Y9uLa
-          wyrAt5OaQTSKQrCW5ngY507Zn8BG5tnfegXULRkAvfQT3Q/PnsYVMkX6YtAA8Yw+AC69mTNuIk1i
-          46fJUYOjwZNzRQ4u0lf4Ga1UklDKOuQvfQLxTAZNoZ4J+LrrZinZrDdz3WUyH6XNieDhQ6w3wWOQ
-          +Q6TaFxmm1hyGJiyMFSh9iIroPdV8/ISUPaV0207rUG92/za6Q4637QNOVzC8Gj/6k7frp3jj2qz
-          XnfiGoXwv8LSy+EhMEJT2Ev4dt5si6gD4tBJ8ysN3CHvSMA4dOXYINcJh1D3uJiJvxYKn20tlIsx
-          VoK6DsrFHak/mvbLxWeneIOQEI/7hwFvJawt/L6ZfykiDSADIvmOUneetLd0R9PJdESd4yllSa40
-          vg8y41pOONRArKiUFCoqhS7UaWLtT+4cpd+Uj0hZFfqTBY5Koa8RJ2HBF/lTxsK/HuAwxu5seo2e
-          Qi5gegqb5WYMOOX+rFN0t7brPTJadjWlMi9UO8rbYNdvb9H3KSO5O/kRrsSCIh5R63BYgO0sSfBq
-          OY6+D++eJUIK3377xzVww93mt4ZzOlzRHyTmQ2k5mMQI9jay+0bXDET+1VeP5BCK5LAv7sYhRFZ6
-          5GEe3ryKsTevoMzky5Waazp/QyuGjnZcFbH2NHX44R0teieLOVZdBIZnGeyCLKQ0vyh+7KhZ/5RI
-          G77x3/PgQBtGIlhQCf8QGwsTutWlK48aPG8z9qRrjq6Sclbsxp4Vt7Nnxc/CnhXFOc62OcafPZmd
-          itw4ijtyPp9n8whR0yO3D0FPj9xAdhjz0zcR46Afu42ERv+kjWQHXDzHZmLExo7bSQgJO28o+GzZ
-          VPB5Pn44aHunY4Hi88OyQYEyf3GYsVsezIOykN+QOPdbLAC4FiLlR3ldrIgfWMA6YZs5AAJ56sVi
-          ILLYtotBNZpVKrDHmlAAWJLucGSrg0r4ljDK3sD3elHzRyQCZ8gz2w9IE/TUWwgBKmxwsL14rCsC
-          eRrCanZzSKxXr6jKJ1RF2YiMWnm1p0QPP6BJVkS6Wwpnm3ZejbMUXz1PSTCmkQWXPWKvcTbHy5U7
-          mT5ss7EQebhhpLRGZr1oLT6EzF6I6g5WRnoKndFs0LSyMN3CgHAJ3YEir2DDquXB5EIGkMrizMmW
-          WNH4E6LYLwWHPNfCdjxyV7vH4lKOsfcM+AybYcdEqXJAbGfWySQYmHXZpvtx3HqQxf6sjDUZSkzG
-          GnYRE/vEEH9I2eb4/JJA1yP45TCrVPhcqsOwKb9mth/DKymEqF6GSZdozChSIdOXtawO3TlPBaFa
-          DxFWengzp12zoYELpwvD5eFfarzBu0QtI8DuEp+CEK1DnN4HznealIepBYB3u5TRZeGx3ryV/TxI
-          9DyCT+UVEwCbaHyXzmm/EXSwz+I7SRYdctBcwnrI484kOUEGpocZ8lqkzO+X31uvYLMpnYbKkHir
-          rBBAzekLwtwhsDfQ6k8/kebx51ul/Ws4L96fhl3GaAskqmkRO09qnlnHur1URhPvUl7bJak0Rxyv
-          UNJWkHye/B7lc9gjFc6ZVZBeQlegs9ltHSd+jpu7rb3gZf+A7phQSuMAqHM4QNDQgz/QeecTQFwO
-          UvgW+myy40JIY2mW/2DslyhN6SZJSks0cWD9ZCXF27x4++aNVYnwwhxL6M7jKMaUdrSOxfzB3OMo
-          3ohZSJFqhmbwYeSn+/Rz6K3JugyfJaITsWvecqB3fMfZ54b4Cz47xP/UxIaIFwR0S/6HQqFcDMT/
-          zJUK2X38z5d4ds7/oCWEQB4IbRkpH4Q2Ml44UA452WceZTS9zTULrIuflbiEH6YkWBMUDe6HI2B3
-          SSjyExHzzb6qNzuJU22xvF+sVq+RnKhX7WaNuBf2DHUKfh1gugyFSn6hy/Pf9QBky1Cy7JdsXtjv
-          HEOxIwlgl5h8GwpW/IIXKPn2+p2uGeyxNJirqqGQrWIJo3gYSlb9kr0Lu4vKoq4JRXUJagcG1O4P
-          ek7tqtvs/85Qw/FrYJYQ06Q2JFQ53V6nbbcG547d6p9DbwyIyGUDBDOIaCEnUVe12WpVO8ZR1mt+
-          0XrTftfu9PrNmr6sI/XhmybKcTB9zESvZZpvRxrtRbNXc1otu+10rgzU23BOwrwVMByw2Bi/Sbi7
-          JFlz4g3yr9KL/IEfrLLeuBp0ugP8h2nsE2GGQmD28rLFVtegd+nUmg0TLhrSsJgJsaHC2J0MN7O1
-          KK56Uiao+odGmhr0rqr8T6LzYT8SKbrrkB2H7jYmgVm3jynxkojj0Ro+XG/Wrkd85DQ7l7mEjwN1
-          eQAN6DAlUWKz16mddzttw9xLW131qvWVroi0s5Edpnt12d+C7cRV+6t255t2YheE+UGrCOvMf2mi
-          p4tvSHm5fMX6DXYtkG06YZ1Yic5VPxBtSKRL27Ob8hPg/1aud/jsbWCOz6NSycT/kb8V/i+Xy5WP
-          /sYqPXtPNM9fOf+nmf+Hu9nz0sAj5v9oP/8v8xjmn9pHDiZTDNWZgTdPaWOL/IcZIALzXyrk9vLf
-          izxvfgOTa93TQL1niVwmmwAOZrRAB6CzxGY9SVcSv3n7xRsgjMVmNXK9t+QYffOrdNpyyF07u8qT
-          UuJde+4KvaYwFd5wdeOuaea7E5aV74Sm2rPSaQZr412nWToCZp2MwVfzpUIFOsNMl8mr0nGukLAO
-          337h96F6ifLqZdFqYKbY6oK4MRnT9Z2wjHonNEveti4Emq8cHeVJ828OJXT8pWfwaY+//oH7XD//
-          2Y/P7vt/tljI7ff/l3gC80/0f8/dxiPO/0Ipv5//l3h084/63+dsY/f5z+dQ/7uf/8//mOYf9f/P
-          1cYj5v8ot+f/X+SJmn/5/ucpbew+/8Ui5v/ez//nf+LOf2cyQesiez6cffzRXfUxt1DcFIBb5L9C
-          MZcL3v8Bd76X/17iiZX/j+lrF6ubzA+b+XSdsT0Q8daZ1yJ9nf+pH8qQN58uMqNbNBpaZ3hY1Rr9
-          rUuZx3Pp8ctHeu2ooT+mH/5b8recZQDFvps5hgBwZhN7Pu6CRAcC7rn7kNxmdP/9p+zD0SRlfel8
-          Cf9p4X8aX/IwovmUVYAXHXz7Ff6n/aUUg4Bps5m36ZnVmK7uMAMh73JmSP9AY/SEN0R30ow7m8jG
-          7UOC1v5q4zI7bxEVO5lodLoXdn9w3mz3z5xWI3EQsx43QpfL+3nYoJ+Alq+n7gfo4IrgCfun5PGS
-          oEMNCTTfvE19UUsfNaxiySrWrGJZVGDXAuEpROM7z8fg+OJ+SDvtmaYwwayAJ6wS0wygcTAQGstF
-          iJaV6/EQf45d+HdojeaTG3zhbSZQO4HWdVUA6iWDlJq56g3sXq3ZDONxpylHu9PIqZPtoA8k/PGB
-          xZ55ioDYxS++tgfVTqdftzHMZ7fZfrd9mu7dFd7te93KMcxQfzWcztxVdzNzdbO0HH6cLYZozJro
-          fNVOQ500tJmudWtpPHt2xD0xDliNdFiH17lybTRdr6GNJGs2xdsPpzxg/bu7H4YcRwyVrV9b8gqB
-          mr+H//OPaav4PVp/IdyDJHaSmnlFVChIFUiNt2/fWpWD7RXz36uWkqECuUCB2DQLUIBqRzATU1gg
-          bgZ+x92rkJQazZbTtkmYnDZPyrFDdZi5AVDGoHvVcljcp51gYH0pihR6+lXt2lf47munzd3WD/7q
-          LwXj8n88lIFiZhyTC9zC/wGvVw7wf/lCObfn/17i+Uz8n8q8GYnHyMINZzNMfdz1Ywt79sqlJvj9
-          xfnCWysnDN0JHOpMln2oZI3BZuXY8qGtxAeQMwIIxNeMgJE3wlADbptB2KFuBFyY9JthMsbYSW7V
-          SpaEIcvuBiaAgSdAUvGwO6AANnQAjKwLPTE4ZSGFfjNd3wo3JOKoFUFiWe3UqA605onN5rIhEjV4
-          OEUAyeuB6HzxI6AU9FC0bqQmMOiEFeHtb6pWifSK3x/OL/DEPf+1Jr3PdP4XiqXg+V/M78//F3le
-          5Pw3Eo/x/B/xYl5tcXe3mAuPN8+8KRP761TsNKy49RHNTjYsU3CIGivwnRrIx2mAGFDvBNbeBlYx
-          9d4JdGUb6KD57S7QG41t0DX2wzs14KQsejbjf7eqL3wq44Fto8iL292aOqQY/kaMUbbMjQUrZ4ZF
-          bHdjAclHdEhY98aCVIiCFDTGNUH0jX4Jy2aEqDHkjQMym93L9rGezOH1ZjobZ25Ww/HM/TxtbDn/
-          0dw3aP9TKO3P/xd5lrPNDUbuppse7IkJ5ASGNDR5BnhD2CxJjO4ENxK0EpXMUaaQsPDjRxpxYr/G
-          /q8+mUO68jPL1WIJ+y6chc/extb1XyoH7b+KpaP9+n+JBxl3RgE/3N8NVzfeWfrbu4c8CAF3Vro+
-          meItJbcHvuo30pUv+Oaw8VyWwuBbqk8XX+aLOYlORuJQd8kRTbT3+03iF/dkDj13vcaL1c/HAmxb
-          /6V8KeT/ky/s1/9LPPT8vxjOhzckujVjBFA7Cst3gelEJIHoZrG4wctd/7pxeO/Oa1BvNZxJrykp
-          XRLYl4vVWnxEbnzsLtHQYD762HW9xWyD3EVkBy4WYzcDZJrsBl827GZr0Gnjrd5vnRrVefYOnjoC
-          7ORqscAYaD+ARJEhyQDprfWg3rsc8CvT/mIxG3SPi4kvWDxyK3ECTFFiv83tn/2zf/bP/tk/+2f/
-          7J/9s3/2z/7ZP/vnl/T8L7ZZrX0AkAEA
-          R94_PROJECT_B64
-          base64 -d /tmp/okn-r94-project.tgz.b64 > /tmp/okn-r94-project.tgz
-          echo "$PROJECT_TGZ_SHA256  /tmp/okn-r94-project.tgz" | sha256sum -c -
-          tar -xzf /tmp/okn-r94-project.tgz -C "$PROJECT_DIR"
-          test -s "$PROJECT_DIR/app/src/main/java/com/okn/bp1048p4r81/MainActivity.java"
-          test -s "$PROJECT_DIR/app/src/main/java/com/okn/bp1048p4r81/UsbCaptureEngine.java"
-          test -s "$PROJECT_DIR/app/src/test/java/com/okn/bp1048p4r81/UsbProtocolClassifierTest.java"
-          test -s "$PROJECT_DIR/app/src/test/java/com/okn/bp1048p4r81/ReadOnlyProtocolFactsTest.java"
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            unzip p7zip-full file binutils jq python3 python3-pip default-jre-headless
+          python3 -m pip install --break-system-packages --quiet androguard || true
 
-      - name: Audit live USB code for read-only behavior
+      - name: Download official GoloPine Android and DSTech Windows packages
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          download_with_fallback() {
+            local out="$1"
+            local primary="$2"
+            local fallback="$3"
+            local used_file="$4"
+
+            for url in "$primary" "$fallback"; do
+              echo "Trying: $url"
+              if curl \
+                --fail --location --retry 3 --retry-all-errors \
+                --connect-timeout 20 --max-time 180 \
+                --user-agent "Mozilla/5.0 OKN-R95-Protocol-Miner" \
+                --referer "https://golodsp.com/7%E9%80%9A%E9%81%93%E9%9F%B3%E9%A2%91%E5%89%8D%E7%BA%A7/" \
+                --output "$out.tmp" "$url"; then
+                  test -s "$out.tmp"
+                  mv "$out.tmp" "$out"
+                  printf '%s\n' "$url" > "$used_file"
+                  return 0
+              fi
+              rm -f "$out.tmp"
+            done
+            return 1
+          }
+
+          android_ok=true
+          windows_ok=true
+
+          download_with_fallback \
+            "$OUT/downloads/golopine-android.zip" \
+            "$ANDROID_URL_PRIMARY" "$ANDROID_URL_FALLBACK" \
+            "$OUT/evidence/01_ANDROID_SOURCE_URL.txt" || android_ok=false
+
+          download_with_fallback \
+            "$OUT/downloads/dstech-windows.zip" \
+            "$WINDOWS_URL_PRIMARY" "$WINDOWS_URL_FALLBACK" \
+            "$OUT/evidence/02_WINDOWS_SOURCE_URL.txt" || windows_ok=false
+
+          printf 'ANDROID_DOWNLOAD_OK=%s\nWINDOWS_DOWNLOAD_OK=%s\n' \
+            "$android_ok" "$windows_ok" | tee "$OUT/evidence/03_DOWNLOAD_STATUS.txt"
+
+          if [ "$android_ok" != true ] && [ "$windows_ok" != true ]; then
+            echo "Both official client downloads failed." >&2
+            exit 1
+          fi
+
+          find "$OUT/downloads" -type f -maxdepth 1 -print0 \
+            | sort -z \
+            | xargs -0 -r sha256sum \
+            > "$OUT/evidence/04_DOWNLOAD_SHA256.txt"
+
+          file "$OUT"/downloads/* > "$OUT/evidence/05_DOWNLOAD_FILE_TYPES.txt" || true
+
+      - name: Expand packages recursively
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p "$OUT/android/pkg" "$OUT/windows/pkg"
+
+          if [ -s "$OUT/downloads/golopine-android.zip" ]; then
+            7z x -y "$OUT/downloads/golopine-android.zip" -o"$OUT/android/pkg" >/dev/null || true
+          fi
+
+          if [ -s "$OUT/downloads/dstech-windows.zip" ]; then
+            7z x -y "$OUT/downloads/dstech-windows.zip" -o"$OUT/windows/pkg" >/dev/null || true
+          fi
+
+          # Expand nested archives/installers best-effort without executing them.
+          find "$OUT/windows/pkg" -type f \( -iname '*.zip' -o -iname '*.7z' -o -iname '*.rar' \) -print0 \
+            | while IFS= read -r -d '' f; do
+                d="$OUT/windows/unpacked/$(basename "$f" | tr -c 'A-Za-z0-9._-' '_')"
+                mkdir -p "$d"
+                7z x -y "$f" -o"$d" >/dev/null 2>&1 || true
+              done
+
+          find "$OUT" -type f | sort > "$OUT/evidence/06_EXPANDED_FILE_INVENTORY.txt"
+          while IFS= read -r f; do
+            printf '%s\t' "${f#$OUT/}"
+            file -b "$f" || true
+          done < "$OUT/evidence/06_EXPANDED_FILE_INVENTORY.txt" \
+            > "$OUT/evidence/07_EXPANDED_FILE_TYPES.txt"
+
+          find "$OUT/android" "$OUT/windows" -type f -print0 \
+            | sort -z \
+            | xargs -0 -r sha256sum \
+            > "$OUT/evidence/08_EXPANDED_SHA256.txt"
+
+      - name: Locate APK and decompile with JADX
+        shell: bash
+        run: |
+          set -euo pipefail
+          apk="$(find "$OUT/android" -type f -iname '*.apk' | head -n1 || true)"
+          printf 'APK_PATH=%s\n' "$apk" > "$OUT/evidence/09_APK_PATH.txt"
+
+          if [ -z "$apk" ]; then
+            echo "No APK found; Windows analysis can still continue."
+            exit 0
+          fi
+
+          cp "$apk" "$OUT/android/golopine.apk"
+          sha256sum "$OUT/android/golopine.apk" > "$OUT/evidence/10_APK_SHA256.txt"
+
+          JADX_VER="1.5.2"
+          JADX_ZIP="$OUT/downloads/jadx.zip"
+          if curl -fsSL --retry 3 \
+              -o "$JADX_ZIP" \
+              "https://github.com/skylot/jadx/releases/download/v${JADX_VER}/jadx-${JADX_VER}.zip"; then
+            mkdir -p "$OUT/jadx"
+            unzip -q "$JADX_ZIP" -d "$OUT/jadx"
+            "$OUT/jadx/bin/jadx" \
+              --no-res --show-bad-code --threads-count 2 \
+              -d "$OUT/decompiled/android" \
+              "$OUT/android/golopine.apk" \
+              > "$OUT/evidence/11_JADX_STDOUT.txt" \
+              2> "$OUT/evidence/12_JADX_STDERR.txt" || true
+          else
+            echo "JADX_DOWNLOAD_FAILED=true" > "$OUT/evidence/12_JADX_STDERR.txt"
+          fi
+
+          # Raw APK extraction is always retained even if JADX fails.
+          mkdir -p "$OUT/android/raw"
+          7z x -y "$OUT/android/golopine.apk" -o"$OUT/android/raw" >/dev/null || true
+
+      - name: Mine Android USB HID protocol evidence
         shell: bash
         run: |
           set -euo pipefail
           python3 - <<'PY'
           from pathlib import Path
-          import hashlib, json, re
+          import os,re,json,hashlib,subprocess
 
-          root = Path('/tmp/okn-android-firmware-tool')
-          src = root / 'app/src/main/java/com/okn/bp1048p4r81'
-          engine = (src / 'UsbCaptureEngine.java').read_text(errors='ignore')
-          facts = (src / 'ProtocolFacts.java').read_text(errors='ignore')
-          main = (src / 'MainActivity.java').read_text(errors='ignore')
-          locked = (src / 'NoProvenReadbackStrategy.java').read_text(errors='ignore')
-          all_java = '\n'.join(p.read_text(errors='ignore') for p in sorted(src.glob('*.java')))
+          out=Path(os.environ["OUT"])
+          roots=[out/"decompiled/android", out/"android/raw"]
+          ev=out/"evidence"
 
-          required = [
-              'captureReadOnlySnapshot', 'getRawDescriptors', 'readRuntimeIf3ReadOnly',
-              'readRuntimeIf4ReadOnlyMatrix', 'HID_OUTPUT_REPORT_WVALUE',
-              'UsbProtocolClassifier', 'FirmwareAnalyzer', 'HexViewer',
-              'NO_PROVEN_FULL_FLASH_READBACK_R94', 'prepareExportZip',
-              'AUTO_EXPORT_CAPTURE_READY=true', 'EXPORT_BLOCKED_NO_COMPLETED_USB_CAPTURE=true'
+          text_ext={".java",".kt",".xml",".smali",".txt",".json",".js",".html",".properties",".cfg",".ini"}
+          terms=[
+            "UsbManager","UsbDevice","UsbDeviceConnection","UsbInterface","UsbEndpoint",
+            "controlTransfer","bulkTransfer","UsbRequest","claimInterface","releaseInterface",
+            "HID","hid","6324","1719","0x6324","0x1719","25380","5913",
+            "55AA","55aa","0x55AA","0x55aa","FF00","ff00",
+            "SET_REPORT","GET_REPORT","requestType","bRequest",
+            "DSTech","GoloPine","AudioDSP","BP1048","BP1048P4",
+            "firmware","upgrade","flash","erase","write","read","save","load",
+            "eq","equalizer","gain","volume","delay","crossover"
           ]
-          missing = [x for x in required if x not in all_java]
-          if missing:
-              raise SystemExit('missing required R94 read-only/export-gate feature(s): ' + repr(missing))
 
-          # No endpoint-transfer primitive exists in R94. This keeps OUT impossible by construction.
-          api_forbidden = ['bulkTransfer(', 'UsbRequest', 'queue(', 'requestWait(', 'setConfiguration(', 'setInterface(']
-          bad_api = [x for x in api_forbidden if x in engine]
-          if bad_api:
-              raise SystemExit('forbidden live USB primitive(s): ' + repr(bad_api))
+          hits=[]
+          byte_array_hits=[]
+          call_hits=[]
+          hex_token=re.compile(r'0x[0-9A-Fa-f]{1,8}')
+          byte_array_re=re.compile(
+              r'(?:byte\s*\[\]\s*\w*\s*=\s*new\s+byte\s*\[\]\s*\{|'
+              r'byte\s*\[\]\s*\w*\s*=\s*\{|'
+              r'new\s+byte\s*\[\]\s*\{)([^}]{1,2000})\}',
+              re.I|re.S
+          )
 
-          if re.search(r'claimInterface\s*\([^,]+,\s*true\s*\)', engine):
-              raise SystemExit('force-detach claimInterface(..., true) is forbidden')
+          for root in roots:
+            if not root.exists(): continue
+            for p in root.rglob("*"):
+              if not p.is_file(): continue
+              if p.suffix.lower() not in text_ext: continue
+              try: txt=p.read_text(errors="ignore")
+              except Exception: continue
+              rel=str(p.relative_to(out))
 
-          # Explicit request-type constants used by controlTransfer must all be device->host.
-          allowed_bm = {
-              'ProtocolFacts.STANDARD_DEVICE_IN_BM',
-              'ProtocolFacts.STANDARD_INTERFACE_IN_BM',
-              'ProtocolFacts.STANDARD_ENDPOINT_IN_BM',
-              'ProtocolFacts.HID_CLASS_IN_BM',
-              'requestType',  # helper parameter validated at all helper call sites below
-          }
-          lines = engine.splitlines()
-          calls=[]
-          for i,line in enumerate(lines):
-              if 'controlTransfer(' not in line:
-                  continue
-              frag=' '.join(lines[i:i+10])
-              calls.append(frag)
-              if not any(x in frag for x in allowed_bm):
-                  raise SystemExit('non-whitelisted controlTransfer request type: '+frag)
+              lines=txt.splitlines()
+              for i,line in enumerate(lines):
+                found=[t for t in terms if t.lower() in line.lower()]
+                if not found: continue
+                lo=max(0,i-5); hi=min(len(lines),i+8)
+                context="\n".join(f"{j+1}: {lines[j]}" for j in range(lo,hi))
+                hits.append({
+                  "path":rel,"line":i+1,"terms":found,
+                  "context":context[:12000]
+                })
 
-          # Every call into readControlBlob supplies one of the four IN request-type constants.
-          helper_calls=[]
-          for i,line in enumerate(lines):
-              if 'readControlBlob(c,' not in line:
-                  continue
-              frag=' '.join(lines[i:i+7])
-              helper_calls.append(frag)
-              if not any(x in frag for x in [
-                  'ProtocolFacts.STANDARD_DEVICE_IN_BM',
-                  'ProtocolFacts.STANDARD_INTERFACE_IN_BM',
-                  'ProtocolFacts.STANDARD_ENDPOINT_IN_BM',
-                  'ProtocolFacts.HID_CLASS_IN_BM']):
-                  raise SystemExit('readControlBlob call without explicit IN bmRequestType: '+frag)
+                if any(x in line for x in ("controlTransfer","bulkTransfer","UsbRequest","claimInterface")):
+                  call_hits.append({
+                    "path":rel,"line":i+1,"line_text":line[:3000],
+                    "context":context[:12000]
+                  })
 
-          constants={
-              'STANDARD_DEVICE_IN_BM':0x80,
-              'STANDARD_INTERFACE_IN_BM':0x81,
-              'STANDARD_ENDPOINT_IN_BM':0x82,
-              'HID_CLASS_IN_BM':0xA1,
-              'HID_GET_REPORT_REQ':0x01,
-              'HID_GET_IDLE_REQ':0x02,
-              'HID_GET_PROTOCOL_REQ':0x03,
-              'STANDARD_GET_STATUS_REQ':0x00,
-              'STANDARD_GET_DESCRIPTOR_REQ':0x06,
-              'STANDARD_GET_CONFIGURATION_REQ':0x08,
-          }
-          for name,value in constants.items():
-              hx=f'0x{value:02X}'
-              if not re.search(r'\b'+re.escape(name)+r'\s*=\s*'+re.escape(hx)+r'\s*;', facts, re.I):
-                  raise SystemExit(f'{name} changed; expected {hx}')
-          for name in ['STANDARD_DEVICE_IN_BM','STANDARD_INTERFACE_IN_BM','STANDARD_ENDPOINT_IN_BM','HID_CLASS_IN_BM']:
-              if constants[name] & 0x80 == 0:
-                  raise SystemExit(name+' lost USB_DIR_IN bit')
+              for m in byte_array_re.finditer(txt):
+                body=m.group(1)
+                nums=re.findall(r'(?:\(byte\)\s*)?(0x[0-9A-Fa-f]{1,2}|-?\d{1,3})',body)
+                vals=[]
+                for tok in nums:
+                  try:
+                    v=int(tok,0)
+                    if v<0: v=(v+256)&255
+                    if 0<=v<=255: vals.append(v)
+                  except: pass
+                if len(vals)>=4:
+                  b=bytes(vals)
+                  if (
+                    b"\x24\x63" in b or b"\x63\x24" in b or
+                    b"\x19\x17" in b or b"\x17\x19" in b or
+                    b"\x55\xAA" in b or b"\xAA\x55" in b or
+                    len(b)>=8
+                  ):
+                    byte_array_hits.append({
+                      "path":rel,
+                      "line":txt.count("\n",0,m.start())+1,
+                      "bytes":len(b),
+                      "hex":b[:512].hex().upper(),
+                      "sha256":hashlib.sha256(b).hexdigest()
+                    })
 
-          # GET_REPORT(Output) is permitted only as a class-IN read of the current Output report value.
-          if not re.search(r'HID_OUTPUT_REPORT_WVALUE\s*=\s*0x0200\s*;', facts, re.I):
-              raise SystemExit('Output-report GET_REPORT value changed')
-          if 'HID_OUTPUT_REPORT_WVALUE' not in engine or 'HID_GET_REPORT_REQ' not in engine:
-              raise SystemExit('R94 output-current read probe missing')
-
-          # Reject common writer/update indicators in live USB source. Text/log labels may contain
-          # SET_REPORT=false, so reject executable-shaped tokens rather than plain documentation words.
-          forbidden_exec = [
-              r'controlTransfer\s*\(\s*(?:0x00|0x01|0x21|0x40|0x41)\b',
-              r'\bHID_SET_REPORT_REQ\b', r'\bSET_REPORT_REQ\b',
-              r'\bSpiFlashWrite\s*\(', r'\bSpiFlashErase\s*\(',
-              r'\bFlashChipErase\s*\(', r'\bFlashSectorErase\s*\('
-          ]
-          for rx in forbidden_exec:
-              if re.search(rx, engine, re.I):
-                  raise SystemExit('forbidden executable live path matched: '+rx)
-
-          if not re.search(r'boolean\s+isProven\s*\(\s*\)\s*\{\s*return\s+false\s*;', locked, re.S):
-              raise SystemExit('full firmware readback lock is not fail-closed')
-          if 'BACKUP FULL FIRMWARE — LOCKED' not in main:
-              raise SystemExit('locked full-backup UI gate missing')
-
-          rows=[]
-          for p in sorted(root.rglob('*')):
-              if not p.is_file() or '/build/' in str(p) or '/ci-output/' in str(p):
-                  continue
-              rows.append(f"{hashlib.sha256(p.read_bytes()).hexdigest()}  {p.relative_to(root)}")
-          (root/'ci-output/evidence/SOURCE_SHA256SUMS.txt').write_text('\n'.join(rows)+'\n')
-
-          result={
-              'revision':'R94',
-              'control_transfer_calls':len(calls),
-              'read_control_helper_calls':len(helper_calls),
-              'allowed_request_types':['0x80 standard device IN','0x81 standard interface IN','0x82 standard endpoint IN','0xA1 HID class IN'],
-              'get_report_output_semantics':'device-to-host read current Output report value',
-              'endpoint_transfer_primitive_present':False,
-              'forced_interface_detach_present':False,
-              'hid_set_report_allowed':False,
-              'vendor_out_allowed':False,
-              'erase_allowed':False,
-              'flash_write_allowed':False,
-              'unlock_allowed':False,
-              'full_flash_readback_proven':False,
-              'gate':'PASS'
-          }
-          (root/'ci-output/evidence/01_USB_READ_ONLY_AUDIT.json').write_text(json.dumps(result,indent=2)+'\n')
-          print('USB_READ_ONLY_AUDIT=PASS',json.dumps(result))
-          PY
-
-      - name: Pin BP1048P4 SDK and collect bounded static evidence
-        shell: bash
-        run: |
-          set -euo pipefail
-          rm -rf /tmp/okn-bp1048-sdk
-          git clone -q "$SDK_REPO" /tmp/okn-bp1048-sdk
-          git -C /tmp/okn-bp1048-sdk checkout -q "$SDK_COMMIT"
-          test "$(git -C /tmp/okn-bp1048-sdk rev-parse HEAD)" = "$SDK_COMMIT"
-
-          python3 - <<'PY'
-          from pathlib import Path
-          import json, os, re
-
-          root = Path('/tmp/okn-bp1048-sdk')
-          out = Path('/tmp/okn-android-firmware-tool/ci-output/evidence')
-          keys = [
-              'SpiFlashRead', 'SpiFlashReadWpr', 'SpiFlashWrite', 'SpiFlashErase',
-              'FlashChipErase', 'FlashSectorErase', 'btupdat', 'Communication_Effect_0x11',
-              'MV_UserWriteData', 'HID', 'USB', 'flashboot', 'upgrade'
-          ]
-          allowed_ext = {'.c','.h','.s','.S','.ld','.txt','.md','.ini','.cfg','.mk','.cmake'}
-          hits = []
-          files = 0
-          for p in sorted(root.rglob('*')):
-              if not p.is_file() or p.suffix not in allowed_ext:
-                  continue
+          # DEX/native strings are useful when transport code lives in JNI.
+          raw_strings=[]
+          for root in roots:
+            if not root.exists(): continue
+            for p in root.rglob("*"):
+              if not p.is_file(): continue
+              if p.suffix.lower() not in {".dex",".so",".bin",".dat"}: continue
               try:
-                  if p.stat().st_size > 2_000_000:
-                      continue
-                  text = p.read_text(errors='ignore')
+                r=subprocess.run(
+                  ["strings","-a","-n","4",str(p)],
+                  capture_output=True,text=True,errors="ignore",timeout=20
+                )
               except Exception:
-                  continue
-              files += 1
-              for n, line in enumerate(text.splitlines(), 1):
-                  found = [k for k in keys if k.lower() in line.lower()]
-                  if found:
-                      hits.append({'path': str(p.relative_to(root)), 'line': n, 'keywords': found, 'text': line[:400]})
-                  if len(hits) >= 3000:
-                      break
-              if len(hits) >= 3000:
-                  break
+                continue
+              for s in r.stdout.splitlines():
+                low=s.lower()
+                if any(t.lower() in low for t in terms):
+                  raw_strings.append({"path":str(p.relative_to(out)),"string":s[:2000]})
 
-          result = {
-              'sdk_repo': os.environ['SDK_REPO'],
-              'sdk_commit': os.environ['SDK_COMMIT'],
-              'source_files_scanned': files,
-              'keyword_hits_capped_at_3000': len(hits),
-              'offline_static_only': True,
-              'proves_generic_full_flash_readback': False,
-              'note': 'Internal flash-read symbols do not by themselves prove a host-visible arbitrary readback command.'
+          ev.joinpath("20_ANDROID_TEXT_HITS.json").write_text(
+              json.dumps(hits,indent=2,ensure_ascii=False)+"\n")
+          ev.joinpath("21_ANDROID_USB_CALL_HITS.json").write_text(
+              json.dumps(call_hits,indent=2,ensure_ascii=False)+"\n")
+          ev.joinpath("22_ANDROID_BYTE_ARRAY_CANDIDATES.json").write_text(
+              json.dumps(byte_array_hits,indent=2,ensure_ascii=False)+"\n")
+          ev.joinpath("23_ANDROID_BINARY_STRINGS.json").write_text(
+              json.dumps(raw_strings,indent=2,ensure_ascii=False)+"\n")
+
+          summary={
+            "text_hits":len(hits),
+            "usb_call_hits":len(call_hits),
+            "byte_array_candidates":len(byte_array_hits),
+            "binary_string_hits":len(raw_strings),
           }
-          (out / '02_SDK_STATIC_SUMMARY.json').write_text(json.dumps(result, indent=2) + '\n')
-          (out / '03_SDK_STATIC_HITS.json').write_text(json.dumps(hits, indent=2, ensure_ascii=False) + '\n')
-          print(json.dumps(result, indent=2))
+          ev.joinpath("24_ANDROID_MINER_SUMMARY.json").write_text(
+              json.dumps(summary,indent=2)+"\n")
+          print(json.dumps(summary,indent=2))
           PY
 
-      - name: Verify R89 BP1048P4 reference layout and MVA rule offline
+      - name: Mine Windows DSTech client protocol evidence
         shell: bash
         run: |
           set -euo pipefail
           python3 - <<'PY'
           from pathlib import Path
-          import json
-          root=Path('/tmp/okn-bp1048-sdk')
-          out=Path('/tmp/okn-android-firmware-tool/ci-output/evidence')
-          flash=(root/'BT_Audio_APP/bt_audio_app_src/inc/flash_config.h').read_text(errors='ignore')
-          boot=(root/'BT_Audio_APP/bt_audio_app_src/inc/flash_boot.h').read_text(errors='ignore')
-          obex=(root/'BT_Audio_APP/bt_audio_app_src/apps/bt_obex_upgrade.c').read_text(errors='ignore')
-          upgrade=(root/'BT_Audio_APP/bt_audio_app_src/device/upgrade.c').read_text(errors='ignore')
-          assertions={
-            'bp1048p4_branch':'#ifdef CFG_CHIP_BP1048P4' in flash,
-            'staging_offset_0x100000':'FLASH_MVA_UPDATE_START_OFFSET 0x100000' in obex,
-            'crc_poly_0x1021':'0x1021' in obex,
-            'crc_initial_zero':'uint16_t Crc16 = 0' in obex,
-            'crc_excludes_last4':'MvaFileTotalSize - 4' in obex,
-            'trailer_bytes_2_3_zero':'Tmp[2] | Tmp[3]' in obex,
-            'dual_bank_apply':'ROM_BankBUpgradeApply(1, FLASH_MVA_UPDATE_START_OFFSET)' in obex,
-            'flash_boot_enabled':'#define FLASH_BOOT_EN      1' in boot,
-            'mva_header_errors':'MVA_HEADER_ERR' in upgrade and 'MVA_MAGIC_ERR' in upgrade,
+          import os,re,json,subprocess,hashlib
+
+          out=Path(os.environ["OUT"])
+          root=out/"windows"
+          ev=out/"evidence"
+
+          terms=[
+            "6324","1719","VID_6324","PID_1719",
+            "55AA","AA55","A55A","5AA5","FF00",
+            "HID","hid.dll","SetupDi","CreateFile","ReadFile","WriteFile",
+            "HidD_","HidP_","DeviceIoControl",
+            "DSTech","GoloPine","AudioDSP","BP1048","BP1048P4",
+            "firmware","upgrade","flash","erase","write","read",
+            "save","load","volume","gain","equalizer","delay","crossover"
+          ]
+
+          files=[]
+          string_hits=[]
+          wide_hits=[]
+          hex_hits=[]
+          hexpat=re.compile(rb'(?:[\x00-\xff]){0}')
+
+          for p in sorted(root.rglob("*")):
+            if not p.is_file(): continue
+            try:
+              data=p.read_bytes()
+            except: continue
+            rel=str(p.relative_to(out))
+            files.append({
+              "path":rel,"bytes":len(data),
+              "sha256":hashlib.sha256(data).hexdigest()
+            })
+
+            # ASCII strings
+            try:
+              r=subprocess.run(
+                ["strings","-a","-n","4",str(p)],
+                capture_output=True,text=True,errors="ignore",timeout=20
+              )
+              for s in r.stdout.splitlines():
+                low=s.lower()
+                if any(t.lower() in low for t in terms):
+                  string_hits.append({"path":rel,"string":s[:3000]})
+            except: pass
+
+            # UTF-16LE strings
+            try:
+              r=subprocess.run(
+                ["strings","-a","-el","-n","4",str(p)],
+                capture_output=True,text=True,errors="ignore",timeout=20
+              )
+              for s in r.stdout.splitlines():
+                low=s.lower()
+                if any(t.lower() in low for t in terms):
+                  wide_hits.append({"path":rel,"string":s[:3000]})
+            except: pass
+
+            # Raw byte windows for production VID/PID and HID usage markers.
+            needles={
+              "VID_LE_6324":bytes.fromhex("2463"),
+              "VID_BE_6324":bytes.fromhex("6324"),
+              "PID_LE_1719":bytes.fromhex("1917"),
+              "PID_BE_1719":bytes.fromhex("1719"),
+              "55AA":bytes.fromhex("55AA"),
+              "AA55":bytes.fromhex("AA55"),
+              "FF00":bytes.fromhex("FF00"),
+              "00FF":bytes.fromhex("00FF"),
+            }
+            for name,needle in needles.items():
+              start=0; count=0
+              while True:
+                i=data.find(needle,start)
+                if i<0: break
+                lo=max(0,i-96); hi=min(len(data),i+len(needle)+192)
+                hex_hits.append({
+                  "path":rel,"marker":name,"offset":i,
+                  "offset_hex":hex(i),
+                  "window_hex":data[lo:hi].hex().upper()
+                })
+                count+=1
+                if count>=100: break
+                start=i+1
+
+          ev.joinpath("30_WINDOWS_FILE_INVENTORY.json").write_text(
+              json.dumps(files,indent=2)+"\n")
+          ev.joinpath("31_WINDOWS_ASCII_HITS.json").write_text(
+              json.dumps(string_hits,indent=2,ensure_ascii=False)+"\n")
+          ev.joinpath("32_WINDOWS_UTF16_HITS.json").write_text(
+              json.dumps(wide_hits,indent=2,ensure_ascii=False)+"\n")
+          ev.joinpath("33_WINDOWS_RAW_MARKER_WINDOWS.json").write_text(
+              json.dumps(hex_hits,indent=2)+"\n")
+
+          summary={
+            "files":len(files),
+            "ascii_hits":len(string_hits),
+            "utf16_hits":len(wide_hits),
+            "raw_marker_windows":len(hex_hits)
           }
-          if not all(assertions.values()): raise SystemExit('R89 reference assertion changed: '+repr(assertions))
-          result={
-            'sdk_commit':'8105bd864b04995d81c9f9ae77cb158259f39015',
-            'reference_only':True,
-            'layout':{
-              'CODE_ADDR':'0x000000','CONST_DATA_ADDR':'0x198000','AUDIO_EFFECT_ADDR':'0x3C8000',
-              'FLASHFS_ADDR':'0x3D0000','USER_DATA_ADDR':'0x3F0000','BP_DATA_ADDR':'0x3F3000',
-              'BT_DATA_ADDR':'0x3FB000','USER_CONFIG_ADDR':'0x3FE000','BT_CONFIG_ADDR':'0x3FF000'},
-            'mva_staging_offset':'0x100000',
-            'mva_crc':{'poly':'0x1021','init':'0x0000','coverage':'all bytes except final 4','trailer':'CRC_LO CRC_HI 00 00'},
-            'assertions':assertions,
-            'production_exact_layout_proven':False,
-            'production_full_flash_readback_proven':False,
-            'flash_allowed':False
-          }
-          (out/'04_R89_REFERENCE_FACTS.json').write_text(json.dumps(result,indent=2)+'\n')
-          print('R89_REFERENCE_VERIFY=PASS')
+          ev.joinpath("34_WINDOWS_MINER_SUMMARY.json").write_text(
+              json.dumps(summary,indent=2)+"\n")
+          print(json.dumps(summary,indent=2))
           PY
 
-      - name: Inventory repository firmware/update candidates offline
+      - name: Rank read/query candidates and keep writer paths separated
         shell: bash
         run: |
           set -euo pipefail
           python3 - <<'PY'
           from pathlib import Path
-          import hashlib, json, math, re
+          import os,json,re
 
-          repo = Path('.')
-          out = Path('/tmp/okn-android-firmware-tool/ci-output/evidence')
-          exts = {'.mva','.bin','.img','.fw','.rom','.ota','.dfu','.upd','.adx','.hex','.elf'}
-          skip = {'.git','.gradle','build','ci-output'}
+          out=Path(os.environ["OUT"])
+          ev=out/"evidence"
 
-          def entropy(b):
-              if not b: return 0.0
-              counts = [0] * 256
-              for x in b: counts[x] += 1
-              return round(-sum((n/len(b))*math.log2(n/len(b)) for n in counts if n), 5)
+          def load(name):
+            p=ev/name
+            return json.loads(p.read_text(errors="ignore")) if p.exists() else []
 
-          items = []
-          for p in sorted(repo.rglob('*')):
-              if not p.is_file() or p.suffix.lower() not in exts or any(x in skip for x in p.parts):
-                  continue
-              h = hashlib.sha256()
-              sample = b''
-              size = p.stat().st_size
-              with p.open('rb') as f:
-                  while True:
-                      chunk = f.read(1024 * 1024)
-                      if not chunk: break
-                      h.update(chunk)
-                      if len(sample) < 1024 * 1024:
-                          sample += chunk[:1024 * 1024 - len(sample)]
-              strings = [m.group().decode('ascii','replace') for m in list(re.finditer(rb'[ -~]{5,120}', sample))[:60]]
-              items.append({
-                  'path': str(p.relative_to(repo)), 'size': size, 'sha256': h.hexdigest(),
-                  'sample_entropy': entropy(sample), 'first64_hex': sample[:64].hex().upper(),
-                  'ascii_strings_sample': strings
-              })
+          android_calls=load("21_ANDROID_USB_CALL_HITS.json")
+          android_hits=load("20_ANDROID_TEXT_HITS.json")
+          arrays=load("22_ANDROID_BYTE_ARRAY_CANDIDATES.json")
+          win_ascii=load("31_WINDOWS_ASCII_HITS.json")
+          win_wide=load("32_WINDOWS_UTF16_HITS.json")
+          raw=load("33_WINDOWS_RAW_MARKER_WINDOWS.json")
 
-          result = {
-              'candidate_count': len(items),
-              'candidates': items,
-              'filename_or_magic_alone_proves_safe_readback': False,
-              'full_flash_readback_proven': False
+          read_words=("read","get","query","request","status","load","sync","fetch","receive","recv")
+          write_words=("write","set","save","upgrade","flash","erase","reset","update","send","store","download")
+
+          candidates=[]
+          dangerous=[]
+
+          for r in android_calls+android_hits:
+            blob=(r.get("context") or r.get("line_text") or "").lower()
+            row={"source":"android","path":r.get("path"),"line":r.get("line"),"text":blob[:12000]}
+            if any(w in blob for w in write_words):
+              dangerous.append(row)
+            if any(w in blob for w in read_words):
+              candidates.append(row)
+
+          for r in win_ascii+win_wide:
+            blob=(r.get("string") or "").lower()
+            row={"source":"windows","path":r.get("path"),"text":r.get("string","")[:4000]}
+            if any(w in blob for w in write_words):
+              dangerous.append(row)
+            if any(w in blob for w in read_words):
+              candidates.append(row)
+
+          decision={
+            "production_fingerprint":{"vid":"6324","pid":"1719","usage_page":"FF00","usage":"55AA"},
+            "read_query_candidates":candidates[:2000],
+            "writer_or_upgrade_candidates":dangerous[:2000],
+            "android_byte_arrays":arrays[:2000],
+            "windows_raw_marker_windows":raw[:2000],
+            "live_board_commands_allowed":False,
+            "full_flash_readback_proven":False,
+            "rule":"Do not promote any host-to-device opcode to live use until its semantics are grounded by official-client code and classified non-destructive."
           }
-          (out / '05_REPO_FIRMWARE_CANDIDATES.json').write_text(json.dumps(result, indent=2, ensure_ascii=False) + '\n')
-          print(json.dumps({'candidate_count': len(items), 'full_flash_readback_proven': False}))
+          ev.joinpath("40_PROTOCOL_TRIAGE.json").write_text(
+              json.dumps(decision,indent=2,ensure_ascii=False)+"\n")
+
+          lines=[
+            "OKN R95 OFFLINE PROTOCOL TRIAGE",
+            "LIVE_BOARD_COMMANDS_ALLOWED=false",
+            "FULL_FLASH_READBACK_PROVEN=false",
+            f"READ_QUERY_CANDIDATES={len(candidates)}",
+            f"WRITER_OR_UPGRADE_CANDIDATES={len(dangerous)}",
+            f"ANDROID_BYTE_ARRAYS={len(arrays)}",
+            f"WINDOWS_RAW_MARKER_WINDOWS={len(raw)}",
+            "NEXT_GATE=Manual evidence review of official-client transport before any live OUT/SET_REPORT.",
+          ]
+          ev.joinpath("41_R95_SUMMARY.txt").write_text("\n".join(lines)+"\n")
+          print("\n".join(lines))
           PY
 
-      - name: Setup Java 17
-        uses: actions/setup-java@v6
-        with:
-          distribution: temurin
-          java-version: '17'
-
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v4
-        with:
-          cmdline-tools-version: 15859902
-          packages: "platform-tools platforms;android-35 build-tools;35.0.0"
-          accept-android-sdk-licenses: true
-          log-accepted-android-sdk-licenses: false
-
-      - name: Accept licenses non-interactively and verify SDK packages
+      - name: Build compact review bundle
         shell: bash
         run: |
           set -euo pipefail
-          sdkmanager --version
-          set +o pipefail
-          yes | sdkmanager --licenses >/dev/null 2>&1
-          set -o pipefail
-          sdkmanager 'platform-tools' 'platforms;android-35' 'build-tools;35.0.0'
-          test -d "$ANDROID_SDK_ROOT/platforms/android-35"
-          test -d "$ANDROID_SDK_ROOT/build-tools/35.0.0"
+          mkdir -p "$OUT/review"
+          cp -a "$OUT/evidence/." "$OUT/review/"
+          {
+            echo "R95_OFFLINE_ONLY=true"
+            echo "TARGET_USB=6324:1719"
+            echo "TARGET_HID_USAGE=FF00:55AA"
+            echo "BOARD_USB_ACCESSED=false"
+            echo "HOST_TO_DEVICE_COMMANDS_SENT=false"
+            echo "FLASH_WRITE=false"
+          } > "$OUT/review/99_SAFETY_ATTESTATION.txt"
 
-      - name: Setup Gradle 8.9
-        uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: '8.9'
-
-      - name: Run unit tests
-        shell: bash
-        run: |
-          set -euo pipefail
-          cd "$PROJECT_DIR"
-          gradle --no-daemon :app:testDebugUnitTest 2>&1 | tee ci-output/logs/unit-tests.log
-
-      - name: Run Android lint
-        shell: bash
-        run: |
-          set -euo pipefail
-          cd "$PROJECT_DIR"
-          gradle --no-daemon :app:lintDebug 2>&1 | tee ci-output/logs/lint.log
-          find app/build/reports -maxdepth 3 -type f -print -exec cp --parents '{}' ci-output/reports/ \; 2>/dev/null || true
-
-      - name: Build Debug APK
-        shell: bash
-        run: |
-          set -euo pipefail
-          cd "$PROJECT_DIR"
-          gradle --no-daemon :app:assembleDebug 2>&1 | tee ci-output/logs/assemble-debug.log
-          APK=app/build/outputs/apk/debug/app-debug.apk
-          test -s "$APK"
-          cp "$APK" ci-output/OKN_DSP_Firmware_Tool_R94-debug.apk
-          sha256sum ci-output/OKN_DSP_Firmware_Tool_R94-debug.apk | tee ci-output/OKN_DSP_Firmware_Tool_R94-debug.apk.sha256
-          zip -9 -r ci-output/OKN_DSP_Firmware_Tool_R94-source.zip \
-            settings.gradle build.gradle gradle.properties app README.md KNOWN_PROTOCOL.md STATUS.txt \
-            -x 'app/build/*' '.gradle/*' 'ci-output/*' >/dev/null
-          sha256sum ci-output/OKN_DSP_Firmware_Tool_R94-source.zip | tee ci-output/OKN_DSP_Firmware_Tool_R94-source.zip.sha256
+          (
+            cd "$OUT/review"
+            find . -type f -print0 | sort -z | xargs -0 sha256sum
+          ) > "$OUT/review/SHA256SUMS.txt"
 
       - name: Publish summary
-        if: ${{ always() }}
+        if: always()
         shell: bash
         run: |
           {
-            echo '# OKN Android Firmware Tool R94'
+            echo "## OKN R95 GoloPine/DSTech Protocol Miner"
             echo
-            echo '- Target path: Samsung Galaxy S25+ -> USB-C -> DSP board USB-C only'
-            echo '- Live mode: descriptors + standard GET_STATUS/GET_CONFIGURATION + HID GET_REPORT/GET_IDLE/GET_PROTOCOL, all device-to-host only'
-            echo '- Protocol discovery: interface/endpoint classification for HID, CDC, DFU/application-specific, Mass Storage, Vendor Specific, Bulk/Interrupt/etc.'
-            echo '- Offline tools: firmware SHA-256/header hints/entropy/strings + R89 MVA CRC/reference-layout check + Hex Viewer + evidence ZIP'
-            echo '- Reference SDK layout/MVA rules: **included as offline hints only**'
-            echo '- Production capture fingerprint: VID:PID 6324:1719, IF4 FF00/55AA, Input 256 / Output 256 / Feature 8'
-            echo '- Full arbitrary firmware readback: **LOCKED / NOT PROVEN**'
-            echo '- GET_REPORT(Output) only reads current Output value; SET_REPORT/OUT/erase/write/unlock: **NOT IMPLEMENTED**'
+            echo "- Offline static analysis only."
+            echo "- No board USB access."
+            echo "- No SET_REPORT / Output transfer / erase / write / unlock."
+            echo "- Production fingerprint target: VID:PID 6324:1719, HID usage FF00:55AA."
             echo
-            if [ -s "$PROJECT_DIR/ci-output/OKN_DSP_Firmware_Tool_R94-debug.apk.sha256" ]; then
-              cat "$PROJECT_DIR/ci-output/OKN_DSP_Firmware_Tool_R94-debug.apk.sha256"
+            if [ -f "$OUT/evidence/03_DOWNLOAD_STATUS.txt" ]; then
+              echo '```text'
+              cat "$OUT/evidence/03_DOWNLOAD_STATUS.txt"
+              echo '```'
+            fi
+            if [ -f "$OUT/evidence/41_R95_SUMMARY.txt" ]; then
+              echo '```text'
+              cat "$OUT/evidence/41_R95_SUMMARY.txt"
+              echo '```'
             fi
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Upload APK logs reports and evidence
-        if: ${{ always() }}
-        uses: actions/upload-artifact@v7
+      - name: Upload R95 protocol evidence
+        if: always()
+        uses: actions/upload-artifact@v4
         with:
-          name: OKN-ANDROID-FIRMWARE-TOOL-R94
-          path: /tmp/okn-android-firmware-tool/ci-output/**
-          if-no-files-found: warn
+          name: R95-GOLOPINE-DSTECH-PROTOCOL-EVIDENCE
+          path: /tmp/okn-r95/review
+          if-no-files-found: error
           retention-days: 30
-
-  cleanup-old-workflows:
-    name: Keep only android-firmware-tool.yml
-    needs: build-test-package
-    if: ${{ needs.build-test-package.result == 'success' && github.event_name != 'pull_request' && github.ref == 'refs/heads/main' }}
-    runs-on: ubuntu-24.04
-    timeout-minutes: 10
-    permissions:
-      contents: write
-    steps:
-      - name: Checkout main for workflow cleanup
-        uses: actions/checkout@v7
-        with:
-          fetch-depth: 0
-          persist-credentials: true
-
-      - name: Remove every other workflow from latest main and push safely
-        shell: bash
-        run: |
-          set -euo pipefail
-          keep='.github/workflows/android-firmware-tool.yml'
-
-          for attempt in 1 2 3; do
-            echo "cleanup attempt=$attempt"
-            git fetch origin main
-            git reset --hard origin/main
-            test -s "$keep"
-
-            echo 'Workflow files before cleanup:'
-            find .github/workflows -maxdepth 1 -type f \( -name '*.yml' -o -name '*.yaml' \) -print | sort
-
-            find .github/workflows -maxdepth 1 -type f \( -name '*.yml' -o -name '*.yaml' \) ! -path "$keep" -print -delete
-
-            count="$(find .github/workflows -maxdepth 1 -type f \( -name '*.yml' -o -name '*.yaml' \) | wc -l | tr -d ' ')"
-            test "$count" = '1'
-            test -s "$keep"
-
-            git add -A .github/workflows
-            if git diff --cached --quiet; then
-              echo 'Only android-firmware-tool.yml remains on latest main already.'
-              exit 0
-            fi
-
-            git config user.name 'github-actions[bot]'
-            git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-            git commit -m 'Keep only android-firmware-tool workflow [skip ci]'
-            if git push origin HEAD:main; then
-              echo 'Workflow cleanup push succeeded.'
-              exit 0
-            fi
-            echo 'Push raced with another commit; retrying from latest main.'
-          done
-
-          echo 'Workflow cleanup could not win the push race after 3 attempts.' >&2
-          exit 1
