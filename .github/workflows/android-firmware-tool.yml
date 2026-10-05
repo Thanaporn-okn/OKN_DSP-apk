@@ -1,4 +1,4 @@
-name: OKN R111 FAST Exact N9 IL Emulator + Method Body Recovery OFFLINE ONLY
+name: OKN R112 MULTI-PATH N9 Crypto Reachability OFFLINE ONLY
 
 on:
   push:
@@ -12,7 +12,7 @@ permissions:
   actions: read
 
 concurrency:
-  group: okn-r111-fast-exact-n9-${{ github.ref }}
+  group: okn-r112-multipath-n9-${{ github.ref }}
   cancel-in-progress: true
 
 env:
@@ -24,11 +24,11 @@ env:
 
 jobs:
   recover:
-    name: Fast exact N9 parser, bounded emulator and h15 recovery
+    name: Multi-path exact N9 parser, crypto reachability and h15 recovery
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     env:
-      OUT: /tmp/r111
+      OUT: /tmp/r112
 
     steps:
       - name: Fail-closed static-only safety gate
@@ -44,7 +44,7 @@ jobs:
           mkdir -p "$OUT"/{downloads,pkg,il,resources,decrypted,evidence,review}
 
           cat > "$OUT/evidence/00_SCOPE.txt" <<'EOF'
-          REVISION=R111
+          REVISION=R112
           MODE=OFFLINE_STATIC_ONLY
           TARGET_EXECUTED=false
           BOARD_USB_ACCESS=NO
@@ -335,8 +335,8 @@ jobs:
 
           switch_targets=re.findall(r'IL_[0-9A-Fa-f]+',ins[label["IL_0012"]][2])
 
-          TRUE_FUN={"zfos5ENLukrcbiO4qNQ","WbRj7RycxdawMtIuobL","fX136sh7mQQ8tIupxUo"}
-          NULL_FUN={"omTjeHNp0inHSoSsOBH","KTbwe7yfoqkIHrkHFxb","ayhyp5hj3R0itGWa7hr"}
+          TRUE_FUN={"WbRj7RycxdawMtIuobL","fX136sh7mQQ8tIupxUo"}
+          NULL_FUN={"KTbwe7yfoqkIHrkHFxb","ayhyp5hj3R0itGWa7hr"}
 
           def locno(op,arg):
               m=re.match(r'(?:ldloc|stloc)\.(\d+)$',op)
@@ -409,6 +409,16 @@ jobs:
               return U(op)
 
           def known_call(s,name,args):
+              if name=="zfos5ENLukrcbiO4qNQ":
+                  mode=os.environ.get("ZFOS_MODE","true")
+                  if mode=="true": return True
+                  if mode=="false": return False
+                  return U("opaque_zfos")
+              if name=="omTjeHNp0inHSoSsOBH":
+                  mode=os.environ.get("OMT_MODE","null")
+                  if mode=="null": return None
+                  if mode=="truthy": return "truthy"
+                  return U("opaque_omt")
               if name in TRUE_FUN:return True
               if name in NULL_FUN:return None
               if name=="tFjbT6Nj4GDWeki27kh":return 4
@@ -508,8 +518,8 @@ jobs:
           active=collections.deque([initial])
           finished=[]
           seen={}
-          MAX_PATHS=192
-          MAX_STEPS=500000
+          MAX_PATHS=384
+          MAX_STEPS=900000
           total_steps=0
 
           def key(s):
@@ -708,7 +718,7 @@ jobs:
                           active.append(x)
                   # Keep bounded symbolic search.
                   if len(active)>MAX_PATHS:
-                      ordered=sorted(active,key=lambda z:(-len(z.milestones),z.unknown_branches,len(z.trace)))
+                      ordered=sorted(active,key=lambda z:(-len(set(x["state"] for x in z.trace)),-len(z.milestones),z.unknown_branches,len(z.trace)))
                       active=collections.deque(ordered[:MAX_PATHS])
               else:
                   # preserve states that hit budget for another quantum
@@ -767,8 +777,31 @@ jobs:
           print(json.dumps(summary,indent=2))
           PY
 
-          timeout 600s python3 "$OUT/n9_emulator.py" > "$OUT/evidence/32_VM_STDOUT.txt" \
-            2> "$OUT/evidence/33_VM_STDERR.txt" || echo "VM_TIMEOUT_OR_NONZERO=true" >> "$OUT/evidence/34_VM_STATUS.txt"
+          mkdir -p "$OUT/evidence/scenarios"
+          for SPEC in             "ztrue_onull:true:null"             "zfalse_onull:false:null"             "ztrue_otruthy:true:truthy"             "zfalse_otruthy:false:truthy"
+          do
+            NAME="${SPEC%%:*}"
+            REST="${SPEC#*:}"
+            Z="${REST%%:*}"
+            O="${REST#*:}"
+
+            rm -f "$OUT/evidence/30_VM_SUMMARY.json" "$OUT/evidence/31_VM_INTERESTING_PATHS.json"
+            echo "SCENARIO=$NAME ZFOS_MODE=$Z OMT_MODE=$O"
+
+            set +e
+            ZFOS_MODE="$Z" OMT_MODE="$O"               timeout 150s python3 "$OUT/n9_emulator.py"               > "$OUT/evidence/scenarios/${NAME}_stdout.txt"               2> "$OUT/evidence/scenarios/${NAME}_stderr.txt"
+            RC=$?
+            set -e
+
+            echo "RC=$RC" > "$OUT/evidence/scenarios/${NAME}_status.txt"
+
+            if [ -f "$OUT/evidence/30_VM_SUMMARY.json" ]; then
+              cp "$OUT/evidence/30_VM_SUMMARY.json"                 "$OUT/evidence/scenarios/${NAME}_summary.json"
+            fi
+            if [ -f "$OUT/evidence/31_VM_INTERESTING_PATHS.json" ]; then
+              cp "$OUT/evidence/31_VM_INTERESTING_PATHS.json"                 "$OUT/evidence/scenarios/${NAME}_paths.json"
+            fi
+          done
 
       - name: Static fallback slice for key IV and h15 reader position
         shell: bash
@@ -818,6 +851,104 @@ jobs:
 
           print("pipeline_hits",len(hits))
           print("key_iv_write_sites",len(writes))
+          PY
+
+      - name: Prove key IV aliases and correlate all VM scenarios
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import os,json,re
+
+          out=Path(os.environ["OUT"])
+          ev=out/"evidence"
+          n9=(ev/"20_N9_METHOD.il").read_text(errors="ignore")
+
+          alias_patterns={
+            "key_local17_to_local47":(
+              r"IL_2f34:\s+ldloc 17\s+IL_2f38:\s+stloc\.s 47"
+            ),
+            "iv_local100_to_local8":(
+              r"IL_111e:\s+ldloc 100\s+IL_1122:\s+stloc\.s 8"
+            ),
+            "create_decryptor_uses_local47_local8":(
+              r"IL_23ed:[\s\S]{0,300}?ldloc\.s 47"
+              r"[\s\S]{0,80}?ldloc\.s 8"
+              r"[\s\S]{0,160}?VnHlfpNorSGR6U9GUOp"
+            ),
+          }
+
+          aliases={k:bool(re.search(p,n9,re.M)) for k,p in alias_patterns.items()}
+
+          scenarios=[]
+          for p in sorted((ev/"scenarios").glob("*_summary.json")):
+            name=p.name.removesuffix("_summary.json")
+            s=json.loads(p.read_text())
+            paths_file=ev/"scenarios"/f"{name}_paths.json"
+            paths=json.loads(paths_file.read_text()) if paths_file.exists() else []
+
+            hit626=any(626 in x.get("trace_states",[]) for x in paths)
+            hit631=any(631 in x.get("trace_states",[]) for x in paths)
+            hit402=any(402 in x.get("trace_states",[]) for x in paths)
+            hit281=any(281 in x.get("trace_states",[]) for x in paths)
+
+            candidates=[]
+            for x in paths:
+              key=x.get("key_local17_hex")
+              iv=x.get("iv_local100_hex")
+              if key and iv:
+                candidates.append({
+                  "key_hex":key,
+                  "iv_hex":iv,
+                  "score":x.get("score"),
+                  "unknown_branches":x.get("unknown_branches"),
+                  "hit_state626":626 in x.get("trace_states",[]),
+                  "hit_state631":631 in x.get("trace_states",[]),
+                  "hit_state402":402 in x.get("trace_states",[]),
+                  "hit_state281":281 in x.get("trace_states",[]),
+                })
+
+            # deduplicate key/IV pairs
+            seen=set(); uniq=[]
+            for c in candidates:
+              k=(c["key_hex"],c["iv_hex"])
+              if k in seen: continue
+              seen.add(k); uniq.append(c)
+
+            scenarios.append({
+              "scenario":name,
+              "summary":s,
+              "hit_state626_key_alias":hit626,
+              "hit_state631_iv_alias":hit631,
+              "hit_state402_create_decryptor":hit402,
+              "hit_state281_crypto_stream":hit281,
+              "candidate_key_iv_pairs":uniq[:20],
+            })
+
+          result={
+            "static_alias_proof":aliases,
+            "scenarios":scenarios,
+            "any_scenario_reached_create_decryptor":any(
+              x["summary"].get("reached_create_decryptor",False) or
+              x["hit_state402_create_decryptor"]
+              for x in scenarios
+            ),
+            "any_scenario_reached_aes":any(
+              x["summary"].get("reached_aes_decrypt",False)
+              for x in scenarios
+            ),
+          }
+
+          (ev/"45_MULTIPATH_CORRELATION.json").write_text(
+            json.dumps(result,indent=2,ensure_ascii=False)+"\n")
+
+          print(json.dumps({
+            "static_alias_proof":aliases,
+            "scenario_count":len(scenarios),
+            "create_reached":result["any_scenario_reached_create_decryptor"],
+            "aes_reached":result["any_scenario_reached_aes"],
+          },indent=2))
           PY
 
       - name: Validate any recovered plaintext and search method-store mappings
@@ -882,6 +1013,7 @@ jobs:
           sw=load("21_EXACT_SWITCH_MAP.json",{})
           vm=load("30_VM_SUMMARY.json",{})
           hyp=load("11_H15_HEADER15_HYPOTHESIS.json",{})
+          multi=load("45_MULTIPATH_CORRELATION.json",{})
           store=load("50_METHOD_STORE_SEARCH.json",{})
 
           verdict={
@@ -894,8 +1026,8 @@ jobs:
               "header15_proven_by_execution_path":False,
               "vm_reached_resource_open":vm.get("reached_resource_open",False),
               "vm_reached_local12":vm.get("reached_local12",False),
-              "vm_reached_create_decryptor":vm.get("reached_create_decryptor",False),
-              "vm_reached_aes_decrypt":vm.get("reached_aes_decrypt",False),
+              "vm_reached_create_decryptor":multi.get("any_scenario_reached_create_decryptor",vm.get("reached_create_decryptor",False)),
+              "vm_reached_aes_decrypt":multi.get("any_scenario_reached_aes",vm.get("reached_aes_decrypt",False)),
               "protected_update_body_recovered":store.get("update_method_body_recovered",False),
               "firmware_readback_primitive_proven":False,
               "full_flash_readback_proven":False,
@@ -903,11 +1035,11 @@ jobs:
               "next_gate":"If the VM reaches CreateDecryptor, independently verify the exact reader offset and key/IV before accepting decrypted bytes. If it stops earlier, use the packaged exact trace and static write sites to extend only the missing wrapper/native semantics."
           }
 
-          (review/"60_R111_VERDICT.json").write_text(
+          (review/"60_R112_VERDICT.json").write_text(
               json.dumps(verdict,indent=2,ensure_ascii=False)+"\n")
 
           lines=[
-              "OKN R111 EXACT N9 IL EMULATOR",
+              "OKN R112 EXACT N9 IL EMULATOR",
               "OFFLINE_ONLY=true",
               f"EXACT_SWITCH_MAPPING_CORRECTED={str(verdict['exact_switch_mapping_corrected']).lower()}",
               f"SWITCH_TARGET_COUNT={verdict['switch_target_count']}",
@@ -924,7 +1056,7 @@ jobs:
               "FULL_FLASH_READBACK_PROVEN=false",
               "LIVE_BOARD_COMMANDS_ALLOWED=false"
           ]
-          (review/"61_R111_SUMMARY.txt").write_text("\n".join(lines)+"\n")
+          (review/"61_R112_SUMMARY.txt").write_text("\n".join(lines)+"\n")
 
           for p in ev.iterdir():
               if p.is_file():shutil.copy2(p,review/p.name)
@@ -956,17 +1088,17 @@ jobs:
         shell: bash
         run: |
           {
-            echo "## OKN R111 MEGA Exact N9 IL Emulator"
+            echo "## OKN R112 MEGA Exact N9 IL Emulator"
             echo
             echo "- Static/offline only; official EXE is never executed."
             echo "- Uses deterministic N9 method slicing; avoids the catastrophic R110 regex."
             echo "- Models the real h15 resource and BinaryReader position."
-            echo "- Uses bounded symbolic branches rather than guessing unknown conditions."
+            echo "- Runs four explicit zfos/omT opaque-predicate scenarios and correlates their reachability."
             echo "- No DSP/USB activity."
             echo
-            if [ -f "$OUT/review/61_R111_SUMMARY.txt" ]; then
+            if [ -f "$OUT/review/61_R112_SUMMARY.txt" ]; then
               echo '```text'
-              cat "$OUT/review/61_R111_SUMMARY.txt"
+              cat "$OUT/review/61_R112_SUMMARY.txt"
               echo '```'
             fi
           } >> "$GITHUB_STEP_SUMMARY"
@@ -975,7 +1107,9 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: R111-EXACT-N9-IL-EMULATOR-EVIDENCE
-          path: /tmp/r110/review
-          if-no-files-found: error
+          name: R112-MULTIPATH-N9-CRYPTO-EVIDENCE
+          path: |
+            /tmp/r112/review
+            /tmp/r112/evidence
+          if-no-files-found: warn
           retention-days: 30
