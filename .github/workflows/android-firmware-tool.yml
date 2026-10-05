@@ -1,4 +1,4 @@
-name: OKN R95 GoloPine Protocol Miner OFFLINE ONLY
+name: OKN R96 Official Client Protocol Decompiler OFFLINE ONLY
 
 on:
   push:
@@ -12,19 +12,13 @@ permissions:
   actions: read
 
 concurrency:
-  group: okn-r95-golopine-protocol-miner-${{ github.ref }}
+  group: okn-r96-official-client-protocol-${{ github.ref }}
   cancel-in-progress: true
 
 env:
-  OUT: /tmp/okn-r95
-  ANDROID_URL_PRIMARY: "https://golodsp.com/wp-content/uploads/2026/05/golopine_audio_turning_release_2026-04-01.apk_.zip"
-  ANDROID_URL_FALLBACK: "https://golodsp.com/wp-content/uploads/2026/02/1Android-APP-golopine-tuning-250401.zip"
-  WINDOWS_URL_PRIMARY: "https://golodsp.com/wp-content/uploads/2026/05/golopine_audio_turning_release_2026-04-08.exe_.zip"
-  WINDOWS_URL_FALLBACK: "https://golodsp.com/wp-content/uploads/2026/02/4-27Nov2025_Windows-DSTech_AudioDSP_Client.zip"
-  TARGET_VID: "6324"
-  TARGET_PID: "1719"
-  TARGET_USAGE_PAGE: "FF00"
-  TARGET_USAGE: "55AA"
+  OUT: /tmp/okn-r96
+  ANDROID_URL: "https://golodsp.com/wp-content/uploads/2026/05/golopine_audio_turning_release_2026-04-01.apk_.zip"
+  WINDOWS_URL: "https://golodsp.com/wp-content/uploads/2026/05/golopine_audio_turning_release_2026-04-08.exe_.zip"
   LIVE_BOARD_USB: "NO"
   HOST_TO_DEVICE_USB: "NO"
   FLASH_ERASE_WRITE: "NO"
@@ -32,9 +26,9 @@ env:
 
 jobs:
   mine:
-    name: Mine official GoloPine/DSTech clients for protocol evidence
+    name: Decompile official Android and Windows clients / STATIC ONLY
     runs-on: ubuntu-24.04
-    timeout-minutes: 25
+    timeout-minutes: 30
 
     steps:
       - name: Checkout repository
@@ -51,292 +45,192 @@ jobs:
           test "$HOST_TO_DEVICE_USB" = "NO"
           test "$FLASH_ERASE_WRITE" = "NO"
           test "$FLASH_ALLOWED" = "NO"
+
           rm -rf "$OUT"
-          mkdir -p "$OUT"/{downloads,android,windows,evidence,decompiled}
+          mkdir -p "$OUT"/{downloads,android,windows,decompiled,evidence,review}
+
           cat > "$OUT/evidence/00_SCOPE.txt" <<'EOF'
-          REVISION=R95
+          REVISION=R96
           MODE=OFFLINE_STATIC_ONLY
-          TARGET=MVSilicon_BP1048P4_GoloPine_DSTech
-          PRODUCTION_USB_FINGERPRINT=6324:1719
-          PRODUCTION_IF4_USAGE_PAGE=FF00
-          PRODUCTION_IF4_USAGE=55AA
+          TARGET=GoloPine_DSTech_BP1048P4
+          KNOWN_PRODUCTION_USB=6324:1719
+          KNOWN_HID_USAGE=FF00:55AA
           BOARD_USB_ACCESS=NO
           LIVE_USB_COMMANDS=NO
           HOST_TO_DEVICE_USB=NO
-          SET_REPORT=NO
-          OUTPUT_TRANSFER=NO
+          SET_REPORT_LIVE=NO
+          OUTPUT_TRANSFER_LIVE=NO
           ERASE=NO
           WRITE=NO
           UNLOCK=NO
-          RESET_PROTECTION=NO
           FLASH_ALLOWED=NO
-          GOAL=Recover_vendor_protocol_from_official_GoloPine_Android_and_DSTech_Windows_clients
+          GOAL=Recover_protocol_command_ids_and_packet_layout_from_official_clients
           EOF
 
-      - name: Install static-analysis utilities
+      - name: Install offline-analysis utilities
         shell: bash
         run: |
           set -euo pipefail
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends \
-            unzip p7zip-full file binutils jq python3 python3-pip default-jre-headless
-          python3 -m pip install --break-system-packages --quiet androguard || true
+            unzip p7zip-full file binutils jq default-jre-headless mono-utils
 
-      - name: Download official GoloPine Android and DSTech Windows packages
+          {
+            echo "java=$(java -version 2>&1 | head -1)"
+            echo "dotnet=$(dotnet --version 2>/dev/null || true)"
+            echo "monodis=$(monodis --version 2>&1 | head -1 || true)"
+          } > "$OUT/evidence/01_TOOL_VERSIONS.txt"
+
+      - name: Download official clients
         shell: bash
         run: |
           set -euo pipefail
 
-          download_with_fallback() {
-            local out="$1"
-            local primary="$2"
-            local fallback="$3"
-            local used_file="$4"
-
-            for url in "$primary" "$fallback"; do
-              echo "Trying: $url"
-              if curl \
-                --fail --location --retry 3 --retry-all-errors \
-                --connect-timeout 20 --max-time 180 \
-                --user-agent "Mozilla/5.0 OKN-R95-Protocol-Miner" \
-                --referer "https://golodsp.com/7%E9%80%9A%E9%81%93%E9%9F%B3%E9%A2%91%E5%89%8D%E7%BA%A7/" \
-                --output "$out.tmp" "$url"; then
-                  test -s "$out.tmp"
-                  mv "$out.tmp" "$out"
-                  printf '%s\n' "$url" > "$used_file"
-                  return 0
-              fi
-              rm -f "$out.tmp"
-            done
-            return 1
+          fetch() {
+            local url="$1"
+            local out="$2"
+            curl \
+              --fail --location --retry 4 --retry-all-errors \
+              --connect-timeout 20 --max-time 240 \
+              --user-agent "Mozilla/5.0 OKN-R96-Interop-Research" \
+              --referer "https://golodsp.com/7%E9%80%9A%E9%81%93%E9%9F%B3%E9%A2%91%E5%89%8D%E7%BA%A7/" \
+              --output "$out" "$url"
+            test -s "$out"
           }
 
-          android_ok=true
-          windows_ok=true
+          fetch "$ANDROID_URL" "$OUT/downloads/android.zip"
+          fetch "$WINDOWS_URL" "$OUT/downloads/windows.zip"
 
-          download_with_fallback \
-            "$OUT/downloads/golopine-android.zip" \
-            "$ANDROID_URL_PRIMARY" "$ANDROID_URL_FALLBACK" \
-            "$OUT/evidence/01_ANDROID_SOURCE_URL.txt" || android_ok=false
+          sha256sum "$OUT/downloads/"*.zip > "$OUT/evidence/02_DOWNLOAD_SHA256.txt"
+          file "$OUT/downloads/"*.zip > "$OUT/evidence/03_DOWNLOAD_FILE_TYPES.txt"
 
-          download_with_fallback \
-            "$OUT/downloads/dstech-windows.zip" \
-            "$WINDOWS_URL_PRIMARY" "$WINDOWS_URL_FALLBACK" \
-            "$OUT/evidence/02_WINDOWS_SOURCE_URL.txt" || windows_ok=false
-
-          printf 'ANDROID_DOWNLOAD_OK=%s\nWINDOWS_DOWNLOAD_OK=%s\n' \
-            "$android_ok" "$windows_ok" | tee "$OUT/evidence/03_DOWNLOAD_STATUS.txt"
-
-          if [ "$android_ok" != true ] && [ "$windows_ok" != true ]; then
-            echo "Both official client downloads failed." >&2
-            exit 1
-          fi
-
-          find "$OUT/downloads" -type f -maxdepth 1 -print0 \
-            | sort -z \
-            | xargs -0 -r sha256sum \
-            > "$OUT/evidence/04_DOWNLOAD_SHA256.txt"
-
-          file "$OUT"/downloads/* > "$OUT/evidence/05_DOWNLOAD_FILE_TYPES.txt" || true
-
-      - name: Expand packages recursively
+      - name: Extract and select real APK and EXE
         shell: bash
         run: |
           set -euo pipefail
-
           mkdir -p "$OUT/android/pkg" "$OUT/windows/pkg"
 
-          if [ -s "$OUT/downloads/golopine-android.zip" ]; then
-            7z x -y "$OUT/downloads/golopine-android.zip" -o"$OUT/android/pkg" >/dev/null || true
-          fi
+          7z x -y "$OUT/downloads/android.zip" -o"$OUT/android/pkg" >/dev/null
+          7z x -y "$OUT/downloads/windows.zip" -o"$OUT/windows/pkg" >/dev/null
 
-          if [ -s "$OUT/downloads/dstech-windows.zip" ]; then
-            7z x -y "$OUT/downloads/dstech-windows.zip" -o"$OUT/windows/pkg" >/dev/null || true
-          fi
+          APK="$(
+            find "$OUT/android/pkg" -type f -iname '*.apk' \
+              ! -path '*/__MACOSX/*' ! -name '._*' -size +100k \
+              -print | sort | head -n1
+          )"
+          EXE="$(
+            find "$OUT/windows/pkg" -type f -iname '*.exe' \
+              ! -path '*/__MACOSX/*' ! -name '._*' -size +100k \
+              -print | sort | head -n1
+          )"
 
-          # Expand nested archives/installers best-effort without executing them.
-          find "$OUT/windows/pkg" -type f \( -iname '*.zip' -o -iname '*.7z' -o -iname '*.rar' \) -print0 \
-            | while IFS= read -r -d '' f; do
-                d="$OUT/windows/unpacked/$(basename "$f" | tr -c 'A-Za-z0-9._-' '_')"
-                mkdir -p "$d"
-                7z x -y "$f" -o"$d" >/dev/null 2>&1 || true
-              done
+          test -n "$APK"
+          test -n "$EXE"
 
-          find "$OUT" -type f | sort > "$OUT/evidence/06_EXPANDED_FILE_INVENTORY.txt"
-          while IFS= read -r f; do
-            printf '%s\t' "${f#$OUT/}"
-            file -b "$f" || true
-          done < "$OUT/evidence/06_EXPANDED_FILE_INVENTORY.txt" \
-            > "$OUT/evidence/07_EXPANDED_FILE_TYPES.txt"
+          file "$APK" | grep -qi 'Android package'
+          unzip -t "$APK" >/dev/null
+          file "$EXE" | grep -Eqi 'PE32|Mono/.Net|assembly'
 
-          find "$OUT/android" "$OUT/windows" -type f -print0 \
-            | sort -z \
-            | xargs -0 -r sha256sum \
-            > "$OUT/evidence/08_EXPANDED_SHA256.txt"
+          cp "$APK" "$OUT/android/golopine.apk"
+          cp "$EXE" "$OUT/windows/dstech.exe"
 
-      - name: Locate APK and decompile with JADX
+          {
+            echo "APK=$APK"
+            echo "APK_SIZE=$(stat -c%s "$APK")"
+            echo "APK_TYPE=$(file -b "$APK")"
+            echo "EXE=$EXE"
+            echo "EXE_SIZE=$(stat -c%s "$EXE")"
+            echo "EXE_TYPE=$(file -b "$EXE")"
+          } > "$OUT/evidence/04_SELECTED_BINARIES.txt"
+
+          sha256sum "$OUT/android/golopine.apk" "$OUT/windows/dstech.exe" \
+            > "$OUT/evidence/05_SELECTED_SHA256.txt"
+
+      - name: Decompile real Android APK with JADX
         shell: bash
         run: |
           set -euo pipefail
-          apk="$(find "$OUT/android" -type f -iname '*.apk' | head -n1 || true)"
-          printf 'APK_PATH=%s\n' "$apk" > "$OUT/evidence/09_APK_PATH.txt"
-
-          if [ -z "$apk" ]; then
-            echo "No APK found; Windows analysis can still continue."
-            exit 0
-          fi
-
-          cp "$apk" "$OUT/android/golopine.apk"
-          sha256sum "$OUT/android/golopine.apk" > "$OUT/evidence/10_APK_SHA256.txt"
 
           JADX_VER="1.5.2"
-          JADX_ZIP="$OUT/downloads/jadx.zip"
-          if curl -fsSL --retry 3 \
-              -o "$JADX_ZIP" \
-              "https://github.com/skylot/jadx/releases/download/v${JADX_VER}/jadx-${JADX_VER}.zip"; then
-            mkdir -p "$OUT/jadx"
-            unzip -q "$JADX_ZIP" -d "$OUT/jadx"
-            "$OUT/jadx/bin/jadx" \
-              --no-res --show-bad-code --threads-count 2 \
-              -d "$OUT/decompiled/android" \
-              "$OUT/android/golopine.apk" \
-              > "$OUT/evidence/11_JADX_STDOUT.txt" \
-              2> "$OUT/evidence/12_JADX_STDERR.txt" || true
-          else
-            echo "JADX_DOWNLOAD_FAILED=true" > "$OUT/evidence/12_JADX_STDERR.txt"
-          fi
+          curl -fsSL --retry 4 \
+            -o "$OUT/downloads/jadx.zip" \
+            "https://github.com/skylot/jadx/releases/download/v${JADX_VER}/jadx-${JADX_VER}.zip"
 
-          # Raw APK extraction is always retained even if JADX fails.
-          mkdir -p "$OUT/android/raw"
-          7z x -y "$OUT/android/golopine.apk" -o"$OUT/android/raw" >/dev/null || true
+          mkdir -p "$OUT/jadx" "$OUT/decompiled/android" "$OUT/android/raw"
+          unzip -q "$OUT/downloads/jadx.zip" -d "$OUT/jadx"
 
-      - name: Mine Android USB HID protocol evidence
+          set +e
+          "$OUT/jadx/bin/jadx" \
+            --no-res --show-bad-code --threads-count 2 \
+            -d "$OUT/decompiled/android" \
+            "$OUT/android/golopine.apk" \
+            > "$OUT/evidence/10_JADX_STDOUT.txt" \
+            2> "$OUT/evidence/11_JADX_STDERR.txt"
+          JADX_RC=$?
+          set -e
+          printf 'JADX_RC=%s\n' "$JADX_RC" > "$OUT/evidence/12_JADX_STATUS.txt"
+
+          7z x -y "$OUT/android/golopine.apk" -o"$OUT/android/raw" >/dev/null
+
+          find "$OUT/decompiled/android" -type f | sort \
+            > "$OUT/evidence/13_ANDROID_DECOMPILED_FILES.txt"
+          find "$OUT/android/raw" -type f | sort \
+            > "$OUT/evidence/14_ANDROID_RAW_FILES.txt"
+
+      - name: Decompile .NET Windows client with ILSpy and monodis fallback
         shell: bash
         run: |
           set -euo pipefail
-          python3 - <<'PY'
-          from pathlib import Path
-          import os,re,json,hashlib,subprocess
+          mkdir -p "$OUT/decompiled/windows-ilspy" "$OUT/decompiled/windows-il"
 
-          out=Path(os.environ["OUT"])
-          roots=[out/"decompiled/android", out/"android/raw"]
-          ev=out/"evidence"
+          ILSPY_OK=false
 
-          text_ext={".java",".kt",".xml",".smali",".txt",".json",".js",".html",".properties",".cfg",".ini"}
-          terms=[
-            "UsbManager","UsbDevice","UsbDeviceConnection","UsbInterface","UsbEndpoint",
-            "controlTransfer","bulkTransfer","UsbRequest","claimInterface","releaseInterface",
-            "HID","hid","6324","1719","0x6324","0x1719","25380","5913",
-            "55AA","55aa","0x55AA","0x55aa","FF00","ff00",
-            "SET_REPORT","GET_REPORT","requestType","bRequest",
-            "DSTech","GoloPine","AudioDSP","BP1048","BP1048P4",
-            "firmware","upgrade","flash","erase","write","read","save","load",
-            "eq","equalizer","gain","volume","delay","crossover"
-          ]
+          if command -v dotnet >/dev/null 2>&1; then
+            export PATH="$PATH:$HOME/.dotnet/tools"
+            if dotnet tool install --global ilspycmd \
+                > "$OUT/evidence/20_ILSPY_INSTALL_STDOUT.txt" \
+                2> "$OUT/evidence/21_ILSPY_INSTALL_STDERR.txt"; then
+              if ilspycmd --version > "$OUT/evidence/22_ILSPY_VERSION.txt" 2>&1; then
+                set +e
+                ilspycmd \
+                  --project \
+                  --outputdir "$OUT/decompiled/windows-ilspy" \
+                  "$OUT/windows/dstech.exe" \
+                  > "$OUT/evidence/23_ILSPY_STDOUT.txt" \
+                  2> "$OUT/evidence/24_ILSPY_STDERR.txt"
+                rc=$?
+                set -e
+                echo "ILSPY_RC=$rc" > "$OUT/evidence/25_ILSPY_STATUS.txt"
+                if [ "$rc" = 0 ]; then ILSPY_OK=true; fi
+              fi
+            else
+              echo "ILSPY_INSTALL_FAILED=true" > "$OUT/evidence/25_ILSPY_STATUS.txt"
+            fi
+          else
+            echo "DOTNET_NOT_FOUND=true" > "$OUT/evidence/25_ILSPY_STATUS.txt"
+          fi
 
-          hits=[]
-          byte_array_hits=[]
-          call_hits=[]
-          hex_token=re.compile(r'0x[0-9A-Fa-f]{1,8}')
-          byte_array_re=re.compile(
-              r'(?:byte\s*\[\]\s*\w*\s*=\s*new\s+byte\s*\[\]\s*\{|'
-              r'byte\s*\[\]\s*\w*\s*=\s*\{|'
-              r'new\s+byte\s*\[\]\s*\{)([^}]{1,2000})\}',
-              re.I|re.S
-          )
+          # Always produce IL too; this is useful for exact integer constants.
+          set +e
+          monodis \
+            --output="$OUT/decompiled/windows-il/dstech.il" \
+            "$OUT/windows/dstech.exe" \
+            > "$OUT/evidence/26_MONODIS_STDOUT.txt" \
+            2> "$OUT/evidence/27_MONODIS_STDERR.txt"
+          MONO_RC=$?
+          set -e
 
-          for root in roots:
-            if not root.exists(): continue
-            for p in root.rglob("*"):
-              if not p.is_file(): continue
-              if p.suffix.lower() not in text_ext: continue
-              try: txt=p.read_text(errors="ignore")
-              except Exception: continue
-              rel=str(p.relative_to(out))
+          {
+            echo "ILSPY_OK=$ILSPY_OK"
+            echo "MONODIS_RC=$MONO_RC"
+          } > "$OUT/evidence/28_WINDOWS_DECOMPILER_STATUS.txt"
 
-              lines=txt.splitlines()
-              for i,line in enumerate(lines):
-                found=[t for t in terms if t.lower() in line.lower()]
-                if not found: continue
-                lo=max(0,i-5); hi=min(len(lines),i+8)
-                context="\n".join(f"{j+1}: {lines[j]}" for j in range(lo,hi))
-                hits.append({
-                  "path":rel,"line":i+1,"terms":found,
-                  "context":context[:12000]
-                })
+          find "$OUT/decompiled/windows-ilspy" -type f | sort \
+            > "$OUT/evidence/29_WINDOWS_CSHARP_FILES.txt"
+          find "$OUT/decompiled/windows-il" -type f | sort \
+            > "$OUT/evidence/30_WINDOWS_IL_FILES.txt"
 
-                if any(x in line for x in ("controlTransfer","bulkTransfer","UsbRequest","claimInterface")):
-                  call_hits.append({
-                    "path":rel,"line":i+1,"line_text":line[:3000],
-                    "context":context[:12000]
-                  })
-
-              for m in byte_array_re.finditer(txt):
-                body=m.group(1)
-                nums=re.findall(r'(?:\(byte\)\s*)?(0x[0-9A-Fa-f]{1,2}|-?\d{1,3})',body)
-                vals=[]
-                for tok in nums:
-                  try:
-                    v=int(tok,0)
-                    if v<0: v=(v+256)&255
-                    if 0<=v<=255: vals.append(v)
-                  except: pass
-                if len(vals)>=4:
-                  b=bytes(vals)
-                  if (
-                    b"\x24\x63" in b or b"\x63\x24" in b or
-                    b"\x19\x17" in b or b"\x17\x19" in b or
-                    b"\x55\xAA" in b or b"\xAA\x55" in b or
-                    len(b)>=8
-                  ):
-                    byte_array_hits.append({
-                      "path":rel,
-                      "line":txt.count("\n",0,m.start())+1,
-                      "bytes":len(b),
-                      "hex":b[:512].hex().upper(),
-                      "sha256":hashlib.sha256(b).hexdigest()
-                    })
-
-          # DEX/native strings are useful when transport code lives in JNI.
-          raw_strings=[]
-          for root in roots:
-            if not root.exists(): continue
-            for p in root.rglob("*"):
-              if not p.is_file(): continue
-              if p.suffix.lower() not in {".dex",".so",".bin",".dat"}: continue
-              try:
-                r=subprocess.run(
-                  ["strings","-a","-n","4",str(p)],
-                  capture_output=True,text=True,errors="ignore",timeout=20
-                )
-              except Exception:
-                continue
-              for s in r.stdout.splitlines():
-                low=s.lower()
-                if any(t.lower() in low for t in terms):
-                  raw_strings.append({"path":str(p.relative_to(out)),"string":s[:2000]})
-
-          ev.joinpath("20_ANDROID_TEXT_HITS.json").write_text(
-              json.dumps(hits,indent=2,ensure_ascii=False)+"\n")
-          ev.joinpath("21_ANDROID_USB_CALL_HITS.json").write_text(
-              json.dumps(call_hits,indent=2,ensure_ascii=False)+"\n")
-          ev.joinpath("22_ANDROID_BYTE_ARRAY_CANDIDATES.json").write_text(
-              json.dumps(byte_array_hits,indent=2,ensure_ascii=False)+"\n")
-          ev.joinpath("23_ANDROID_BINARY_STRINGS.json").write_text(
-              json.dumps(raw_strings,indent=2,ensure_ascii=False)+"\n")
-
-          summary={
-            "text_hits":len(hits),
-            "usb_call_hits":len(call_hits),
-            "byte_array_candidates":len(byte_array_hits),
-            "binary_string_hits":len(raw_strings),
-          }
-          ev.joinpath("24_ANDROID_MINER_SUMMARY.json").write_text(
-              json.dumps(summary,indent=2)+"\n")
-          print(json.dumps(summary,indent=2))
-          PY
-
-      - name: Mine Windows DSTech client protocol evidence
+      - name: Mine Android transport and command evidence
         shell: bash
         run: |
           set -euo pipefail
@@ -345,107 +239,198 @@ jobs:
           import os,re,json,subprocess,hashlib
 
           out=Path(os.environ["OUT"])
-          root=out/"windows"
           ev=out/"evidence"
+          roots=[out/"decompiled/android",out/"android/raw"]
 
           terms=[
-            "6324","1719","VID_6324","PID_1719",
-            "55AA","AA55","A55A","5AA5","FF00",
-            "HID","hid.dll","SetupDi","CreateFile","ReadFile","WriteFile",
-            "HidD_","HidP_","DeviceIoControl",
+            "UsbManager","UsbDevice","UsbDeviceConnection","UsbInterface","UsbEndpoint",
+            "controlTransfer","bulkTransfer","UsbRequest","claimInterface",
+            "6324","1719","0x6324","0x1719","55AA","55aa","FF00","ff00",
+            "GET_REPORT","SET_REPORT","HidD_","hid","USBHID",
             "DSTech","GoloPine","AudioDSP","BP1048","BP1048P4",
-            "firmware","upgrade","flash","erase","write","read",
-            "save","load","volume","gain","equalizer","delay","crossover"
+            "ReadSensor","WriteActuator","UFE_","payload","command",
+            "firmware","upgrade","flash","erase","read","write","save","load",
+            "volume","gain","equalizer","delay","crossover"
           ]
 
-          files=[]
-          string_hits=[]
-          wide_hits=[]
-          hex_hits=[]
-          hexpat=re.compile(rb'(?:[\x00-\xff]){0}')
+          text_ext={".java",".kt",".xml",".smali",".txt",".json",".js",".properties",".ini",".cfg"}
+          hits=[]
+          arrays=[]
+          binary_strings=[]
 
-          for p in sorted(root.rglob("*")):
-            if not p.is_file(): continue
-            try:
-              data=p.read_bytes()
-            except: continue
-            rel=str(p.relative_to(out))
-            files.append({
-              "path":rel,"bytes":len(data),
-              "sha256":hashlib.sha256(data).hexdigest()
-            })
+          for root in roots:
+            if not root.exists(): continue
+            for p in root.rglob("*"):
+              if not p.is_file(): continue
+              rel=str(p.relative_to(out))
+              if p.suffix.lower() in text_ext:
+                try: txt=p.read_text(errors="ignore")
+                except: continue
+                lines=txt.splitlines()
+                for i,line in enumerate(lines):
+                  matched=[t for t in terms if t.lower() in line.lower()]
+                  if not matched: continue
+                  lo=max(0,i-8); hi=min(len(lines),i+15)
+                  hits.append({
+                    "path":rel,"line":i+1,"terms":matched,
+                    "context":"\n".join(f"{j+1}: {lines[j]}" for j in range(lo,hi))[:16000]
+                  })
 
-            # ASCII strings
-            try:
-              r=subprocess.run(
-                ["strings","-a","-n","4",str(p)],
-                capture_output=True,text=True,errors="ignore",timeout=20
-              )
-              for s in r.stdout.splitlines():
-                low=s.lower()
-                if any(t.lower() in low for t in terms):
-                  string_hits.append({"path":rel,"string":s[:3000]})
-            except: pass
+                # Candidate Java/Kotlin byte arrays.
+                for m in re.finditer(r'(?is)(?:byteArrayOf|new\s+byte\s*\[\]\s*\{|byte\s*\[\][^=]*=\s*\{)(.{1,3000}?)(?:\)|\})',txt):
+                  vals=[]
+                  for tok in re.findall(r'(?:\(byte\)\s*)?(0x[0-9A-Fa-f]{1,2}|-?\d{1,3})',m.group(1)):
+                    try:
+                      v=int(tok,0)
+                      if v<0: v=(v+256)&255
+                      if 0<=v<=255: vals.append(v)
+                    except: pass
+                  if len(vals)>=4:
+                    b=bytes(vals)
+                    arrays.append({
+                      "path":rel,
+                      "line":txt.count("\n",0,m.start())+1,
+                      "length":len(b),
+                      "hex":b[:512].hex().upper(),
+                      "sha256":hashlib.sha256(b).hexdigest()
+                    })
 
-            # UTF-16LE strings
-            try:
-              r=subprocess.run(
-                ["strings","-a","-el","-n","4",str(p)],
-                capture_output=True,text=True,errors="ignore",timeout=20
-              )
-              for s in r.stdout.splitlines():
-                low=s.lower()
-                if any(t.lower() in low for t in terms):
-                  wide_hits.append({"path":rel,"string":s[:3000]})
-            except: pass
+              if p.suffix.lower() in {".dex",".so",".bin",".dat"}:
+                try:
+                  r=subprocess.run(["strings","-a","-n","4",str(p)],
+                                   capture_output=True,text=True,errors="ignore",timeout=30)
+                except Exception:
+                  continue
+                for s in r.stdout.splitlines():
+                  low=s.lower()
+                  if any(t.lower() in low for t in terms):
+                    binary_strings.append({"path":rel,"string":s[:3000]})
 
-            # Raw byte windows for production VID/PID and HID usage markers.
-            needles={
-              "VID_LE_6324":bytes.fromhex("2463"),
-              "VID_BE_6324":bytes.fromhex("6324"),
-              "PID_LE_1719":bytes.fromhex("1917"),
-              "PID_BE_1719":bytes.fromhex("1719"),
-              "55AA":bytes.fromhex("55AA"),
-              "AA55":bytes.fromhex("AA55"),
-              "FF00":bytes.fromhex("FF00"),
-              "00FF":bytes.fromhex("00FF"),
-            }
-            for name,needle in needles.items():
-              start=0; count=0
-              while True:
-                i=data.find(needle,start)
-                if i<0: break
-                lo=max(0,i-96); hi=min(len(data),i+len(needle)+192)
-                hex_hits.append({
-                  "path":rel,"marker":name,"offset":i,
-                  "offset_hex":hex(i),
-                  "window_hex":data[lo:hi].hex().upper()
-                })
-                count+=1
-                if count>=100: break
-                start=i+1
-
-          ev.joinpath("30_WINDOWS_FILE_INVENTORY.json").write_text(
-              json.dumps(files,indent=2)+"\n")
-          ev.joinpath("31_WINDOWS_ASCII_HITS.json").write_text(
-              json.dumps(string_hits,indent=2,ensure_ascii=False)+"\n")
-          ev.joinpath("32_WINDOWS_UTF16_HITS.json").write_text(
-              json.dumps(wide_hits,indent=2,ensure_ascii=False)+"\n")
-          ev.joinpath("33_WINDOWS_RAW_MARKER_WINDOWS.json").write_text(
-              json.dumps(hex_hits,indent=2)+"\n")
-
-          summary={
-            "files":len(files),
-            "ascii_hits":len(string_hits),
-            "utf16_hits":len(wide_hits),
-            "raw_marker_windows":len(hex_hits)
-          }
-          ev.joinpath("34_WINDOWS_MINER_SUMMARY.json").write_text(
-              json.dumps(summary,indent=2)+"\n")
-          print(json.dumps(summary,indent=2))
+          ev.joinpath("40_ANDROID_PROTOCOL_HITS.json").write_text(
+            json.dumps(hits,indent=2,ensure_ascii=False)+"\n")
+          ev.joinpath("41_ANDROID_BYTE_ARRAYS.json").write_text(
+            json.dumps(arrays,indent=2,ensure_ascii=False)+"\n")
+          ev.joinpath("42_ANDROID_BINARY_STRINGS.json").write_text(
+            json.dumps(binary_strings,indent=2,ensure_ascii=False)+"\n")
+          ev.joinpath("43_ANDROID_SUMMARY.json").write_text(json.dumps({
+            "protocol_hits":len(hits),
+            "byte_arrays":len(arrays),
+            "binary_string_hits":len(binary_strings)
+          },indent=2)+"\n")
           PY
 
-      - name: Rank read/query candidates and keep writer paths separated
+      - name: Mine Windows C sharp and IL for exact protocol constants
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import os,re,json
+
+          out=Path(os.environ["OUT"])
+          ev=out/"evidence"
+          croot=out/"decompiled/windows-ilspy"
+          ilfile=out/"decompiled/windows-il/dstech.il"
+
+          keywords=[
+            "DSTechAcutatorCommand","ReadSensorPeriperalCommand",
+            "ReadSensorBulkCommand","ReadSensorFifoCommand",
+            "ReadActuatorPeriperalCommand","WriteActuatorPeriperalCommand",
+            "UFE_WRITE_ACTUATOR_COMMAND","UFE_READ_SENSOR_ACTUATOR_COMMAND",
+            "UFE_RESPONSE_READ_SENSOR_ACTUATOR_COMMAND",
+            "UFE_READ_SENSOR_FIFO_COMMAND","UFE_READ_SENSOR_ACTUATOR_BULK_COMMAND",
+            "UFE_RESPONSE_READ_SENSOR_ACTUATOR_BULK_COMMAND",
+            "USBHID","HidD_SetOutputReport","HidD_GetInputReport",
+            "HidD_SetFeature","HidRead","HidDataReceived",
+            "VendorID","ProductID","6324","1719","0x6324","0x1719",
+            "55AA","AA55","FF00",
+            "firmware","upgrade","flash","erase"
+          ]
+
+          csharp_hits=[]
+          enum_blocks=[]
+          numeric_lines=[]
+          method_windows=[]
+
+          if croot.exists():
+            for p in croot.rglob("*.cs"):
+              try: txt=p.read_text(errors="ignore")
+              except: continue
+              rel=str(p.relative_to(out))
+              lines=txt.splitlines()
+
+              for i,line in enumerate(lines):
+                if any(k.lower() in line.lower() for k in keywords):
+                  lo=max(0,i-12); hi=min(len(lines),i+30)
+                  csharp_hits.append({
+                    "path":rel,"line":i+1,
+                    "context":"\n".join(f"{j+1}: {lines[j]}" for j in range(lo,hi))[:20000]
+                  })
+
+                if re.search(r'\b(?:const|static\s+readonly)\b',line) and re.search(r'(?:0x[0-9A-Fa-f]+|\b\d+\b)',line):
+                  if any(k.lower() in ("\n".join(lines[max(0,i-8):min(len(lines),i+9)])).lower()
+                         for k in keywords):
+                    numeric_lines.append({"path":rel,"line":i+1,"text":line.strip()[:3000]})
+
+              for m in re.finditer(r'(?is)\benum\s+([A-Za-z_]\w*)[^{]*\{(.{1,20000}?)\}',txt):
+                name=m.group(1)
+                body=m.group(2)
+                if any(k.lower() in (name+"\n"+body).lower() for k in keywords) or \
+                   any(x in name.lower() for x in ("command","sensor","actuator","hid","ufe")):
+                  enum_blocks.append({
+                    "path":rel,
+                    "line":txt.count("\n",0,m.start())+1,
+                    "name":name,
+                    "body":body[:18000]
+                  })
+
+              # Method bodies whose name suggests actual transport/packet construction.
+              for m in re.finditer(
+                r'(?m)^\s*(?:public|private|protected|internal)\s+(?:static\s+)?'
+                r'[^\n{;=]+\b(ReadSensor\w*|WriteActuator\w*|HidRead\w*|HidWrite\w*|'
+                r'Send\w*|Receive\w*|Build\w*Command\w*|appendRead\w*|appendWrite\w*)\s*\(',
+                txt,re.I):
+                start=m.start()
+                # bounded source window rather than whole proprietary file
+                snippet=txt[start:start+16000]
+                method_windows.append({
+                  "path":rel,
+                  "line":txt.count("\n",0,start)+1,
+                  "method":m.group(1),
+                  "snippet":snippet
+                })
+
+          il_hits=[]
+          if ilfile.exists():
+            lines=ilfile.read_text(errors="ignore").splitlines()
+            for i,line in enumerate(lines):
+              if any(k.lower() in line.lower() for k in keywords):
+                lo=max(0,i-18); hi=min(len(lines),i+45)
+                il_hits.append({
+                  "line":i+1,
+                  "context":"\n".join(f"{j+1}: {lines[j]}" for j in range(lo,hi))[:22000]
+                })
+
+          ev.joinpath("50_WINDOWS_CSHARP_HITS.json").write_text(
+            json.dumps(csharp_hits,indent=2,ensure_ascii=False)+"\n")
+          ev.joinpath("51_WINDOWS_ENUM_BLOCKS.json").write_text(
+            json.dumps(enum_blocks,indent=2,ensure_ascii=False)+"\n")
+          ev.joinpath("52_WINDOWS_NUMERIC_CONSTANTS.json").write_text(
+            json.dumps(numeric_lines,indent=2,ensure_ascii=False)+"\n")
+          ev.joinpath("53_WINDOWS_METHOD_WINDOWS.json").write_text(
+            json.dumps(method_windows,indent=2,ensure_ascii=False)+"\n")
+          ev.joinpath("54_WINDOWS_IL_HITS.json").write_text(
+            json.dumps(il_hits,indent=2,ensure_ascii=False)+"\n")
+          ev.joinpath("55_WINDOWS_SUMMARY.json").write_text(json.dumps({
+            "csharp_hits":len(csharp_hits),
+            "enum_blocks":len(enum_blocks),
+            "numeric_constants":len(numeric_lines),
+            "method_windows":len(method_windows),
+            "il_hits":len(il_hits)
+          },indent=2)+"\n")
+          PY
+
+      - name: Classify candidate read paths without enabling live commands
         shell: bash
         run: |
           set -euo pipefail
@@ -456,80 +441,69 @@ jobs:
           out=Path(os.environ["OUT"])
           ev=out/"evidence"
 
-          def load(name):
+          def load(name,default):
             p=ev/name
-            return json.loads(p.read_text(errors="ignore")) if p.exists() else []
+            if not p.exists(): return default
+            return json.loads(p.read_text(errors="ignore"))
 
-          android_calls=load("21_ANDROID_USB_CALL_HITS.json")
-          android_hits=load("20_ANDROID_TEXT_HITS.json")
-          arrays=load("22_ANDROID_BYTE_ARRAY_CANDIDATES.json")
-          win_ascii=load("31_WINDOWS_ASCII_HITS.json")
-          win_wide=load("32_WINDOWS_UTF16_HITS.json")
-          raw=load("33_WINDOWS_RAW_MARKER_WINDOWS.json")
+          enums=load("51_WINDOWS_ENUM_BLOCKS.json",[])
+          nums=load("52_WINDOWS_NUMERIC_CONSTANTS.json",[])
+          methods=load("53_WINDOWS_METHOD_WINDOWS.json",[])
+          csharp=load("50_WINDOWS_CSHARP_HITS.json",[])
+          android=load("40_ANDROID_PROTOCOL_HITS.json",[])
 
-          read_words=("read","get","query","request","status","load","sync","fetch","receive","recv")
-          write_words=("write","set","save","upgrade","flash","erase","reset","update","send","store","download")
+          read_words=("read","get","query","status","sensor","receive","recv","load")
+          write_words=("write","set","save","flash","erase","upgrade","update","reset","unlock")
 
-          candidates=[]
-          dangerous=[]
+          read_candidates=[]
+          unsafe_candidates=[]
 
-          for r in android_calls+android_hits:
-            blob=(r.get("context") or r.get("line_text") or "").lower()
-            row={"source":"android","path":r.get("path"),"line":r.get("line"),"text":blob[:12000]}
-            if any(w in blob for w in write_words):
-              dangerous.append(row)
+          for row in enums+nums+methods+csharp+android:
+            blob=json.dumps(row,ensure_ascii=False).lower()
             if any(w in blob for w in read_words):
-              candidates.append(row)
-
-          for r in win_ascii+win_wide:
-            blob=(r.get("string") or "").lower()
-            row={"source":"windows","path":r.get("path"),"text":r.get("string","")[:4000]}
+              read_candidates.append(row)
             if any(w in blob for w in write_words):
-              dangerous.append(row)
-            if any(w in blob for w in read_words):
-              candidates.append(row)
+              unsafe_candidates.append(row)
 
-          decision={
-            "production_fingerprint":{"vid":"6324","pid":"1719","usage_page":"FF00","usage":"55AA"},
-            "read_query_candidates":candidates[:2000],
-            "writer_or_upgrade_candidates":dangerous[:2000],
-            "android_byte_arrays":arrays[:2000],
-            "windows_raw_marker_windows":raw[:2000],
+          verdict={
+            "known_live_usb":{"vid":"6324","pid":"1719","usage_page":"FF00","usage":"55AA"},
+            "read_candidate_count":len(read_candidates),
+            "unsafe_or_write_candidate_count":len(unsafe_candidates),
+            "read_candidates":read_candidates[:500],
+            "unsafe_or_write_candidates":unsafe_candidates[:500],
             "live_board_commands_allowed":False,
-            "full_flash_readback_proven":False,
-            "rule":"Do not promote any host-to-device opcode to live use until its semantics are grounded by official-client code and classified non-destructive."
+            "firmware_readback_proven":False,
+            "promotion_rule":"A command may be tested live only after official-client decompilation grounds its exact command id, frame layout, response semantics, and shows no erase/write/unlock side effect."
           }
-          ev.joinpath("40_PROTOCOL_TRIAGE.json").write_text(
-              json.dumps(decision,indent=2,ensure_ascii=False)+"\n")
+          ev.joinpath("60_PROTOCOL_VERDICT.json").write_text(
+            json.dumps(verdict,indent=2,ensure_ascii=False)+"\n")
 
-          lines=[
-            "OKN R95 OFFLINE PROTOCOL TRIAGE",
+          summary=[
+            "OKN R96 OFFLINE PROTOCOL DECOMPILER",
             "LIVE_BOARD_COMMANDS_ALLOWED=false",
-            "FULL_FLASH_READBACK_PROVEN=false",
-            f"READ_QUERY_CANDIDATES={len(candidates)}",
-            f"WRITER_OR_UPGRADE_CANDIDATES={len(dangerous)}",
-            f"ANDROID_BYTE_ARRAYS={len(arrays)}",
-            f"WINDOWS_RAW_MARKER_WINDOWS={len(raw)}",
-            "NEXT_GATE=Manual evidence review of official-client transport before any live OUT/SET_REPORT.",
+            "FIRMWARE_READBACK_PROVEN=false",
+            f"READ_CANDIDATES={len(read_candidates)}",
+            f"UNSAFE_OR_WRITE_CANDIDATES={len(unsafe_candidates)}",
+            "NEXT_GATE=Review exact enums/constants/methods before constructing any live host-to-device packet."
           ]
-          ev.joinpath("41_R95_SUMMARY.txt").write_text("\n".join(lines)+"\n")
-          print("\n".join(lines))
+          ev.joinpath("61_R96_SUMMARY.txt").write_text("\n".join(summary)+"\n")
+          print("\n".join(summary))
           PY
 
-      - name: Build compact review bundle
+      - name: Build compact evidence artifact
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p "$OUT/review"
           cp -a "$OUT/evidence/." "$OUT/review/"
-          {
-            echo "R95_OFFLINE_ONLY=true"
-            echo "TARGET_USB=6324:1719"
-            echo "TARGET_HID_USAGE=FF00:55AA"
-            echo "BOARD_USB_ACCESSED=false"
-            echo "HOST_TO_DEVICE_COMMANDS_SENT=false"
-            echo "FLASH_WRITE=false"
-          } > "$OUT/review/99_SAFETY_ATTESTATION.txt"
+
+          cat > "$OUT/review/99_SAFETY_ATTESTATION.txt" <<'EOF'
+          OFFLINE_STATIC_ONLY=true
+          BOARD_USB_ACCESSED=false
+          HOST_TO_DEVICE_COMMANDS_SENT=false
+          HID_SET_REPORT_LIVE=false
+          FLASH_ERASE_WRITE=false
+          FULL_FIRMWARE_READBACK_PROVEN=false
+          EOF
 
           (
             cd "$OUT/review"
@@ -541,30 +515,31 @@ jobs:
         shell: bash
         run: |
           {
-            echo "## OKN R95 GoloPine/DSTech Protocol Miner"
+            echo "## OKN R96 Official Client Protocol Decompiler"
             echo
-            echo "- Offline static analysis only."
-            echo "- No board USB access."
-            echo "- No SET_REPORT / Output transfer / erase / write / unlock."
-            echo "- Production fingerprint target: VID:PID 6324:1719, HID usage FF00:55AA."
+            echo "- Offline-only interoperability analysis."
+            echo "- No board USB access and no live host-to-device packets."
             echo
-            if [ -f "$OUT/evidence/03_DOWNLOAD_STATUS.txt" ]; then
-              echo '```text'
-              cat "$OUT/evidence/03_DOWNLOAD_STATUS.txt"
-              echo '```'
-            fi
-            if [ -f "$OUT/evidence/41_R95_SUMMARY.txt" ]; then
-              echo '```text'
-              cat "$OUT/evidence/41_R95_SUMMARY.txt"
-              echo '```'
-            fi
+            for f in \
+              "$OUT/evidence/04_SELECTED_BINARIES.txt" \
+              "$OUT/evidence/28_WINDOWS_DECOMPILER_STATUS.txt" \
+              "$OUT/evidence/43_ANDROID_SUMMARY.json" \
+              "$OUT/evidence/55_WINDOWS_SUMMARY.json" \
+              "$OUT/evidence/61_R96_SUMMARY.txt"; do
+              if [ -f "$f" ]; then
+                echo "### $(basename "$f")"
+                echo '```text'
+                cat "$f"
+                echo '```'
+              fi
+            done
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Upload R95 protocol evidence
+      - name: Upload R96 protocol evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: R95-GOLOPINE-DSTECH-PROTOCOL-EVIDENCE
-          path: /tmp/okn-r95/review
+          name: R96-OFFICIAL-CLIENT-PROTOCOL-EVIDENCE
+          path: /tmp/okn-r96/review
           if-no-files-found: error
           retention-days: 30
