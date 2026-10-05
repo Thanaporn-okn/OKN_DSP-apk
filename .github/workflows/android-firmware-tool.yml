@@ -1,4 +1,4 @@
-name: OKN R106 MEGA Protected Method Recovery OFFLINE ONLY
+name: OKN R107 MEGA Protector Unwrap STATIC OFFLINE ONLY
 
 on:
   push:
@@ -12,7 +12,7 @@ permissions:
   actions: read
 
 concurrency:
-  group: okn-r106-protected-method-recovery-${{ github.ref }}
+  group: okn-r107-protector-unwrap-${{ github.ref }}
   cancel-in-progress: true
 
 env:
@@ -23,15 +23,15 @@ env:
   FLASH_ALLOWED: "NO"
 
 jobs:
-  inspect_metadata:
-    name: 1 - Metadata + stub + protector inspection
+  resources:
+    name: 1 - Raw PE managed-resource recovery
     runs-on: ubuntu-24.04
-    timeout-minutes: 35
+    timeout-minutes: 30
     env:
-      OUT: /tmp/r106-metadata
+      OUT: /tmp/r107-resources
 
     steps:
-      - name: Fail-closed safety gate
+      - name: Safety gate and setup
         shell: bash
         run: |
           set -euo pipefail
@@ -40,28 +40,23 @@ jobs:
           test "$FLASH_ERASE_WRITE" = "NO"
           test "$FLASH_ALLOWED" = "NO"
           rm -rf "$OUT"
-          mkdir -p "$OUT"/{downloads,pkg,decompiled,il,evidence,resource-dump}
+          mkdir -p "$OUT"/{downloads,pkg,evidence,blobs}
+
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            unzip p7zip-full file binutils jq curl mono-utils python3 python3-pip
+          python3 -m pip install --break-system-packages --quiet pefile dnfile
+
           cat > "$OUT/evidence/00_SCOPE.txt" <<'EOF'
-          REVISION=R106
+          REVISION=R107
+          JOB=RAW_MANAGED_RESOURCES
           MODE=OFFLINE_STATIC_ONLY
-          TARGET_USB=6324:1719
-          TARGET_HID_USAGE=FF00:55AA
-          UPDATE_COMMAND_THREAD_TOKEN=0x0600082C
-          UPDATE_COMMAND_THREAD_RVA=0x0000A3F4
+          TARGET_EXECUTED=false
           BOARD_USB_ACCESS=NO
           HOST_TO_DEVICE_USB=NO
           FLASH_ERASE_WRITE=NO
           FLASH_ALLOWED=NO
           EOF
-
-      - name: Install analysis utilities
-        shell: bash
-        run: |
-          set -euo pipefail
-          sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends \
-            unzip p7zip-full file binutils jq curl mono-utils python3 python3-pip
-          python3 -m pip install --break-system-packages --quiet pefile dnfile capstone
 
       - name: Download official Windows client
         shell: bash
@@ -69,275 +64,239 @@ jobs:
           set -euo pipefail
           curl --fail --location --retry 4 --retry-all-errors \
             --connect-timeout 20 --max-time 240 \
-            --user-agent "Mozilla/5.0 OKN-R106-Interop-Research" \
+            --user-agent "Mozilla/5.0 OKN-R107-Static-Research" \
             --referer "https://golodsp.com/7%E9%80%9A%E9%81%93%E9%9F%B3%E9%A2%91%E5%89%8D%E7%BA%A7/" \
             --output "$OUT/downloads/windows.zip" "$WINDOWS_URL"
+
           7z x -y "$OUT/downloads/windows.zip" -o"$OUT/pkg" >/dev/null
-          EXE="$(find "$OUT/pkg" -type f -iname '*.exe' ! -path '*/__MACOSX/*' ! -name '._*' -size +100k | sort | head -n1)"
+          EXE="$(
+            find "$OUT/pkg" -type f -iname '*.exe' \
+              ! -path '*/__MACOSX/*' ! -name '._*' -size +100k \
+              | sort | head -n1
+          )"
           test -n "$EXE"
           cp "$EXE" "$OUT/dstech.exe"
+
           {
             file "$OUT/dstech.exe"
             sha256sum "$OUT/dstech.exe"
             stat -c 'SIZE=%s' "$OUT/dstech.exe"
           } > "$OUT/evidence/01_IDENTITY.txt"
 
-      - name: Decompile whole assembly and raw IL
+      - name: Enumerate manifest with monodis
         shell: bash
         run: |
           set -euo pipefail
-          export PATH="$PATH:$HOME/.dotnet/tools"
-          if ! command -v ilspycmd >/dev/null 2>&1; then
-            dotnet tool install --global ilspycmd >/dev/null
-          fi
-          ilspycmd --project --outputdir "$OUT/decompiled" "$OUT/dstech.exe" \
-            > "$OUT/evidence/10_ILSPY_CSHARP_STDOUT.txt" \
-            2> "$OUT/evidence/11_ILSPY_CSHARP_STDERR.txt"
-          ilspycmd --ilcode "$OUT/dstech.exe" > "$OUT/il/all.il" \
-            2> "$OUT/evidence/12_ILSPY_IL_STDERR.txt"
-          ilspycmd --version > "$OUT/evidence/13_ILSPY_VERSION.txt" 2>&1
+          set +e
+          monodis --manifest "$OUT/dstech.exe" \
+            > "$OUT/evidence/10_MONODIS_MANIFEST.txt" \
+            2> "$OUT/evidence/11_MONODIS_MANIFEST_STDERR.txt"
+          RC=$?
+          set -e
+          echo "MONODIS_MANIFEST_RC=$RC" > "$OUT/evidence/12_MONODIS_STATUS.txt"
 
-      - name: Fingerprint protector and runtime-restoration APIs
-        shell: bash
-        run: |
-          set -euo pipefail
-          strings -a -n 4 "$OUT/dstech.exe" > "$OUT/evidence/20_ASCII_STRINGS.txt"
-          strings -el -n 4 "$OUT/dstech.exe" > "$OUT/evidence/21_UTF16_STRINGS.txt" || true
-          python3 - <<'PY'
-          from pathlib import Path
-          import os,json
-          out=Path(os.environ['OUT']); ev=out/'evidence'
-          blobs=[]
-          for name in ('20_ASCII_STRINGS.txt','21_UTF16_STRINGS.txt'):
-            p=ev/name
-            if p.exists(): blobs += p.read_text(errors='ignore').splitlines()
-          fingerprints=[
-            'Eazfuscator','Confuser','Babel','Dotfuscator','SmartAssembly',
-            'AgileDotNet','.NET Reactor','CryptoObfuscator','CodeVeil',
-            'VirtualProtect','VirtualAlloc','GetProcAddress','LoadLibrary',
-            'RuntimeHelpers','PrepareMethod','GetFunctionPointer','Marshal.Copy',
-            'GetManifestResourceStream','AssemblyResolve','ResourceManager',
-            'DeflateStream','GZipStream','CryptoStream','Rijndael','AesManaged',
-            'ProtectedMemory','MemoryStream','BinaryReader'
-          ]
-          hits=[]
-          for s in blobs:
-            ms=[t for t in fingerprints if t.lower() in s.lower()]
-            if ms: hits.append({'terms':ms,'string':s[:3000]})
-          (ev/'22_PROTECTOR_FINGERPRINT_HITS.json').write_text(
-            json.dumps(hits,indent=2,ensure_ascii=False)+'\n')
-          print('fingerprint_hits',len(hits))
-          PY
-
-      - name: Build precise MethodDef stub map
+      - name: Extract managed resources directly from PE COR20 directory
         shell: bash
         run: |
           set -euo pipefail
           python3 - <<'PY'
           from pathlib import Path
-          import os,json,re
-          import dnfile, pefile
+          import os,struct,json,hashlib,re
+          import pefile,dnfile
 
-          out=Path(os.environ['OUT']); ev=out/'evidence'; exe=out/'dstech.exe'
+          out=Path(os.environ["OUT"])
+          ev=out/"evidence"
+          blobdir=out/"blobs"
+          exe=out/"dstech.exe"
+          raw=exe.read_bytes()
           pe=pefile.PE(str(exe),fast_load=False)
           dn=dnfile.dnPE(str(exe))
-          raw=exe.read_bytes()
+
+          # IMAGE_DIRECTORY_ENTRY_COM_DESCRIPTOR = 14.
+          com=pe.OPTIONAL_HEADER.DATA_DIRECTORY[14]
+          cor_rva=int(com.VirtualAddress)
+          cor_off=pe.get_offset_from_rva(cor_rva)
+
+          # IMAGE_COR20_HEADER:
+          # +24 Resources RVA, +28 Resources Size.
+          res_rva,res_size=struct.unpack_from("<II",raw,cor_off+24)
+          res_off=pe.get_offset_from_rva(res_rva) if res_rva else None
 
           rows=[]
-          stubs=[]
-          key=[]
-          if dn.net and dn.net.mdtables and dn.net.mdtables.MethodDef:
-            for rid,m in enumerate(dn.net.mdtables.MethodDef.rows,1):
-              name=str(m.Name)
-              rva=int(m.Rva or 0)
-              token=0x06000000|rid
-              body=b''
-              file_off=None
-              if rva:
-                try:
-                  file_off=pe.get_offset_from_rva(rva)
-                  body=raw[file_off:file_off+32]
-                except: pass
-              # Recognize the protected method body seen repeatedly:
-              # tiny/fat header then nop,nop,nop,ret. Keep raw bytes for audit.
-              stub_like=(b'\x00\x00\x00\x2a' in body[:20])
-              row={
-                'rid':rid,'token':token,'token_hex':hex(token),
-                'name':name,'rva':rva,'rva_hex':hex(rva),
-                'file_offset':file_off,
-                'file_offset_hex':hex(file_off) if file_off is not None else None,
-                'raw32':body.hex().upper(),
-                'stub_like':stub_like
-              }
-              rows.append(row)
-              if stub_like: stubs.append(row)
-              if name in {
-                'UpdateCommandThread','HidRead','HidDataReceived','Read','Write',
-                'Send','getFeature','setFeature','appendReadSensorBulkCommand',
-                'appendReadSensorFifoCommand','appendReadSensorCommand'
-              }:
-                key.append(row)
-          (ev/'30_METHODDEF_MAP.json').write_text(json.dumps(rows,indent=2)+'\n')
-          (ev/'31_STUB_METHODS.json').write_text(json.dumps(stubs,indent=2)+'\n')
-          (ev/'32_KEY_METHODS.json').write_text(json.dumps(key,indent=2)+'\n')
-          (ev/'33_STUB_SUMMARY.json').write_text(json.dumps({
-            'method_count':len(rows),'stub_like_count':len(stubs),
-            'stub_fraction':(len(stubs)/len(rows) if rows else 0),
-            'update_command_thread':[r for r in rows if r['name']=='UpdateCommandThread']
-          },indent=2)+'\n')
-          PY
+          table=getattr(getattr(getattr(dn,"net",None),"mdtables",None),"ManifestResource",None)
+          manifest_rows=getattr(table,"rows",[]) if table else []
 
-      - name: Extract protector helper classes and module initialization IL
-        shell: bash
-        run: |
-          set -euo pipefail
-          python3 - <<'PY'
-          from pathlib import Path
-          import os,re,json
-          out=Path(os.environ['OUT']); ev=out/'evidence'
-          il=(out/'il/all.il').read_text(errors='ignore')
-          needles=[
-            'q71r2Rj8SiD9GF1BI50','cIl9ffeRGV4htojFrSb',
-            "<Module>{93326db6-bd6b-49d7-bcbb-0b5f9f9d91b4}",
-            'N9jju8llVi','GlNjyV3Xag','ziUjWiyQoN','eUxozINRQ9'
-          ]
-          windows=[]
-          lines=il.splitlines()
-          for i,line in enumerate(lines):
-            found=[n for n in needles if n.lower() in line.lower()]
-            if not found: continue
-            lo=max(0,i-120); hi=min(len(lines),i+500)
-            windows.append({
-              'line':i+1,'terms':found,
-              'context':'\n'.join(f'{j+1}: {lines[j]}' for j in range(lo,hi))[:120000]
-            })
-          (ev/'40_PROTECTOR_HELPER_IL_WINDOWS.json').write_text(
-            json.dumps(windows,indent=2,ensure_ascii=False)+'\n')
-          print('helper_windows',len(windows))
-          PY
-
-      - name: Extract managed resource blobs without executing assembly
-        shell: bash
-        run: |
-          set -euo pipefail
-          cat > "$OUT/ResourceDump.cs" <<'CS'
-          using System;
-          using System.IO;
-          using System.Reflection.Metadata;
-          using System.Reflection.PortableExecutable;
-          using System.Text.Json;
-          using System.Collections.Generic;
-
-          class P {
-            static void Main(string[] args) {
-              var path=args[0]; var outDir=args[1]; Directory.CreateDirectory(outDir);
-              using var fs=File.OpenRead(path); using var pe=new PEReader(fs);
-              var md=pe.GetMetadataReader(); var ch=pe.PEHeaders.CorHeader;
-              var list=new List<object>();
-              if(ch == null) { File.WriteAllText(Path.Combine(outDir,"manifest.json"),"[]"); return; }
-              var resRva=ch.ResourcesDirectory.RelativeVirtualAddress;
-              foreach(var h in md.ManifestResources) {
-                var r=md.GetManifestResource(h); var name=md.GetString(r.Name);
-                bool embedded=r.Implementation.IsNil;
-                int len=0; string file=""; string err="";
-                if(embedded) {
-                  try {
-                    var block=pe.GetSectionData(resRva + (int)r.Offset);
-                    var reader=block.GetReader(); len=reader.ReadInt32();
-                    if(len>=0 && len<=reader.RemainingBytes) {
-                      var bytes=reader.ReadBytes(len);
-                      var safe=string.Join("_", name.Split(Path.GetInvalidFileNameChars()));
-                      file=safe+".bin"; File.WriteAllBytes(Path.Combine(outDir,file),bytes);
-                    }
-                  } catch(Exception ex) { err=ex.GetType().Name+":"+ex.Message; }
-                }
-                list.Add(new { name, embedded, offset=(uint)r.Offset, length=len, file, error=err });
-              }
-              File.WriteAllText(Path.Combine(outDir,"manifest.json"),
-                JsonSerializer.Serialize(list,new JsonSerializerOptions{WriteIndented=true}));
+          for idx,r in enumerate(manifest_rows,1):
+            name=str(r.Name)
+            rel_off=int(r.Offset or 0)
+            safe=re.sub(r'[^A-Za-z0-9._-]+','_',name).strip('_') or f"resource_{idx}"
+            item={
+              "rid":idx,
+              "name":name,
+              "relative_offset":rel_off,
+              "relative_offset_hex":hex(rel_off),
+              "resources_rva":hex(res_rva),
+              "resources_size":res_size,
+              "extracted":False
             }
-          }
-          CS
-          cat > "$OUT/ResourceDump.csproj" <<'XML'
-          <Project Sdk="Microsoft.NET.Sdk">
-            <PropertyGroup><OutputType>Exe</OutputType><TargetFramework>net8.0</TargetFramework></PropertyGroup>
-          </Project>
-          XML
-          (cd "$OUT" && dotnet run -c Release --project ResourceDump.csproj -- "$OUT/dstech.exe" "$OUT/resource-dump") \
-            > "$OUT/evidence/50_RESOURCE_DUMP_STDOUT.txt" 2> "$OUT/evidence/51_RESOURCE_DUMP_STDERR.txt"
-          cp "$OUT/resource-dump/manifest.json" "$OUT/evidence/52_MANIFEST_RESOURCES.json"
 
-      - name: Analyze resource blobs and search method token/RVA keys
+            if res_off is None or rel_off+4 > res_size:
+              item["error"]="offset_outside_COR20_resources"
+              rows.append(item)
+              continue
+
+            pos=res_off+rel_off
+            if pos+4 > len(raw):
+              item["error"]="offset_outside_file"
+              rows.append(item)
+              continue
+
+            n=struct.unpack_from("<I",raw,pos)[0]
+            if n > res_size-rel_off-4 or pos+4+n > len(raw):
+              item["error"]=f"invalid_length_{n}"
+              rows.append(item)
+              continue
+
+            data=raw[pos+4:pos+4+n]
+            dst=blobdir/f"{idx:03d}_{safe}.bin"
+            dst.write_bytes(data)
+            item.update({
+              "extracted":True,
+              "length":n,
+              "file":dst.name,
+              "sha256":hashlib.sha256(data).hexdigest(),
+              "head64":data[:64].hex().upper(),
+              "tail64":data[-64:].hex().upper() if data else ""
+            })
+            rows.append(item)
+
+          summary={
+            "cor20_rva":hex(cor_rva),
+            "resources_rva":hex(res_rva),
+            "resources_size":res_size,
+            "manifest_row_count":len(rows),
+            "extracted_count":sum(1 for x in rows if x["extracted"])
+          }
+          (ev/"20_COR20_RESOURCE_SUMMARY.json").write_text(json.dumps(summary,indent=2)+"\n")
+          (ev/"21_MANIFEST_RESOURCE_MAP.json").write_text(
+            json.dumps(rows,indent=2,ensure_ascii=False)+"\n")
+          print(json.dumps(summary,indent=2))
+          PY
+
+      - name: Analyze resource blobs and common static transforms
         shell: bash
         run: |
           set -euo pipefail
           python3 - <<'PY'
           from pathlib import Path
-          import os,json,math,collections,zlib,gzip,bz2,lzma,hashlib,struct,re
-          out=Path(os.environ['OUT']); ev=out/'evidence'; rr=out/'resource-dump'
-          token=0x0600082C; rva=0xA3F4
-          pats={
-            'UpdateCommandThread_token_LE':struct.pack('<I',token),
-            'UpdateCommandThread_RVA_LE':struct.pack('<I',rva),
-            'BSJB':b'BSJB','MZ':b'MZ','PE':b'PE\x00\x00'
-          }
+          import os,json,hashlib,math,collections,struct,zlib,gzip,bz2,lzma,re
+
+          out=Path(os.environ["OUT"])
+          ev=out/"evidence"
+          blobdir=out/"blobs"
+
           def entropy(data):
-            if not data:return 0
+            if not data: return 0.0
             c=collections.Counter(data); n=len(data)
             return -sum((v/n)*math.log2(v/n) for v in c.values())
-          rows=[]; keys=[]
-          for p in rr.glob('*.bin'):
+
+          probes={
+            "UPDATE_TOKEN_LE":struct.pack("<I",0x0600082C),
+            "UPDATE_RVA_LE":struct.pack("<I",0x0000A3F4),
+            "BSJB":b"BSJB",
+            "MZ":b"MZ",
+            "PE":b"PE\x00\x00",
+            "GZIP":b"\x1f\x8b",
+            "ZIP":b"PK\x03\x04"
+          }
+
+          rows=[]
+          transforms=[]
+
+          for p in sorted(blobdir.glob("*.bin")):
             data=p.read_bytes()
-            row={'file':p.name,'size':len(data),'sha256':hashlib.sha256(data).hexdigest(),
-                 'entropy':entropy(data),'head64':data[:64].hex().upper()}
-            found=[]
-            for name,pat in pats.items():
-              pos=data.find(pat)
-              if pos>=0:
-                found.append({'pattern':name,'offset':pos,'offset_hex':hex(pos)})
-                keys.append({'file':p.name,'pattern':name,'offset':pos})
-            row['key_hits']=found
-            attempts=[]
-            funcs=[('zlib',zlib.decompress),('gzip',gzip.decompress),('bz2',bz2.decompress),('lzma',lzma.decompress)]
-            for name,fn in funcs:
+            hits=[]
+            for name,pat in probes.items():
+              start=0
+              while True:
+                i=data.find(pat,start)
+                if i<0: break
+                hits.append({"pattern":name,"offset":i,"offset_hex":hex(i)})
+                start=i+1
+
+            strings=[]
+            for m in re.finditer(rb'[\x20-\x7e]{5,}',data):
+              s=m.group(0).decode("ascii",errors="ignore")
+              if any(k in s.lower() for k in (
+                "resource","protect","crypto","deflate","gzip","aes",
+                "method","module","runtime","virtualprotect","marshal"
+              )):
+                strings.append(s[:1000])
+
+            row={
+              "file":p.name,
+              "size":len(data),
+              "sha256":hashlib.sha256(data).hexdigest(),
+              "entropy":entropy(data),
+              "probe_hits":hits,
+              "interesting_strings":strings[:200]
+            }
+
+            codecs=[
+              ("zlib",lambda b:zlib.decompress(b)),
+              ("raw_deflate",lambda b:zlib.decompress(b,-15)),
+              ("gzip",lambda b:gzip.decompress(b)),
+              ("bz2",lambda b:bz2.decompress(b)),
+              ("lzma",lambda b:lzma.decompress(b)),
+            ]
+            decoded=[]
+            for name,fn in codecs:
               try:
                 dec=fn(data)
-                if dec and len(dec)>0:
-                  op=rr/(p.name+'.'+name+'.dec')
-                  op.write_bytes(dec)
-                  attempts.append({'codec':name,'ok':True,'size':len(dec),'head64':dec[:64].hex().upper()})
-              except Exception: pass
-            # raw-deflate best effort
-            try:
-              dec=zlib.decompress(data,-15)
-              if dec:
-                op=rr/(p.name+'.deflate.dec');op.write_bytes(dec)
-                attempts.append({'codec':'raw-deflate','ok':True,'size':len(dec),'head64':dec[:64].hex().upper()})
-            except Exception: pass
-            row['decompression']=attempts
+                if not dec: continue
+                dname=f"{p.name}.{name}.decoded"
+                (blobdir/dname).write_bytes(dec)
+                dh=[]
+                for pn,pat in probes.items():
+                  i=dec.find(pat)
+                  if i>=0: dh.append({"pattern":pn,"offset":i})
+                decoded.append({
+                  "codec":name,"size":len(dec),
+                  "sha256":hashlib.sha256(dec).hexdigest(),
+                  "entropy":entropy(dec),
+                  "head64":dec[:64].hex().upper(),
+                  "probe_hits":dh
+                })
+              except Exception:
+                pass
+
+            row["decoded_variants"]=decoded
             rows.append(row)
-          (ev/'53_RESOURCE_BLOB_ANALYSIS.json').write_text(json.dumps(rows,indent=2)+'\n')
-          (ev/'54_RESOURCE_KEY_HITS.json').write_text(json.dumps(keys,indent=2)+'\n')
-          print('resource_blobs',len(rows),'key_hits',len(keys))
+
+          (ev/"22_RESOURCE_BLOB_ANALYSIS.json").write_text(
+            json.dumps(rows,indent=2,ensure_ascii=False)+"\n")
+          print("resource_blobs",len(rows))
+          print("decoded_variants",sum(len(x["decoded_variants"]) for x in rows))
           PY
 
-      - name: Upload metadata/protector evidence
+      - name: Upload resource evidence even on partial failure
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: r106-metadata-protector-evidence
-          path: /tmp/r106-metadata/evidence
-          if-no-files-found: error
+          name: r107-resource-evidence
+          path: /tmp/r107-resources/evidence
+          if-no-files-found: warn
           retention-days: 7
 
-  carve_text:
-    name: 2 - High-entropy text + encrypted-store carving
+  protector:
+    name: 2 - Module initializer + protector call graph
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 35
     env:
-      OUT: /tmp/r106-carve
+      OUT: /tmp/r107-protector
 
     steps:
-      - name: Safety gate and download client
+      - name: Safety gate and setup
         shell: bash
         run: |
           set -euo pipefail
@@ -345,109 +304,329 @@ jobs:
           test "$HOST_TO_DEVICE_USB" = "NO"
           test "$FLASH_ERASE_WRITE" = "NO"
           test "$FLASH_ALLOWED" = "NO"
-          rm -rf "$OUT"; mkdir -p "$OUT"/{downloads,pkg,evidence}
+          rm -rf "$OUT"
+          mkdir -p "$OUT"/{downloads,pkg,il,decompiled,evidence}
+
           sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends unzip p7zip-full file curl python3 python3-pip
+          sudo apt-get install -y --no-install-recommends \
+            unzip p7zip-full file binutils jq curl mono-utils python3 python3-pip
           python3 -m pip install --break-system-packages --quiet pefile dnfile
-          curl --fail --location --retry 4 --retry-all-errors --connect-timeout 20 --max-time 240 \
-            --user-agent "Mozilla/5.0 OKN-R106-Carver" \
+
+          cat > "$OUT/evidence/00_SCOPE.txt" <<'EOF'
+          REVISION=R107
+          JOB=PROTECTOR_CALLGRAPH
+          MODE=OFFLINE_STATIC_ONLY
+          TARGET_EXECUTED=false
+          BOARD_USB_ACCESS=NO
+          HOST_TO_DEVICE_USB=NO
+          FLASH_ERASE_WRITE=NO
+          EOF
+
+      - name: Download and decompile
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 4 --retry-all-errors \
+            --connect-timeout 20 --max-time 240 \
+            --user-agent "Mozilla/5.0 OKN-R107-Static-Research" \
             --referer "https://golodsp.com/7%E9%80%9A%E9%81%93%E9%9F%B3%E9%A2%91%E5%89%8D%E7%BA%A7/" \
             --output "$OUT/downloads/windows.zip" "$WINDOWS_URL"
           7z x -y "$OUT/downloads/windows.zip" -o"$OUT/pkg" >/dev/null
-          EXE="$(find "$OUT/pkg" -type f -iname '*.exe' ! -path '*/__MACOSX/*' ! -name '._*' -size +100k | sort | head -n1)"
+          EXE="$(
+            find "$OUT/pkg" -type f -iname '*.exe' \
+              ! -path '*/__MACOSX/*' ! -name '._*' -size +100k \
+              | sort | head -n1
+          )"
           cp "$EXE" "$OUT/dstech.exe"
 
-      - name: Build PE section entropy map and token/RVA windows
+          export PATH="$PATH:$HOME/.dotnet/tools"
+          if ! command -v ilspycmd >/dev/null 2>&1; then
+            dotnet tool install --global ilspycmd >/dev/null
+          fi
+
+          ilspycmd --ilcode "$OUT/dstech.exe" > "$OUT/il/all.il" \
+            2> "$OUT/evidence/10_ILSPY_IL_STDERR.txt"
+          ilspycmd --project --outputdir "$OUT/decompiled" "$OUT/dstech.exe" \
+            > "$OUT/evidence/11_ILSPY_CSHARP_STDOUT.txt" \
+            2> "$OUT/evidence/12_ILSPY_CSHARP_STDERR.txt"
+
+      - name: Build exact IL method index and API map
         shell: bash
         run: |
           set -euo pipefail
           python3 - <<'PY'
           from pathlib import Path
-          import os,json,math,collections,struct,hashlib
-          import pefile
-          out=Path(os.environ['OUT']); ev=out/'evidence'; exe=out/'dstech.exe'; data=exe.read_bytes()
-          pe=pefile.PE(str(exe),fast_load=False)
-          def H(b):
-            if not b:return 0
-            c=collections.Counter(b);n=len(b)
-            return -sum((v/n)*math.log2(v/n) for v in c.values())
-          sections=[]; blocks=[]
-          for s in pe.sections:
-            name=s.Name.rstrip(b'\0').decode(errors='ignore')
-            raw=s.get_data(); base=s.PointerToRawData
-            sections.append({'name':name,'raw_offset':base,'raw_size':len(raw),'entropy':H(raw),
-                             'virtual_address':int(s.VirtualAddress),'virtual_size':int(s.Misc_VirtualSize)})
-            if name=='.text':
-              for off in range(0,len(raw),4096):
-                b=raw[off:off+4096]
-                blocks.append({'file_offset':base+off,'file_offset_hex':hex(base+off),
-                               'section_offset':off,'section_offset_hex':hex(off),
-                               'size':len(b),'entropy':H(b),'sha256':hashlib.sha256(b).hexdigest(),
-                               'head32':b[:32].hex().upper()})
-          blocks.sort(key=lambda x:-x['entropy'])
-          pats={
-            'token_0600082C_LE':struct.pack('<I',0x0600082C),
-            'rva_A3F4_LE':struct.pack('<I',0xA3F4),
-            'VID_PID_LE':bytes.fromhex('24631917'),
-            'usage_55AA':bytes.fromhex('AA55')
-          }
-          ph=[]
-          for name,pat in pats.items():
-            start=0
-            while True:
-              i=data.find(pat,start)
-              if i<0:break
-              lo=max(0,i-128);hi=min(len(data),i+256)
-              ph.append({'pattern':name,'offset':i,'offset_hex':hex(i),'context_hex':data[lo:hi].hex().upper()})
-              start=i+1
-          (ev/'10_PE_SECTIONS.json').write_text(json.dumps(sections,indent=2)+'\n')
-          (ev/'11_TOP_ENTROPY_BLOCKS.json').write_text(json.dumps(blocks[:300],indent=2)+'\n')
-          (ev/'12_TOKEN_RVA_BINARY_HITS.json').write_text(json.dumps(ph,indent=2)+'\n')
-          print('token_rva_hits',len(ph))
+          import os,re,json
+
+          out=Path(os.environ["OUT"])
+          ev=out/"evidence"
+          lines=(out/"il/all.il").read_text(errors="ignore").splitlines()
+
+          methods=[]
+          cur=[]
+          in_method=False
+
+          for line in lines:
+            if re.match(r'^\s*\.method\b',line):
+              if cur:
+                cur=[]
+              in_method=True
+              cur=[line]
+              continue
+
+            if in_method:
+              cur.append(line)
+              m=re.match(r'^\s*// end of method (.+?)\s*$',line)
+              if m:
+                key=m.group(1).strip()
+                text="\n".join(cur)
+                methods.append({"key":key,"text":text})
+                cur=[]
+                in_method=False
+
+          api_terms=[
+            "VirtualProtect","VirtualAlloc","GetProcAddress","LoadLibrary",
+            "GetManifestResourceStream","AssemblyResolve","ResourceManager",
+            "DeflateStream","GZipStream","CryptoStream","Rijndael","Aes",
+            "Marshal::Copy","Marshal.Copy","RuntimeHelpers",
+            "PrepareMethod","GetFunctionPointer","BinaryReader","MemoryStream",
+            "GetILAsByteArray","GetMethodBody"
+          ]
+
+          call_re=re.compile(
+            r'\bcall(?:virt)?\s+.*?\s+'
+            r'([A-Za-z0-9_.$<>`/+\'"-]+)::([A-Za-z0-9_.$<>`\'"-]+)\s*\('
+          )
+          ldstr_re=re.compile(r'\bldstr\s+"([^"]*)"')
+
+          index={}
+          api_methods=[]
+          cctors=[]
+
+          for m in methods:
+            text=m["text"]
+            calls=[]
+            for cm in call_re.finditer(text):
+              calls.append(cm.group(1)+"::"+cm.group(2))
+            strings=ldstr_re.findall(text)
+            apis=[t for t in api_terms if t.lower() in text.lower()]
+            row={
+              "key":m["key"],
+              "calls":calls,
+              "ldstr":strings[:500],
+              "api_terms":apis,
+              "text":text
+            }
+            index[m["key"]]=row
+            if apis:
+              api_methods.append(row)
+            if m["key"].endswith("::.cctor"):
+              cctors.append(row)
+
+          (ev/"20_IL_METHOD_INDEX.json").write_text(
+            json.dumps([
+              {k:v for k,v in x.items() if k!="text"}
+              for x in index.values()
+            ],indent=2,ensure_ascii=False)+"\n")
+          (ev/"21_API_BEARING_METHODS.json").write_text(
+            json.dumps(api_methods,indent=2,ensure_ascii=False)+"\n")
+          (ev/"22_ALL_CCTORS.json").write_text(
+            json.dumps(cctors,indent=2,ensure_ascii=False)+"\n")
+
+          print("method_count",len(methods))
+          print("api_bearing_methods",len(api_methods))
+          print("cctor_count",len(cctors))
           PY
 
-      - name: Map protected stub RVAs against high entropy neighborhoods
+      - name: Walk module initializer and protector helper graph
         shell: bash
         run: |
           set -euo pipefail
           python3 - <<'PY'
           from pathlib import Path
-          import os,json,math,collections
+          import os,json,re,collections
+
+          out=Path(os.environ["OUT"])
+          ev=out/"evidence"
+          methods=json.loads((ev/"20_IL_METHOD_INDEX.json").read_text())
+          api_methods=json.loads((ev/"21_API_BEARING_METHODS.json").read_text())
+          cctors=json.loads((ev/"22_ALL_CCTORS.json").read_text())
+
+          by={m["key"]:m for m in methods}
+          by_suffix=collections.defaultdict(list)
+          for key in by:
+            by_suffix[key.split("::")[-1]].append(key)
+
+          seeds=[]
+          for c in cctors:
+            key=c["key"]
+            if "<Module>" in key or key.startswith("<Module>"):
+              seeds.append(key)
+
+          # If obfuscator renamed the module wrapper, also seed every cctor
+          # that directly uses resource/crypto/memory APIs.
+          for c in cctors:
+            if c.get("api_terms") and c["key"] not in seeds:
+              seeds.append(c["key"])
+
+          visited=set()
+          queue=[(s,0) for s in seeds]
+          graph=[]
+
+          while queue:
+            key,depth=queue.pop(0)
+            if key in visited or depth>6:
+              continue
+            visited.add(key)
+            m=by.get(key)
+            if not m:
+              continue
+            graph.append({"depth":depth,**m})
+            for call in m.get("calls",[]):
+              targets=[]
+              if call in by:
+                targets=[call]
+              else:
+                name=call.split("::")[-1]
+                targets=by_suffix.get(name,[])
+              for t in targets[:20]:
+                if t not in visited:
+                  queue.append((t,depth+1))
+
+          # Add every direct API-bearing protector candidate even when
+          # obfuscation prevents exact call resolution.
+          for m in api_methods:
+            if m["key"] not in visited:
+              graph.append({"depth":None,**m})
+
+          (ev/"23_PROTECTOR_GRAPH.json").write_text(
+            json.dumps(graph,indent=2,ensure_ascii=False)+"\n")
+
+          shortlist=[]
+          for g in graph:
+            blob=(json.dumps(g,ensure_ascii=False)).lower()
+            score=0
+            reasons=[]
+            for term,points in (
+              ("virtualprotect",8),("getmanifestresourcestream",7),
+              ("marshal",5),("deflatestream",5),("cryptostream",5),
+              ("rijndael",5),("aes",5),("getfunctionpointer",7),
+              ("preparemethod",7),("binaryreader",2),("memorystream",2)
+            ):
+              if term in blob:
+                score+=points; reasons.append(term)
+            if g.get("ldstr"):
+              score+=1
+            if score:
+              shortlist.append({
+                "key":g["key"],"depth":g.get("depth"),
+                "score":score,"reasons":reasons,
+                "calls":g.get("calls",[]),
+                "ldstr":g.get("ldstr",[]),
+                "api_terms":g.get("api_terms",[])
+              })
+
+          shortlist.sort(key=lambda x:(-x["score"],str(x["depth"]),x["key"]))
+          (ev/"24_PROTECTOR_SHORTLIST.json").write_text(
+            json.dumps(shortlist,indent=2,ensure_ascii=False)+"\n")
+          print("module_seeds",len(seeds))
+          print("graph_methods",len(graph))
+          print("shortlist",len(shortlist))
+          PY
+
+      - name: Build stub map and identify non-stub restoration candidates
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import os,json
           import pefile,dnfile
-          out=Path(os.environ['OUT']);ev=out/'evidence';exe=out/'dstech.exe';raw=exe.read_bytes()
-          pe=pefile.PE(str(exe),fast_load=False);dn=dnfile.dnPE(str(exe))
-          def H(b):
-            if not b:return 0
-            c=collections.Counter(b);n=len(b)
-            return -sum((v/n)*math.log2(v/n) for v in c.values())
+
+          out=Path(os.environ["OUT"])
+          ev=out/"evidence"
+          exe=out/"dstech.exe"
+          raw=exe.read_bytes()
+          pe=pefile.PE(str(exe),fast_load=False)
+          dn=dnfile.dnPE(str(exe))
+
           rows=[]
-          if dn.net and dn.net.mdtables and dn.net.mdtables.MethodDef:
-            for rid,m in enumerate(dn.net.mdtables.MethodDef.rows,1):
-              rva=int(m.Rva or 0)
-              if not rva:continue
-              try: fo=pe.get_offset_from_rva(rva)
-              except:continue
-              b=raw[fo:fo+32]
-              if b'\x00\x00\x00\x2a' not in b[:20]:continue
-              lo=max(0,fo-4096);hi=min(len(raw),fo+4096)
-              rows.append({'rid':rid,'token_hex':hex(0x06000000|rid),'name':str(m.Name),
-                           'rva_hex':hex(rva),'file_offset_hex':hex(fo),
-                           'local_entropy_8k':H(raw[lo:hi]),'raw32':b.hex().upper()})
-          (ev/'20_STUB_LOCAL_ENTROPY.json').write_text(json.dumps(rows,indent=2)+'\n')
-          print('stub_count',len(rows))
+          table=getattr(getattr(getattr(dn,"net",None),"mdtables",None),"MethodDef",None)
+          mr=getattr(table,"rows",[]) if table else []
+
+          for rid,m in enumerate(mr,1):
+            name=str(m.Name)
+            rva=int(m.Rva or 0)
+            fo=None; body=b""
+            if rva:
+              try:
+                fo=pe.get_offset_from_rva(rva)
+                body=raw[fo:fo+32]
+              except Exception:
+                pass
+            stub=(b"\x00\x00\x00\x2a" in body[:20])
+            rows.append({
+              "rid":rid,
+              "token_hex":hex(0x06000000|rid),
+              "name":name,
+              "rva_hex":hex(rva),
+              "file_offset_hex":hex(fo) if fo is not None else None,
+              "stub":stub,
+              "raw32":body.hex().upper()
+            })
+
+          update=[x for x in rows if x["name"]=="UpdateCommandThread"]
+          summary={
+            "method_count":len(rows),
+            "stub_count":sum(1 for x in rows if x["stub"]),
+            "non_stub_count":sum(1 for x in rows if not x["stub"]),
+            "update_command_thread":update
+          }
+          (ev/"30_STUB_MAP.json").write_text(json.dumps(rows,indent=2)+"\n")
+          (ev/"31_STUB_SUMMARY.json").write_text(json.dumps(summary,indent=2)+"\n")
+          print(json.dumps(summary,indent=2))
           PY
 
-      - name: Upload carving evidence
+      - name: Exact protector fingerprint strings
+        shell: bash
+        run: |
+          set -euo pipefail
+          strings -a -n 4 "$OUT/dstech.exe" > "$OUT/evidence/40_ASCII_STRINGS.txt"
+          python3 - <<'PY'
+          from pathlib import Path
+          import os,json
+          out=Path(os.environ["OUT"]); ev=out/"evidence"
+          lines=(ev/"40_ASCII_STRINGS.txt").read_text(errors="ignore").splitlines()
+          terms=[
+            "Eazfuscator","Confuser","Babel","Dotfuscator","SmartAssembly",
+            "AgileDotNet",".NET Reactor","CryptoObfuscator","CodeVeil",
+            "VirtualProtect","VirtualAlloc","GetProcAddress","LoadLibrary",
+            "GetManifestResourceStream","AssemblyResolve","DeflateStream",
+            "GZipStream","CryptoStream","Rijndael","AesManaged",
+            "RuntimeHelpers","PrepareMethod","GetFunctionPointer","Marshal"
+          ]
+          hits=[]
+          for s in lines:
+            ms=[t for t in terms if t.lower() in s.lower()]
+            if ms: hits.append({"terms":ms,"string":s[:3000]})
+          (ev/"41_FINGERPRINT_HITS.json").write_text(
+            json.dumps(hits,indent=2,ensure_ascii=False)+"\n")
+          print("fingerprint_hits",len(hits))
+          PY
+
+      - name: Upload protector evidence even on partial failure
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: r106-text-carving-evidence
-          path: /tmp/r106-carve/evidence
-          if-no-files-found: error
+          name: r107-protector-evidence
+          path: /tmp/r107-protector/evidence
+          if-no-files-found: warn
           retention-days: 7
 
   correlate:
-    name: 3 - Correlate protector + resource + encrypted store
-    needs: [inspect_metadata, carve_text]
+    name: 3 - Correlate resources + initializer + stubs
+    needs: [resources, protector]
+    if: always()
     runs-on: ubuntu-24.04
     timeout-minutes: 15
 
@@ -460,117 +639,155 @@ jobs:
           test "$HOST_TO_DEVICE_USB" = "NO"
           test "$FLASH_ERASE_WRITE" = "NO"
           test "$FLASH_ALLOWED" = "NO"
-          rm -rf /tmp/r106-final; mkdir -p /tmp/r106-final/{metadata,carve,review}
+          rm -rf /tmp/r107-final
+          mkdir -p /tmp/r107-final/{resources,protector,review}
 
-      - name: Download metadata evidence
+      - name: Download resource evidence
+        continue-on-error: true
         uses: actions/download-artifact@v4
         with:
-          name: r106-metadata-protector-evidence
-          path: /tmp/r106-final/metadata
+          name: r107-resource-evidence
+          path: /tmp/r107-final/resources
 
-      - name: Download carving evidence
+      - name: Download protector evidence
+        continue-on-error: true
         uses: actions/download-artifact@v4
         with:
-          name: r106-text-carving-evidence
-          path: /tmp/r106-final/carve
+          name: r107-protector-evidence
+          path: /tmp/r107-final/protector
 
-      - name: Produce recovery verdict and next-stage map
+      - name: Correlate evidence and generate next-stage targets
         shell: bash
         run: |
           set -euo pipefail
           python3 - <<'PY'
           from pathlib import Path
           import json
-          b=Path('/tmp/r106-final');m=b/'metadata';c=b/'carve';r=b/'review'
-          def load(p,d):
-            p=Path(p)
-            try:return json.loads(p.read_text(errors='ignore'))
-            except:return d
-          st=load(m/'33_STUB_SUMMARY.json',{})
-          fp=load(m/'22_PROTECTOR_FINGERPRINT_HITS.json',[])
-          res=load(m/'53_RESOURCE_BLOB_ANALYSIS.json',[])
-          keys=load(m/'54_RESOURCE_KEY_HITS.json',[])
-          hits=load(c/'12_TOKEN_RVA_BINARY_HITS.json',[])
-          secs=load(c/'10_PE_SECTIONS.json',[])
-          helper=load(m/'40_PROTECTOR_HELPER_IL_WINDOWS.json',[])
-          update=st.get('update_command_thread',[])
-          recovery_sources=[]
-          if keys: recovery_sources.append('manifest_resource_key_hit')
-          if hits: recovery_sources.append('raw_binary_token_or_rva_hit')
-          if helper: recovery_sources.append('protector_helper_il_available')
+
+          base=Path("/tmp/r107-final")
+          res=base/"resources"
+          prot=base/"protector"
+          review=base/"review"
+
+          def load(p,default):
+            try: return json.loads(Path(p).read_text(errors="ignore"))
+            except: return default
+
+          rsum=load(res/"20_COR20_RESOURCE_SUMMARY.json",{})
+          blobs=load(res/"22_RESOURCE_BLOB_ANALYSIS.json",[])
+          shortlist=load(prot/"24_PROTECTOR_SHORTLIST.json",[])
+          stub=load(prot/"31_STUB_SUMMARY.json",{})
+          fp=load(prot/"41_FINGERPRINT_HITS.json",[])
+          graph=load(prot/"23_PROTECTOR_GRAPH.json",[])
+
+          token_hits=[]
+          decoded_hits=[]
+          for b in blobs:
+            if b.get("probe_hits"):
+              token_hits.append({
+                "file":b.get("file"),
+                "probe_hits":b.get("probe_hits")
+              })
+            for d in b.get("decoded_variants",[]):
+              if d.get("probe_hits"):
+                decoded_hits.append({
+                  "file":b.get("file"),
+                  "codec":d.get("codec"),
+                  "probe_hits":d.get("probe_hits")
+                })
+
           verdict={
-            'method_count':st.get('method_count'),
-            'stub_like_count':st.get('stub_like_count'),
-            'stub_fraction':st.get('stub_fraction'),
-            'update_command_thread':update,
-            'protector_fingerprint_hits':len(fp),
-            'manifest_resource_blobs':len(res),
-            'resource_token_or_rva_key_hits':len(keys),
-            'raw_binary_token_or_rva_hits':len(hits),
-            'protector_helper_il_windows':len(helper),
-            'recovery_sources':recovery_sources,
-            'protected_method_body_recovered':False,
-            'updater_protocol_recovered':False,
-            'firmware_readback_primitive_proven':False,
-            'full_flash_readback_proven':False,
-            'live_board_commands_allowed':False,
-            'next_gate':'Use protector-helper IL plus resource/token/RVA hits to reconstruct the method-restoration algorithm and recover UpdateCommandThread body without executing the target.'
+            "manifest_resources":rsum.get("manifest_row_count",0),
+            "extracted_resources":rsum.get("extracted_count",0),
+            "resource_probe_hits":len(token_hits),
+            "decoded_resource_probe_hits":len(decoded_hits),
+            "protector_graph_methods":len(graph),
+            "protector_shortlist_methods":len(shortlist),
+            "fingerprint_hits":len(fp),
+            "method_count":stub.get("method_count",0),
+            "stub_count":stub.get("stub_count",0),
+            "update_command_thread":stub.get("update_command_thread",[]),
+            "protected_update_body_recovered":False,
+            "firmware_readback_primitive_proven":False,
+            "full_flash_readback_proven":False,
+            "live_board_commands_allowed":False,
+            "next_targets":shortlist[:20],
+            "next_gate":"Statically reproduce the highest-ranked protector helper(s), using exact resource names/strings and extracted resource blobs. Do not execute the protected target and do not send updater traffic to the DSP."
           }
-          (r/'50_R106_VERDICT.json').write_text(json.dumps(verdict,indent=2)+'\n')
+
+          (review/"50_R107_VERDICT.json").write_text(
+            json.dumps(verdict,indent=2,ensure_ascii=False)+"\n")
+
           lines=[
-            'OKN R106 MEGA PROTECTED METHOD RECOVERY',
-            'OFFLINE_ONLY=true',
-            f"METHOD_COUNT={st.get('method_count',0)}",
-            f"STUB_LIKE_COUNT={st.get('stub_like_count',0)}",
-            f"PROTECTOR_FINGERPRINT_HITS={len(fp)}",
-            f"MANIFEST_RESOURCE_BLOBS={len(res)}",
-            f"RESOURCE_TOKEN_RVA_KEY_HITS={len(keys)}",
-            f"RAW_BINARY_TOKEN_RVA_HITS={len(hits)}",
-            f"PROTECTOR_HELPER_IL_WINDOWS={len(helper)}",
-            'PROTECTED_METHOD_BODY_RECOVERED=false',
-            'UPDATER_PROTOCOL_RECOVERED=false',
-            'FIRMWARE_READBACK_PRIMITIVE_PROVEN=false',
-            'FULL_FLASH_READBACK_PROVEN=false',
-            'LIVE_BOARD_COMMANDS_ALLOWED=false'
+            "OKN R107 MEGA PROTECTOR UNWRAP",
+            "OFFLINE_ONLY=true",
+            f"MANIFEST_RESOURCES={verdict['manifest_resources']}",
+            f"EXTRACTED_RESOURCES={verdict['extracted_resources']}",
+            f"RESOURCE_PROBE_HITS={verdict['resource_probe_hits']}",
+            f"DECODED_RESOURCE_PROBE_HITS={verdict['decoded_resource_probe_hits']}",
+            f"PROTECTOR_GRAPH_METHODS={verdict['protector_graph_methods']}",
+            f"PROTECTOR_SHORTLIST_METHODS={verdict['protector_shortlist_methods']}",
+            f"FINGERPRINT_HITS={verdict['fingerprint_hits']}",
+            f"METHOD_COUNT={verdict['method_count']}",
+            f"STUB_COUNT={verdict['stub_count']}",
+            "PROTECTED_UPDATE_BODY_RECOVERED=false",
+            "FIRMWARE_READBACK_PRIMITIVE_PROVEN=false",
+            "FULL_FLASH_READBACK_PROVEN=false",
+            "LIVE_BOARD_COMMANDS_ALLOWED=false",
           ]
-          (r/'51_R106_SUMMARY.txt').write_text('\n'.join(lines)+'\n')
-          print('\n'.join(lines))
+          (review/"51_R107_SUMMARY.txt").write_text("\n".join(lines)+"\n")
+
+          (review/"52_TOP_PROTECTOR_TARGETS.json").write_text(
+            json.dumps(shortlist[:50],indent=2,ensure_ascii=False)+"\n")
+          print("\n".join(lines))
           PY
 
-      - name: Copy compact evidence into final bundle
+      - name: Copy all compact evidence
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p /tmp/r106-final/review/metadata /tmp/r106-final/review/carve
-          cp -a /tmp/r106-final/metadata/. /tmp/r106-final/review/metadata/
-          cp -a /tmp/r106-final/carve/. /tmp/r106-final/review/carve/
-          cat > /tmp/r106-final/review/99_SAFETY_ATTESTATION.txt <<'EOF'
+          mkdir -p /tmp/r107-final/review/resources /tmp/r107-final/review/protector
+          cp -a /tmp/r107-final/resources/. /tmp/r107-final/review/resources/ 2>/dev/null || true
+          cp -a /tmp/r107-final/protector/. /tmp/r107-final/review/protector/ 2>/dev/null || true
+
+          cat > /tmp/r107-final/review/99_SAFETY_ATTESTATION.txt <<'EOF'
           OFFLINE_STATIC_ONLY=true
           TARGET_EXECUTED=false
           BOARD_USB_ACCESSED=false
           HOST_TO_DEVICE_COMMANDS_SENT=false
+          HID_SET_REPORT_LIVE=false
           FLASH_ERASE_WRITE=false
           FULL_FLASH_READBACK_PROVEN=false
           EOF
-          (cd /tmp/r106-final/review && find . -type f -print0 | sort -z | xargs -0 sha256sum) \
-            > /tmp/r106-final/review/SHA256SUMS.txt
 
-      - name: Publish combined summary
+          (
+            cd /tmp/r107-final/review
+            find . -type f -print0 | sort -z | xargs -0 sha256sum
+          ) > /tmp/r107-final/review/SHA256SUMS.txt
+
+      - name: Publish summary
+        if: always()
         shell: bash
         run: |
           {
-            echo "## OKN R106 MEGA Protected Method Recovery"
+            echo "## OKN R107 MEGA Protector Unwrap"
             echo
-            echo "Static-only: the protected Windows client is never executed."
-            echo '```text'
-            cat /tmp/r106-final/review/51_R106_SUMMARY.txt
-            echo '```'
+            echo "- Fixed R106 resource-extraction failure."
+            echo "- Target EXE is never executed."
+            echo "- Raw COR20 resources + module initializer/protector graph are analyzed in parallel."
+            echo
+            if [ -f /tmp/r107-final/review/51_R107_SUMMARY.txt ]; then
+              echo '```text'
+              cat /tmp/r107-final/review/51_R107_SUMMARY.txt
+              echo '```'
+            fi
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Upload final R106 evidence
+      - name: Upload final R107 evidence
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: R106-MEGA-PROTECTED-METHOD-RECOVERY-EVIDENCE
-          path: /tmp/r106-final/review
+          name: R107-MEGA-PROTECTOR-UNWRAP-EVIDENCE
+          path: /tmp/r107-final/review
           if-no-files-found: error
           retention-days: 30
