@@ -1,4 +1,4 @@
-name: OKN R110 MEGA Exact N9 IL Emulator + Method Body Recovery OFFLINE ONLY
+name: OKN R111 FAST Exact N9 IL Emulator + Method Body Recovery OFFLINE ONLY
 
 on:
   push:
@@ -12,7 +12,7 @@ permissions:
   actions: read
 
 concurrency:
-  group: okn-r110-exact-n9-${{ github.ref }}
+  group: okn-r111-fast-exact-n9-${{ github.ref }}
   cancel-in-progress: true
 
 env:
@@ -24,11 +24,11 @@ env:
 
 jobs:
   recover:
-    name: Exact static N9 state emulator and h15 decrypt recovery
+    name: Fast exact N9 parser, bounded emulator and h15 recovery
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     env:
-      OUT: /tmp/r110
+      OUT: /tmp/r111
 
     steps:
       - name: Fail-closed static-only safety gate
@@ -44,7 +44,7 @@ jobs:
           mkdir -p "$OUT"/{downloads,pkg,il,resources,decrypted,evidence,review}
 
           cat > "$OUT/evidence/00_SCOPE.txt" <<'EOF'
-          REVISION=R110
+          REVISION=R111
           MODE=OFFLINE_STATIC_ONLY
           TARGET_EXECUTED=false
           BOARD_USB_ACCESS=NO
@@ -77,7 +77,7 @@ jobs:
           set -euo pipefail
           curl --fail --location --retry 4 --retry-all-errors \
             --connect-timeout 20 --max-time 240 \
-            --user-agent "Mozilla/5.0 OKN-R110-Static-Research" \
+            --user-agent "Mozilla/5.0 OKN-R111-Static-Research" \
             --referer "https://golodsp.com/7%E9%80%9A%E9%81%93%E9%9F%B3%E9%A2%91%E5%89%8D%E7%BA%A7/" \
             --output "$OUT/downloads/windows.zip" "$WINDOWS_URL"
 
@@ -164,42 +164,56 @@ jobs:
           print(json.dumps(hypothesis,indent=2))
           PY
 
-      - name: Parse exact N9 method switch and prove corrected state mapping
+      - name: Parse exact N9 method switch with deterministic slicing
         shell: bash
         run: |
           set -euo pipefail
           python3 - <<'PY'
           from pathlib import Path
-          import os,re,json
+          import os,json,re
 
           out=Path(os.environ["OUT"])
           il=(out/"il/all.il").read_text(errors="ignore")
 
-          # Robust method extraction by explicit end marker.
-          m=re.search(
-              r'(?ms)^\s*\.method[^\n]*\n(?:.*\n){0,8}?'
-              r'\s*void N9jju8llVi \(\) cil managed noinlining\s*\n'
-              r'\s*\{(.*?)^\s*\}\s*// end of method .*?::N9jju8llVi\s*$',
-              il
-          )
-          if not m:
-              # Fallback: locate method name and matching end comment.
-              pos=il.find("N9jju8llVi () cil managed")
-              if pos<0: raise SystemExit("N9 method not found")
-              start=il.rfind(".method",0,pos)
-              em=re.search(r'(?m)^\s*\}\s*// end of method .*?::N9jju8llVi\s*$',il[pos:])
-              if not em: raise SystemExit("N9 end not found")
-              n9=il[start:pos+em.end()]
-          else:
-              n9=m.group(0)
+          # IMPORTANT: never use a whole-file DOTALL/non-greedy regex here.
+          # R110 timed out because that regex backtracked across the large IL.
+          needle="N9jju8llVi () cil managed noinlining"
+          pos=il.find(needle)
+          if pos < 0:
+              raise SystemExit("N9 method signature not found")
 
+          start=il.rfind(".method",0,pos)
+          if start < 0:
+              raise SystemExit("N9 method start not found")
+
+          end_tag="// end of method q71r2Rj8SiD9GF1BI50::N9jju8llVi"
+          end_pos=il.find(end_tag,pos)
+          if end_pos < 0:
+              # Less-specific fallback still uses direct find, not regex.
+              end_pos=il.find("// end of method",pos)
+          if end_pos < 0:
+              raise SystemExit("N9 method end not found")
+
+          end_line=il.find("\n",end_pos)
+          if end_line < 0:
+              end_line=len(il)
+
+          n9=il[start:end_line]
           (out/"evidence/20_N9_METHOD.il").write_text(n9)
 
-          sw=re.search(r'IL_0012:\s+switch\s+\((.*?)\)',n9,re.S)
-          if not sw: raise SystemExit("main switch not found")
-          targets=re.findall(r'IL_[0-9A-Fa-f]+',sw.group(1))
+          sw_start=n9.find("IL_0012: switch (")
+          if sw_start < 0:
+              raise SystemExit("main switch not found")
+          sw_open=n9.find("(",sw_start)
+          sw_close=n9.find(")",sw_open)
+          if sw_open < 0 or sw_close < 0:
+              raise SystemExit("main switch bounds not found")
+
+          switch_blob=n9[sw_open+1:sw_close]
+          targets=re.findall(r"IL_[0-9A-Fa-f]+",switch_blob)
 
           result={
+              "method_bytes":len(n9),
               "switch_target_count":len(targets),
               "initial_state_constant":392,
               "initial_state_target":targets[392] if len(targets)>392 else None,
@@ -211,8 +225,16 @@ jobs:
           (out/"evidence/21_EXACT_SWITCH_MAP.json").write_text(
               json.dumps(result,indent=2)+"\n")
 
+          # Checkpoint immediately so evidence survives any later timeout.
+          (out/"review").mkdir(exist_ok=True)
+          (out/"review/20_N9_METHOD.il").write_text(n9)
+          (out/"review/21_EXACT_SWITCH_MAP.json").write_text(
+              json.dumps(result,indent=2)+"\n")
+
+          print("method_bytes",len(n9))
           print("switch_targets",len(targets))
           print("state392",result["initial_state_target"])
+
           if not result["state_392_mapping_correct"]:
               raise SystemExit("corrected switch mapping gate failed")
           PY
@@ -486,8 +508,8 @@ jobs:
           active=collections.deque([initial])
           finished=[]
           seen={}
-          MAX_PATHS=384
-          MAX_STEPS=450000
+          MAX_PATHS=192
+          MAX_STEPS=500000
           total_steps=0
 
           def key(s):
@@ -745,8 +767,8 @@ jobs:
           print(json.dumps(summary,indent=2))
           PY
 
-          python3 "$OUT/n9_emulator.py" > "$OUT/evidence/32_VM_STDOUT.txt" \
-            2> "$OUT/evidence/33_VM_STDERR.txt" || true
+          timeout 600s python3 "$OUT/n9_emulator.py" > "$OUT/evidence/32_VM_STDOUT.txt" \
+            2> "$OUT/evidence/33_VM_STDERR.txt" || echo "VM_TIMEOUT_OR_NONZERO=true" >> "$OUT/evidence/34_VM_STATUS.txt"
 
       - name: Static fallback slice for key IV and h15 reader position
         shell: bash
@@ -881,11 +903,11 @@ jobs:
               "next_gate":"If the VM reaches CreateDecryptor, independently verify the exact reader offset and key/IV before accepting decrypted bytes. If it stops earlier, use the packaged exact trace and static write sites to extend only the missing wrapper/native semantics."
           }
 
-          (review/"60_R110_VERDICT.json").write_text(
+          (review/"60_R111_VERDICT.json").write_text(
               json.dumps(verdict,indent=2,ensure_ascii=False)+"\n")
 
           lines=[
-              "OKN R110 EXACT N9 IL EMULATOR",
+              "OKN R111 EXACT N9 IL EMULATOR",
               "OFFLINE_ONLY=true",
               f"EXACT_SWITCH_MAPPING_CORRECTED={str(verdict['exact_switch_mapping_corrected']).lower()}",
               f"SWITCH_TARGET_COUNT={verdict['switch_target_count']}",
@@ -902,7 +924,7 @@ jobs:
               "FULL_FLASH_READBACK_PROVEN=false",
               "LIVE_BOARD_COMMANDS_ALLOWED=false"
           ]
-          (review/"61_R110_SUMMARY.txt").write_text("\n".join(lines)+"\n")
+          (review/"61_R111_SUMMARY.txt").write_text("\n".join(lines)+"\n")
 
           for p in ev.iterdir():
               if p.is_file():shutil.copy2(p,review/p.name)
@@ -934,17 +956,17 @@ jobs:
         shell: bash
         run: |
           {
-            echo "## OKN R110 MEGA Exact N9 IL Emulator"
+            echo "## OKN R111 MEGA Exact N9 IL Emulator"
             echo
             echo "- Static/offline only; official EXE is never executed."
-            echo "- Corrects the R109 flattened-switch indexing bug."
+            echo "- Uses deterministic N9 method slicing; avoids the catastrophic R110 regex."
             echo "- Models the real h15 resource and BinaryReader position."
             echo "- Uses bounded symbolic branches rather than guessing unknown conditions."
             echo "- No DSP/USB activity."
             echo
-            if [ -f "$OUT/review/61_R110_SUMMARY.txt" ]; then
+            if [ -f "$OUT/review/61_R111_SUMMARY.txt" ]; then
               echo '```text'
-              cat "$OUT/review/61_R110_SUMMARY.txt"
+              cat "$OUT/review/61_R111_SUMMARY.txt"
               echo '```'
             fi
           } >> "$GITHUB_STEP_SUMMARY"
@@ -953,7 +975,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: R110-EXACT-N9-IL-EMULATOR-EVIDENCE
+          name: R111-EXACT-N9-IL-EMULATOR-EVIDENCE
           path: /tmp/r110/review
           if-no-files-found: error
           retention-days: 30
