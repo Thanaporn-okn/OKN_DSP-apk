@@ -1,4 +1,4 @@
-name: OKN R100 Flutter Raw-AOT UFE Command Miner OFFLINE ONLY
+name: OKN R101 Flutter UFE Reverse Callgraph Miner OFFLINE ONLY
 
 on:
   push:
@@ -12,11 +12,11 @@ permissions:
   actions: read
 
 concurrency:
-  group: okn-r100-raw-aot-ufe-${{ github.ref }}
+  group: okn-r101-ufe-reverse-callgraph-${{ github.ref }}
   cancel-in-progress: true
 
 env:
-  OUT: /tmp/okn-r100
+  OUT: /tmp/okn-r101
   ANDROID_URL: "https://golodsp.com/wp-content/uploads/2026/05/golopine_audio_turning_release_2026-04-01.apk_.zip"
   LIVE_BOARD_USB: "NO"
   HOST_TO_DEVICE_USB: "NO"
@@ -25,7 +25,7 @@ env:
 
 jobs:
   mine:
-    name: Recover hidden UFE read builders from Flutter ARM64 AOT / STATIC ONLY
+    name: Reverse callers/callees around Flutter UFE parser / STATIC ONLY
     runs-on: ubuntu-24.04
     timeout-minutes: 40
 
@@ -49,25 +49,16 @@ jobs:
           mkdir -p "$OUT"/{downloads,android,blutter,evidence,review}
 
           cat > "$OUT/evidence/00_SCOPE.txt" <<'EOF'
-          REVISION=R100
+          REVISION=R101
           MODE=OFFLINE_STATIC_ONLY
           TARGET=GoloPine_DSTech_BP1048P4
           KNOWN_USB=6324:1719
           KNOWN_HID_USAGE=FF00:55AA
-          KNOWN_READ_SENSOR=0x58
-          KNOWN_READ_FIFO=0x61
-          KNOWN_READ_BULK=0x63
-          KNOWN_RESPONSE_READ=0x60
-          KNOWN_RESPONSE_FIFO=0x62
-          KNOWN_RESPONSE_BULK=0x64
-          KNOWN_CONTINUE_BULK=0x82
-          DART_SMI_READ_SENSOR=0xB0
-          DART_SMI_READ_FIFO=0xC2
-          DART_SMI_READ_BULK=0xC6
-          DART_SMI_RESPONSE_READ=0xC0
-          DART_SMI_RESPONSE_FIFO=0xC4
-          DART_SMI_RESPONSE_BULK=0xC8
-          DART_SMI_CONTINUE_BULK=0x104
+          KNOWN_RESPONSE_PARSER=0x266c0dc
+          KNOWN_HIDDEN_HELPER_1=0x2517708
+          KNOWN_HIDDEN_HELPER_2=0x25c2234
+          KNOWN_HIDDEN_HELPER_3=0x2545420
+          KNOWN_HIDDEN_HELPER_4=0x25465f0
           BOARD_USB_ACCESS=NO
           LIVE_USB_COMMANDS=NO
           HOST_TO_DEVICE_USB=NO
@@ -77,10 +68,10 @@ jobs:
           WRITE=NO
           UNLOCK=NO
           FLASH_ALLOWED=NO
-          GOAL=Find_read_command_Smi_constants_and_raw_disassemble_hidden_AOT_functions
+          GOAL=Recover_request_builder_and_transport_path_by_reverse_callgraph_from_official_Flutter_AOT
           EOF
 
-      - name: Install AOT analysis dependencies
+      - name: Install static-analysis dependencies
         shell: bash
         run: |
           set -euo pipefail
@@ -99,7 +90,7 @@ jobs:
           curl \
             --fail --location --retry 4 --retry-all-errors \
             --connect-timeout 20 --max-time 240 \
-            --user-agent "Mozilla/5.0 OKN-R100-Interop-Research" \
+            --user-agent "Mozilla/5.0 OKN-R101-Interop-Research" \
             --referer "https://golodsp.com/7%E9%80%9A%E9%81%93%E9%9F%B3%E9%A2%91%E5%89%8D%E7%BA%A7/" \
             --output "$OUT/downloads/android.zip" "$ANDROID_URL"
 
@@ -116,83 +107,80 @@ jobs:
           cp "$APK" "$OUT/android/golopine.apk"
           7z x -y "$OUT/android/golopine.apk" -o"$OUT/android/raw" >/dev/null
 
-          LIB="$OUT/android/raw/lib/arm64-v8a/libapp.so"
-          FLUTTER="$OUT/android/raw/lib/arm64-v8a/libflutter.so"
-          test -s "$LIB"
-          test -s "$FLUTTER"
+          test -s "$OUT/android/raw/lib/arm64-v8a/libapp.so"
+          test -s "$OUT/android/raw/lib/arm64-v8a/libflutter.so"
 
           {
             echo "APK_SIZE=$(stat -c%s "$OUT/android/golopine.apk")"
-            echo "APK_TYPE=$(file -b "$OUT/android/golopine.apk")"
-            echo "LIBAPP_SIZE=$(stat -c%s "$LIB")"
-            echo "LIBAPP_TYPE=$(file -b "$LIB")"
-            sha256sum "$OUT/android/golopine.apk" "$LIB" "$FLUTTER"
+            echo "LIBAPP_SIZE=$(stat -c%s "$OUT/android/raw/lib/arm64-v8a/libapp.so")"
+            sha256sum "$OUT/android/golopine.apk"
+            sha256sum "$OUT/android/raw/lib/arm64-v8a/libapp.so"
           } > "$OUT/evidence/01_IDENTITY.txt"
 
-          readelf -lW "$LIB" > "$OUT/evidence/02_LIBAPP_PROGRAM_HEADERS.txt"
-          readelf -SW "$LIB" > "$OUT/evidence/03_LIBAPP_SECTIONS.txt"
-
-      - name: Run Blutter and build function-address index
+      - name: Run Blutter
         shell: bash
         run: |
           set -euo pipefail
           git clone --depth 1 https://github.com/worawit/blutter.git "$OUT/blutter-src"
-
           python3 "$OUT/blutter-src/blutter.py" \
             "$OUT/android/raw/lib/arm64-v8a" \
             "$OUT/blutter/out" \
             > "$OUT/evidence/10_BLUTTER_STDOUT.txt" \
             2> "$OUT/evidence/11_BLUTTER_STDERR.txt"
-
           echo "BLUTTER_RC=0" > "$OUT/evidence/12_BLUTTER_STATUS.txt"
 
+      - name: Build Blutter function index and retain protocol classes
+        shell: bash
+        run: |
+          set -euo pipefail
           python3 - <<'PY'
           from pathlib import Path
-          import os,re,json
+          import os,re,json,shutil
 
           out=Path(os.environ["OUT"])
           asm=out/"blutter/out/asm"
+          ev=out/"evidence"
 
           rows=[]
           pat=re.compile(r'// \*\* addr: 0x([0-9a-fA-F]+), size: ([^\s]+)')
-          decl_re=re.compile(r'^\s*(.*\{)\s*$')
-
           for p in asm.rglob("*.dart"):
             try: lines=p.read_text(errors="ignore").splitlines()
             except Exception: continue
-            rel=str(p.relative_to(out))
             for i,line in enumerate(lines):
               m=pat.search(line)
               if not m: continue
-              addr=int(m.group(1),16)
-              size_raw=m.group(2)
-              size=None
-              try:
-                size=int(size_raw,0)
-              except:
-                pass
               decl=""
               for j in range(i-1,max(-1,i-8),-1):
                 if "(" in lines[j] and "{" in lines[j]:
                   decl=lines[j].strip()
                   break
+              try: sz=int(m.group(2),0)
+              except: sz=None
               rows.append({
-                "addr":addr,
-                "addr_hex":hex(addr),
-                "size":size,
-                "size_raw":size_raw,
-                "path":rel,
+                "addr":int(m.group(1),16),
+                "addr_hex":"0x"+m.group(1).lower(),
+                "size":sz,
+                "size_raw":m.group(2),
+                "path":str(p.relative_to(out)),
                 "line":i+1,
                 "decl":decl
               })
-
           rows.sort(key=lambda x:x["addr"])
-          (out/"evidence/13_FUNCTION_ADDRESS_INDEX.json").write_text(
+          (ev/"20_FUNCTION_INDEX.json").write_text(
               json.dumps(rows,indent=2,ensure_ascii=False)+"\n")
-          print("function_addresses",len(rows))
+
+          # Keep full assembly for the two obfuscated protocol classes only.
+          keep=out/"review/protocol-classes"
+          keep.mkdir(parents=True,exist_ok=True)
+          for name in ("aLe.dart","MKe.dart"):
+            p=asm/name
+            if p.exists():
+              shutil.copy2(p,keep/name)
+
+          print("function_count",len(rows))
           PY
 
-      - name: Locate Dart-Smi UFE command constants globally
+      - name: Scan Blutter assembly for direct references to protocol anchors
         shell: bash
         run: |
           set -euo pipefail
@@ -204,80 +192,49 @@ jobs:
           asm=out/"blutter/out/asm"
           ev=out/"evidence"
 
-          # Dart small integers are tagged as Smi = value << 1.
-          smi={
-            0xB0:"READ_SENSOR_0x58",
-            0xC2:"READ_FIFO_0x61",
-            0xC6:"READ_BULK_0x63",
-            0xC0:"RESPONSE_READ_0x60",
-            0xC4:"RESPONSE_FIFO_0x62",
-            0xC8:"RESPONSE_BULK_0x64",
-            0x104:"CONTINUE_BULK_0x82",
+          targets={
+            0x266c0dc:"RESPONSE_PARSER",
+            0x2517708:"HIDDEN_HELPER_2517708",
+            0x25c2234:"HIDDEN_HELPER_25c2234",
+            0x2545420:"HIDDEN_HELPER_2545420",
+            0x25465f0:"HIDDEN_HELPER_25465f0",
+            0x25177c4:"ALE_BYTEDATA_CLOSURE",
+            0x2546d8c:"MKE_PR_CLOSURE",
           }
 
-          # Only accept immediates used as produced integer values.
-          imm_re=re.compile(
-            r'\b(?:movz|mov)\s+x\d+,\s*#(0x[0-9a-fA-F]+|\d+)\b',
-            re.I
-          )
-          func_re=re.compile(r'// \*\* addr: 0x([0-9a-fA-F]+), size: ([^\s]+)')
-
-          hits=[]
+          refs=[]
           for p in asm.rglob("*.dart"):
             try: lines=p.read_text(errors="ignore").splitlines()
             except Exception: continue
-
-            current_addr=None
-            current_decl=""
+            rel=str(p.relative_to(out))
             for i,line in enumerate(lines):
-              fm=func_re.search(line)
-              if fm:
-                current_addr=int(fm.group(1),16)
-                current_decl=""
-                for j in range(i-1,max(-1,i-8),-1):
-                  if "(" in lines[j] and "{" in lines[j]:
-                    current_decl=lines[j].strip()
-                    break
+              low=line.lower()
+              for addr,label in targets.items():
+                needle=f"0x{addr:x}"
+                if needle not in low:
+                  continue
+                lo=max(0,i-50); hi=min(len(lines),i+90)
+                refs.append({
+                  "target":hex(addr),
+                  "label":label,
+                  "path":rel,
+                  "line":i+1,
+                  "matched_line":line.strip(),
+                  "context":"\n".join(lines[lo:hi])
+                })
 
-              im=imm_re.search(line)
-              if not im: continue
-              v=int(im.group(1),0)
-              if v not in smi: continue
-
-              lo=max(0,i-80); hi=min(len(lines),i+180)
-              ctx="\n".join(lines[lo:hi])
-              hits.append({
-                "value":v,
-                "value_hex":hex(v),
-                "meaning":smi[v],
-                "path":str(p.relative_to(out)),
-                "line":i+1,
-                "function_addr":current_addr,
-                "function_addr_hex":hex(current_addr) if current_addr is not None else None,
-                "function_decl":current_decl,
-                "instruction":line.strip(),
-                "context":ctx
-              })
-
-          (ev/"20_SMI_COMMAND_HITS.json").write_text(
-              json.dumps(hits,indent=2,ensure_ascii=False)+"\n")
-
-          by={}
-          for h in hits:
-            by[h["meaning"]]=by.get(h["meaning"],0)+1
-          (ev/"21_SMI_COMMAND_COUNTS.json").write_text(
-              json.dumps(by,indent=2,ensure_ascii=False)+"\n")
-
-          print(json.dumps(by,indent=2))
+          (ev/"21_BLUTTER_TEXT_XREFS.json").write_text(
+              json.dumps(refs,indent=2,ensure_ascii=False)+"\n")
+          print("blutter_text_xrefs",len(refs))
           PY
 
-      - name: Raw-disassemble hidden and protocol-cluster functions
+      - name: Build raw ARM64 direct-call graph for libapp
         shell: bash
         run: |
           set -euo pipefail
           python3 - <<'PY'
           from pathlib import Path
-          import os,json,re
+          import os,json,bisect
           from elftools.elf.elffile import ELFFile
           from capstone import Cs, CS_ARCH_ARM64, CS_MODE_LITTLE_ENDIAN
           from capstone.arm64 import ARM64_OP_IMM
@@ -285,182 +242,225 @@ jobs:
           out=Path(os.environ["OUT"])
           ev=out/"evidence"
           lib=out/"android/raw/lib/arm64-v8a/libapp.so"
+          index=json.loads((ev/"20_FUNCTION_INDEX.json").read_text())
+          starts=sorted(r["addr"] for r in index)
+          by={r["addr"]:r for r in index}
 
-          index=json.loads((ev/"13_FUNCTION_ADDRESS_INDEX.json").read_text())
-          addr_to_row={r["addr"]:r for r in index}
-          sorted_addrs=sorted(addr_to_row)
+          def owner(addr):
+            i=bisect.bisect_right(starts,addr)-1
+            if i<0: return None
+            s=starts[i]
+            # Avoid attributing across implausibly huge gaps.
+            if addr-s>0x10000:
+              return None
+            return by[s]
 
-          targets={
-            # Flutter UFE / protocol cluster from R98-R99
-            0x2515070:"MKe_main_closure",
-            0x25170dc:"MKe_os_closure",
-            0x2517118:"MKe_object_callback",
-            0x2517274:"MKe_ByteData_callback",
-            0x25173fc:"MKe_js_closure",
-            0x2517414:"MKe_object_callback_2",
-            0x2517568:"MKe_ByteData_callback_2",
-            0x251761c:"MKe_null_closure",
-            0x2517708:"aLe_repeated_call_target",
-            0x25177c4:"aLe_Bs_ByteData_closure",
-            0x2545288:"aLe_protocol_call_2545288",
-            0x2545420:"aLe_protocol_call_2545420",
-            0x25465f0:"aLe_protocol_call_25465f0",
-            0x2546850:"aLe_or_closure",
-            0x254690c:"aLe_nr_closure",
-            0x2546a08:"aLe_mr_closure",
-            0x2546ad0:"MKe_xs_callback",
-            0x2546c24:"MKe_zs_callback",
-            0x2546c5c:"MKe_ys_callback",
-            0x2546c94:"MKe_As_callback",
-            0x2546d8c:"MKe_pr_closure",
-            0x2546dc8:"MKe_dynamic_closure",
-            0x2546f4c:"MKe_vr_closure",
-            0x25c2234:"aLe_protocol_helper",
-            # Known parser where RESPONSE_BULK Smi 0xC8 was observed.
-            0x266c0dc:"aLe_Bs_response_parser",
+          md=Cs(CS_ARCH_ARM64,CS_MODE_LITTLE_ENDIAN)
+          md.detail=True
+
+          edges=[]
+          with lib.open("rb") as f:
+            elf=ELFFile(f)
+            for seg in elf.iter_segments():
+              if seg["p_type"]!="PT_LOAD":
+                continue
+              flags=int(seg["p_flags"])
+              # PF_X
+              if not (flags & 1):
+                continue
+              data=seg.data()
+              base=int(seg["p_vaddr"])
+              for ins in md.disasm(data,base):
+                if ins.mnemonic!="bl" or not ins.operands:
+                  continue
+                op=ins.operands[0]
+                if op.type!=ARM64_OP_IMM:
+                  continue
+                target=int(op.imm)
+                own=owner(ins.address)
+                edges.append({
+                  "callsite":ins.address,
+                  "callsite_hex":hex(ins.address),
+                  "target":target,
+                  "target_hex":hex(target),
+                  "caller":own,
+                  "callee":by.get(target)
+                })
+
+          (ev/"30_RAW_CALL_EDGES.json").write_text(
+              json.dumps(edges,indent=2,ensure_ascii=False)+"\n")
+          print("direct_bl_edges",len(edges))
+          PY
+
+      - name: Extract reverse callers and callees around UFE parser/helpers
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import os,json,collections
+
+          out=Path(os.environ["OUT"])
+          ev=out/"evidence"
+          edges=json.loads((ev/"30_RAW_CALL_EDGES.json").read_text())
+
+          seed={
+            0x266c0dc:"RESPONSE_PARSER",
+            0x2517708:"HIDDEN_HELPER_2517708",
+            0x25c2234:"HIDDEN_HELPER_25c2234",
+            0x2545420:"HIDDEN_HELPER_2545420",
+            0x25465f0:"HIDDEN_HELPER_25465f0",
           }
+
+          rev=collections.defaultdict(list)
+          fwd=collections.defaultdict(list)
+          for e in edges:
+            rev[e["target"]].append(e)
+            if e.get("caller"):
+              fwd[e["caller"]["addr"]].append(e)
+
+          rows=[]
+          interesting_funcs=set(seed)
+          for addr,label in seed.items():
+            callers=rev.get(addr,[])
+            rows.append({
+              "seed":hex(addr),
+              "label":label,
+              "callers":callers[:1000],
+            })
+            for e in callers:
+              c=e.get("caller")
+              if c:
+                interesting_funcs.add(c["addr"])
+                # one more level outward
+                for up in rev.get(c["addr"],[]):
+                  if up.get("caller"):
+                    interesting_funcs.add(up["caller"]["addr"])
+
+            for e in fwd.get(addr,[]):
+              interesting_funcs.add(e["target"])
+
+          # Add direct callees of all discovered callers.
+          expanded=set(interesting_funcs)
+          for a in list(interesting_funcs):
+            for e in fwd.get(a,[]):
+              expanded.add(e["target"])
+          interesting_funcs=expanded
+
+          (ev/"31_REVERSE_CALLERS.json").write_text(
+              json.dumps(rows,indent=2,ensure_ascii=False)+"\n")
+          (ev/"32_INTERESTING_FUNCTION_ADDRS.json").write_text(
+              json.dumps(
+                [{"addr":a,"addr_hex":hex(a)} for a in sorted(interesting_funcs)],
+                indent=2
+              )+"\n")
+          print("interesting_function_addrs",len(interesting_funcs))
+          PY
+
+      - name: Raw-disassemble discovered callgraph nodes
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import os,json,bisect
+          from elftools.elf.elffile import ELFFile
+          from capstone import Cs, CS_ARCH_ARM64, CS_MODE_LITTLE_ENDIAN
+          from capstone.arm64 import ARM64_OP_IMM
+
+          out=Path(os.environ["OUT"])
+          ev=out/"evidence"
+          lib=out/"android/raw/lib/arm64-v8a/libapp.so"
+          index=json.loads((ev/"20_FUNCTION_INDEX.json").read_text())
+          wanted=json.loads((ev/"32_INTERESTING_FUNCTION_ADDRS.json").read_text())
+
+          by={r["addr"]:r for r in index}
+          starts=sorted(by)
+
+          md=Cs(CS_ARCH_ARM64,CS_MODE_LITTLE_ENDIAN)
+          md.detail=True
 
           with lib.open("rb") as f:
             elf=ELFFile(f)
-            blob=f.read() if False else None
-            segments=[]
+            segs=[]
             for seg in elf.iter_segments():
               if seg["p_type"]=="PT_LOAD":
-                segments.append({
+                segs.append({
                   "vaddr":int(seg["p_vaddr"]),
-                  "memsz":int(seg["p_memsz"]),
-                  "offset":int(seg["p_offset"]),
                   "filesz":int(seg["p_filesz"]),
-                  "flags":int(seg["p_flags"]),
+                  "offset":int(seg["p_offset"]),
                 })
 
-            def read_vaddr(addr, size):
-              for s in segments:
-                if s["vaddr"] <= addr < s["vaddr"]+s["filesz"]:
-                  take=min(size,s["vaddr"]+s["filesz"]-addr)
-                  off=s["offset"]+(addr-s["vaddr"])
-                  f.seek(off)
-                  return f.read(take),off,s
-              return None,None,None
+            def readva(addr,size):
+              for s in segs:
+                if s["vaddr"]<=addr<s["vaddr"]+s["filesz"]:
+                  n=min(size,s["vaddr"]+s["filesz"]-addr)
+                  f.seek(s["offset"]+(addr-s["vaddr"]))
+                  return f.read(n)
+              return b""
 
-            def next_known(addr):
-              for a in sorted_addrs:
-                if a>addr:
-                  return a
-              return None
+            def next_start(addr):
+              i=bisect.bisect_right(starts,addr)
+              return starts[i] if i<len(starts) else None
 
-            md=Cs(CS_ARCH_ARM64,CS_MODE_LITTLE_ENDIAN)
-            md.detail=True
-
-            results=[]
-            smi_map={
-              0xB0:"READ_SENSOR_0x58",
-              0xC2:"READ_FIFO_0x61",
-              0xC6:"READ_BULK_0x63",
-              0xC0:"RESPONSE_READ_0x60",
-              0xC4:"RESPONSE_FIFO_0x62",
-              0xC8:"RESPONSE_BULK_0x64",
-              0x104:"CONTINUE_BULK_0x82",
-            }
-
-            for addr,label in targets.items():
-              nxt=next_known(addr)
-              # Prefer next Blutter function as a conservative bound, but clamp
-              # hidden/stub functions to avoid swallowing unrelated code.
-              if nxt and 4 <= nxt-addr <= 0x3000:
-                size=nxt-addr
+            rows=[]
+            for w in wanted:
+              addr=w["addr"]
+              ns=next_start(addr)
+              # If exact Blutter function is known, use next start as bound.
+              # For hidden targets use a conservative 0x800 window.
+              if addr in by and ns and 4<=ns-addr<=0x3000:
+                size=ns-addr
               else:
-                size=0x1000
-              size=max(4,min(size,0x3000))
-
-              data,foff,seg=read_vaddr(addr,size)
-              if not data:
-                results.append({
-                  "addr":hex(addr),"label":label,
-                  "mapped":False,"next_known":hex(nxt) if nxt else None
-                })
-                continue
-
+                size=0x800
+              data=readva(addr,size)
               insns=[]
-              command_hits=[]
-              stores=[]
               calls=[]
+              stores=[]
+              loads=[]
+              immediates=[]
               for ins in md.disasm(data,addr):
                 text=f"{ins.mnemonic} {ins.op_str}".strip()
-                row={"address":hex(ins.address),"mnemonic":ins.mnemonic,"op_str":ins.op_str}
-
-                # Direct BL target annotation.
+                row={"address":hex(ins.address),"text":text}
                 if ins.mnemonic=="bl" and ins.operands and ins.operands[0].type==ARM64_OP_IMM:
-                  target=int(ins.operands[0].imm)
-                  sym=addr_to_row.get(target)
-                  call={
-                    "at":hex(ins.address),
-                    "target":hex(target),
-                    "symbol":sym
-                  }
-                  calls.append(call)
-                  row["call_target"]=call
-
+                  t=int(ins.operands[0].imm)
+                  c={"at":hex(ins.address),"target":hex(t),"symbol":by.get(t)}
+                  calls.append(c); row["call"]=c
                 if ins.mnemonic in ("strb","sturb","strh","sturh","str","stur","stp"):
                   stores.append({"at":hex(ins.address),"text":text})
-
-                # Capstone normalizes movz/mov immediates.
-                if ins.mnemonic in ("mov","movz","orr"):
+                if ins.mnemonic in ("ldrb","ldurb","ldrh","ldurh","ldr","ldur","ldp"):
+                  loads.append({"at":hex(ins.address),"text":text})
+                if ins.mnemonic in ("mov","movz","movk","orr","add","sub"):
                   for op in ins.operands:
                     if op.type==ARM64_OP_IMM:
                       v=int(op.imm)
-                      if v in smi_map:
-                        ch={
+                      if v <= 0x10000:
+                        immediates.append({
                           "at":hex(ins.address),
                           "value":v,
-                          "value_hex":hex(v),
-                          "meaning":smi_map[v],
+                          "hex":hex(v),
                           "text":text
-                        }
-                        command_hits.append(ch)
-                        row["ufe_command_smi"]=ch
-
+                        })
                 insns.append(row)
 
-              results.append({
+              rows.append({
                 "addr":hex(addr),
-                "label":label,
-                "mapped":True,
-                "file_offset":hex(foff),
-                "segment":seg,
-                "requested_size":size,
-                "next_known":hex(nxt) if nxt else None,
-                "blutter_symbol":addr_to_row.get(addr),
+                "symbol":by.get(addr),
+                "size":size,
                 "raw_hex":data[:512].hex().upper(),
-                "command_smi_hits":command_hits,
-                "stores":stores[:500],
                 "calls":calls[:500],
+                "stores":stores[:500],
+                "loads":loads[:500],
+                "small_immediates":immediates[:1000],
                 "instructions":insns[:5000],
               })
 
-          (ev/"30_RAW_TARGET_DISASSEMBLY.json").write_text(
-              json.dumps(results,indent=2,ensure_ascii=False)+"\n")
-
-          concise=[]
-          for r in results:
-            concise.append({
-              "addr":r["addr"],
-              "label":r["label"],
-              "mapped":r.get("mapped"),
-              "next_known":r.get("next_known"),
-              "command_smi_hits":r.get("command_smi_hits",[]),
-              "store_count":len(r.get("stores",[])),
-              "calls":r.get("calls",[])[:100],
-            })
-          (ev/"31_RAW_TARGET_SUMMARY.json").write_text(
-              json.dumps(concise,indent=2,ensure_ascii=False)+"\n")
-
-          print("targets",len(results))
-          print("mapped",sum(1 for r in results if r.get("mapped")))
-          print("command_hits",sum(len(r.get("command_smi_hits",[])) for r in results))
+          (ev/"40_CALLGRAPH_NODE_DISASSEMBLY.json").write_text(
+              json.dumps(rows,indent=2,ensure_ascii=False)+"\n")
+          print("nodes_disassembled",len(rows))
           PY
 
-      - name: Correlate command constants with hidden raw functions
+      - name: Rank likely request-builder and transport nodes
         shell: bash
         run: |
           set -euo pipefail
@@ -470,87 +470,86 @@ jobs:
 
           out=Path(os.environ["OUT"])
           ev=out/"evidence"
+          nodes=json.loads((ev/"40_CALLGRAPH_NODE_DISASSEMBLY.json").read_text())
+          textrefs=json.loads((ev/"21_BLUTTER_TEXT_XREFS.json").read_text())
 
-          global_hits=json.loads((ev/"20_SMI_COMMAND_HITS.json").read_text())
-          raw=json.loads((ev/"30_RAW_TARGET_DISASSEMBLY.json").read_text())
+          # Known UFE command values and tagged Smi forms.
+          values={
+            0x58:"READ_SENSOR",
+            0x61:"READ_FIFO",
+            0x63:"READ_BULK",
+            0x82:"CONTINUE_BULK",
+            0xB0:"READ_SENSOR_SMI",
+            0xC2:"READ_FIFO_SMI",
+            0xC6:"READ_BULK_SMI",
+            0x104:"CONTINUE_BULK_SMI",
+          }
 
-          read_meanings={"READ_SENSOR_0x58","READ_FIFO_0x61","READ_BULK_0x63"}
-          response_meanings={"RESPONSE_READ_0x60","RESPONSE_FIFO_0x62","RESPONSE_BULK_0x64"}
+          ranked=[]
+          for n in nodes:
+            score=0
+            reasons=[]
+            matched=[]
+            for im in n.get("small_immediates",[]):
+              v=im["value"]
+              if v in values:
+                matched.append({"meaning":values[v],**im})
+                score+=5
+            if len(n.get("stores",[]))>=2:
+              score+=2; reasons.append("multiple_stores")
+            if n.get("calls"):
+              score+=1; reasons.append("has_calls")
+            sym=n.get("symbol") or {}
+            blob=json.dumps(sym,ensure_ascii=False).lower()
+            if any(k in blob for k in ("byte","data","usb","hid","sensor","bulk","fifo")):
+              score+=3; reasons.append("symbol_semantic_hint")
 
-          candidates=[]
-          calibrations=[]
+            ranked.append({
+              "addr":n["addr"],
+              "symbol":n.get("symbol"),
+              "score":score,
+              "reasons":reasons,
+              "matched_command_immediates":matched,
+              "store_count":len(n.get("stores",[])),
+              "call_count":len(n.get("calls",[])),
+              "calls":n.get("calls",[])[:100],
+              "stores":n.get("stores",[])[:100],
+            })
 
-          for r in raw:
-            hits=r.get("command_smi_hits",[])
-            meanings={h["meaning"] for h in hits}
-            if meanings & read_meanings:
-              candidates.append({
-                "addr":r["addr"],
-                "label":r["label"],
-                "meanings":sorted(meanings),
-                "command_hits":hits,
-                "stores":r.get("stores",[])[:200],
-                "calls":r.get("calls",[])[:200],
-                "instructions":r.get("instructions",[])[:1600],
-              })
-            if meanings & response_meanings:
-              calibrations.append({
-                "addr":r["addr"],
-                "label":r["label"],
-                "meanings":sorted(meanings),
-                "command_hits":hits,
-              })
+          ranked.sort(key=lambda x:(-x["score"],x["addr"]))
+          strong=[r for r in ranked if r["score"]>=6]
 
-          # Global Blutter functions containing read-Smi constants are strong
-          # locator evidence, but not yet sufficient to prove packet layout.
-          global_read=[
-            h for h in global_hits
-            if h["meaning"] in read_meanings
-          ]
+          (ev/"50_RANKED_CALLGRAPH_NODES.json").write_text(
+              json.dumps(ranked,indent=2,ensure_ascii=False)+"\n")
+          (ev/"51_STRONG_REQUEST_BUILDER_CANDIDATES.json").write_text(
+              json.dumps(strong,indent=2,ensure_ascii=False)+"\n")
 
           verdict={
-            "global_read_smi_hits":len(global_read),
-            "raw_target_read_candidates":len(candidates),
-            "response_smi_calibrations":len(calibrations),
+            "blutter_text_xrefs":len(textrefs),
+            "callgraph_nodes":len(nodes),
+            "strong_request_builder_candidates":len(strong),
             "read_command_ids_proven":True,
-            "dart_smi_encoding_calibrated":bool(calibrations),
             "exact_read_frame_layout_proven":False,
             "full_flash_readback_proven":False,
             "live_board_commands_allowed":False,
-            "rule":"Raw read-Smi constants locate candidate functions; frame layout is promoted only after argument/field stores and transport call chain are independently reconstructed."
+            "reason":"Reverse callgraph narrows request/transport candidates, but no packet is promoted until command semantics and byte layout are tied to the same official-client function."
           }
-
-          # Conservative promotion: require a hidden/raw function to contain a
-          # read command Smi, at least 2 stores, and at least 1 resolved call.
-          strong=[]
-          for c in candidates:
-            if len(c["stores"])>=2 and c["calls"]:
-              strong.append(c)
-          verdict["strong_raw_read_builders"]=len(strong)
-          verdict["exact_read_frame_layout_proven"]=False
-
-          (ev/"40_READ_BUILDER_CANDIDATES.json").write_text(
-              json.dumps(candidates,indent=2,ensure_ascii=False)+"\n")
-          (ev/"41_STRONG_RAW_READ_BUILDERS.json").write_text(
-              json.dumps(strong,indent=2,ensure_ascii=False)+"\n")
-          (ev/"42_R100_VERDICT.json").write_text(
+          (ev/"52_R101_VERDICT.json").write_text(
               json.dumps(verdict,indent=2,ensure_ascii=False)+"\n")
 
-          lines=[
-            "OKN R100 FLUTTER RAW-AOT UFE COMMAND MINER",
+          summary=[
+            "OKN R101 FLUTTER UFE REVERSE CALLGRAPH MINER",
             "OFFLINE_ONLY=true",
-            f"GLOBAL_READ_SMI_HITS={len(global_read)}",
-            f"RAW_TARGET_READ_CANDIDATES={len(candidates)}",
-            f"RESPONSE_SMI_CALIBRATIONS={len(calibrations)}",
-            f"STRONG_RAW_READ_BUILDERS={len(strong)}",
-            f"DART_SMI_ENCODING_CALIBRATED={str(bool(calibrations)).lower()}",
+            f"BLUTTER_TEXT_XREFS={len(textrefs)}",
+            f"CALLGRAPH_NODES={len(nodes)}",
+            f"STRONG_REQUEST_BUILDER_CANDIDATES={len(strong)}",
             "READ_COMMAND_IDS_PROVEN=true",
             "EXACT_READ_FRAME_LAYOUT_PROVEN=false",
             "FULL_FLASH_READBACK_PROVEN=false",
             "LIVE_BOARD_COMMANDS_ALLOWED=false",
           ]
-          (ev/"43_R100_SUMMARY.txt").write_text("\n".join(lines)+"\n")
-          print("\n".join(lines))
+          (ev/"53_R101_SUMMARY.txt").write_text("\n".join(summary)+"\n")
+          print("\n".join(summary))
           PY
 
       - name: Build compact evidence artifact
@@ -578,17 +577,15 @@ jobs:
         shell: bash
         run: |
           {
-            echo "## OKN R100 Flutter Raw-AOT UFE Command Miner"
+            echo "## OKN R101 Flutter UFE Reverse Callgraph Miner"
             echo
             echo "- Offline/static analysis only."
-            echo "- Searches Dart-Smi encoded UFE IDs in value-producing ARM64 instructions."
-            echo "- Raw-disassembles hidden size:-1 AOT functions directly from libapp.so."
-            echo "- No board USB access and no host-to-device packets."
+            echo "- Reverse-calls from the proven response parser and hidden helpers."
+            echo "- No board USB access and no host-to-device packet."
             echo
             for f in \
               "$OUT/evidence/12_BLUTTER_STATUS.txt" \
-              "$OUT/evidence/21_SMI_COMMAND_COUNTS.json" \
-              "$OUT/evidence/43_R100_SUMMARY.txt"; do
+              "$OUT/evidence/53_R101_SUMMARY.txt"; do
               if [ -f "$f" ]; then
                 echo "### $(basename "$f")"
                 echo '```text'
@@ -598,11 +595,11 @@ jobs:
             done
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Upload R100 evidence
+      - name: Upload R101 evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: R100-FLUTTER-RAW-AOT-UFE-COMMAND-EVIDENCE
-          path: /tmp/okn-r100/review
+          name: R101-FLUTTER-UFE-REVERSE-CALLGRAPH-EVIDENCE
+          path: /tmp/okn-r101/review
           if-no-files-found: error
           retention-days: 30
