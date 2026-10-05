@@ -1,4 +1,4 @@
-name: OKN R102 Raw ARM64 UFE Packet Builder Miner OFFLINE ONLY
+name: OKN R103 Firmware Readback Capability Auditor OFFLINE ONLY
 
 on:
   push:
@@ -12,22 +12,23 @@ permissions:
   actions: read
 
 concurrency:
-  group: okn-r102-raw-arm64-ufe-builders-${{ github.ref }}
+  group: okn-r103-firmware-readback-audit-${{ github.ref }}
   cancel-in-progress: true
 
 env:
-  OUT: /tmp/okn-r102
+  OUT: /tmp/okn-r103
   ANDROID_URL: "https://golodsp.com/wp-content/uploads/2026/05/golopine_audio_turning_release_2026-04-01.apk_.zip"
+  WINDOWS_URL: "https://golodsp.com/wp-content/uploads/2026/05/golopine_audio_turning_release_2026-04-08.exe_.zip"
   LIVE_BOARD_USB: "NO"
   HOST_TO_DEVICE_USB: "NO"
   FLASH_ERASE_WRITE: "NO"
   FLASH_ALLOWED: "NO"
 
 jobs:
-  mine:
-    name: Recover exact UFE packet builders from raw ARM64 / STATIC ONLY
+  audit:
+    name: Audit official clients for true firmware readback capability / STATIC ONLY
     runs-on: ubuntu-24.04
-    timeout-minutes: 40
+    timeout-minutes: 35
 
     steps:
       - name: Checkout repository
@@ -45,500 +46,340 @@ jobs:
           test "$FLASH_ERASE_WRITE" = "NO"
           test "$FLASH_ALLOWED" = "NO"
           rm -rf "$OUT"
-          mkdir -p "$OUT"/{downloads,android,evidence,review}
+          mkdir -p "$OUT"/{downloads,android,windows,decompiled,evidence,review}
 
           cat > "$OUT/evidence/00_SCOPE.txt" <<'EOF'
-          REVISION=R102
+          REVISION=R103
           MODE=OFFLINE_STATIC_ONLY
           TARGET=GoloPine_DSTech_BP1048P4
-          KNOWN_USB=6324:1719
-          KNOWN_HID_USAGE=FF00:55AA
-          UFE_WRITE_ACTUATOR=0x57
-          UFE_READ_SENSOR_ACTUATOR=0x58
-          UFE_READ_SENSOR_JSON=0x59
-          UFE_RESPONSE_READ_SENSOR=0x60
-          UFE_READ_SENSOR_FIFO=0x61
-          UFE_RESPONSE_FIFO=0x62
-          UFE_READ_SENSOR_BULK=0x63
-          UFE_RESPONSE_BULK=0x64
-          UFE_CONTINUE_BULK=0x82
+          PRODUCTION_USB=6324:1719
+          PRODUCTION_HID_USAGE=FF00:55AA
+          UFE_READ_SENSOR=0x58
+          UFE_READ_FIFO=0x61
+          UFE_READ_BULK=0x63
           BOARD_USB_ACCESS=NO
           LIVE_USB_COMMANDS=NO
           HOST_TO_DEVICE_USB=NO
           SET_REPORT_LIVE=NO
-          OUTPUT_TRANSFER_LIVE=NO
           ERASE=NO
           WRITE=NO
           UNLOCK=NO
           FLASH_ALLOWED=NO
-          GOAL=Recover_exact_raw_ARM64_packet_builders_for_UFE_read_commands
+          GOAL=Determine_if_official_clients_expose_true_firmware_or_flash_readback_beyond_UFE_sensor_reads
           EOF
 
-      - name: Install raw ARM64 analysis dependencies
+      - name: Install static-analysis utilities
         shell: bash
         run: |
           set -euo pipefail
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends \
-            unzip p7zip-full file curl python3 python3-pip python3-pyelftools
-          python3 -m pip install --break-system-packages --quiet capstone pyelftools
+            unzip p7zip-full file binutils jq curl default-jre-headless
 
-      - name: Download and extract official Android client
+      - name: Download official Android and Windows clients
         shell: bash
         run: |
           set -euo pipefail
-          curl \
-            --fail --location --retry 4 --retry-all-errors \
-            --connect-timeout 20 --max-time 240 \
-            --user-agent "Mozilla/5.0 OKN-R102-Interop-Research" \
-            --referer "https://golodsp.com/7%E9%80%9A%E9%81%93%E9%9F%B3%E9%A2%91%E5%89%8D%E7%BA%A7/" \
-            --output "$OUT/downloads/android.zip" "$ANDROID_URL"
 
-          mkdir -p "$OUT/android/pkg" "$OUT/android/raw"
+          fetch() {
+            curl \
+              --fail --location --retry 4 --retry-all-errors \
+              --connect-timeout 20 --max-time 240 \
+              --user-agent "Mozilla/5.0 OKN-R103-Interop-Research" \
+              --referer "https://golodsp.com/7%E9%80%9A%E9%81%93%E9%9F%B3%E9%A2%91%E5%89%8D%E7%BA%A7/" \
+              --output "$2" "$1"
+            test -s "$2"
+          }
+
+          fetch "$ANDROID_URL" "$OUT/downloads/android.zip"
+          fetch "$WINDOWS_URL" "$OUT/downloads/windows.zip"
+          sha256sum "$OUT/downloads/"*.zip > "$OUT/evidence/01_DOWNLOAD_SHA256.txt"
+
+      - name: Extract real APK and Windows client
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$OUT/android/pkg" "$OUT/windows/pkg"
           7z x -y "$OUT/downloads/android.zip" -o"$OUT/android/pkg" >/dev/null
+          7z x -y "$OUT/downloads/windows.zip" -o"$OUT/windows/pkg" >/dev/null
 
-          APK="$(
-            find "$OUT/android/pkg" -type f -iname '*.apk' \
-              ! -path '*/__MACOSX/*' ! -name '._*' -size +100k \
-              -print | sort | head -n1
-          )"
+          APK="$(find "$OUT/android/pkg" -type f -iname '*.apk' ! -path '*/__MACOSX/*' ! -name '._*' -size +100k | sort | head -n1)"
+          EXE="$(find "$OUT/windows/pkg" -type f -iname '*.exe' ! -path '*/__MACOSX/*' ! -name '._*' -size +100k | sort | head -n1)"
+
           test -n "$APK"
+          test -n "$EXE"
           unzip -t "$APK" >/dev/null
           cp "$APK" "$OUT/android/golopine.apk"
-          7z x -y "$OUT/android/golopine.apk" -o"$OUT/android/raw" >/dev/null
-
-          LIB="$OUT/android/raw/lib/arm64-v8a/libapp.so"
-          test -s "$LIB"
+          cp "$EXE" "$OUT/windows/dstech.exe"
 
           {
-            echo "APK_SIZE=$(stat -c%s "$OUT/android/golopine.apk")"
-            echo "LIBAPP_SIZE=$(stat -c%s "$LIB")"
-            file "$LIB"
-            sha256sum "$OUT/android/golopine.apk" "$LIB"
-          } > "$OUT/evidence/01_IDENTITY.txt"
+            file "$OUT/android/golopine.apk"
+            file "$OUT/windows/dstech.exe"
+            sha256sum "$OUT/android/golopine.apk" "$OUT/windows/dstech.exe"
+          } > "$OUT/evidence/02_CLIENT_IDENTITY.txt"
 
-      - name: Decode every aligned ARM64 word and find command-byte stores
+      - name: Decompile Windows .NET client
+        shell: bash
+        run: |
+          set -euo pipefail
+          export PATH="$PATH:$HOME/.dotnet/tools"
+          if ! command -v ilspycmd >/dev/null 2>&1; then
+            dotnet tool install --global ilspycmd >/dev/null
+          fi
+
+          mkdir -p "$OUT/decompiled/windows"
+          ilspycmd --project --outputdir "$OUT/decompiled/windows" "$OUT/windows/dstech.exe" \
+            > "$OUT/evidence/10_ILSPY_STDOUT.txt" \
+            2> "$OUT/evidence/11_ILSPY_STDERR.txt"
+
+          echo "ILSPY_RC=0" > "$OUT/evidence/12_ILSPY_STATUS.txt"
+
+      - name: Extract protocol class contracts from Windows client
         shell: bash
         run: |
           set -euo pipefail
           python3 - <<'PY'
           from pathlib import Path
-          import os,json,re
-          from elftools.elf.elffile import ELFFile
-          from capstone import Cs, CS_ARCH_ARM64, CS_MODE_LITTLE_ENDIAN
-          from capstone.arm64 import ARM64_OP_IMM, ARM64_OP_REG, ARM64_OP_MEM
+          import os,re,json
 
-          out=Path(os.environ["OUT"])
-          ev=out/"evidence"
-          lib=out/"android/raw/lib/arm64-v8a/libapp.so"
+          out=Path(os.environ['OUT'])
+          root=out/'decompiled/windows'
+          ev=out/'evidence'
 
-          commands={
-            0x57:"WRITE_ACTUATOR",
-            0x58:"READ_SENSOR_ACTUATOR",
-            0x59:"READ_SENSOR_JSON",
-            0x60:"RESPONSE_READ_SENSOR",
-            0x61:"READ_SENSOR_FIFO",
-            0x62:"RESPONSE_FIFO",
-            0x63:"READ_SENSOR_BULK",
-            0x64:"RESPONSE_BULK",
-            0x82:"CONTINUE_BULK",
-          }
+          wanted=[
+            'Sensor.cs','ReadSensorPeriperalCommand.cs','ReadSensorFifoCommand.cs',
+            'ReadSensorBulkCommand.cs','UFEHeader.cs','HidDevice.cs','HIDInterface.cs',
+            'DeviceCommunicationStream.cs','UFEcommandBridge.cs'
+          ]
 
-          md=Cs(CS_ARCH_ARM64,CS_MODE_LITTLE_ENDIAN)
-          md.detail=True
-
-          insns=[]
-          with lib.open("rb") as f:
-            elf=ELFFile(f)
-            for seg in elf.iter_segments():
-              if seg["p_type"]!="PT_LOAD" or not (int(seg["p_flags"]) & 1):
-                continue
-              data=seg.data()
-              base=int(seg["p_vaddr"])
-              # ARM64 instructions are fixed 4-byte width. Decode each word
-              # independently so data/invalid words cannot terminate scanning.
-              for off in range(0,len(data)-3,4):
-                addr=base+off
-                one=list(md.disasm(data[off:off+4],addr,count=1))
-                if not one:
-                  continue
-                ins=one[0]
-                insns.append({
-                  "address":addr,
-                  "address_hex":hex(addr),
-                  "mnemonic":ins.mnemonic,
-                  "op_str":ins.op_str,
-                  "bytes":data[off:off+4].hex().upper(),
-                  "_ins":ins
-                })
-
-          # Address-indexed ordered map.
-          byaddr={x["address"]:x for x in insns}
-          addrs=sorted(byaddr)
-
-          # Discover canonical Dart prologues:
-          # stp x29,x30,[x15,#-0x10]! ; mov x29,x15
-          prologues=[]
-          for a in addrs:
-            x=byaddr[a]
-            y=byaddr.get(a+4)
-            if not y: continue
-            if (
-              x["mnemonic"]=="stp"
-              and "x29, x30" in x["op_str"]
-              and "x15" in x["op_str"]
-              and y["mnemonic"]=="mov"
-              and y["op_str"].replace(" ","")=="x29,x15"
-            ):
-              prologues.append(a)
-
-          def prev_prologue(addr,limit=0x4000):
-            vals=[p for p in prologues if p<=addr and addr-p<=limit]
-            return vals[-1] if vals else None
-
-          def next_prologue(addr,limit=0x5000):
-            for p in prologues:
-              if p>addr and p-addr<=limit:
-                return p
-            return None
-
-          # Find mov/movz immediate command followed quickly by a byte store
-          # of the same register.
-          hits=[]
-          for idx,a in enumerate(addrs):
-            row=byaddr[a]
-            ins=row["_ins"]
-            if ins.mnemonic not in ("mov","movz"):
-              continue
-
-            reg=None; imm=None
-            for op in ins.operands:
-              if op.type==ARM64_OP_REG and reg is None:
-                reg=ins.reg_name(op.reg)
-              elif op.type==ARM64_OP_IMM:
-                imm=int(op.imm)
-            if reg is None or imm not in commands:
-              continue
-
-            src_w=("w"+reg[1:]) if reg.startswith("x") else reg
-
-            store=None
-            for step in range(1,9):
-              nxt=byaddr.get(a+4*step)
-              if not nxt: continue
-              ni=nxt["_ins"]
-              if ni.mnemonic not in ("strb","sturb"):
-                continue
-              # First operand source register.
-              if not ni.operands or ni.operands[0].type!=ARM64_OP_REG:
-                continue
-              sreg=ni.reg_name(ni.operands[0].reg)
-              if sreg in (reg,src_w):
-                store=nxt
-                break
-            if not store:
-              continue
-
-            start=prev_prologue(a)
-            end=next_prologue(a)
-            if start is None:
-              start=max(addrs[0],a-0x800)
-            if end is None:
-              end=min(addrs[-1]+4,start+0x3000)
-
-            hits.append({
-              "command":imm,
-              "command_hex":hex(imm),
-              "meaning":commands[imm],
-              "mov_address":hex(a),
-              "mov_text":f"{row['mnemonic']} {row['op_str']}",
-              "store_address":store["address_hex"],
-              "store_text":f"{store['mnemonic']} {store['op_str']}",
-              "function_start":hex(start),
-              "function_end":hex(end),
-              "function_size":end-start,
-            })
-
-          # De-dup exact mov sites.
-          uniq=[]; seen=set()
-          for h in hits:
-            k=(h["command"],h["mov_address"])
-            if k in seen: continue
-            seen.add(k); uniq.append(h)
-
-          (ev/"10_RAW_COMMAND_STORE_HITS.json").write_text(
-            json.dumps(uniq,indent=2)+"\n")
-
-          counts={}
-          for h in uniq:
-            counts[h["meaning"]]=counts.get(h["meaning"],0)+1
-          (ev/"11_RAW_COMMAND_STORE_COUNTS.json").write_text(
-            json.dumps(counts,indent=2)+"\n")
-
-          # Strip Capstone private object before later serialization.
-          compact=[]
-          for a in addrs:
-            r=byaddr[a]
-            compact.append({
-              "address":r["address"],
-              "address_hex":r["address_hex"],
-              "mnemonic":r["mnemonic"],
-              "op_str":r["op_str"],
-              "bytes":r["bytes"],
-            })
-          # Keep only metadata summary; full instruction list is recreated in
-          # next step directly from ELF to avoid a huge artifact.
-          print("decoded_instructions",len(compact))
-          print(json.dumps(counts,indent=2))
-          PY
-
-      - name: Recover full function windows for packet builders
-        shell: bash
-        run: |
-          set -euo pipefail
-          python3 - <<'PY'
-          from pathlib import Path
-          import os,json,re
-          from elftools.elf.elffile import ELFFile
-          from capstone import Cs, CS_ARCH_ARM64, CS_MODE_LITTLE_ENDIAN
-          from capstone.arm64 import ARM64_OP_IMM, ARM64_OP_REG, ARM64_OP_MEM
-
-          out=Path(os.environ["OUT"])
-          ev=out/"evidence"
-          lib=out/"android/raw/lib/arm64-v8a/libapp.so"
-          hits=json.loads((ev/"10_RAW_COMMAND_STORE_HITS.json").read_text())
-
-          md=Cs(CS_ARCH_ARM64,CS_MODE_LITTLE_ENDIAN)
-          md.detail=True
-
-          with lib.open("rb") as f:
-            elf=ELFFile(f)
-            segments=[]
-            for seg in elf.iter_segments():
-              if seg["p_type"]=="PT_LOAD":
-                segments.append({
-                  "vaddr":int(seg["p_vaddr"]),
-                  "filesz":int(seg["p_filesz"]),
-                  "offset":int(seg["p_offset"]),
-                })
-
-            def readva(addr,size):
-              for s in segments:
-                if s["vaddr"]<=addr<s["vaddr"]+s["filesz"]:
-                  n=min(size,s["vaddr"]+s["filesz"]-addr)
-                  f.seek(s["offset"]+(addr-s["vaddr"]))
-                  return f.read(n)
-              return b""
-
-            builders=[]
-            for h in hits:
-              start=int(h["function_start"],16)
-              end=int(h["function_end"],16)
-              size=min(end-start,0x5000)
-              data=readva(start,size)
-              rows=[]
-              stores=[]
-              calls=[]
-              immediates=[]
-
-              # Decode word-by-word, never stop on invalid word.
-              for off in range(0,len(data)-3,4):
-                addr=start+off
-                one=list(md.disasm(data[off:off+4],addr,count=1))
-                if not one: continue
-                ins=one[0]
-                text=f"{ins.mnemonic} {ins.op_str}".strip()
-                row={"address":hex(addr),"mnemonic":ins.mnemonic,"op_str":ins.op_str,"text":text}
-
-                if ins.mnemonic in ("strb","sturb","strh","sturh","str","stur","stp"):
-                  mem=None
-                  if ins.operands and ins.operands[-1].type==ARM64_OP_MEM:
-                    mop=ins.operands[-1].mem
-                    mem={
-                      "base":ins.reg_name(mop.base) if mop.base else None,
-                      "index":ins.reg_name(mop.index) if mop.index else None,
-                      "disp":int(mop.disp),
-                    }
-                  s={"address":hex(addr),"text":text,"mem":mem}
-                  stores.append(s); row["store"]=s
-
-                if ins.mnemonic=="bl" and ins.operands and ins.operands[0].type==ARM64_OP_IMM:
-                  c={"address":hex(addr),"target":hex(int(ins.operands[0].imm))}
-                  calls.append(c); row["call"]=c
-
-                if ins.mnemonic in ("mov","movz","movk","orr","add","sub"):
-                  vals=[]
-                  for op in ins.operands:
-                    if op.type==ARM64_OP_IMM:
-                      vals.append(int(op.imm))
-                  if vals:
-                    immediates.append({"address":hex(addr),"text":text,"values":vals})
-
-                rows.append(row)
-
-              builders.append({
-                **h,
-                "stores":stores[:1000],
-                "calls":calls[:1000],
-                "immediates":immediates[:2000],
-                "instructions":rows[:12000],
+          contracts=[]
+          for name in wanted:
+            matches=list(root.rglob(name))
+            for p in matches:
+              txt=p.read_text(errors='ignore')
+              contracts.append({
+                'file':str(p.relative_to(out)),
+                'text':txt[:50000]
               })
 
-          (ev/"20_PACKET_BUILDER_WINDOWS.json").write_text(
-            json.dumps(builders,indent=2)+"\n")
-          print("builder_windows",len(builders))
-          PY
+          (ev/'20_WINDOWS_PROTOCOL_CONTRACTS.json').write_text(
+            json.dumps(contracts,indent=2,ensure_ascii=False)+'\n')
 
-      - name: Infer byte layout conservatively
-        shell: bash
-        run: |
-          set -euo pipefail
-          python3 - <<'PY'
-          from pathlib import Path
-          import os,json,re
-
-          out=Path(os.environ["OUT"])
-          ev=out/"evidence"
-          builders=json.loads((ev/"20_PACKET_BUILDER_WINDOWS.json").read_text())
-
-          layouts=[]
-          for b in builders:
-            cmd_addr=int(b["mov_address"],16)
-            instr=b["instructions"]
-
-            # Limit analysis to +/- 0x300 bytes around command store.
-            nearby=[]
-            for r in instr:
-              a=int(r["address"],16)
-              if cmd_addr-0x80 <= a <= cmd_addr+0x500:
-                nearby.append(r)
-
-            packet_stores=[]
-            for r in nearby:
-              if "store" not in r: continue
-              s=r["store"]
-              mem=s.get("mem") or {}
-              disp=mem.get("disp")
-              # Packet stores commonly use offsets 0..32. Stack/local stores
-              # are negative and are excluded from layout inference.
-              if isinstance(disp,int) and 0 <= disp <= 32:
-                packet_stores.append(s)
-
-            # Detect byte swap idioms used before a 32-bit packet store.
-            text="\n".join(r["text"] for r in nearby)
-            has_manual_bswap32=all(tok in text for tok in (
-              "#0xff00ff00","#0xff00ff","#0xffff0000","#0xffff"
-            ))
-
-            # Immediate -> following narrow store, useful for fixed fields.
-            fixed=[]
-            for i,r in enumerate(nearby):
-              if r["mnemonic"] not in ("mov","movz"):
-                continue
-              m=re.search(r'^(?:mov|movz)\s+([xw]\d+),\s*#(0x[0-9a-fA-F]+|\d+)',r["text"])
-              if not m: continue
-              reg=m.group(1)
-              val=int(m.group(2),0)
-              wreg=("w"+reg[1:]) if reg.startswith("x") else reg
-              for rr in nearby[i+1:i+8]:
-                if rr["mnemonic"] not in ("strb","sturb","strh","sturh","str","stur"):
-                  continue
-                if not re.search(rf'\b(?:{re.escape(reg)}|{re.escape(wreg)})\b',rr["text"]):
-                  continue
-                s=rr.get("store")
-                if not s: continue
-                mem=s.get("mem") or {}
-                disp=mem.get("disp")
-                if isinstance(disp,int) and 0<=disp<=32:
-                  fixed.append({
-                    "value":val,
-                    "value_hex":hex(val),
-                    "from":r["address"],
-                    "store":s
-                  })
-                  break
-
-            layouts.append({
-              "command":b["command"],
-              "command_hex":b["command_hex"],
-              "meaning":b["meaning"],
-              "function_start":b["function_start"],
-              "function_end":b["function_end"],
-              "command_store":b["store_text"],
-              "packet_stores":packet_stores,
-              "fixed_immediate_stores":fixed,
-              "manual_bswap32_seen":has_manual_bswap32,
-              "nearby_instructions":nearby,
+          # Parse public fields / constructor signatures that remain visible even
+          # when method bodies are protected.
+          parsed=[]
+          for c in contracts:
+            txt=c['text']
+            fields=re.findall(r'(?m)^\s*public\s+([\w<>\[\].]+)\s+(\w+)\s*;',txt)
+            ctors=re.findall(r'(?m)^\s*public\s+(\w+)\s*\(([^)]*)\)',txt)
+            enums=re.findall(r'(?m)^\s*(UFE_[A-Z0-9_]+)\s*=\s*(\d+)\s*,?\s*$',txt)
+            parsed.append({
+              'file':c['file'],
+              'public_fields':fields,
+              'constructors':ctors,
+              'ufe_enum_values':[(n,int(v)) for n,v in enums]
             })
 
-          (ev/"30_INFERRED_PACKET_LAYOUTS.json").write_text(
-            json.dumps(layouts,indent=2)+"\n")
-          print("layouts",len(layouts))
+          (ev/'21_WINDOWS_PROTOCOL_CONTRACT_SUMMARY.json').write_text(
+            json.dumps(parsed,indent=2,ensure_ascii=False)+'\n')
           PY
 
-      - name: Compare read and write builder families
+      - name: Inventory Android transport plugins and permissions
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$OUT/android/raw"
+          7z x -y "$OUT/android/golopine.apk" -o"$OUT/android/raw" >/dev/null
+
+          strings -a -n 4 "$OUT/android/raw/classes.dex" > "$OUT/evidence/30_CLASSES_DEX_STRINGS.txt"
+
+          python3 - <<'PY'
+          from pathlib import Path
+          import os,json
+
+          out=Path(os.environ['OUT'])
+          ev=out/'evidence'
+          lines=(ev/'30_CLASSES_DEX_STRINGS.txt').read_text(errors='ignore').splitlines()
+          terms=[
+            'bluetooth','ble','bluetooth_classic','universal_ble',
+            'UsbManager','UsbDevice','controlTransfer','bulkTransfer',
+            'hidraw','hidapi','/dev/bus/usb','MethodChannel'
+          ]
+          hits=[]
+          for s in lines:
+            ms=[t for t in terms if t.lower() in s.lower()]
+            if ms:
+              hits.append({'terms':ms,'string':s[:2000]})
+          (ev/'31_ANDROID_TRANSPORT_EVIDENCE.json').write_text(
+            json.dumps(hits,indent=2,ensure_ascii=False)+'\n')
+          PY
+
+      - name: Search both clients for firmware flash readback primitives
         shell: bash
         run: |
           set -euo pipefail
           python3 - <<'PY'
           from pathlib import Path
-          import os,json,collections
+          import os,re,json,subprocess
 
-          out=Path(os.environ["OUT"])
-          ev=out/"evidence"
-          layouts=json.loads((ev/"30_INFERRED_PACKET_LAYOUTS.json").read_text())
+          out=Path(os.environ['OUT'])
+          ev=out/'evidence'
+          roots=[out/'decompiled/windows',out/'android/raw']
 
-          by=collections.defaultdict(list)
-          for x in layouts:
-            by[x["meaning"]].append(x)
+          # Separate readback terms from write/update terms.  A firmware updater
+          # or 'update command' does NOT count as readback evidence.
+          read_terms=[
+            'ReadFlash','ReadFirmware','FirmwareRead','FlashRead','ReadMemory',
+            'DumpFirmware','DumpFlash','DownloadFirmware','BackupFirmware',
+            'ReadRom','ReadROM','MemoryRead','FlashDump','FirmwareDump'
+          ]
+          update_terms=[
+            'firmware','flash','upgrade','bootloader','updatecommandthread',
+            'writeflash','erase','program','download mva','mva'
+          ]
 
-          target_names=("READ_SENSOR_ACTUATOR","READ_SENSOR_FIFO","READ_SENSOR_BULK","CONTINUE_BULK")
-          target_count=sum(len(by.get(n,[])) for n in target_names)
+          read_hits=[]
+          update_hits=[]
 
-          # A packet layout is considered recovered for a command only when we
-          # have a direct command-byte store plus at least one additional
-          # positive-offset packet store in the same raw function.
-          recovered=[]
-          for x in layouts:
-            if x["meaning"] not in target_names: continue
-            extra=[
-              s for s in x["packet_stores"]
-              if int(s["address"],16) != int(x["function_start"],16)
-            ]
-            # command store is included among packet_stores; require >=2 total.
-            if len(x["packet_stores"])>=2:
-              recovered.append(x["meaning"])
+          for root in roots:
+            if not root.exists(): continue
+            for p in root.rglob('*'):
+              if not p.is_file() or p.stat().st_size>80_000_000: continue
+              rel=str(p.relative_to(out))
+              if p.suffix.lower() in {'.cs','.java','.kt','.xml','.txt','.json','.ini','.cfg','.properties'}:
+                try: lines=p.read_text(errors='ignore').splitlines()
+                except: continue
+                for i,line in enumerate(lines):
+                  r=[t for t in read_terms if t.lower() in line.lower()]
+                  u=[t for t in update_terms if t.lower() in line.lower()]
+                  if r:
+                    read_hits.append({'path':rel,'line':i+1,'terms':r,'text':line[:4000]})
+                  if u:
+                    update_hits.append({'path':rel,'line':i+1,'terms':u,'text':line[:4000]})
+              elif p.suffix.lower() in {'.exe','.dll','.so','.dex'}:
+                try:
+                  rr=subprocess.run(['strings','-a','-n','4',str(p)],capture_output=True,text=True,errors='ignore',timeout=40)
+                except Exception:
+                  continue
+                for s in rr.stdout.splitlines():
+                  r=[t for t in read_terms if t.lower() in s.lower()]
+                  u=[t for t in update_terms if t.lower() in s.lower()]
+                  if r: read_hits.append({'path':rel,'terms':r,'text':s[:4000]})
+                  if u: update_hits.append({'path':rel,'terms':u,'text':s[:4000]})
 
-          recovered=sorted(set(recovered))
+          (ev/'40_FIRMWARE_READBACK_TERM_HITS.json').write_text(
+            json.dumps(read_hits,indent=2,ensure_ascii=False)+'\n')
+          (ev/'41_FIRMWARE_UPDATE_WRITE_TERM_HITS.json').write_text(
+            json.dumps(update_hits[:4000],indent=2,ensure_ascii=False)+'\n')
+          print('readback_term_hits',len(read_hits))
+          print('update_write_term_hits',len(update_hits))
+          PY
+
+      - name: Correlate proven R102 packet layouts with Windows type semantics
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import os,json
+
+          out=Path(os.environ['OUT'])
+          ev=out/'evidence'
+          contracts=json.loads((ev/'21_WINDOWS_PROTOCOL_CONTRACT_SUMMARY.json').read_text())
+
+          def find(name):
+            return [x for x in contracts if x['file'].endswith('/'+name) or x['file'].endswith(name)]
+
+          result={
+            'read_sensor_fifo':{
+              'command':0x61,
+              'windows_contract':find('ReadSensorFifoCommand.cs'),
+              'proven_r102_wire_layout':'[0x61][Sensor.ID BE32][memlength BE16]',
+              'official_android_observed_memlength':200,
+            },
+            'read_sensor_bulk':{
+              'command':0x63,
+              'windows_contract':find('ReadSensorBulkCommand.cs'),
+              'proven_r102_wire_layout':'[0x63][Sensor.ID BE32][memoffset BE16][memlength BE16]',
+              'official_android_observed_memoffset':0,
+              'official_android_observed_memlength':0x078C,
+            },
+            'read_sensor_actuator':{
+              'command':0x58,
+              'windows_contract':find('ReadSensorPeriperalCommand.cs'),
+              'proven_r102_wire_layout':'[0x58][Sensor.ID BE32][0x0000][derived/cascade length BE16]',
+            },
+            'sensor_model':find('Sensor.cs'),
+          }
+          (ev/'50_UFE_READ_SEMANTICS.json').write_text(
+            json.dumps(result,indent=2,ensure_ascii=False)+'\n')
+          PY
+
+      - name: Produce conservative capability verdict
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import os,json
+
+          out=Path(os.environ['OUT'])
+          ev=out/'evidence'
+
+          contracts=json.loads((ev/'21_WINDOWS_PROTOCOL_CONTRACT_SUMMARY.json').read_text())
+          transport=json.loads((ev/'31_ANDROID_TRANSPORT_EVIDENCE.json').read_text())
+          readhits=json.loads((ev/'40_FIRMWARE_READBACK_TERM_HITS.json').read_text())
+          updatehits=json.loads((ev/'41_FIRMWARE_UPDATE_WRITE_TERM_HITS.json').read_text())
+
+          flat=json.dumps(contracts,ensure_ascii=False)
+          bulk_sensor_semantics=(
+            'ReadSensorBulkCommand' in flat and
+            'memoffset' in flat and
+            'memlength' in flat and
+            'Sensor' in flat
+          )
+          fifo_sensor_semantics=(
+            'ReadSensorFifoCommand' in flat and
+            'memlength' in flat and
+            'Sensor' in flat
+          )
+
+          android_blob=json.dumps(transport,ensure_ascii=False).lower()
+          android_ble=('bluetooth_classic' in android_blob or 'universal_ble' in android_blob)
+          android_usb=any(k in android_blob for k in ('usbmanager','controtransfer','bulktransfer','hidraw','hidapi'))
 
           verdict={
-            "raw_command_store_hits":len(layouts),
-            "target_read_builder_hits":target_count,
-            "recovered_read_builder_kinds":recovered,
-            "read_sensor_fifo_builder_proven":"READ_SENSOR_FIFO" in recovered,
-            "read_sensor_bulk_builder_proven":"READ_SENSOR_BULK" in recovered,
-            "read_sensor_actuator_builder_proven":"READ_SENSOR_ACTUATOR" in recovered,
-            "exact_full_flash_readback_proven":False,
-            "live_board_commands_allowed":False,
-            "reason":"Raw packet builders can establish request bytes, but live use remains blocked until sensor/address semantics and the Android HID transport path are tied to production VID:PID without destructive side effects."
+            'ufe_bulk_is_sensor_scoped':bulk_sensor_semantics,
+            'ufe_fifo_is_sensor_scoped':fifo_sensor_semantics,
+            'ufe_sensor_id_is_not_proven_flash_address':True,
+            'official_android_transport_shows_bluetooth_ble':android_ble,
+            'official_android_transport_shows_direct_android_usb_api':android_usb,
+            'explicit_firmware_flash_readback_term_hits':len(readhits),
+            'firmware_update_or_write_related_hits':len(updatehits),
+            'true_firmware_readback_primitive_proven':False,
+            'full_flash_readback_proven':False,
+            'live_board_commands_allowed':False,
+            'next_gate':'If no true firmware-read primitive exists, pivot away from UFE sensor reads and locate a vendor bootloader/updater readback path; do not reinterpret Sensor.ID as a flash address.'
           }
-          (ev/"40_R102_VERDICT.json").write_text(
-            json.dumps(verdict,indent=2)+"\n")
+          (ev/'60_R103_VERDICT.json').write_text(
+            json.dumps(verdict,indent=2,ensure_ascii=False)+'\n')
 
           lines=[
-            "OKN R102 RAW ARM64 UFE PACKET BUILDER MINER",
-            "OFFLINE_ONLY=true",
-            f"RAW_COMMAND_STORE_HITS={len(layouts)}",
-            f"TARGET_READ_BUILDER_HITS={target_count}",
-            "RECOVERED_READ_BUILDER_KINDS="+(",".join(recovered) if recovered else "NONE"),
-            f"READ_SENSOR_FIFO_BUILDER_PROVEN={str('READ_SENSOR_FIFO' in recovered).lower()}",
-            f"READ_SENSOR_BULK_BUILDER_PROVEN={str('READ_SENSOR_BULK' in recovered).lower()}",
-            f"READ_SENSOR_ACTUATOR_BUILDER_PROVEN={str('READ_SENSOR_ACTUATOR' in recovered).lower()}",
-            "FULL_FLASH_READBACK_PROVEN=false",
-            "LIVE_BOARD_COMMANDS_ALLOWED=false",
+            'OKN R103 FIRMWARE READBACK CAPABILITY AUDITOR',
+            'OFFLINE_ONLY=true',
+            f'UFE_BULK_IS_SENSOR_SCOPED={str(bulk_sensor_semantics).lower()}',
+            f'UFE_FIFO_IS_SENSOR_SCOPED={str(fifo_sensor_semantics).lower()}',
+            'UFE_SENSOR_ID_IS_NOT_PROVEN_FLASH_ADDRESS=true',
+            f'ANDROID_OFFICIAL_CLIENT_BLUETOOTH_BLE={str(android_ble).lower()}',
+            f'ANDROID_OFFICIAL_CLIENT_DIRECT_USB_API={str(android_usb).lower()}',
+            f'FIRMWARE_READBACK_TERM_HITS={len(readhits)}',
+            f'UPDATE_WRITE_RELATED_HITS={len(updatehits)}',
+            'TRUE_FIRMWARE_READBACK_PRIMITIVE_PROVEN=false',
+            'FULL_FLASH_READBACK_PROVEN=false',
+            'LIVE_BOARD_COMMANDS_ALLOWED=false',
           ]
-          (ev/"41_R102_SUMMARY.txt").write_text("\n".join(lines)+"\n")
-          print("\n".join(lines))
+          (ev/'61_R103_SUMMARY.txt').write_text('\n'.join(lines)+'\n')
+          print('\n'.join(lines))
           PY
 
       - name: Build compact evidence artifact
@@ -566,16 +407,16 @@ jobs:
         shell: bash
         run: |
           {
-            echo "## OKN R102 Raw ARM64 UFE Packet Builder Miner"
+            echo "## OKN R103 Firmware Readback Capability Auditor"
             echo
-            echo "- Static/offline analysis only."
-            echo "- Decodes every aligned ARM64 word so invalid/data words cannot terminate the scan."
-            echo "- Locates command immediate -> byte-store builders for UFE 0x57/0x58/0x61/0x63/0x82."
-            echo "- No board USB access and no host-to-device packets."
+            echo "- Static/offline only."
+            echo "- Distinguishes UFE Sensor.ID reads from true firmware/flash reads."
+            echo "- Searches official Android and Windows clients for a separate readback primitive."
+            echo "- No board USB access and no host-to-device packet."
             echo
             for f in \
-              "$OUT/evidence/11_RAW_COMMAND_STORE_COUNTS.json" \
-              "$OUT/evidence/41_R102_SUMMARY.txt"; do
+              "$OUT/evidence/12_ILSPY_STATUS.txt" \
+              "$OUT/evidence/61_R103_SUMMARY.txt"; do
               if [ -f "$f" ]; then
                 echo "### $(basename "$f")"
                 echo '```text'
@@ -585,11 +426,11 @@ jobs:
             done
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Upload R102 evidence
+      - name: Upload R103 evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: R102-RAW-ARM64-UFE-PACKET-BUILDER-EVIDENCE
-          path: /tmp/okn-r102/review
+          name: R103-FIRMWARE-READBACK-CAPABILITY-EVIDENCE
+          path: /tmp/okn-r103/review
           if-no-files-found: error
           retention-days: 30
