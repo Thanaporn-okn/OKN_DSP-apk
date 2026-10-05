@@ -1,4 +1,4 @@
-name: OKN R103 Firmware Readback Capability Auditor OFFLINE ONLY
+name: OKN R105 MEGA Updater + Bootloader + Firmware Miner OFFLINE ONLY
 
 on:
   push:
@@ -12,12 +12,10 @@ permissions:
   actions: read
 
 concurrency:
-  group: okn-r103-firmware-readback-audit-${{ github.ref }}
+  group: okn-r105-mega-offline-${{ github.ref }}
   cancel-in-progress: true
 
 env:
-  OUT: /tmp/okn-r103
-  ANDROID_URL: "https://golodsp.com/wp-content/uploads/2026/05/golopine_audio_turning_release_2026-04-01.apk_.zip"
   WINDOWS_URL: "https://golodsp.com/wp-content/uploads/2026/05/golopine_audio_turning_release_2026-04-08.exe_.zip"
   LIVE_BOARD_USB: "NO"
   HOST_TO_DEVICE_USB: "NO"
@@ -25,19 +23,15 @@ env:
   FLASH_ALLOWED: "NO"
 
 jobs:
-  audit:
-    name: Audit official clients for true firmware readback capability / STATIC ONLY
+  dotnet_protocol:
+    name: 1 - Decompile updater + HID protocol
     runs-on: ubuntu-24.04
     timeout-minutes: 35
+    env:
+      OUT: /tmp/r105-dotnet
 
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v7
-        with:
-          fetch-depth: 1
-          persist-credentials: false
-
-      - name: Fail-closed offline-only scope gate
+      - name: Safety gate
         shell: bash
         run: |
           set -euo pipefail
@@ -46,95 +40,86 @@ jobs:
           test "$FLASH_ERASE_WRITE" = "NO"
           test "$FLASH_ALLOWED" = "NO"
           rm -rf "$OUT"
-          mkdir -p "$OUT"/{downloads,android,windows,decompiled,evidence,review}
+          mkdir -p "$OUT"/{downloads,pkg,decompiled,il,evidence}
 
           cat > "$OUT/evidence/00_SCOPE.txt" <<'EOF'
-          REVISION=R103
+          REVISION=R105
+          JOB=DOTNET_PROTOCOL
           MODE=OFFLINE_STATIC_ONLY
-          TARGET=GoloPine_DSTech_BP1048P4
-          PRODUCTION_USB=6324:1719
-          PRODUCTION_HID_USAGE=FF00:55AA
-          UFE_READ_SENSOR=0x58
-          UFE_READ_FIFO=0x61
-          UFE_READ_BULK=0x63
+          TARGET_USB=6324:1719
+          TARGET_HID_USAGE=FF00:55AA
           BOARD_USB_ACCESS=NO
           LIVE_USB_COMMANDS=NO
           HOST_TO_DEVICE_USB=NO
           SET_REPORT_LIVE=NO
-          ERASE=NO
-          WRITE=NO
-          UNLOCK=NO
+          FLASH_ERASE_WRITE=NO
           FLASH_ALLOWED=NO
-          GOAL=Determine_if_official_clients_expose_true_firmware_or_flash_readback_beyond_UFE_sensor_reads
           EOF
 
-      - name: Install static-analysis utilities
+      - name: Install analysis tools
         shell: bash
         run: |
           set -euo pipefail
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends \
-            unzip p7zip-full file binutils jq curl default-jre-headless
+            unzip p7zip-full file binutils jq curl mono-utils python3 python3-pip
+          python3 -m pip install --break-system-packages --quiet dnfile pefile
 
-      - name: Download official Android and Windows clients
+      - name: Download official Windows client
         shell: bash
         run: |
           set -euo pipefail
+          curl --fail --location --retry 4 --retry-all-errors \
+            --connect-timeout 20 --max-time 240 \
+            --user-agent "Mozilla/5.0 OKN-R105-Interop-Research" \
+            --referer "https://golodsp.com/7%E9%80%9A%E9%81%93%E9%9F%B3%E9%A2%91%E5%89%8D%E7%BA%A7/" \
+            --output "$OUT/downloads/windows.zip" "$WINDOWS_URL"
 
-          fetch() {
-            curl \
-              --fail --location --retry 4 --retry-all-errors \
-              --connect-timeout 20 --max-time 240 \
-              --user-agent "Mozilla/5.0 OKN-R103-Interop-Research" \
-              --referer "https://golodsp.com/7%E9%80%9A%E9%81%93%E9%9F%B3%E9%A2%91%E5%89%8D%E7%BA%A7/" \
-              --output "$2" "$1"
-            test -s "$2"
-          }
+          7z x -y "$OUT/downloads/windows.zip" -o"$OUT/pkg" >/dev/null
 
-          fetch "$ANDROID_URL" "$OUT/downloads/android.zip"
-          fetch "$WINDOWS_URL" "$OUT/downloads/windows.zip"
-          sha256sum "$OUT/downloads/"*.zip > "$OUT/evidence/01_DOWNLOAD_SHA256.txt"
-
-      - name: Extract real APK and Windows client
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p "$OUT/android/pkg" "$OUT/windows/pkg"
-          7z x -y "$OUT/downloads/android.zip" -o"$OUT/android/pkg" >/dev/null
-          7z x -y "$OUT/downloads/windows.zip" -o"$OUT/windows/pkg" >/dev/null
-
-          APK="$(find "$OUT/android/pkg" -type f -iname '*.apk' ! -path '*/__MACOSX/*' ! -name '._*' -size +100k | sort | head -n1)"
-          EXE="$(find "$OUT/windows/pkg" -type f -iname '*.exe' ! -path '*/__MACOSX/*' ! -name '._*' -size +100k | sort | head -n1)"
-
-          test -n "$APK"
+          EXE="$(
+            find "$OUT/pkg" -type f -iname '*.exe' \
+              ! -path '*/__MACOSX/*' ! -name '._*' -size +100k \
+              -print | sort | head -n1
+          )"
           test -n "$EXE"
-          unzip -t "$APK" >/dev/null
-          cp "$APK" "$OUT/android/golopine.apk"
-          cp "$EXE" "$OUT/windows/dstech.exe"
+          cp "$EXE" "$OUT/dstech.exe"
 
           {
-            file "$OUT/android/golopine.apk"
-            file "$OUT/windows/dstech.exe"
-            sha256sum "$OUT/android/golopine.apk" "$OUT/windows/dstech.exe"
-          } > "$OUT/evidence/02_CLIENT_IDENTITY.txt"
+            file "$OUT/dstech.exe"
+            sha256sum "$OUT/dstech.exe"
+            stat -c 'SIZE=%s' "$OUT/dstech.exe"
+          } > "$OUT/evidence/01_CLIENT_IDENTITY.txt"
 
-      - name: Decompile Windows .NET client
+      - name: Decompile C sharp and raw IL
         shell: bash
         run: |
           set -euo pipefail
           export PATH="$PATH:$HOME/.dotnet/tools"
+
           if ! command -v ilspycmd >/dev/null 2>&1; then
-            dotnet tool install --global ilspycmd >/dev/null
+            dotnet tool install --global ilspycmd \
+              > "$OUT/evidence/10_ILSPY_INSTALL_STDOUT.txt" \
+              2> "$OUT/evidence/11_ILSPY_INSTALL_STDERR.txt"
           fi
 
-          mkdir -p "$OUT/decompiled/windows"
-          ilspycmd --project --outputdir "$OUT/decompiled/windows" "$OUT/windows/dstech.exe" \
-            > "$OUT/evidence/10_ILSPY_STDOUT.txt" \
-            2> "$OUT/evidence/11_ILSPY_STDERR.txt"
+          ilspycmd --project \
+            --outputdir "$OUT/decompiled" \
+            "$OUT/dstech.exe" \
+            > "$OUT/evidence/12_CSHARP_STDOUT.txt" \
+            2> "$OUT/evidence/13_CSHARP_STDERR.txt"
 
-          echo "ILSPY_RC=0" > "$OUT/evidence/12_ILSPY_STATUS.txt"
+          ilspycmd --ilcode "$OUT/dstech.exe" \
+            > "$OUT/il/all.il" \
+            2> "$OUT/evidence/14_IL_STDERR.txt"
 
-      - name: Extract protocol class contracts from Windows client
+          {
+            echo "CSHARP_RC=0"
+            echo "IL_RC=0"
+            ilspycmd --version 2>&1
+          } > "$OUT/evidence/15_DECOMPILER_STATUS.txt"
+
+      - name: Mine updater, bootloader, HID and verification paths
         shell: bash
         run: |
           set -euo pipefail
@@ -142,253 +127,675 @@ jobs:
           from pathlib import Path
           import os,re,json
 
-          out=Path(os.environ['OUT'])
-          root=out/'decompiled/windows'
-          ev=out/'evidence'
+          out=Path(os.environ["OUT"])
+          root=out/"decompiled"
+          ev=out/"evidence"
 
-          wanted=[
-            'Sensor.cs','ReadSensorPeriperalCommand.cs','ReadSensorFifoCommand.cs',
-            'ReadSensorBulkCommand.cs','UFEHeader.cs','HidDevice.cs','HIDInterface.cs',
-            'DeviceCommunicationStream.cs','UFEcommandBridge.cs'
-          ]
+          categories={
+            "updater":[
+              "UpdateCommandThread","firmware","upgrade","bootloader","flash",
+              "erase","program","download","mva","update"
+            ],
+            "device_to_host":[
+              "HidD_GetInputReport","HidD_GetFeature","ReadFile",
+              "GetInputReport","GetFeature","receive","response","ack"
+            ],
+            "host_to_device":[
+              "HidD_SetOutputReport","HidD_SetFeature","WriteFile",
+              "SetOutputReport","SetFeature","send"
+            ],
+            "verify_status":[
+              "verify","status","checksum","crc","version","query",
+              "readback","compare","check","ack"
+            ],
+            "readback_words":[
+              "ReadFlash","ReadFirmware","FirmwareRead","FlashRead",
+              "ReadMemory","MemoryRead","DumpFlash","DumpFirmware",
+              "BackupFirmware","ReadRom","ReadROM"
+            ]
+          }
 
-          contracts=[]
-          for name in wanted:
-            matches=list(root.rglob(name))
-            for p in matches:
-              txt=p.read_text(errors='ignore')
-              contracts.append({
-                'file':str(p.relative_to(out)),
-                'text':txt[:50000]
-              })
+          hits=[]
+          method_windows=[]
+          method_pat=re.compile(
+            r'(?m)^\s*(?:public|private|protected|internal)\s+'
+            r'(?:static\s+)?[^\n{;=]+\s+([A-Za-z_]\w*)\s*\([^)]*\)\s*\{'
+          )
 
-          (ev/'20_WINDOWS_PROTOCOL_CONTRACTS.json').write_text(
-            json.dumps(contracts,indent=2,ensure_ascii=False)+'\n')
+          for p in root.rglob("*.cs"):
+            try: txt=p.read_text(errors="ignore")
+            except: continue
+            lines=txt.splitlines()
+            rel=str(p.relative_to(out))
 
-          # Parse public fields / constructor signatures that remain visible even
-          # when method bodies are protected.
-          parsed=[]
-          for c in contracts:
-            txt=c['text']
-            fields=re.findall(r'(?m)^\s*public\s+([\w<>\[\].]+)\s+(\w+)\s*;',txt)
-            ctors=re.findall(r'(?m)^\s*public\s+(\w+)\s*\(([^)]*)\)',txt)
-            enums=re.findall(r'(?m)^\s*(UFE_[A-Z0-9_]+)\s*=\s*(\d+)\s*,?\s*$',txt)
-            parsed.append({
-              'file':c['file'],
-              'public_fields':fields,
-              'constructors':ctors,
-              'ufe_enum_values':[(n,int(v)) for n,v in enums]
-            })
+            for i,line in enumerate(lines):
+              matched={}
+              for cat,terms in categories.items():
+                ms=[t for t in terms if t.lower() in line.lower()]
+                if ms: matched[cat]=ms
+              if matched:
+                lo=max(0,i-18); hi=min(len(lines),i+45)
+                hits.append({
+                  "path":rel,"line":i+1,"matched":matched,
+                  "context":"\n".join(
+                    f"{j+1}: {lines[j]}" for j in range(lo,hi)
+                  )[:26000]
+                })
 
-          (ev/'21_WINDOWS_PROTOCOL_CONTRACT_SUMMARY.json').write_text(
-            json.dumps(parsed,indent=2,ensure_ascii=False)+'\n')
+            for m in method_pat.finditer(txt):
+              name=m.group(1)
+              start=m.start()
+              snippet=txt[start:start+36000]
+              low=snippet.lower()
+              matched_cats=[
+                cat for cat,terms in categories.items()
+                if any(t.lower() in low[:16000] for t in terms)
+              ]
+              if name=="UpdateCommandThread" or matched_cats:
+                method_windows.append({
+                  "path":rel,
+                  "line":txt.count("\n",0,start)+1,
+                  "method":name,
+                  "categories":matched_cats,
+                  "snippet":snippet
+                })
+
+          (ev/"20_SOURCE_HITS.json").write_text(
+            json.dumps(hits,indent=2,ensure_ascii=False)+"\n")
+          (ev/"21_METHOD_WINDOWS.json").write_text(
+            json.dumps(method_windows,indent=2,ensure_ascii=False)+"\n")
+          print("source_hits",len(hits))
+          print("method_windows",len(method_windows))
           PY
 
-      - name: Inventory Android transport plugins and permissions
+      - name: Build updater call map and constants map
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p "$OUT/android/raw"
-          7z x -y "$OUT/android/golopine.apk" -o"$OUT/android/raw" >/dev/null
+          python3 - <<'PY'
+          from pathlib import Path
+          import os,re,json,collections
 
-          strings -a -n 4 "$OUT/android/raw/classes.dex" > "$OUT/evidence/30_CLASSES_DEX_STRINGS.txt"
+          out=Path(os.environ["OUT"])
+          ev=out/"evidence"
+          methods=json.loads((ev/"21_METHOD_WINDOWS.json").read_text())
 
+          rows=[]
+          call_index=collections.defaultdict(set)
+
+          for m in methods:
+            txt=m["snippet"]
+            constants=[]
+            for cm in re.finditer(r'(?<![\w])(?:0x[0-9A-Fa-f]+|\d+)(?![\w])',txt):
+              tok=cm.group(0)
+              try: v=int(tok,0)
+              except: continue
+              if 0 <= v <= 0xFFFFFFFF:
+                constants.append({
+                  "value":v,"hex":hex(v),"offset":cm.start()
+                })
+
+            calls=[]
+            for c in re.finditer(r'\b([A-Za-z_]\w*)\s*\(',txt):
+              name=c.group(1)
+              if name in {
+                "if","for","while","switch","catch","lock","using",
+                "sizeof","typeof","nameof","new"
+              }:
+                continue
+              calls.append(name)
+              call_index[m["method"]].add(name)
+
+            arrays=[]
+            for a in re.finditer(
+              r'(?is)(?:new\s+byte\s*\[[^\]]*\]|new\s+byte\s*\[\]\s*\{).{0,2500}',
+              txt
+            ):
+              arrays.append(a.group(0)[:5000])
+
+            rows.append({
+              "path":m["path"],
+              "method":m["method"],
+              "categories":m["categories"],
+              "constants":constants[:2000],
+              "calls":calls[:3000],
+              "byte_array_windows":arrays[:300]
+            })
+
+          graph={k:sorted(v) for k,v in call_index.items()}
+          (ev/"22_METHOD_CONSTANTS_CALLS.json").write_text(
+            json.dumps(rows,indent=2,ensure_ascii=False)+"\n")
+          (ev/"23_METHOD_CALL_GRAPH.json").write_text(
+            json.dumps(graph,indent=2,ensure_ascii=False)+"\n")
+          PY
+
+      - name: Mine raw IL around updater and HID APIs
+        shell: bash
+        run: |
+          set -euo pipefail
           python3 - <<'PY'
           from pathlib import Path
           import os,json
 
-          out=Path(os.environ['OUT'])
-          ev=out/'evidence'
-          lines=(ev/'30_CLASSES_DEX_STRINGS.txt').read_text(errors='ignore').splitlines()
-          terms=[
-            'bluetooth','ble','bluetooth_classic','universal_ble',
-            'UsbManager','UsbDevice','controlTransfer','bulkTransfer',
-            'hidraw','hidapi','/dev/bus/usb','MethodChannel'
+          out=Path(os.environ["OUT"])
+          ev=out/"evidence"
+          lines=(out/"il/all.il").read_text(errors="ignore").splitlines()
+
+          needles=[
+            "UpdateCommandThread",
+            "HidD_SetOutputReport","HidD_GetInputReport",
+            "HidD_SetFeature","HidD_GetFeature",
+            "WriteFile","ReadFile",
+            "Firmware","Upgrade","Boot","Flash","MVA",
+            "CRC","Checksum","Verify","Status"
           ]
-          hits=[]
-          for s in lines:
-            ms=[t for t in terms if t.lower() in s.lower()]
-            if ms:
-              hits.append({'terms':ms,'string':s[:2000]})
-          (ev/'31_ANDROID_TRANSPORT_EVIDENCE.json').write_text(
-            json.dumps(hits,indent=2,ensure_ascii=False)+'\n')
+
+          windows=[]
+          for i,line in enumerate(lines):
+            found=[n for n in needles if n.lower() in line.lower()]
+            if not found: continue
+            lo=max(0,i-100); hi=min(len(lines),i+260)
+            windows.append({
+              "line":i+1,
+              "terms":found,
+              "context":"\n".join(
+                f"{j+1}: {lines[j]}" for j in range(lo,hi)
+              )[:60000]
+            })
+
+          (ev/"30_IL_PROTOCOL_WINDOWS.json").write_text(
+            json.dumps(windows,indent=2,ensure_ascii=False)+"\n")
+          print("il_windows",len(windows))
           PY
 
-      - name: Search both clients for firmware flash readback primitives
+      - name: Enumerate .NET methods, RVAs and protected stubs
         shell: bash
         run: |
           set -euo pipefail
           python3 - <<'PY'
           from pathlib import Path
-          import os,re,json,subprocess
+          import os,json
+          import dnfile
 
-          out=Path(os.environ['OUT'])
-          ev=out/'evidence'
-          roots=[out/'decompiled/windows',out/'android/raw']
+          out=Path(os.environ["OUT"])
+          ev=out/"evidence"
+          pe=dnfile.dnPE(str(out/"dstech.exe"))
 
-          # Separate readback terms from write/update terms.  A firmware updater
-          # or 'update command' does NOT count as readback evidence.
-          read_terms=[
-            'ReadFlash','ReadFirmware','FirmwareRead','FlashRead','ReadMemory',
-            'DumpFirmware','DumpFlash','DownloadFirmware','BackupFirmware',
-            'ReadRom','ReadROM','MemoryRead','FlashDump','FirmwareDump'
-          ]
-          update_terms=[
-            'firmware','flash','upgrade','bootloader','updatecommandthread',
-            'writeflash','erase','program','download mva','mva'
-          ]
+          rows=[]
+          if pe.net and pe.net.mdtables and pe.net.mdtables.MethodDef:
+            for idx,row in enumerate(pe.net.mdtables.MethodDef.rows,1):
+              name=str(row.Name)
+              rva=int(row.Rva or 0)
+              flags=str(row.Flags)
+              interesting=any(k in name.lower() for k in (
+                "update","firm","flash","boot","hid","read","write",
+                "verify","status","crc","checksum","feature","report"
+              ))
+              if interesting:
+                rows.append({
+                  "rid":idx,
+                  "name":name,
+                  "rva":rva,
+                  "rva_hex":hex(rva),
+                  "flags":flags
+                })
 
-          read_hits=[]
-          update_hits=[]
+          (ev/"31_INTERESTING_METHOD_RVAS.json").write_text(
+            json.dumps(rows,indent=2,ensure_ascii=False)+"\n")
+          print("interesting_method_rvas",len(rows))
+          PY
+
+      - name: Classify exact updater candidates conservatively
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import os,json
+
+          out=Path(os.environ["OUT"])
+          ev=out/"evidence"
+          methods=json.loads((ev/"21_METHOD_WINDOWS.json").read_text())
+          consts=json.loads((ev/"22_METHOD_CONSTANTS_CALLS.json").read_text())
+
+          safeish=[]
+          mutating=[]
+          readback=[]
+
+          for m in methods:
+            cats=set(m.get("categories",[]))
+            item={
+              "path":m["path"],"method":m["method"],
+              "categories":sorted(cats)
+            }
+            if "verify_status" in cats or "device_to_host" in cats:
+              safeish.append(item)
+            if "updater" in cats or "host_to_device" in cats:
+              mutating.append(item)
+            if "readback_words" in cats:
+              readback.append(item)
+
+          verdict={
+            "method_windows":len(methods),
+            "status_verify_or_device_to_host_methods":len(safeish),
+            "mutating_or_host_to_device_methods":len(mutating),
+            "explicit_readback_named_methods":len(readback),
+            "updater_protocol_fully_recovered":False,
+            "non_destructive_bootloader_query_proven":False,
+            "firmware_readback_primitive_proven":False,
+            "live_board_commands_allowed":False,
+            "promotion_rule":"No updater command is promoted live until its exact request bytes, exact response bytes, and non-mutating behavior are all tied together in official-client code."
+          }
+
+          (ev/"40_DOTNET_VERDICT.json").write_text(
+            json.dumps(verdict,indent=2)+"\n")
+          (ev/"41_SAFEISH_CANDIDATES.json").write_text(
+            json.dumps(safeish,indent=2,ensure_ascii=False)+"\n")
+          (ev/"42_MUTATING_CANDIDATES.json").write_text(
+            json.dumps(mutating,indent=2,ensure_ascii=False)+"\n")
+          (ev/"43_EXPLICIT_READBACK_CANDIDATES.json").write_text(
+            json.dumps(readback,indent=2,ensure_ascii=False)+"\n")
+          PY
+
+      - name: Upload .NET evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: r105-dotnet-evidence
+          path: /tmp/r105-dotnet/evidence
+          if-no-files-found: error
+          retention-days: 7
+
+  firmware_resources:
+    name: 2 - Mine updater resources + firmware formats
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      OUT: /tmp/r105-resources
+
+    steps:
+      - name: Safety gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$LIVE_BOARD_USB" = "NO"
+          test "$HOST_TO_DEVICE_USB" = "NO"
+          test "$FLASH_ERASE_WRITE" = "NO"
+          test "$FLASH_ALLOWED" = "NO"
+          rm -rf "$OUT"
+          mkdir -p "$OUT"/{downloads,pkg,expanded,evidence}
+
+          cat > "$OUT/evidence/00_SCOPE.txt" <<'EOF'
+          REVISION=R105
+          JOB=FIRMWARE_RESOURCES
+          MODE=OFFLINE_STATIC_ONLY
+          BOARD_USB_ACCESS=NO
+          HOST_TO_DEVICE_USB=NO
+          FLASH_ERASE_WRITE=NO
+          FLASH_ALLOWED=NO
+          EOF
+
+      - name: Install resource-analysis tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            unzip p7zip-full file binutils jq curl python3 python3-pip icoutils
+          python3 -m pip install --break-system-packages --quiet pefile
+
+      - name: Download and recursively expand Windows package
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 4 --retry-all-errors \
+            --connect-timeout 20 --max-time 240 \
+            --user-agent "Mozilla/5.0 OKN-R105-Resource-Research" \
+            --referer "https://golodsp.com/7%E9%80%9A%E9%81%93%E9%9F%B3%E9%A2%91%E5%89%8D%E7%BA%A7/" \
+            --output "$OUT/downloads/windows.zip" "$WINDOWS_URL"
+
+          7z x -y "$OUT/downloads/windows.zip" -o"$OUT/pkg" >/dev/null
+
+          EXE="$(
+            find "$OUT/pkg" -type f -iname '*.exe' \
+              ! -path '*/__MACOSX/*' ! -name '._*' -size +100k \
+              -print | sort | head -n1
+          )"
+          test -n "$EXE"
+          cp "$EXE" "$OUT/dstech.exe"
+
+          # Extract resources/embedded archives best-effort.
+          7z x -y "$OUT/dstech.exe" -o"$OUT/expanded/pe" \
+            > "$OUT/evidence/10_7Z_PE_STDOUT.txt" 2>&1 || true
+
+          find "$OUT/pkg" "$OUT/expanded" -type f -printf '%p\t%s\n' | sort \
+            > "$OUT/evidence/11_FILE_INVENTORY.tsv"
+
+      - name: Find firmware-like payloads and updater assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import os,json,hashlib,subprocess,re,math
+
+          out=Path(os.environ["OUT"])
+          roots=[out/"pkg",out/"expanded"]
+          ev=out/"evidence"
+
+          ext_interest={
+            ".bin",".fw",".img",".rom",".hex",".mva",".dat",".upd",
+            ".dfu",".ota",".pack",".res",".resource",".dll",".exe"
+          }
+          name_terms=(
+            "firm","flash","upgrade","update","boot","mva","rom","dsp",
+            "bp1048","image","program"
+          )
+
+          candidates=[]
+          strings_hits=[]
 
           for root in roots:
             if not root.exists(): continue
-            for p in root.rglob('*'):
-              if not p.is_file() or p.stat().st_size>80_000_000: continue
+            for p in root.rglob("*"):
+              if not p.is_file(): continue
+              try: size=p.stat().st_size
+              except: continue
               rel=str(p.relative_to(out))
-              if p.suffix.lower() in {'.cs','.java','.kt','.xml','.txt','.json','.ini','.cfg','.properties'}:
-                try: lines=p.read_text(errors='ignore').splitlines()
-                except: continue
-                for i,line in enumerate(lines):
-                  r=[t for t in read_terms if t.lower() in line.lower()]
-                  u=[t for t in update_terms if t.lower() in line.lower()]
-                  if r:
-                    read_hits.append({'path':rel,'line':i+1,'terms':r,'text':line[:4000]})
-                  if u:
-                    update_hits.append({'path':rel,'line':i+1,'terms':u,'text':line[:4000]})
-              elif p.suffix.lower() in {'.exe','.dll','.so','.dex'}:
-                try:
-                  rr=subprocess.run(['strings','-a','-n','4',str(p)],capture_output=True,text=True,errors='ignore',timeout=40)
-                except Exception:
-                  continue
-                for s in rr.stdout.splitlines():
-                  r=[t for t in read_terms if t.lower() in s.lower()]
-                  u=[t for t in update_terms if t.lower() in s.lower()]
-                  if r: read_hits.append({'path':rel,'terms':r,'text':s[:4000]})
-                  if u: update_hits.append({'path':rel,'terms':u,'text':s[:4000]})
+              suffix=p.suffix.lower()
+              lowname=p.name.lower()
 
-          (ev/'40_FIRMWARE_READBACK_TERM_HITS.json').write_text(
-            json.dumps(read_hits,indent=2,ensure_ascii=False)+'\n')
-          (ev/'41_FIRMWARE_UPDATE_WRITE_TERM_HITS.json').write_text(
-            json.dumps(update_hits[:4000],indent=2,ensure_ascii=False)+'\n')
-          print('readback_term_hits',len(read_hits))
-          print('update_write_term_hits',len(update_hits))
+              selected=(
+                suffix in ext_interest
+                or any(t in lowname for t in name_terms)
+                or size > 256*1024
+              )
+              if selected:
+                try:
+                  data=p.read_bytes()
+                  sha=hashlib.sha256(data).hexdigest()
+                  head=data[:64].hex().upper()
+                  tail=data[-64:].hex().upper() if data else ""
+                except:
+                  sha=head=tail=""
+                candidates.append({
+                  "path":rel,"size":size,"suffix":suffix,
+                  "sha256":sha,"head64":head,"tail64":tail
+                })
+
+              if size <= 100_000_000 and suffix in {
+                ".exe",".dll",".bin",".dat",".mva",".fw",".img",".rom",".resource"
+              }:
+                try:
+                  r=subprocess.run(
+                    ["strings","-a","-n","4",str(p)],
+                    capture_output=True,text=True,errors="ignore",timeout=30
+                  )
+                except:
+                  continue
+                for s in r.stdout.splitlines():
+                  if any(t in s.lower() for t in (
+                    "firmware","flash","bootloader","upgrade","update",
+                    "crc","checksum","verify","erase","program",
+                    "readflash","readfirmware","readmemory","backup"
+                  )):
+                    strings_hits.append({
+                      "path":rel,"string":s[:3000]
+                    })
+
+          (ev/"20_FIRMWARE_LIKE_FILES.json").write_text(
+            json.dumps(candidates,indent=2,ensure_ascii=False)+"\n")
+          (ev/"21_RESOURCE_STRINGS.json").write_text(
+            json.dumps(strings_hits,indent=2,ensure_ascii=False)+"\n")
+          print("firmware_like_files",len(candidates))
+          print("resource_string_hits",len(strings_hits))
           PY
 
-      - name: Correlate proven R102 packet layouts with Windows type semantics
+      - name: Enumerate PE resources and overlays
         shell: bash
         run: |
           set -euo pipefail
           python3 - <<'PY'
           from pathlib import Path
-          import os,json
+          import os,json,hashlib
+          import pefile
 
-          out=Path(os.environ['OUT'])
-          ev=out/'evidence'
-          contracts=json.loads((ev/'21_WINDOWS_PROTOCOL_CONTRACT_SUMMARY.json').read_text())
+          out=Path(os.environ["OUT"])
+          ev=out/"evidence"
+          exe=out/"dstech.exe"
+          pe=pefile.PE(str(exe),fast_load=False)
 
-          def find(name):
-            return [x for x in contracts if x['file'].endswith('/'+name) or x['file'].endswith(name)]
+          sections=[]
+          for s in pe.sections:
+            sections.append({
+              "name":s.Name.rstrip(b"\0").decode(errors="ignore"),
+              "virtual_address":hex(s.VirtualAddress),
+              "virtual_size":s.Misc_VirtualSize,
+              "raw_offset":s.PointerToRawData,
+              "raw_size":s.SizeOfRawData,
+              "entropy":s.get_entropy()
+            })
+
+          overlay_offset=pe.get_overlay_data_start_offset()
+          overlay=None
+          if overlay_offset is not None:
+            data=exe.read_bytes()[overlay_offset:]
+            overlay={
+              "offset":overlay_offset,
+              "size":len(data),
+              "sha256":hashlib.sha256(data).hexdigest(),
+              "head64":data[:64].hex().upper()
+            }
 
           result={
-            'read_sensor_fifo':{
-              'command':0x61,
-              'windows_contract':find('ReadSensorFifoCommand.cs'),
-              'proven_r102_wire_layout':'[0x61][Sensor.ID BE32][memlength BE16]',
-              'official_android_observed_memlength':200,
-            },
-            'read_sensor_bulk':{
-              'command':0x63,
-              'windows_contract':find('ReadSensorBulkCommand.cs'),
-              'proven_r102_wire_layout':'[0x63][Sensor.ID BE32][memoffset BE16][memlength BE16]',
-              'official_android_observed_memoffset':0,
-              'official_android_observed_memlength':0x078C,
-            },
-            'read_sensor_actuator':{
-              'command':0x58,
-              'windows_contract':find('ReadSensorPeriperalCommand.cs'),
-              'proven_r102_wire_layout':'[0x58][Sensor.ID BE32][0x0000][derived/cascade length BE16]',
-            },
-            'sensor_model':find('Sensor.cs'),
+            "sections":sections,
+            "overlay":overlay,
+            "entrypoint_rva":hex(pe.OPTIONAL_HEADER.AddressOfEntryPoint),
+            "image_base":hex(pe.OPTIONAL_HEADER.ImageBase)
           }
-          (ev/'50_UFE_READ_SEMANTICS.json').write_text(
-            json.dumps(result,indent=2,ensure_ascii=False)+'\n')
+          (ev/"22_PE_LAYOUT.json").write_text(
+            json.dumps(result,indent=2)+"\n")
           PY
 
-      - name: Produce conservative capability verdict
+      - name: Search binary for likely update framing constants
         shell: bash
         run: |
           set -euo pipefail
           python3 - <<'PY'
           from pathlib import Path
-          import os,json
+          import os,json,re
 
-          out=Path(os.environ['OUT'])
-          ev=out/'evidence'
+          out=Path(os.environ["OUT"])
+          ev=out/"evidence"
+          data=(out/"dstech.exe").read_bytes()
 
-          contracts=json.loads((ev/'21_WINDOWS_PROTOCOL_CONTRACT_SUMMARY.json').read_text())
-          transport=json.loads((ev/'31_ANDROID_TRANSPORT_EVIDENCE.json').read_text())
-          readhits=json.loads((ev/'40_FIRMWARE_READBACK_TERM_HITS.json').read_text())
-          updatehits=json.loads((ev/'41_FIRMWARE_UPDATE_WRITE_TERM_HITS.json').read_text())
-
-          flat=json.dumps(contracts,ensure_ascii=False)
-          bulk_sensor_semantics=(
-            'ReadSensorBulkCommand' in flat and
-            'memoffset' in flat and
-            'memlength' in flat and
-            'Sensor' in flat
-          )
-          fifo_sensor_semantics=(
-            'ReadSensorFifoCommand' in flat and
-            'memlength' in flat and
-            'Sensor' in flat
-          )
-
-          android_blob=json.dumps(transport,ensure_ascii=False).lower()
-          android_ble=('bluetooth_classic' in android_blob or 'universal_ble' in android_blob)
-          android_usb=any(k in android_blob for k in ('usbmanager','controtransfer','bulktransfer','hidraw','hidapi'))
-
-          verdict={
-            'ufe_bulk_is_sensor_scoped':bulk_sensor_semantics,
-            'ufe_fifo_is_sensor_scoped':fifo_sensor_semantics,
-            'ufe_sensor_id_is_not_proven_flash_address':True,
-            'official_android_transport_shows_bluetooth_ble':android_ble,
-            'official_android_transport_shows_direct_android_usb_api':android_usb,
-            'explicit_firmware_flash_readback_term_hits':len(readhits),
-            'firmware_update_or_write_related_hits':len(updatehits),
-            'true_firmware_readback_primitive_proven':False,
-            'full_flash_readback_proven':False,
-            'live_board_commands_allowed':False,
-            'next_gate':'If no true firmware-read primitive exists, pivot away from UFE sensor reads and locate a vendor bootloader/updater readback path; do not reinterpret Sensor.ID as a flash address.'
+          # Context around known production USB IDs and common protocol markers.
+          patterns={
+            "VID_LE":bytes.fromhex("2463"),
+            "VID_BE":bytes.fromhex("6324"),
+            "PID_LE":bytes.fromhex("1917"),
+            "PID_BE":bytes.fromhex("1719"),
+            "USAGE_55AA_LE":bytes.fromhex("AA55"),
+            "USAGE_55AA_BE":bytes.fromhex("55AA"),
+            "CRC16_POLY_1021_LE":bytes.fromhex("2110"),
+            "CRC16_POLY_1021_BE":bytes.fromhex("1021"),
           }
-          (ev/'60_R103_VERDICT.json').write_text(
-            json.dumps(verdict,indent=2,ensure_ascii=False)+'\n')
 
-          lines=[
-            'OKN R103 FIRMWARE READBACK CAPABILITY AUDITOR',
-            'OFFLINE_ONLY=true',
-            f'UFE_BULK_IS_SENSOR_SCOPED={str(bulk_sensor_semantics).lower()}',
-            f'UFE_FIFO_IS_SENSOR_SCOPED={str(fifo_sensor_semantics).lower()}',
-            'UFE_SENSOR_ID_IS_NOT_PROVEN_FLASH_ADDRESS=true',
-            f'ANDROID_OFFICIAL_CLIENT_BLUETOOTH_BLE={str(android_ble).lower()}',
-            f'ANDROID_OFFICIAL_CLIENT_DIRECT_USB_API={str(android_usb).lower()}',
-            f'FIRMWARE_READBACK_TERM_HITS={len(readhits)}',
-            f'UPDATE_WRITE_RELATED_HITS={len(updatehits)}',
-            'TRUE_FIRMWARE_READBACK_PRIMITIVE_PROVEN=false',
-            'FULL_FLASH_READBACK_PROVEN=false',
-            'LIVE_BOARD_COMMANDS_ALLOWED=false',
-          ]
-          (ev/'61_R103_SUMMARY.txt').write_text('\n'.join(lines)+'\n')
-          print('\n'.join(lines))
+          hits=[]
+          for name,pat in patterns.items():
+            start=0
+            while True:
+              i=data.find(pat,start)
+              if i<0: break
+              lo=max(0,i-64); hi=min(len(data),i+128)
+              hits.append({
+                "pattern":name,
+                "offset":i,
+                "offset_hex":hex(i),
+                "context_hex":data[lo:hi].hex().upper()
+              })
+              start=i+1
+
+          (ev/"30_BINARY_MARKER_WINDOWS.json").write_text(
+            json.dumps(hits[:5000],indent=2)+"\n")
+          print("marker_hits",len(hits))
           PY
 
-      - name: Build compact evidence artifact
+      - name: Upload resource evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: r105-resource-evidence
+          path: /tmp/r105-resources/evidence
+          if-no-files-found: error
+          retention-days: 7
+
+  correlate:
+    name: 3 - Correlate protocol + resources + risk
+    needs: [dotnet_protocol, firmware_resources]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+
+    steps:
+      - name: Safety gate
         shell: bash
         run: |
           set -euo pipefail
-          cp -a "$OUT/evidence/." "$OUT/review/"
+          test "$LIVE_BOARD_USB" = "NO"
+          test "$HOST_TO_DEVICE_USB" = "NO"
+          test "$FLASH_ERASE_WRITE" = "NO"
+          test "$FLASH_ALLOWED" = "NO"
+          rm -rf /tmp/r105-final
+          mkdir -p /tmp/r105-final/{dotnet,resources,review}
 
-          cat > "$OUT/review/99_SAFETY_ATTESTATION.txt" <<'EOF'
+      - name: Download .NET evidence
+        uses: actions/download-artifact@v4
+        with:
+          name: r105-dotnet-evidence
+          path: /tmp/r105-final/dotnet
+
+      - name: Download resource evidence
+        uses: actions/download-artifact@v4
+        with:
+          name: r105-resource-evidence
+          path: /tmp/r105-final/resources
+
+      - name: Build combined protocol map and next-gate verdict
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import json,re
+
+          base=Path("/tmp/r105-final")
+          dot=base/"dotnet"
+          res=base/"resources"
+          review=base/"review"
+
+          def load(path,default):
+            p=Path(path)
+            if not p.exists(): return default
+            try: return json.loads(p.read_text(errors="ignore"))
+            except: return default
+
+          dver=load(dot/"40_DOTNET_VERDICT.json",{})
+          safe=load(dot/"41_SAFEISH_CANDIDATES.json",[])
+          mut=load(dot/"42_MUTATING_CANDIDATES.json",[])
+          readback=load(dot/"43_EXPLICIT_READBACK_CANDIDATES.json",[])
+          rsrc=load(res/"20_FIRMWARE_LIKE_FILES.json",[])
+          rstrings=load(res/"21_RESOURCE_STRINGS.json",[])
+          pelayout=load(res/"22_PE_LAYOUT.json",{})
+
+          # Known, already-proven UFE layouts from R102 are included as
+          # reference only. They remain sensor-scoped and are not flash reads.
+          proven_ufe={
+            "0x58":{
+              "name":"READ_SENSOR_ACTUATOR",
+              "scope":"Sensor/parameter data",
+              "full_flash_readback":False
+            },
+            "0x61":{
+              "name":"READ_SENSOR_FIFO",
+              "layout":"[61][Sensor.ID BE32][memlength BE16]",
+              "scope":"Sensor FIFO",
+              "full_flash_readback":False
+            },
+            "0x63":{
+              "name":"READ_SENSOR_BULK",
+              "layout":"[63][Sensor.ID BE32][memoffset BE16][memlength BE16]",
+              "scope":"Sensor data block",
+              "full_flash_readback":False
+            }
+          }
+
+          # High-value candidates are methods that appear in both a
+          # device-to-host/status context and updater context. They are still
+          # NOT safe until exact request/response semantics are proven.
+          safe_names={x.get("method") for x in safe}
+          mut_names={x.get("method") for x in mut}
+          overlap=sorted(x for x in safe_names & mut_names if x)
+
+          firmware_payloads=[
+            x for x in rsrc
+            if x.get("suffix") in {".bin",".fw",".img",".rom",".mva",".hex",".dfu",".ota",".upd"}
+            or any(t in x.get("path","").lower() for t in ("firm","flash","upgrade","mva","boot"))
+          ]
+
+          combined={
+            "revision":"R105",
+            "mode":"OFFLINE_STATIC_ONLY",
+            "proven_sensor_read_protocol":proven_ufe,
+            "updater_status_or_device_to_host_candidates":safe,
+            "mutating_updater_candidates":mut,
+            "explicit_named_readback_candidates":readback,
+            "status_updater_overlap_method_names":overlap,
+            "firmware_payload_candidates":firmware_payloads,
+            "pe_overlay":pelayout.get("overlay"),
+            "true_firmware_readback_primitive_proven":False,
+            "full_flash_readback_proven":False,
+            "live_board_commands_allowed":False,
+            "next_gate":"Inspect any status/updater overlap method and any embedded firmware payload together to recover exact bootloader request/response framing. Do not execute updater traffic on the production board yet."
+          }
+
+          (review/"50_R105_COMBINED_PROTOCOL_MAP.json").write_text(
+            json.dumps(combined,indent=2,ensure_ascii=False)+"\n")
+
+          lines=[
+            "OKN R105 MEGA OFFLINE RESULT",
+            "UFE_SENSOR_READ_LAYOUTS_PROVEN=true",
+            f"UPDATER_STATUS_OR_D2H_CANDIDATES={len(safe)}",
+            f"MUTATING_UPDATER_CANDIDATES={len(mut)}",
+            f"EXPLICIT_NAMED_READBACK_CANDIDATES={len(readback)}",
+            f"STATUS_UPDATER_OVERLAP_METHODS={len(overlap)}",
+            f"FIRMWARE_PAYLOAD_CANDIDATES={len(firmware_payloads)}",
+            "TRUE_FIRMWARE_READBACK_PRIMITIVE_PROVEN=false",
+            "FULL_FLASH_READBACK_PROVEN=false",
+            "LIVE_BOARD_COMMANDS_ALLOWED=false",
+          ]
+          (review/"51_R105_SUMMARY.txt").write_text("\n".join(lines)+"\n")
+
+          # Compact shortlist for manual review on the next turn.
+          shortlist={
+            "overlap_methods":overlap[:100],
+            "safeish_candidates":safe[:100],
+            "explicit_readback_candidates":readback[:100],
+            "firmware_payload_candidates":firmware_payloads[:100],
+            "resource_strings":rstrings[:200]
+          }
+          (review/"52_R105_SHORTLIST.json").write_text(
+            json.dumps(shortlist,indent=2,ensure_ascii=False)+"\n")
+
+          print("\n".join(lines))
+          PY
+
+      - name: Copy all compact evidence into final bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/r105-final/review/dotnet /tmp/r105-final/review/resources
+          cp -a /tmp/r105-final/dotnet/. /tmp/r105-final/review/dotnet/
+          cp -a /tmp/r105-final/resources/. /tmp/r105-final/review/resources/
+
+          cat > /tmp/r105-final/review/99_SAFETY_ATTESTATION.txt <<'EOF'
           OFFLINE_STATIC_ONLY=true
           BOARD_USB_ACCESSED=false
           HOST_TO_DEVICE_COMMANDS_SENT=false
@@ -398,39 +805,30 @@ jobs:
           EOF
 
           (
-            cd "$OUT/review"
+            cd /tmp/r105-final/review
             find . -type f -print0 | sort -z | xargs -0 sha256sum
-          ) > "$OUT/review/SHA256SUMS.txt"
+          ) > /tmp/r105-final/review/SHA256SUMS.txt
 
-      - name: Publish summary
-        if: always()
+      - name: Publish combined summary
         shell: bash
         run: |
           {
-            echo "## OKN R103 Firmware Readback Capability Auditor"
+            echo "## OKN R105 MEGA Offline Updater/Bootloader/Firmware Miner"
             echo
-            echo "- Static/offline only."
-            echo "- Distinguishes UFE Sensor.ID reads from true firmware/flash reads."
-            echo "- Searches official Android and Windows clients for a separate readback primitive."
-            echo "- No board USB access and no host-to-device packet."
+            echo "- Runs .NET protocol mining and firmware-resource mining in parallel."
+            echo "- Correlates updater status/verify paths with HID transport and embedded payloads."
+            echo "- Includes previously proven UFE sensor-read layouts only as reference."
+            echo "- No board USB access; no host-to-device traffic."
             echo
-            for f in \
-              "$OUT/evidence/12_ILSPY_STATUS.txt" \
-              "$OUT/evidence/61_R103_SUMMARY.txt"; do
-              if [ -f "$f" ]; then
-                echo "### $(basename "$f")"
-                echo '```text'
-                cat "$f"
-                echo '```'
-              fi
-            done
+            echo '```text'
+            cat /tmp/r105-final/review/51_R105_SUMMARY.txt
+            echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Upload R103 evidence
-        if: always()
+      - name: Upload final R105 evidence
         uses: actions/upload-artifact@v4
         with:
-          name: R103-FIRMWARE-READBACK-CAPABILITY-EVIDENCE
-          path: /tmp/okn-r103/review
+          name: R105-MEGA-UPDATER-BOOTLOADER-FIRMWARE-EVIDENCE
+          path: /tmp/r105-final/review
           if-no-files-found: error
           retention-days: 30
