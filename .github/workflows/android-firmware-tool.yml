@@ -1,4 +1,4 @@
-name: OKN R109 MEGA Static Decrypt + Method Store Recovery OFFLINE ONLY
+name: OKN R110 MEGA Exact N9 IL Emulator + Method Body Recovery OFFLINE ONLY
 
 on:
   push:
@@ -12,7 +12,7 @@ permissions:
   actions: read
 
 concurrency:
-  group: okn-r109-static-decrypt-${{ github.ref }}
+  group: okn-r110-exact-n9-${{ github.ref }}
   cancel-in-progress: true
 
 env:
@@ -24,14 +24,14 @@ env:
 
 jobs:
   recover:
-    name: Static decryptor + protected method store recovery
+    name: Exact static N9 state emulator and h15 decrypt recovery
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     env:
-      OUT: /tmp/r109
+      OUT: /tmp/r110
 
     steps:
-      - name: Fail-closed offline safety gate
+      - name: Fail-closed static-only safety gate
         shell: bash
         run: |
           set -euo pipefail
@@ -41,42 +41,43 @@ jobs:
           test "$FLASH_ALLOWED" = "NO"
 
           rm -rf "$OUT"
-          mkdir -p "$OUT"/{downloads,pkg,il,evidence,resources,fieldrva,decrypted,review}
+          mkdir -p "$OUT"/{downloads,pkg,il,resources,decrypted,evidence,review}
 
           cat > "$OUT/evidence/00_SCOPE.txt" <<'EOF'
-          REVISION=R109
+          REVISION=R110
           MODE=OFFLINE_STATIC_ONLY
           TARGET_EXECUTED=false
           BOARD_USB_ACCESS=NO
           HOST_TO_DEVICE_USB=NO
           FLASH_ERASE_WRITE=NO
           FLASH_ALLOWED=NO
+          PE_TARGET=PE32
+          STATIC_INTPTR_SIZE=4
+          TARGET_PROTECTOR=N9jju8llVi
+          TARGET_RESOURCE=h15IL2i6yy2BZV8RqM.YuRwd1JALC4oy32W66
           TARGET_METHOD=UpdateCommandThread
           TARGET_METHOD_TOKEN=0x0600082C
           TARGET_METHOD_RID=2092
-          TARGET_METHOD_RVA=0xA3F4
-          TARGET_PROTECTOR_METHOD=N9jju8llVi
-          TARGET_RESOURCE=h15IL2i6yy2BZV8RqM.YuRwd1JALC4oy32W66
-          GOAL=Recover_crypto_material_method_store_format_and_UpdateCommandThread_body_statically
+          GOAL=Evaluate_real_flattened_IL_path_recover_reader_position_key_iv_and_decrypt_method_store
           EOF
 
-      - name: Install static analysis and crypto tools
+      - name: Install static-analysis dependencies
         shell: bash
         run: |
           set -euo pipefail
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends \
-            unzip p7zip-full file binutils jq curl mono-utils python3 python3-pip gzip
+            unzip p7zip-full file curl python3 python3-pip
           python3 -m pip install --break-system-packages --quiet \
             pefile dnfile pycryptodome
 
-      - name: Download official Windows client
+      - name: Download official Windows client and dump IL
         shell: bash
         run: |
           set -euo pipefail
           curl --fail --location --retry 4 --retry-all-errors \
             --connect-timeout 20 --max-time 240 \
-            --user-agent "Mozilla/5.0 OKN-R109-Static-Research" \
+            --user-agent "Mozilla/5.0 OKN-R110-Static-Research" \
             --referer "https://golodsp.com/7%E9%80%9A%E9%81%93%E9%9F%B3%E9%A2%91%E5%89%8D%E7%BA%A7/" \
             --output "$OUT/downloads/windows.zip" "$WINDOWS_URL"
 
@@ -90,34 +91,20 @@ jobs:
           test -n "$EXE"
           cp "$EXE" "$OUT/dstech.exe"
 
-          {
-            file "$OUT/dstech.exe"
-            sha256sum "$OUT/dstech.exe"
-            stat -c 'SIZE=%s' "$OUT/dstech.exe"
-          } > "$OUT/evidence/01_IDENTITY.txt"
-
-      - name: Dump complete IL
-        shell: bash
-        run: |
-          set -euo pipefail
           export PATH="$PATH:$HOME/.dotnet/tools"
           if ! command -v ilspycmd >/dev/null 2>&1; then
             dotnet tool install --global ilspycmd >/dev/null
           fi
-
-          ilspycmd --ilcode "$OUT/dstech.exe" \
-            > "$OUT/il/all.il" \
-            2> "$OUT/evidence/10_ILSPY_STDERR.txt"
-
-          gzip -9 -c "$OUT/il/all.il" > "$OUT/review/all.il.gz"
+          ilspycmd --ilcode "$OUT/dstech.exe" > "$OUT/il/all.il" \
+            2> "$OUT/evidence/01_ILSPY_STDERR.txt"
 
           {
+            file "$OUT/dstech.exe"
+            sha256sum "$OUT/dstech.exe"
             echo "IL_BYTES=$(stat -c%s "$OUT/il/all.il")"
-            echo "IL_GZIP_BYTES=$(stat -c%s "$OUT/review/all.il.gz")"
-            echo "IL_METHOD_MARKERS=$(grep -c '^[[:space:]]*\\.method' "$OUT/il/all.il" || true)"
-          } > "$OUT/evidence/11_IL_IDENTITY.txt"
+          } > "$OUT/evidence/02_IDENTITY.txt"
 
-      - name: Extract managed resource blobs
+      - name: Extract h15 and all managed resources statically
         shell: bash
         run: |
           set -euo pipefail
@@ -127,339 +114,57 @@ jobs:
           import pefile,dnfile
 
           out=Path(os.environ["OUT"])
-          ev=out/"evidence"
-          rd=out/"resources"
           exe=out/"dstech.exe"
           raw=exe.read_bytes()
-
           pe=pefile.PE(str(exe),fast_load=False)
           dn=dnfile.dnPE(str(exe))
 
-          com=pe.OPTIONAL_HEADER.DATA_DIRECTORY[14]
-          cor_off=pe.get_offset_from_rva(int(com.VirtualAddress))
-          resources_rva,resources_size=struct.unpack_from("<II",raw,cor_off+24)
-          resources_off=pe.get_offset_from_rva(resources_rva)
+          cor=pe.OPTIONAL_HEADER.DATA_DIRECTORY[14]
+          co=pe.get_offset_from_rva(int(cor.VirtualAddress))
+          rrva,rsize=struct.unpack_from("<II",raw,co+24)
+          ro=pe.get_offset_from_rva(rrva)
 
           table=getattr(getattr(getattr(dn,"net",None),"mdtables",None),"ManifestResource",None)
           rows=[]
-
           for rid,r in enumerate(getattr(table,"rows",[]) if table else [],1):
-            name=str(r.Name)
-            rel=int(r.Offset or 0)
-            pos=resources_off+rel
-            n=struct.unpack_from("<I",raw,pos)[0]
-            data=raw[pos+4:pos+4+n]
-            safe=re.sub(r"[^A-Za-z0-9._-]+","_",name)
-            path=rd/f"{rid:03d}_{safe}.bin"
-            path.write_bytes(data)
-            rows.append({
-              "rid":rid,"name":name,"offset":rel,"length":len(data),
-              "file":path.name,"sha256":hashlib.sha256(data).hexdigest(),
-              "head64":data[:64].hex().upper()
-            })
-
-          (ev/"20_RESOURCE_MAP.json").write_text(
-            json.dumps(rows,indent=2,ensure_ascii=False)+"\n")
-
-          print("resources",len(rows))
-          for r in rows:
-            print(r["rid"],r["length"],r["name"])
-          PY
-
-      - name: Parse all IL methods robustly and extract target helper closure
-        shell: bash
-        run: |
-          set -euo pipefail
-          python3 - <<'PY'
-          from pathlib import Path
-          import os,re,json,collections
-
-          out=Path(os.environ["OUT"])
-          ev=out/"evidence"
-          lines=(out/"il/all.il").read_text(errors="ignore").splitlines()
-
-          methods=[]
-          i=0
-          while i<len(lines):
-            if not re.match(r'^\s*\.method\b',lines[i]):
-              i+=1
-              continue
-
-            start=i
-            buf=[lines[i]]
-            i+=1
-            while i<len(lines) and "{" not in lines[i]:
-              buf.append(lines[i]); i+=1
-            if i>=len(lines): break
-            buf.append(lines[i])
-            depth=lines[i].count("{")-lines[i].count("}")
-            i+=1
-            while i<len(lines) and depth>0:
-              buf.append(lines[i])
-              depth += lines[i].count("{")-lines[i].count("}")
-              i+=1
-
-            text="\n".join(buf)
-            end=re.search(r'// end of method\s+(.+?)\s*$',text,re.M)
-            key=end.group(1).strip() if end else f"method_at_{start+1}"
-            methods.append({"key":key,"line":start+1,"text":text})
-
-          by={m["key"]:m for m in methods}
-          simple=collections.defaultdict(list)
-          for m in methods:
-            simple[m["key"].split("::")[-1]].append(m)
-
-          call_re=re.compile(
-            r'\bcall(?:virt)?\s+[^\n]*?'
-            r'([A-Za-z0-9_.$<>`/+\'"-]+)::([A-Za-z0-9_.$<>`\'"-]+)\s*\('
-          )
-
-          seed_names=[
-            "N9jju8llVi","ziUjWiyQoN","P9qj5Kx99X","t2QjAoPE2q",
-            "trEuKPNkgB3p5fLuROn","Q2CVcdNXO7dpP5ufbGy","VnHlfpNorSGR6U9GUOp",
-            "v4OJaAhFeRY6ZLdwU7P","j3nmKNhYKinv9gbwl75","HrXMLmhEkdhLuD3wdnt",
-            "sB3UoOhBdwvI167Dv5t","gH6uphNOsYQyRXDZmHu","yedj03pwm9",
-            "Udvj2O2k24","q7pjhICQsP","aFOdrihC0M6LDv9TOro",
-            "it3eekNKjtbEQVI5up2","rYJfrbhT5j16r2Rs8VK",
-            "zfos5ENLukrcbiO4qNQ","omTjeHNp0inHSoSsOBH",
-            "fX136sh7mQQ8tIupxUo","tFjbT6Nj4GDWeki27kh","ayhyp5hj3R0itGWa7hr"
-          ]
-
-          selected={}
-          queue=[]
-          for name in seed_names:
-            for m in simple.get(name,[]):
-              queue.append((m,0))
-
-          while queue:
-            m,depth=queue.pop(0)
-            if m["key"] in selected or depth>3:
-              continue
-            selected[m["key"]]=m
-            for cm in call_re.finditer(m["text"]):
-              method_name=cm.group(2)
-              for target in simple.get(method_name,[])[:20]:
-                # Restrict recursive closure to protector class / small wrappers.
-                if (
-                  "q71r2Rj8SiD9GF1BI50" in target["key"]
-                  or depth<1
-                ):
-                  queue.append((target,depth+1))
-
-          (ev/"30_METHOD_PARSE_SUMMARY.json").write_text(
-            json.dumps({
-              "method_count":len(methods),
-              "selected_helper_count":len(selected),
-              "seed_names":seed_names
-            },indent=2)+"\n")
-
-          (ev/"31_TARGET_HELPER_METHODS.json").write_text(
-            json.dumps(list(selected.values()),indent=2,ensure_ascii=False)+"\n")
-
-          # Compact wrapper inference based only on explicit framework calls.
-          wrappers=[]
-          framework_terms={
-            "CreateDecryptor":"CREATE_DECRYPTOR",
-            "CreateEncryptor":"CREATE_ENCRYPTOR",
-            "set_Key":"SET_KEY",
-            "set_IV":"SET_IV",
-            "set_Mode":"SET_CIPHER_MODE",
-            "GetManifestResourceStream":"GET_RESOURCE_STREAM",
-            "MemoryStream::.ctor":"NEW_MEMORY_STREAM",
-            "ToArray":"STREAM_TO_ARRAY",
-            "CryptoStream::.ctor":"NEW_CRYPTO_STREAM",
-            "PrepareMethod":"PREPARE_METHOD",
-            "GetFunctionPointer":"GET_FUNCTION_POINTER",
-            "VirtualProtect":"VIRTUAL_PROTECT",
-            "Marshal::Copy":"MARSHAL_COPY",
-          }
-
-          for m in selected.values():
-            hits=[meaning for term,meaning in framework_terms.items() if term in m["text"]]
-            if hits:
-              wrappers.append({
-                "key":m["key"],
-                "framework_semantics":hits,
-                "text":m["text"]
+              name=str(r.Name); rel=int(r.Offset or 0)
+              pos=ro+rel
+              n=struct.unpack_from("<I",raw,pos)[0]
+              data=raw[pos+4:pos+4+n]
+              safe=re.sub(r"[^A-Za-z0-9._-]+","_",name)
+              fn=f"{rid:03d}_{safe}.bin"
+              (out/"resources"/fn).write_bytes(data)
+              rows.append({
+                  "rid":rid,"name":name,"length":len(data),"file":fn,
+                  "sha256":hashlib.sha256(data).hexdigest(),
+                  "mod16":len(data)%16,
+                  "head32":data[:32].hex().upper()
               })
 
-          (ev/"32_WRAPPER_SEMANTICS.json").write_text(
-            json.dumps(wrappers,indent=2,ensure_ascii=False)+"\n")
+          (out/"evidence/10_RESOURCE_MAP.json").write_text(
+              json.dumps(rows,indent=2,ensure_ascii=False)+"\n")
+
+          h=next(x for x in rows if x["name"]=="h15IL2i6yy2BZV8RqM.YuRwd1JALC4oy32W66")
+          data=(out/"resources"/h["file"]).read_bytes()
+          header=data[:15]
+          body=data[15:]
+          (out/"resources/h15_header15.bin").write_bytes(header)
+          (out/"resources/h15_after15.bin").write_bytes(body)
+
+          hypothesis={
+              "total_length":len(data),
+              "total_mod16":len(data)%16,
+              "first15_hex":header.hex().upper(),
+              "after15_length":len(body),
+              "after15_mod16":len(body)%16,
+              "header15_is_hypothesis_not_proof":True
+          }
+          (out/"evidence/11_H15_HEADER15_HYPOTHESIS.json").write_text(
+              json.dumps(hypothesis,indent=2)+"\n")
+          print(json.dumps(hypothesis,indent=2))
           PY
 
-      - name: Extract FieldRVA blobs and exact P9q AES key IV
-        shell: bash
-        run: |
-          set -euo pipefail
-          python3 - <<'PY'
-          from pathlib import Path
-          import os,re,json,hashlib
-          import pefile,dnfile
-
-          out=Path(os.environ["OUT"])
-          ev=out/"evidence"
-          exe=out/"dstech.exe"
-          raw=exe.read_bytes()
-
-          pe=pefile.PE(str(exe),fast_load=False)
-          dn=dnfile.dnPE(str(exe))
-
-          helpers=json.loads((ev/"31_TARGET_HELPER_METHODS.json").read_text())
-          p9=next((m["text"] for m in helpers if m["key"].endswith("::P9qj5Kx99X")),"")
-
-          refs=[]
-          for m in re.finditer(
-            r"__StaticArrayInitTypeSize=(\d+)'[^:]*::'([0-9A-F]{64})'",
-            p9
-          ):
-            refs.append({"size":int(m.group(1)),"field_name":m.group(2)})
-
-          fieldrva_table=getattr(getattr(getattr(dn,"net",None),"mdtables",None),"FieldRva",None)
-          all_rows=[]
-
-          for fr in getattr(fieldrva_table,"rows",[]) if fieldrva_table else []:
-            try:
-              fld=fr.Field.row
-            except Exception:
-              try: fld=fr.Field
-              except Exception: fld=None
-            name=str(getattr(fld,"Name",""))
-            rva=int(getattr(fr,"Rva",0) or 0)
-            if not name or not rva:
-              continue
-            try:
-              off=pe.get_offset_from_rva(rva)
-            except Exception:
-              continue
-
-            # Save a bounded raw window for future static analysis.
-            data=raw[off:off+512]
-            path=out/"fieldrva"/f"{name}.bin"
-            path.write_bytes(data)
-            all_rows.append({
-              "name":name,"rva":rva,"rva_hex":hex(rva),
-              "file_offset":off,"file_offset_hex":hex(off),
-              "window_file":path.name,"window_sha256":hashlib.sha256(data).hexdigest()
-            })
-
-          by={r["name"]:r for r in all_rows}
-          exact=[]
-
-          for ref in refs:
-            row=by.get(ref["field_name"])
-            if not row:
-              exact.append({**ref,"found":False})
-              continue
-            off=row["file_offset"]
-            data=raw[off:off+ref["size"]]
-            path=out/"fieldrva"/f"P9Q_{ref['size']}_{ref['field_name']}.bin"
-            path.write_bytes(data)
-            exact.append({
-              **ref,"found":True,"rva_hex":row["rva_hex"],
-              "file_offset_hex":row["file_offset_hex"],
-              "data_hex":data.hex().upper(),
-              "sha256":hashlib.sha256(data).hexdigest(),
-              "file":path.name
-            })
-
-          (ev/"40_FIELDRVA_INDEX.json").write_text(
-            json.dumps(all_rows,indent=2)+"\n")
-          (ev/"41_P9Q_STATIC_ARRAY_REFS.json").write_text(
-            json.dumps(refs,indent=2)+"\n")
-          (ev/"42_P9Q_KEY_IV_BYTES.json").write_text(
-            json.dumps(exact,indent=2)+"\n")
-
-          print("p9_static_refs",len(refs))
-          for x in exact:
-            print(x.get("size"),x.get("found"),x.get("data_hex"))
-          PY
-
-      - name: Test exact P9q AES decryption against every resource
-        shell: bash
-        run: |
-          set -euo pipefail
-          python3 - <<'PY'
-          from pathlib import Path
-          import os,json,hashlib,math,collections,re,zlib,gzip,bz2,lzma
-          from Crypto.Cipher import AES
-          from Crypto.Util.Padding import unpad
-
-          out=Path(os.environ["OUT"])
-          ev=out/"evidence"
-          resources=json.loads((ev/"20_RESOURCE_MAP.json").read_text())
-          arrays=json.loads((ev/"42_P9Q_KEY_IV_BYTES.json").read_text())
-
-          key=next((bytes.fromhex(x["data_hex"]) for x in arrays if x.get("found") and x["size"]==32),None)
-          iv=next((bytes.fromhex(x["data_hex"]) for x in arrays if x.get("found") and x["size"]==16),None)
-
-          def entropy(data):
-            if not data: return 0.0
-            c=collections.Counter(data); n=len(data)
-            return -sum((v/n)*math.log2(v/n) for v in c.values())
-
-          def markers(data):
-            terms=[]
-            if data.startswith(b"MZ"): terms.append("MZ")
-            if data.startswith(b"BSJB"): terms.append("BSJB")
-            if data.startswith(b"PK\x03\x04"): terms.append("ZIP")
-            if data.startswith(b"\x1f\x8b"): terms.append("GZIP")
-            if b"UpdateCommandThread" in data: terms.append("UpdateCommandThread")
-            if b"clrjit.dll" in data: terms.append("clrjit.dll")
-            if b"System.Reflection" in data: terms.append("System.Reflection")
-            if b"\x2c\x08\x00\x06" in data: terms.append("TOKEN_0600082C_LE")
-            return terms
-
-          rows=[]
-          if key is None or iv is None:
-            rows.append({"error":"P9q_key_or_iv_not_recovered"})
-          else:
-            for r in resources:
-              src=out/"resources"/r["file"]
-              data=src.read_bytes()
-
-              item={
-                "resource":r["name"],"input_size":len(data),
-                "input_mod16":len(data)%16
-              }
-
-              if len(data)%16:
-                item["cbc_test"]="skipped_not_block_aligned"
-                rows.append(item)
-                continue
-
-              try:
-                raw=AES.new(key,AES.MODE_CBC,iv).decrypt(data)
-                item["raw_entropy"]=entropy(raw)
-                item["raw_head64"]=raw[:64].hex().upper()
-                item["raw_markers"]=markers(raw)
-
-                raw_path=out/"decrypted"/f"{r['rid']:03d}_p9q_cbc_raw.bin"
-                raw_path.write_bytes(raw)
-                item["raw_file"]=raw_path.name
-
-                try:
-                  plain=unpad(raw,16)
-                  item["pkcs7_valid"]=True
-                  item["plain_size"]=len(plain)
-                  item["plain_entropy"]=entropy(plain)
-                  item["plain_head64"]=plain[:64].hex().upper()
-                  item["plain_markers"]=markers(plain)
-                  plain_path=out/"decrypted"/f"{r['rid']:03d}_p9q_cbc_unpadded.bin"
-                  plain_path.write_bytes(plain)
-                  item["plain_file"]=plain_path.name
-                except Exception:
-                  item["pkcs7_valid"]=False
-              except Exception as e:
-                item["error"]=type(e).__name__+":"+str(e)
-
-              rows.append(item)
-
-          (ev/"43_P9Q_DECRYPT_TESTS.json").write_text(
-            json.dumps(rows,indent=2,ensure_ascii=False)+"\n")
-          print(json.dumps(rows,indent=2,ensure_ascii=False))
-          PY
-
-      - name: Resolve N9j crypto wrappers and key IV local origins
+      - name: Parse exact N9 method switch and prove corrected state mapping
         shell: bash
         run: |
           set -euo pipefail
@@ -468,275 +173,677 @@ jobs:
           import os,re,json
 
           out=Path(os.environ["OUT"])
-          ev=out/"evidence"
-          helpers=json.loads((ev/"31_TARGET_HELPER_METHODS.json").read_text())
-          n9=next((m["text"] for m in helpers if m["key"].endswith("::N9jju8llVi")),"")
-          zi=next((m["text"] for m in helpers if m["key"].endswith("::ziUjWiyQoN")),"")
+          il=(out/"il/all.il").read_text(errors="ignore")
+
+          # Robust method extraction by explicit end marker.
+          m=re.search(
+              r'(?ms)^\s*\.method[^\n]*\n(?:.*\n){0,8}?'
+              r'\s*void N9jju8llVi \(\) cil managed noinlining\s*\n'
+              r'\s*\{(.*?)^\s*\}\s*// end of method .*?::N9jju8llVi\s*$',
+              il
+          )
+          if not m:
+              # Fallback: locate method name and matching end comment.
+              pos=il.find("N9jju8llVi () cil managed")
+              if pos<0: raise SystemExit("N9 method not found")
+              start=il.rfind(".method",0,pos)
+              em=re.search(r'(?m)^\s*\}\s*// end of method .*?::N9jju8llVi\s*$',il[pos:])
+              if not em: raise SystemExit("N9 end not found")
+              n9=il[start:pos+em.end()]
+          else:
+              n9=m.group(0)
+
+          (out/"evidence/20_N9_METHOD.il").write_text(n9)
+
+          sw=re.search(r'IL_0012:\s+switch\s+\((.*?)\)',n9,re.S)
+          if not sw: raise SystemExit("main switch not found")
+          targets=re.findall(r'IL_[0-9A-Fa-f]+',sw.group(1))
+
+          result={
+              "switch_target_count":len(targets),
+              "initial_state_constant":392,
+              "initial_state_target":targets[392] if len(targets)>392 else None,
+              "state_391_target":targets[391] if len(targets)>391 else None,
+              "state_392_expected":"IL_1990",
+              "state_392_mapping_correct":len(targets)>392 and targets[392]=="IL_1990",
+              "all_targets":targets
+          }
+          (out/"evidence/21_EXACT_SWITCH_MAP.json").write_text(
+              json.dumps(result,indent=2)+"\n")
+
+          print("switch_targets",len(targets))
+          print("state392",result["initial_state_target"])
+          if not result["state_392_mapping_correct"]:
+              raise SystemExit("corrected switch mapping gate failed")
+          PY
+
+      - name: Extract exact opaque-predicate and wrapper semantics
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import os,re,json
+
+          out=Path(os.environ["OUT"])
+          il=(out/"il/all.il").read_text(errors="ignore")
+
+          names=[
+              "zfos5ENLukrcbiO4qNQ","WbRj7RycxdawMtIuobL","fX136sh7mQQ8tIupxUo",
+              "omTjeHNp0inHSoSsOBH","KTbwe7yfoqkIHrkHFxb","ayhyp5hj3R0itGWa7hr",
+              "tFjbT6Nj4GDWeki27kh","gH6uphNOsYQyRXDZmHu","qfkv4ZNDynVciIciQy6",
+              "oNNQE6NTi9uesXTTGZJ","B5fr4WNvBYuVpLZQQQQ","sWg0PuN2fLSfxi2LB0D",
+              "trEuKPNkgB3p5fLuROn","Q2CVcdNXO7dpP5ufbGy","VnHlfpNorSGR6U9GUOp",
+              "RMHoOvNN1BGBrZfKGy1","it3eekNKjtbEQVI5up2","HVJrNANRJZcM7WNOuLw"
+          ]
+
+          rows=[]
+          for name in names:
+              pos=il.find(name+"(")
+              if pos<0:
+                  rows.append({"name":name,"found":False}); continue
+              start=il.rfind(".method",0,pos)
+              endc=il.find("// end of method",pos)
+              end=il.find("\n",endc) if endc>=0 else min(len(il),pos+10000)
+              text=il[start:end]
+              rows.append({"name":name,"found":True,"text":text})
+
+          known={
+              "zfos5ENLukrcbiO4qNQ":True,
+              "WbRj7RycxdawMtIuobL":True,
+              "fX136sh7mQQ8tIupxUo":True,
+              "omTjeHNp0inHSoSsOBH":None,
+              "KTbwe7yfoqkIHrkHFxb":None,
+              "ayhyp5hj3R0itGWa7hr":None,
+              "tFjbT6Nj4GDWeki27kh":4
+          }
+
+          (out/"evidence/22_WRAPPER_IL.json").write_text(
+              json.dumps(rows,indent=2,ensure_ascii=False)+"\n")
+          (out/"evidence/23_KNOWN_STATIC_WRAPPER_VALUES.json").write_text(
+              json.dumps(known,indent=2)+"\n")
+          PY
+
+      - name: Run bounded concrete symbolic IL emulator
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > "$OUT/n9_emulator.py" <<'PY'
+          from pathlib import Path
+          from dataclasses import dataclass, field
+          import os,re,json,copy,struct,hashlib,collections
+          from Crypto.Cipher import AES
+          from Crypto.Util.Padding import unpad
+
+          OUT=Path(os.environ["OUT"])
+          N9=(OUT/"evidence/20_N9_METHOD.il").read_text(errors="ignore")
+          RM=json.loads((OUT/"evidence/10_RESOURCE_MAP.json").read_text())
+          RESOURCE_BY_NAME={r["name"]:(OUT/"resources"/r["file"]).read_bytes() for r in RM}
+
+          class U:
+              def __init__(self,name="unknown"): self.name=name
+              def __repr__(self): return f"U({self.name})"
+          def unk(v): return isinstance(v,U)
+
+          class Stream:
+              def __init__(self,data=b""): self.data=bytes(data); self.pos=0
+          class Reader:
+              def __init__(self,s): self.s=s
+          class SymAlg:
+              def __init__(self): self.mode=1
+          class Transform:
+              def __init__(self,key,iv): self.key=key; self.iv=iv
+          class Mem:
+              def __init__(self): self.data=bytearray()
+          class Crypto:
+              def __init__(self,mem,tr): self.mem=mem; self.tr=tr; self.inp=bytearray()
+
+          # Parse IL instruction labels.
+          ins=[]
+          label={}
+          for line in N9.splitlines():
+              m=re.match(r'\s*(IL_[0-9A-Fa-f]+):\s*(.*)',line)
+              if not m: continue
+              lab=m.group(1); rest=m.group(2).strip()
+              if not rest: continue
+              parts=rest.split(None,1)
+              op=parts[0]; arg=parts[1] if len(parts)>1 else ""
+              label[lab]=len(ins)
+              ins.append((lab,op,arg,rest))
+
+          switch_targets=re.findall(r'IL_[0-9A-Fa-f]+',ins[label["IL_0012"]][2])
+
+          TRUE_FUN={"zfos5ENLukrcbiO4qNQ","WbRj7RycxdawMtIuobL","fX136sh7mQQ8tIupxUo"}
+          NULL_FUN={"omTjeHNp0inHSoSsOBH","KTbwe7yfoqkIHrkHFxb","ayhyp5hj3R0itGWa7hr"}
+
+          def locno(op,arg):
+              m=re.match(r'(?:ldloc|stloc)\.(\d+)$',op)
+              if m:return int(m.group(1))
+              if op in ("ldloc","stloc","ldloc.s","stloc.s"):
+                  try:return int(arg.split()[0])
+                  except:return None
+              return None
+
+          def ldc(op,arg):
+              if op=="ldc.i4.m1": return -1
+              m=re.match(r'ldc\.i4\.(\d+)$',op)
+              if m:return int(m.group(1))
+              if op in ("ldc.i4","ldc.i4.s"):
+                  s=arg.split()[0]
+                  try:return int(s,0)
+                  except:return U("bad_ldc")
+              return None
+
+          def argc(callarg):
+              mm=re.search(r'\((.*)\)\s*$',callarg)
+              if not mm:return 0
+              s=mm.group(1).strip()
+              if not s:return 0
+              # All relevant protector wrapper args are simple and have no nested commas.
+              return len([x for x in s.split(",") if x.strip()])
+
+          def method(callarg):
+              m=re.search(r'::([A-Za-z0-9_.$<>`\'"-]+)\s*\(',callarg)
+              return m.group(1) if m else ""
+
+          def rettype(callarg):
+              pre=callarg.split("::",1)[0].strip()
+              return pre.split()[0] if pre else "object"
+
+          @dataclass
+          class S:
+              ip:int=0
+              stack:list=field(default_factory=list)
+              locals:list=field(default_factory=lambda:[0]*120)
+              statics:dict=field(default_factory=dict)
+              trace:list=field(default_factory=list)
+              reads:list=field(default_factory=list)
+              milestones:list=field(default_factory=list)
+              unknown_branches:int=0
+              steps:int=0
+
+          def cp(s): return copy.deepcopy(s)
+          def pop(s):
+              return s.stack.pop() if s.stack else U("stack_underflow")
+          def push(s,v): s.stack.append(v)
+
+          def binary(a,b,op):
+              if unk(a) or unk(b): return U(f"{op}")
+              try:
+                  if op=="add":return a+b
+                  if op=="sub":return a-b
+                  if op=="mul":return a*b
+                  if op in ("div","div.un"):return a//b
+                  if op in ("rem","rem.un"):return a%b
+                  if op=="xor":return a^b
+                  if op=="and":return a&b
+                  if op=="or":return a|b
+                  if op=="shl":return a<<b
+                  if op in ("shr","shr.un"):return a>>b
+                  if op=="ceq":return int(a==b)
+                  if op in ("cgt","cgt.un"):return int(a>b)
+                  if op in ("clt","clt.un"):return int(a<b)
+              except:return U(op)
+              return U(op)
+
+          def known_call(s,name,args):
+              if name in TRUE_FUN:return True
+              if name in NULL_FUN:return None
+              if name=="tFjbT6Nj4GDWeki27kh":return 4
+              if name=="gH6uphNOsYQyRXDZmHu":
+                  nm=args[-1] if args else U()
+                  if isinstance(nm,str) and nm in RESOURCE_BY_NAME:
+                      st=Stream(RESOURCE_BY_NAME[nm])
+                      s.milestones.append({"kind":"resource_open","name":nm,"length":len(st.data),"step":s.steps})
+                      return st
+                  return U("resource")
+              if name=="qfkv4ZNDynVciIciQy6":
+                  r=args[-1] if args else U()
+                  if isinstance(r,Reader):
+                      before=r.s.pos
+                      if before+4<=len(r.s.data):
+                          v=struct.unpack_from("<i",r.s.data,before)[0]; r.s.pos+=4
+                          s.reads.append({"op":"ReadInt32","before":before,"after":r.s.pos,"value":v})
+                          return v
+                  return U("ReadInt32")
+              if name=="oNNQE6NTi9uesXTTGZJ":
+                  r=args[-1] if args else U()
+                  return r.s if isinstance(r,Reader) else U("BaseStream")
+              if name=="B5fr4WNvBYuVpLZQQQQ":
+                  st=args[-1] if args else U()
+                  return len(st.data) if isinstance(st,Stream) else U("Length")
+              if name=="YoMYlpKfA3xZZIkL5Uo":
+                  st=args[-1] if args else U()
+                  return st.pos if isinstance(st,Stream) else U("Position")
+              if name=="uKbcISNmDSreine16Qp":
+                  if len(args)>=2 and isinstance(args[-2],Stream) and isinstance(args[-1],int):
+                      args[-2].pos=args[-1]
+                  return None
+              if name=="sWg0PuN2fLSfxi2LB0D":
+                  if len(args)>=2 and isinstance(args[-2],Reader) and isinstance(args[-1],int):
+                      r=args[-2]; n=max(0,args[-1]); before=r.s.pos
+                      data=r.s.data[before:before+n]; r.s.pos+=len(data)
+                      s.reads.append({"op":"ReadBytes","before":before,"after":r.s.pos,"requested":n,"returned":len(data)})
+                      return bytes(data)
+                  return U("ReadBytes")
+              if name=="trEuKPNkgB3p5fLuROn":return SymAlg()
+              if name=="Q2CVcdNXO7dpP5ufbGy":
+                  if len(args)>=2 and isinstance(args[-2],SymAlg):args[-2].mode=args[-1]
+                  return None
+              if name=="VnHlfpNorSGR6U9GUOp":
+                  if len(args)>=3:
+                      alg,key,iv=args[-3:]
+                      kb=bytes(key) if isinstance(key,(bytes,bytearray)) else key
+                      ib=bytes(iv) if isinstance(iv,(bytes,bytearray)) else iv
+                      if isinstance(kb,bytes) and isinstance(ib,bytes):
+                          s.milestones.append({
+                              "kind":"CreateDecryptor","key_hex":kb.hex().upper(),
+                              "iv_hex":ib.hex().upper(),"key_len":len(kb),"iv_len":len(ib),
+                              "step":s.steps
+                          })
+                      return Transform(kb,ib)
+                  return U("transform")
+              if name=="RMHoOvNN1BGBrZfKGy1":
+                  if len(args)>=4 and isinstance(args[-4],Crypto):
+                      c,buf,off,n=args[-4:]
+                      if isinstance(buf,(bytes,bytearray)) and isinstance(off,int) and isinstance(n,int):
+                          c.inp.extend(bytes(buf)[off:off+n])
+                  return None
+              if name=="it3eekNKjtbEQVI5up2":
+                  c=args[-1] if args else U()
+                  if isinstance(c,Crypto) and isinstance(c.tr,Transform):
+                      key,iv=c.tr.key,c.tr.iv
+                      if isinstance(key,bytes) and isinstance(iv,bytes) and len(key) in (16,24,32) and len(iv)==16 and len(c.inp)%16==0:
+                          try:
+                              raw=AES.new(key,AES.MODE_CBC,iv).decrypt(bytes(c.inp))
+                              try: plain=unpad(raw,16)
+                              except: plain=raw
+                              c.mem.data.extend(plain)
+                              s.milestones.append({
+                                  "kind":"AES_DECRYPT","cipher_len":len(c.inp),
+                                  "plain_len":len(plain),"plain_head64":plain[:64].hex().upper(),
+                                  "pkcs7_removed":len(plain)!=len(raw),"step":s.steps
+                              })
+                          except Exception as e:
+                              s.milestones.append({"kind":"AES_ERROR","error":str(e)})
+                  return None
+              if name=="HVJrNANRJZcM7WNOuLw":
+                  mem=args[-1] if args else U()
+                  return bytes(mem.data) if isinstance(mem,Mem) else U("ToArray")
+              if name=="VdpxeBN91DReLWMTEcv":
+                  if len(args)>=3 and isinstance(args[-3],bytearray):
+                      a,o,n=args[-3:]
+                      if isinstance(o,int) and isinstance(n,int):
+                          a[o:o+n]=b"\0"*max(0,n)
+                  return None
+              return U("call:"+name)
+
+          initial=S(ip=label["IL_0000"])
+          # .NET zero-initialized static field before N9 first-call guard.
+          # This assumption is explicit and alternate branches are still forked when unknown.
+          initial.statics["NaheA732Kj"]=False
+
+          active=collections.deque([initial])
+          finished=[]
+          seen={}
+          MAX_PATHS=384
+          MAX_STEPS=450000
+          total_steps=0
+
+          def key(s):
+              def arrsig(v):
+                  if isinstance(v,bytearray):return hashlib.sha1(bytes(v)).hexdigest()[:12]
+                  if isinstance(v,bytes):return hashlib.sha1(v).hexdigest()[:12]
+                  if isinstance(v,Reader):return ("reader",v.s.pos)
+                  if isinstance(v,Stream):return ("stream",v.pos)
+                  if isinstance(v,(int,str,bool,type(None))):return v
+                  return type(v).__name__
+              focus=[8,12,17,29,47,55,71,78,95,100,114]
+              return (s.ip,tuple(arrsig(s.locals[i]) for i in focus),
+                      s.statics.get("NaheA732Kj"),len(s.milestones))
+
+          while active and total_steps<MAX_STEPS:
+              s=active.popleft()
+              branch_out=[]
+              local_budget=5000
+
+              while local_budget>0 and s.steps<120000:
+                  local_budget-=1; s.steps+=1; total_steps+=1
+                  if s.ip<0 or s.ip>=len(ins):
+                      finished.append(s); break
+
+                  lab,op,arg,raw=ins[s.ip]
+                  nxt=s.ip+1
+                  c=ldc(op,arg)
+                  if c is not None:
+                      push(s,c); s.ip=nxt; continue
+
+                  ln=locno(op,arg)
+                  if op.startswith("ldloc") and ln is not None:
+                      push(s,s.locals[ln]); s.ip=nxt; continue
+                  if op.startswith("stloc") and ln is not None:
+                      v=pop(s); s.locals[ln]=v
+                      if ln==12 and isinstance(v,(bytes,bytearray)):
+                          rp=None
+                          r=s.locals[114]
+                          if isinstance(r,Reader):rp=r.s.pos
+                          s.milestones.append({
+                              "kind":"LOCAL12_SET","length":len(v),
+                              "reader_position_after":rp,
+                              "mod16":len(v)%16,"step":s.steps
+                          })
+                      if ln==29 and isinstance(v,(bytes,bytearray)):
+                          s.milestones.append({
+                              "kind":"LOCAL29_PLAINTEXT","length":len(v),
+                              "head64":bytes(v)[:64].hex().upper(),"step":s.steps
+                          })
+                      s.ip=nxt; continue
+
+                  if op=="ldnull":push(s,None);s.ip=nxt;continue
+                  if op=="ldstr":
+                      mm=re.match(r'"(.*)"',arg)
+                      push(s,bytes(mm.group(1),"utf-8").decode("unicode_escape") if mm else arg)
+                      s.ip=nxt;continue
+                  if op=="dup":
+                      push(s,s.stack[-1] if s.stack else U("dup"));s.ip=nxt;continue
+                  if op=="pop":pop(s);s.ip=nxt;continue
+
+                  if op=="newarr":
+                      n=pop(s)
+                      push(s,bytearray(n) if isinstance(n,int) and 0<=n<=10000000 else U("array"))
+                      s.ip=nxt;continue
+                  if op=="ldlen":
+                      a=pop(s);push(s,len(a) if isinstance(a,(bytes,bytearray,list)) else U("len"))
+                      s.ip=nxt;continue
+                  if op in ("stelem.i1","stelem.i2","stelem.i4"):
+                      val=pop(s);idx=pop(s);a=pop(s)
+                      if isinstance(a,bytearray) and isinstance(idx,int) and 0<=idx<len(a) and isinstance(val,int):
+                          a[idx]=val&255
+                      s.ip=nxt;continue
+                  if op in ("ldelem.u1","ldelem.i1"):
+                      idx=pop(s);a=pop(s)
+                      if isinstance(a,(bytes,bytearray)) and isinstance(idx,int) and 0<=idx<len(a):
+                          push(s,a[idx])
+                      else:push(s,U("elem"))
+                      s.ip=nxt;continue
+
+                  if op in ("add","sub","mul","div","div.un","rem","rem.un","xor","and","or","shl","shr","shr.un","ceq","cgt","cgt.un","clt","clt.un"):
+                      b=pop(s);a=pop(s);push(s,binary(a,b,op));s.ip=nxt;continue
+                  if op=="neg":
+                      a=pop(s);push(s,-a if isinstance(a,int) else U("neg"));s.ip=nxt;continue
+                  if op=="not":
+                      a=pop(s);push(s,~a if isinstance(a,int) else U("not"));s.ip=nxt;continue
+                  if op.startswith("conv."):
+                      a=pop(s)
+                      if isinstance(a,int):
+                          if op in ("conv.u1",):a&=0xff
+                          elif op in ("conv.u2",):a&=0xffff
+                          elif op in ("conv.u4",):a&=0xffffffff
+                      push(s,a);s.ip=nxt;continue
+
+                  if op=="ldsfld":
+                      fld=arg.split("::")[-1]
+                      push(s,s.statics.get(fld,U("static:"+fld)));s.ip=nxt;continue
+                  if op=="stsfld":
+                      fld=arg.split("::")[-1]
+                      s.statics[fld]=pop(s);s.ip=nxt;continue
+
+                  if op=="switch":
+                      v=pop(s)
+                      ts=re.findall(r'IL_[0-9A-Fa-f]+',arg)
+                      if isinstance(v,int) and 0<=v<len(ts):
+                          s.trace.append({"state":v,"target":ts[v],"step":s.steps})
+                          s.ip=label[ts[v]]
+                      else:s.ip=nxt
+                      continue
+
+                  if op in ("br","br.s","leave","leave.s"):
+                      t=re.search(r'IL_[0-9A-Fa-f]+',arg)
+                      if t:s.ip=label[t.group(0)]
+                      else:s.ip=nxt
+                      continue
+
+                  if op in ("brtrue","brtrue.s","brfalse","brfalse.s"):
+                      v=pop(s); want_true=op.startswith("brtrue")
+                      t=re.search(r'IL_[0-9A-Fa-f]+',arg)
+                      ti=label[t.group(0)] if t else nxt
+                      if unk(v):
+                          a=cp(s);b=cp(s)
+                          a.unknown_branches+=1;b.unknown_branches+=1
+                          a.ip=ti if want_true else nxt
+                          b.ip=nxt if want_true else ti
+                          branch_out=[a,b];break
+                      truth=bool(v)
+                      s.ip=ti if truth==want_true else nxt
+                      continue
+
+                  if op.startswith(("beq","bne","bge","bgt","ble","blt")):
+                      b=pop(s);a=pop(s)
+                      t=re.search(r'IL_[0-9A-Fa-f]+',arg)
+                      ti=label[t.group(0)] if t else nxt
+                      if unk(a) or unk(b):
+                          x=cp(s);y=cp(s);x.unknown_branches+=1;y.unknown_branches+=1
+                          x.ip=ti;y.ip=nxt;branch_out=[x,y];break
+                      try:
+                          if op.startswith("beq"):cond=a==b
+                          elif op.startswith("bne"):cond=a!=b
+                          elif op.startswith("bge"):cond=a>=b
+                          elif op.startswith("bgt"):cond=a>b
+                          elif op.startswith("ble"):cond=a<=b
+                          else:cond=a<b
+                      except:cond=False
+                      s.ip=ti if cond else nxt
+                      continue
+
+                  if op in ("call","callvirt"):
+                      name=method(arg); n=argc(arg)
+                      args=[pop(s) for _ in range(n)][::-1]
+                      if "instance " in arg:
+                          args=[pop(s)]+args
+                      ret=known_call(s,name,args)
+                      # Known void wrapper names.
+                      void=(" void " in (" "+arg)) or arg.startswith("void ")
+                      if not void:push(s,ret)
+                      s.ip=nxt;continue
+
+                  if op=="newobj":
+                      n=argc(arg);args=[pop(s) for _ in range(n)][::-1]
+                      if "Y7Uor8e58M9K22QZF7H::.ctor" in arg:
+                          push(s,Reader(args[-1]) if args and isinstance(args[-1],Stream) else U("Reader"))
+                      elif "MemoryStream::.ctor" in arg:
+                          push(s,Mem())
+                      elif "CryptoStream::.ctor" in arg:
+                          # ctor args: stream, transform, mode
+                          mem=args[-3] if len(args)>=3 else U()
+                          tr=args[-2] if len(args)>=2 else U()
+                          push(s,Crypto(mem,tr) if isinstance(mem,Mem) else U("Crypto"))
+                      else:
+                          push(s,U("newobj"))
+                      s.ip=nxt;continue
+
+                  # Address/pointer/native instructions not needed for the
+                  # resource/key phase are modelled conservatively.
+                  if op.startswith(("ldloca","ldarga","ldarg","ldfld","ldflda","ldind","ldelema","ldtoken")):
+                      push(s,U(op));s.ip=nxt;continue
+                  if op.startswith(("stfld","stind","initobj","cpblk","stobj")):
+                      # conservative stack cleanup is intentionally omitted;
+                      # unknown later branch will fork rather than invent truth.
+                      s.ip=nxt;continue
+                  if op=="ret":
+                      finished.append(s);break
+                  if op in ("nop","volatile."):
+                      s.ip=nxt;continue
+
+                  # Unsupported opcode: keep going but make it visible.
+                  s.milestones.append({"kind":"UNSUPPORTED","label":lab,"op":op,"arg":arg})
+                  s.ip=nxt
+
+              if branch_out:
+                  for x in branch_out:
+                      k=key(x);best=seen.get(k)
+                      if best is None or x.unknown_branches<best:
+                          seen[k]=x.unknown_branches
+                          active.append(x)
+                  # Keep bounded symbolic search.
+                  if len(active)>MAX_PATHS:
+                      ordered=sorted(active,key=lambda z:(-len(z.milestones),z.unknown_branches,len(z.trace)))
+                      active=collections.deque(ordered[:MAX_PATHS])
+              else:
+                  # preserve states that hit budget for another quantum
+                  if local_budget<=0:
+                      k=key(s);best=seen.get(k)
+                      if best is None or s.unknown_branches<best:
+                          seen[k]=s.unknown_branches;active.append(s)
+
+          allstates=finished+list(active)
+          interesting=[]
+          for s in allstates:
+              kinds=[m["kind"] for m in s.milestones]
+              score=(1000*("LOCAL29_PLAINTEXT" in kinds)+
+                     500*("AES_DECRYPT" in kinds)+
+                     200*("CreateDecryptor" in kinds)+
+                     100*("LOCAL12_SET" in kinds)+
+                     20*("resource_open" in kinds))
+              if score:
+                  interesting.append((score,s))
+          interesting.sort(key=lambda x:(-x[0],x[1].unknown_branches))
+
+          report=[]
+          for score,s in interesting[:100]:
+              report.append({
+                  "score":score,
+                  "steps":s.steps,
+                  "unknown_branches":s.unknown_branches,
+                  "trace_states":[x["state"] for x in s.trace[:2000]],
+                  "trace_targets":[x["target"] for x in s.trace[:2000]],
+                  "reads":s.reads[:500],
+                  "milestones":s.milestones[:1000],
+                  "key_local17_hex":bytes(s.locals[17]).hex().upper() if isinstance(s.locals[17],bytearray) else None,
+                  "iv_local100_hex":bytes(s.locals[100]).hex().upper() if isinstance(s.locals[100],bytearray) else None
+              })
+
+          summary={
+              "instruction_count":len(ins),
+              "switch_target_count":len(switch_targets),
+              "switch_392":switch_targets[392] if len(switch_targets)>392 else None,
+              "total_vm_steps":total_steps,
+              "finished_or_active_states":len(allstates),
+              "interesting_states":len(interesting),
+              "best_score":interesting[0][0] if interesting else 0,
+              "reached_resource_open":any(any(m["kind"]=="resource_open" for m in s.milestones) for s in allstates),
+              "reached_local12":any(any(m["kind"]=="LOCAL12_SET" for m in s.milestones) for s in allstates),
+              "reached_create_decryptor":any(any(m["kind"]=="CreateDecryptor" for m in s.milestones) for s in allstates),
+              "reached_aes_decrypt":any(any(m["kind"]=="AES_DECRYPT" for m in s.milestones) for s in allstates),
+              "reached_plaintext":any(any(m["kind"]=="LOCAL29_PLAINTEXT" for m in s.milestones) for s in allstates),
+              "static_intptr_size":4,
+              "initial_NaheA732Kj_assumption":False
+          }
+
+          (OUT/"evidence/30_VM_SUMMARY.json").write_text(json.dumps(summary,indent=2)+"\n")
+          (OUT/"evidence/31_VM_INTERESTING_PATHS.json").write_text(
+              json.dumps(report,indent=2,ensure_ascii=False)+"\n")
+          print(json.dumps(summary,indent=2))
+          PY
+
+          python3 "$OUT/n9_emulator.py" > "$OUT/evidence/32_VM_STDOUT.txt" \
+            2> "$OUT/evidence/33_VM_STDERR.txt" || true
+
+      - name: Static fallback slice for key IV and h15 reader position
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import os,re,json,collections
+
+          out=Path(os.environ["OUT"])
+          n9=(out/"evidence/20_N9_METHOD.il").read_text(errors="ignore")
 
           targets=[
-            "trEuKPNkgB3p5fLuROn","Q2CVcdNXO7dpP5ufbGy","VnHlfpNorSGR6U9GUOp",
-            "v4OJaAhFeRY6ZLdwU7P","j3nmKNhYKinv9gbwl75","HrXMLmhEkdhLuD3wdnt"
+              ("resource_open","h15IL2i6yy2BZV8RqM.YuRwd1JALC4oy32W66"),
+              ("read_int32","qfkv4ZNDynVciIciQy6"),
+              ("read_bytes","sWg0PuN2fLSfxi2LB0D"),
+              ("key_alias","stloc.s 47"),
+              ("iv_use","ldloc.s 8"),
+              ("create_decryptor","VnHlfpNorSGR6U9GUOp"),
+              ("crypto_stream","CryptoStream::.ctor"),
+              ("local12","stloc.s 12")
           ]
-          target_defs={}
-          for name in targets:
-            matches=[m for m in helpers if m["key"].endswith("::"+name)]
-            target_defs[name]=matches
 
-          def context(text,needle,before=50,after=80):
-            lines=text.splitlines()
-            outrows=[]
-            for i,l in enumerate(lines):
-              if needle in l:
-                outrows.append("\n".join(lines[max(0,i-before):min(len(lines),i+after)]))
-            return outrows
+          lines=n9.splitlines()
+          hits=[]
+          for kind,needle in targets:
+              for i,l in enumerate(lines):
+                  if needle in l:
+                      hits.append({
+                          "kind":kind,"line":i+1,"matched":l.strip(),
+                          "context":"\n".join(lines[max(0,i-15):min(len(lines),i+25)])
+                      })
 
-          result={
-            "wrapper_definitions":target_defs,
-            "n9_create_transform_context":context(n9,"VnHlfpNorSGR6U9GUOp",80,80),
-            "n9_crypto_stream_context":context(n9,"CryptoStream::.ctor",80,100),
-            "n9_key_local_assignment_context":context(n9,"stloc.s 47",80,80),
-            "n9_iv_local_assignment_context":context(n9,"stloc.s 8",25,25),
-            "zi_create_transform_context":context(zi,"HrXMLmhEkdhLuD3wdnt",80,80),
-            "zi_crypto_stream_context":context(zi,"CryptoStream::.ctor",80,100),
-          }
+          # Enumerate all explicit writes to key local17 and IV local100.
+          writes=[]
+          for i,l in enumerate(lines):
+              if re.search(r'\bldloc(?:\.s)?\s+(17|100)\b',l):
+                  loc=int(re.search(r'(17|100)',l).group(1))
+                  ctx="\n".join(lines[i:min(len(lines),i+10)])
+                  if "stelem.i1" in ctx:
+                      writes.append({"local":loc,"line":i+1,"context":ctx})
 
-          (ev/"50_N9_ZI_CRYPTO_TRACE.json").write_text(
-            json.dumps(result,indent=2,ensure_ascii=False)+"\n")
+          (out/"evidence/40_STATIC_PIPELINE_HITS.json").write_text(
+              json.dumps(hits,indent=2,ensure_ascii=False)+"\n")
+          (out/"evidence/41_KEY_IV_WRITE_SITES.json").write_text(
+              json.dumps(writes,indent=2,ensure_ascii=False)+"\n")
+
+          print("pipeline_hits",len(hits))
+          print("key_iv_write_sites",len(writes))
           PY
 
-      - name: Build N9j flattened-state graph and shortest paths to crypto stages
+      - name: Validate any recovered plaintext and search method-store mappings
         shell: bash
         run: |
           set -euo pipefail
           python3 - <<'PY'
           from pathlib import Path
-          import os,re,json,collections
+          import os,json,re,struct,hashlib,math,collections
 
           out=Path(os.environ["OUT"])
           ev=out/"evidence"
-          helpers=json.loads((ev/"31_TARGET_HELPER_METHODS.json").read_text())
-          n9=next((m["text"] for m in helpers if m["key"].endswith("::N9jju8llVi")),"")
-          lines=n9.splitlines()
 
-          # Extract main switch table after ldloc 95.
-          switch_line=next((l for l in lines if "switch (" in l and "IL_" in l),None)
-          targets=re.findall(r'IL_[0-9A-Fa-f]+',switch_line or "")
-          label_to_state={lab:i for i,lab in enumerate(targets)}
+          paths=[]
+          try: paths=json.loads((ev/"31_VM_INTERESTING_PATHS.json").read_text())
+          except: pass
 
-          labels={}
-          for i,l in enumerate(lines):
-            m=re.match(r'\s*(IL_[0-9A-Fa-f]+):',l)
-            if m: labels[m.group(1)]=i
+          candidates=[]
+          for p in paths:
+              for m in p.get("milestones",[]):
+                  if m.get("kind") in ("AES_DECRYPT","LOCAL29_PLAINTEXT"):
+                      candidates.append({"path_score":p.get("score"),"milestone":m})
 
-          # State blocks are bounded by next main-switch target label.
-          ordered=sorted(
-            ((labels[lab],lab,state) for lab,state in label_to_state.items() if lab in labels),
-            key=lambda x:x[0]
-          )
-          edges=collections.defaultdict(set)
-          block_info={}
-
-          def ldc_value(line):
-            s=line.strip()
-            m=re.search(r'\bldc\.i4\.(\d+)\b',s)
-            if m: return int(m.group(1))
-            if "ldc.i4.m1" in s: return -1
-            m=re.search(r'\bldc\.i4(?:\.s)?\s+(-?\d+)',s)
-            if m: return int(m.group(1))
-            return None
-
-          for pos,(start,lab,state) in enumerate(ordered):
-            end=ordered[pos+1][0] if pos+1<len(ordered) else min(len(lines),start+500)
-            block=lines[start:end]
-            nexts=[]
-
-            # Pattern A: ldc N ; stloc 95 ; br IL_000e
-            for j in range(len(block)-2):
-              v=ldc_value(block[j])
-              if v is None: continue
-              if re.search(r'\bstloc(?:\.s)?\s+95\b',block[j+1]):
-                if 0<=v<len(targets):
-                  nexts.append(v)
-
-            # Pattern B: ldc N ; br IL_0012 (push state directly into switch)
-            for j in range(len(block)-1):
-              v=ldc_value(block[j])
-              if v is None: continue
-              if "br IL_0012" in block[j+1] and 0<=v<len(targets):
-                nexts.append(v)
-
-            # Direct branch to a main switch target.
-            for l in block:
-              bm=re.search(r'\bbr(?:true|false|\.s)?\s+(IL_[0-9A-Fa-f]+)',l)
-              if bm and bm.group(1) in label_to_state:
-                nexts.append(label_to_state[bm.group(1)])
-
-            for n in nexts:
-              edges[state].add(n)
-
-            block_info[state]={
-              "label":lab,
-              "line_start":start+1,
-              "next_states":sorted(set(nexts)),
-              "contains_resource":"h15IL2i6yy2BZV8RqM.YuRwd1JALC4oy32W66" in "\n".join(block),
-              "contains_transform":"VnHlfpNorSGR6U9GUOp" in "\n".join(block),
-              "contains_crypto_stream":"CryptoStream::.ctor" in "\n".join(block),
-              "contains_key_alias":"stloc.s 47" in "\n".join(block),
-              "contains_iv_alias":"stloc.s 8" in "\n".join(block),
-            }
-
-          starts=[392]
-          goals={
-            "resource":[s for s,b in block_info.items() if b["contains_resource"]],
-            "transform":[s for s,b in block_info.items() if b["contains_transform"]],
-            "crypto_stream":[s for s,b in block_info.items() if b["contains_crypto_stream"]],
-            "key_alias":[s for s,b in block_info.items() if b["contains_key_alias"]],
-          }
-
-          def shortest(start,goalset):
-            q=collections.deque([start]); prev={start:None}
-            goal=None
-            while q:
-              x=q.popleft()
-              if x in goalset:
-                goal=x; break
-              for y in edges.get(x,()):
-                if y not in prev:
-                  prev[y]=x; q.append(y)
-            if goal is None: return None
-            path=[]
-            cur=goal
-            while cur is not None:
-              path.append(cur); cur=prev[cur]
-            return list(reversed(path))
-
-          paths={name:shortest(392,set(gs)) for name,gs in goals.items()}
+          # Also inspect any VM-produced decrypted files if future emulator
+          # versions create them.
+          files=[]
+          for fp in (out/"decrypted").glob("*"):
+              if not fp.is_file():continue
+              data=fp.read_bytes()
+              files.append({
+                  "file":fp.name,"size":len(data),
+                  "sha256":hashlib.sha256(data).hexdigest(),
+                  "head64":data[:64].hex().upper(),
+                  "token_0600082c_offsets":[m.start() for m in re.finditer(re.escape(b"\x2c\x08\x00\x06"),data)][:100],
+                  "rid_2092_le_offsets":[m.start() for m in re.finditer(re.escape(struct.pack("<I",2092)),data)][:100],
+              })
 
           result={
-            "switch_state_count":len(targets),
-            "initial_state":392,
-            "edge_count":sum(len(v) for v in edges.values()),
-            "goal_states":goals,
-            "shortest_paths":paths,
-            "blocks":block_info
+              "plaintext_milestone_candidates":candidates[:100],
+              "decrypted_files":files,
+              "update_method_body_recovered":False,
+              "note":"A token/RID hit alone is not sufficient; body mapping must be tied to protector store format."
           }
-
-          (ev/"51_N9_STATE_GRAPH.json").write_text(
-            json.dumps(result,indent=2)+"\n")
-          print("states",len(targets),"edges",result["edge_count"])
-          print("paths",json.dumps(paths))
+          (ev/"50_METHOD_STORE_SEARCH.json").write_text(
+              json.dumps(result,indent=2,ensure_ascii=False)+"\n")
           PY
 
-      - name: Collect candidate N9 key IV byte writes along recovered paths
-        shell: bash
-        run: |
-          set -euo pipefail
-          python3 - <<'PY'
-          from pathlib import Path
-          import os,re,json,collections
-
-          out=Path(os.environ["OUT"])
-          ev=out/"evidence"
-          helpers=json.loads((ev/"31_TARGET_HELPER_METHODS.json").read_text())
-          graph=json.loads((ev/"51_N9_STATE_GRAPH.json").read_text())
-          n9=next((m["text"] for m in helpers if m["key"].endswith("::N9jju8llVi")),"")
-          lines=n9.splitlines()
-
-          label_to_line={}
-          for i,l in enumerate(lines):
-            m=re.match(r'\s*(IL_[0-9A-Fa-f]+):',l)
-            if m: label_to_line[m.group(1)]=i
-
-          blocks=graph["blocks"]
-
-          # Candidate source arrays observed before CreateDecryptor:
-          # local47 aliases local17; local8 often aliases local100.
-          source_locals={"key_candidate":"17","iv_candidate":"100"}
-
-          def ldc(line):
-            s=line.strip()
-            m=re.search(r'\bldc\.i4\.(\d+)\b',s)
-            if m:return int(m.group(1))
-            if "ldc.i4.m1" in s:return -1
-            m=re.search(r'\bldc\.i4(?:\.s)?\s+(-?\d+)',s)
-            if m:return int(m.group(1))
-            return None
-
-          # Analyze all direct constant writes and path-restricted writes.
-          def collect(allowed_states=None):
-            vals={name:collections.defaultdict(list) for name in source_locals}
-
-            for state_s,b in blocks.items():
-              state=int(state_s)
-              if allowed_states is not None and state not in allowed_states:
-                continue
-              start=b["line_start"]-1
-              # bound until next main state label by using a conservative 80 lines.
-              section=lines[start:min(len(lines),start+120)]
-
-              for arrname,loc in source_locals.items():
-                for i,l in enumerate(section):
-                  if not re.search(rf'\bldloc(?:\.s)?\s+{loc}\b',l):
-                    continue
-                  if i+1>=len(section): continue
-                  idx=ldc(section[i+1])
-                  if idx is None or not (0<=idx<64): continue
-
-                  stack=[]
-                  val=None
-                  for j in range(i+2,min(len(section),i+8)):
-                    op=section[j].strip()
-                    c=ldc(op)
-                    if c is not None:
-                      stack.append(c); continue
-                    if re.search(r'\badd\b',op) and len(stack)>=2:
-                      b2=stack.pop(); a=stack.pop(); stack.append(a+b2); continue
-                    if re.search(r'\bsub\b',op) and len(stack)>=2:
-                      b2=stack.pop(); a=stack.pop(); stack.append(a-b2); continue
-                    if "conv.u1" in op:
-                      if stack: stack[-1]&=255
-                      continue
-                    if "stelem.i1" in op:
-                      if stack: val=stack[-1]&255
-                      break
-                    break
-
-                  if val is not None:
-                    vals[arrname][idx].append({
-                      "value":val,"state":state,"label":b["label"]
-                    })
-            return vals
-
-          path_states=set()
-          for p in graph.get("shortest_paths",{}).values():
-            if p: path_states.update(p)
-
-          allvals=collect(None)
-          pathvals=collect(path_states)
-
-          def summarize(vals):
-            outd={}
-            for name,d in vals.items():
-              outd[name]={}
-              for idx,items in sorted(d.items()):
-                ctr=collections.Counter(x["value"] for x in items)
-                outd[name][str(idx)]={
-                  "counts":dict(sorted(ctr.items())),
-                  "items":items
-                }
-            return outd
-
-          result={
-            "path_states":sorted(path_states),
-            "all_direct_constant_writes":summarize(allvals),
-            "path_direct_constant_writes":summarize(pathvals)
-          }
-
-          (ev/"52_N9_KEY_IV_WRITE_CANDIDATES.json").write_text(
-            json.dumps(result,indent=2)+"\n")
-          PY
-
-      - name: Build final R109 verdict and package analysis corpus
+      - name: Build conservative R110 verdict and artifact
         shell: bash
         run: |
           set -euo pipefail
@@ -744,82 +851,65 @@ jobs:
           from pathlib import Path
           import os,json,shutil
 
-          out=Path(os.environ["OUT"])
-          ev=out/"evidence"
-          review=out/"review"
+          out=Path(os.environ["OUT"]); ev=out/"evidence"; review=out/"review"
 
           def load(name,default):
-            try:return json.loads((ev/name).read_text(errors="ignore"))
-            except:return default
+              try:return json.loads((ev/name).read_text(errors="ignore"))
+              except:return default
 
-          arrays=load("42_P9Q_KEY_IV_BYTES.json",[])
-          decrypt=load("43_P9Q_DECRYPT_TESTS.json",[])
-          wrappers=load("32_WRAPPER_SEMANTICS.json",[])
-          state=load("51_N9_STATE_GRAPH.json",{})
-          writes=load("52_N9_KEY_IV_WRITE_CANDIDATES.json",{})
-
-          key_ok=any(x.get("found") and x.get("size")==32 for x in arrays)
-          iv_ok=any(x.get("found") and x.get("size")==16 for x in arrays)
-          meaningful_p9=any(
-            x.get("pkcs7_valid") or x.get("raw_markers") or x.get("plain_markers")
-            for x in decrypt if isinstance(x,dict)
-          )
+          sw=load("21_EXACT_SWITCH_MAP.json",{})
+          vm=load("30_VM_SUMMARY.json",{})
+          hyp=load("11_H15_HEADER15_HYPOTHESIS.json",{})
+          store=load("50_METHOD_STORE_SEARCH.json",{})
 
           verdict={
-            "complete_il_packaged":True,
-            "fieldrva_windows_packaged":True,
-            "resource_blobs_packaged":True,
-            "p9q_key_recovered":key_ok,
-            "p9q_iv_recovered":iv_ok,
-            "p9q_meaningful_resource_decrypt":meaningful_p9,
-            "wrapper_semantics_count":len(wrappers),
-            "n9_switch_state_count":state.get("switch_state_count",0),
-            "n9_graph_edge_count":state.get("edge_count",0),
-            "n9_shortest_paths":state.get("shortest_paths",{}),
-            "n9_key_iv_candidates_collected":bool(writes),
-            "protected_update_body_recovered":False,
-            "firmware_readback_primitive_proven":False,
-            "full_flash_readback_proven":False,
-            "live_board_commands_allowed":False,
-            "next_gate":"Use the packaged all.il, exact wrapper semantics, FieldRVA bytes and N9 state graph to solve the live N9j key/IV path and decrypt the 607967-byte protected-method resource. Then locate MethodDef RID 2092 in the decoded store."
+              "exact_switch_mapping_corrected":sw.get("state_392_mapping_correct",False),
+              "switch_target_count":sw.get("switch_target_count"),
+              "initial_state_392_target":sw.get("initial_state_target"),
+              "h15_total_length":hyp.get("total_length"),
+              "h15_after15_length":hyp.get("after15_length"),
+              "header15_block_alignment_observed":hyp.get("after15_mod16")==0,
+              "header15_proven_by_execution_path":False,
+              "vm_reached_resource_open":vm.get("reached_resource_open",False),
+              "vm_reached_local12":vm.get("reached_local12",False),
+              "vm_reached_create_decryptor":vm.get("reached_create_decryptor",False),
+              "vm_reached_aes_decrypt":vm.get("reached_aes_decrypt",False),
+              "protected_update_body_recovered":store.get("update_method_body_recovered",False),
+              "firmware_readback_primitive_proven":False,
+              "full_flash_readback_proven":False,
+              "live_board_commands_allowed":False,
+              "next_gate":"If the VM reaches CreateDecryptor, independently verify the exact reader offset and key/IV before accepting decrypted bytes. If it stops earlier, use the packaged exact trace and static write sites to extend only the missing wrapper/native semantics."
           }
 
-          (review/"60_R109_VERDICT.json").write_text(
-            json.dumps(verdict,indent=2,ensure_ascii=False)+"\n")
+          (review/"60_R110_VERDICT.json").write_text(
+              json.dumps(verdict,indent=2,ensure_ascii=False)+"\n")
 
           lines=[
-            "OKN R109 STATIC DECRYPT + METHOD STORE RECOVERY",
-            "OFFLINE_ONLY=true",
-            f"P9Q_KEY_RECOVERED={str(key_ok).lower()}",
-            f"P9Q_IV_RECOVERED={str(iv_ok).lower()}",
-            f"P9Q_MEANINGFUL_RESOURCE_DECRYPT={str(meaningful_p9).lower()}",
-            f"WRAPPER_SEMANTICS_COUNT={len(wrappers)}",
-            f"N9_SWITCH_STATES={state.get('switch_state_count',0)}",
-            f"N9_GRAPH_EDGES={state.get('edge_count',0)}",
-            "PROTECTED_UPDATE_BODY_RECOVERED=false",
-            "FIRMWARE_READBACK_PRIMITIVE_PROVEN=false",
-            "FULL_FLASH_READBACK_PROVEN=false",
-            "LIVE_BOARD_COMMANDS_ALLOWED=false"
+              "OKN R110 EXACT N9 IL EMULATOR",
+              "OFFLINE_ONLY=true",
+              f"EXACT_SWITCH_MAPPING_CORRECTED={str(verdict['exact_switch_mapping_corrected']).lower()}",
+              f"SWITCH_TARGET_COUNT={verdict['switch_target_count']}",
+              f"INITIAL_STATE_392_TARGET={verdict['initial_state_392_target']}",
+              f"H15_TOTAL_LENGTH={verdict['h15_total_length']}",
+              f"H15_AFTER15_LENGTH={verdict['h15_after15_length']}",
+              f"HEADER15_BLOCK_ALIGNMENT_OBSERVED={str(verdict['header15_block_alignment_observed']).lower()}",
+              f"VM_REACHED_RESOURCE_OPEN={str(verdict['vm_reached_resource_open']).lower()}",
+              f"VM_REACHED_LOCAL12={str(verdict['vm_reached_local12']).lower()}",
+              f"VM_REACHED_CREATE_DECRYPTOR={str(verdict['vm_reached_create_decryptor']).lower()}",
+              f"VM_REACHED_AES_DECRYPT={str(verdict['vm_reached_aes_decrypt']).lower()}",
+              "PROTECTED_UPDATE_BODY_RECOVERED=false",
+              "FIRMWARE_READBACK_PRIMITIVE_PROVEN=false",
+              "FULL_FLASH_READBACK_PROVEN=false",
+              "LIVE_BOARD_COMMANDS_ALLOWED=false"
           ]
-          (review/"61_R109_SUMMARY.txt").write_text("\n".join(lines)+"\n")
+          (review/"61_R110_SUMMARY.txt").write_text("\n".join(lines)+"\n")
 
-          # Copy compact evidence plus the static corpus required for deeper
-          # local analysis after this run.
           for p in ev.iterdir():
-            if p.is_file():
-              shutil.copy2(p,review/p.name)
+              if p.is_file():shutil.copy2(p,review/p.name)
 
           (review/"resources").mkdir(exist_ok=True)
-          for p in (out/"resources").glob("*.bin"):
-            shutil.copy2(p,review/"resources"/p.name)
-
-          (review/"fieldrva").mkdir(exist_ok=True)
-          for p in (out/"fieldrva").glob("*.bin"):
-            shutil.copy2(p,review/"fieldrva"/p.name)
-
-          (review/"decrypted").mkdir(exist_ok=True)
-          for p in (out/"decrypted").glob("*.bin"):
-            shutil.copy2(p,review/"decrypted"/p.name)
+          for p in (out/"resources").glob("*"):
+              if p.is_file():shutil.copy2(p,review/"resources"/p.name)
 
           print("\n".join(lines))
           PY
@@ -844,25 +934,26 @@ jobs:
         shell: bash
         run: |
           {
-            echo "## OKN R109 MEGA Static Decrypt + Method Store Recovery"
+            echo "## OKN R110 MEGA Exact N9 IL Emulator"
             echo
-            echo "- Offline/static only; official client is never executed."
-            echo "- Packages complete compressed IL, all managed resources and FieldRVA windows."
-            echo "- Recovers exact static AES key/IV where possible and tests resources."
-            echo "- Builds a flattened-state graph for N9j protected method restoration."
+            echo "- Static/offline only; official EXE is never executed."
+            echo "- Corrects the R109 flattened-switch indexing bug."
+            echo "- Models the real h15 resource and BinaryReader position."
+            echo "- Uses bounded symbolic branches rather than guessing unknown conditions."
+            echo "- No DSP/USB activity."
             echo
-            if [ -f "$OUT/review/61_R109_SUMMARY.txt" ]; then
+            if [ -f "$OUT/review/61_R110_SUMMARY.txt" ]; then
               echo '```text'
-              cat "$OUT/review/61_R109_SUMMARY.txt"
+              cat "$OUT/review/61_R110_SUMMARY.txt"
               echo '```'
             fi
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Upload R109 complete static-analysis corpus
+      - name: Upload R110 evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: R109-STATIC-DECRYPT-METHOD-STORE-CORPUS
-          path: /tmp/r109/review
+          name: R110-EXACT-N9-IL-EMULATOR-EVIDENCE
+          path: /tmp/r110/review
           if-no-files-found: error
           retention-days: 30
