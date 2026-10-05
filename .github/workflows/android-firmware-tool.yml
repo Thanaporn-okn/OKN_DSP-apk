@@ -1,4 +1,4 @@
-name: OKN R99 ARM64 PP-XREF UFE Frame Miner OFFLINE ONLY
+name: OKN R100 Flutter Raw-AOT UFE Command Miner OFFLINE ONLY
 
 on:
   push:
@@ -12,11 +12,11 @@ permissions:
   actions: read
 
 concurrency:
-  group: okn-r99-arm64-pp-xref-${{ github.ref }}
+  group: okn-r100-raw-aot-ufe-${{ github.ref }}
   cancel-in-progress: true
 
 env:
-  OUT: /tmp/okn-r99
+  OUT: /tmp/okn-r100
   ANDROID_URL: "https://golodsp.com/wp-content/uploads/2026/05/golopine_audio_turning_release_2026-04-01.apk_.zip"
   LIVE_BOARD_USB: "NO"
   HOST_TO_DEVICE_USB: "NO"
@@ -25,9 +25,9 @@ env:
 
 jobs:
   mine:
-    name: Reconstruct ARM64 PP references for UFE read frames / STATIC ONLY
+    name: Recover hidden UFE read builders from Flutter ARM64 AOT / STATIC ONLY
     runs-on: ubuntu-24.04
-    timeout-minutes: 35
+    timeout-minutes: 40
 
     steps:
       - name: Checkout repository
@@ -44,22 +44,30 @@ jobs:
           test "$HOST_TO_DEVICE_USB" = "NO"
           test "$FLASH_ERASE_WRITE" = "NO"
           test "$FLASH_ALLOWED" = "NO"
+
           rm -rf "$OUT"
           mkdir -p "$OUT"/{downloads,android,blutter,evidence,review}
 
           cat > "$OUT/evidence/00_SCOPE.txt" <<'EOF'
-          REVISION=R99
+          REVISION=R100
           MODE=OFFLINE_STATIC_ONLY
           TARGET=GoloPine_DSTech_BP1048P4
-          KNOWN_PRODUCTION_USB=6324:1719
+          KNOWN_USB=6324:1719
           KNOWN_HID_USAGE=FF00:55AA
           KNOWN_READ_SENSOR=0x58
-          KNOWN_READ_SENSOR_FIFO=0x61
-          KNOWN_READ_SENSOR_BULK=0x63
-          KNOWN_RESPONSE_READ_SENSOR=0x60
+          KNOWN_READ_FIFO=0x61
+          KNOWN_READ_BULK=0x63
+          KNOWN_RESPONSE_READ=0x60
           KNOWN_RESPONSE_FIFO=0x62
           KNOWN_RESPONSE_BULK=0x64
           KNOWN_CONTINUE_BULK=0x82
+          DART_SMI_READ_SENSOR=0xB0
+          DART_SMI_READ_FIFO=0xC2
+          DART_SMI_READ_BULK=0xC6
+          DART_SMI_RESPONSE_READ=0xC0
+          DART_SMI_RESPONSE_FIFO=0xC4
+          DART_SMI_RESPONSE_BULK=0xC8
+          DART_SMI_CONTINUE_BULK=0x104
           BOARD_USB_ACCESS=NO
           LIVE_USB_COMMANDS=NO
           HOST_TO_DEVICE_USB=NO
@@ -69,10 +77,10 @@ jobs:
           WRITE=NO
           UNLOCK=NO
           FLASH_ALLOWED=NO
-          GOAL=Resolve_split_ARM64_PP_references_and_recover_exact_UFE_read_frame_builder
+          GOAL=Find_read_command_Smi_constants_and_raw_disassemble_hidden_AOT_functions
           EOF
 
-      - name: Install Blutter dependencies
+      - name: Install AOT analysis dependencies
         shell: bash
         run: |
           set -euo pipefail
@@ -82,6 +90,7 @@ jobs:
             python3 python3-pip python3-pyelftools python3-requests \
             cmake ninja-build build-essential pkg-config \
             libicu-dev libcapstone-dev
+          python3 -m pip install --break-system-packages --quiet capstone pyelftools
 
       - name: Download and extract official Android client
         shell: bash
@@ -90,7 +99,7 @@ jobs:
           curl \
             --fail --location --retry 4 --retry-all-errors \
             --connect-timeout 20 --max-time 240 \
-            --user-agent "Mozilla/5.0 OKN-R99-Interop-Research" \
+            --user-agent "Mozilla/5.0 OKN-R100-Interop-Research" \
             --referer "https://golodsp.com/7%E9%80%9A%E9%81%93%E9%9F%B3%E9%A2%91%E5%89%8D%E7%BA%A7/" \
             --output "$OUT/downloads/android.zip" "$ANDROID_URL"
 
@@ -107,30 +116,83 @@ jobs:
           cp "$APK" "$OUT/android/golopine.apk"
           7z x -y "$OUT/android/golopine.apk" -o"$OUT/android/raw" >/dev/null
 
-          test -s "$OUT/android/raw/lib/arm64-v8a/libapp.so"
-          test -s "$OUT/android/raw/lib/arm64-v8a/libflutter.so"
+          LIB="$OUT/android/raw/lib/arm64-v8a/libapp.so"
+          FLUTTER="$OUT/android/raw/lib/arm64-v8a/libflutter.so"
+          test -s "$LIB"
+          test -s "$FLUTTER"
 
           {
             echo "APK_SIZE=$(stat -c%s "$OUT/android/golopine.apk")"
             echo "APK_TYPE=$(file -b "$OUT/android/golopine.apk")"
-            sha256sum "$OUT/android/golopine.apk"
-            sha256sum "$OUT/android/raw/lib/arm64-v8a/libapp.so"
-            sha256sum "$OUT/android/raw/lib/arm64-v8a/libflutter.so"
+            echo "LIBAPP_SIZE=$(stat -c%s "$LIB")"
+            echo "LIBAPP_TYPE=$(file -b "$LIB")"
+            sha256sum "$OUT/android/golopine.apk" "$LIB" "$FLUTTER"
           } > "$OUT/evidence/01_IDENTITY.txt"
 
-      - name: Run Blutter
+          readelf -lW "$LIB" > "$OUT/evidence/02_LIBAPP_PROGRAM_HEADERS.txt"
+          readelf -SW "$LIB" > "$OUT/evidence/03_LIBAPP_SECTIONS.txt"
+
+      - name: Run Blutter and build function-address index
         shell: bash
         run: |
           set -euo pipefail
           git clone --depth 1 https://github.com/worawit/blutter.git "$OUT/blutter-src"
+
           python3 "$OUT/blutter-src/blutter.py" \
             "$OUT/android/raw/lib/arm64-v8a" \
             "$OUT/blutter/out" \
             > "$OUT/evidence/10_BLUTTER_STDOUT.txt" \
             2> "$OUT/evidence/11_BLUTTER_STDERR.txt"
+
           echo "BLUTTER_RC=0" > "$OUT/evidence/12_BLUTTER_STATUS.txt"
 
-      - name: Resolve target PP objects and adjacent closures
+          python3 - <<'PY'
+          from pathlib import Path
+          import os,re,json
+
+          out=Path(os.environ["OUT"])
+          asm=out/"blutter/out/asm"
+
+          rows=[]
+          pat=re.compile(r'// \*\* addr: 0x([0-9a-fA-F]+), size: ([^\s]+)')
+          decl_re=re.compile(r'^\s*(.*\{)\s*$')
+
+          for p in asm.rglob("*.dart"):
+            try: lines=p.read_text(errors="ignore").splitlines()
+            except Exception: continue
+            rel=str(p.relative_to(out))
+            for i,line in enumerate(lines):
+              m=pat.search(line)
+              if not m: continue
+              addr=int(m.group(1),16)
+              size_raw=m.group(2)
+              size=None
+              try:
+                size=int(size_raw,0)
+              except:
+                pass
+              decl=""
+              for j in range(i-1,max(-1,i-8),-1):
+                if "(" in lines[j] and "{" in lines[j]:
+                  decl=lines[j].strip()
+                  break
+              rows.append({
+                "addr":addr,
+                "addr_hex":hex(addr),
+                "size":size,
+                "size_raw":size_raw,
+                "path":rel,
+                "line":i+1,
+                "decl":decl
+              })
+
+          rows.sort(key=lambda x:x["addr"])
+          (out/"evidence/13_FUNCTION_ADDRESS_INDEX.json").write_text(
+              json.dumps(rows,indent=2,ensure_ascii=False)+"\n")
+          print("function_addresses",len(rows))
+          PY
+
+      - name: Locate Dart-Smi UFE command constants globally
         shell: bash
         run: |
           set -euo pipefail
@@ -139,391 +201,355 @@ jobs:
           import os,re,json
 
           out=Path(os.environ["OUT"])
-          pp=(out/"blutter/out/pp.txt").read_text(errors="ignore").splitlines()
-
-          targets=[
-            "Sent Device Type and software version authentication request data",
-            "CurDeviceDescriptionLength=",
-            "Target DeviceDescriptionLength= ",
-            "Bulk receive start Length= ",
-            " memoffset=",
-            " sensorID=",
-            "Bulk receive Length= ",
-            "Bulk Receive Finished len= ",
-            "On actuator data updated",
-            "On sensor data updated",
-            "Decode UFE JSON success!"
-          ]
-
-          rows=[]
-          for i,line in enumerate(pp):
-            m=re.match(r'^\[pp\+0x([0-9a-fA-F]+)\]\s+(.*)$',line)
-            if not m:
-              continue
-            off=int(m.group(1),16)
-            rest=m.group(2)
-            matched=[t for t in targets if t.lower() in rest.lower()]
-            if matched:
-              lo=max(0,i-8); hi=min(len(pp),i+9)
-              rows.append({
-                "offset":off,
-                "offset_hex":hex(off),
-                "page":off>>12,
-                "page_hex":hex(off>>12),
-                "low12":off & 0xfff,
-                "low12_hex":hex(off & 0xfff),
-                "matched":matched,
-                "object":rest,
-                "neighbors":pp[lo:hi]
-              })
-
-          # Also retain known nearby closures/functions disclosed by pp.txt.
-          closure_pat=re.compile(r'(?:AnonymousClosure|Closure):.*?\((0x[0-9a-fA-F]+)\)')
-          nearby_closures=[]
-          for r in rows:
-            for line in r["neighbors"]:
-              cm=closure_pat.search(line)
-              if cm:
-                nearby_closures.append({
-                  "target":r["matched"],
-                  "address":cm.group(1).lower(),
-                  "line":line
-                })
-
-          # Known anchors from R98/R97 PP table.
-          for addr in ("0x25177c4","0x2546d8c","0x2515070"):
-            nearby_closures.append({
-              "target":["known_anchor"],
-              "address":addr,
-              "line":"known_from_previous_evidence"
-            })
-
-          # de-dup
-          seen=set(); uniq=[]
-          for x in nearby_closures:
-            k=x["address"]
-            if k not in seen:
-              seen.add(k); uniq.append(x)
-
+          asm=out/"blutter/out/asm"
           ev=out/"evidence"
-          (ev/"20_TARGET_PP_OBJECTS.json").write_text(
-            json.dumps(rows,indent=2,ensure_ascii=False)+"\n")
-          (ev/"21_NEARBY_FUNCTION_ADDRESSES.json").write_text(
-            json.dumps(uniq,indent=2,ensure_ascii=False)+"\n")
-          print("targets",len(rows),"function_addresses",len(uniq))
-          PY
 
-      - name: Reconstruct split ARM64 PP references
-        shell: bash
-        run: |
-          set -euo pipefail
-          python3 - <<'PY'
-          from pathlib import Path
-          import os,re,json,shutil
+          # Dart small integers are tagged as Smi = value << 1.
+          smi={
+            0xB0:"READ_SENSOR_0x58",
+            0xC2:"READ_FIFO_0x61",
+            0xC6:"READ_BULK_0x63",
+            0xC0:"RESPONSE_READ_0x60",
+            0xC4:"RESPONSE_FIFO_0x62",
+            0xC8:"RESPONSE_BULK_0x64",
+            0x104:"CONTINUE_BULK_0x82",
+          }
 
-          out=Path(os.environ["OUT"])
-          ev=out/"evidence"
-          asmroot=out/"blutter/out/asm"
-          targets=json.loads((ev/"20_TARGET_PP_OBJECTS.json").read_text())
-
-          # Typical Dart ARM64 access for large PP offset:
-          #   add xN, PP, #0xc, lsl #12
-          #   ldr xM, [xN, #0xf30]
-          add_re=re.compile(
-            r'\badd\s+x(?P<reg>\d+),\s*PP,\s*#(?P<page>0x[0-9a-fA-F]+|\d+),\s*lsl\s*#12',
+          # Only accept immediates used as produced integer values.
+          imm_re=re.compile(
+            r'\b(?:movz|mov)\s+x\d+,\s*#(0x[0-9a-fA-F]+|\d+)\b',
             re.I
           )
-          mem_re_tpl=r'\[(?:x{reg}),\s*#(?P<imm>-?(?:0x[0-9a-fA-F]+|\d+))\]'
-          direct_re=re.compile(r'\[PP,\s*#(?P<imm>0x[0-9a-fA-F]+|\d+)\]',re.I)
+          func_re=re.compile(r'// \*\* addr: 0x([0-9a-fA-F]+), size: ([^\s]+)')
 
-          xrefs=[]
-          selected=set()
-
-          for p in asmroot.rglob("*.dart"):
+          hits=[]
+          for p in asm.rglob("*.dart"):
             try: lines=p.read_text(errors="ignore").splitlines()
             except Exception: continue
 
+            current_addr=None
+            current_decl=""
             for i,line in enumerate(lines):
-              # Direct PP references.
-              for dm in direct_re.finditer(line):
-                imm=int(dm.group("imm"),0)
-                for t in targets:
-                  if imm==t["offset"]:
-                    lo=max(0,i-220); hi=min(len(lines),i+380)
-                    xrefs.append({
-                      "target":t,
-                      "mode":"direct",
-                      "path":str(p.relative_to(out)),
-                      "line":i+1,
-                      "match_lines":[line],
-                      "context":"\n".join(lines[lo:hi])
-                    })
-                    selected.add(p)
+              fm=func_re.search(line)
+              if fm:
+                current_addr=int(fm.group(1),16)
+                current_decl=""
+                for j in range(i-1,max(-1,i-8),-1):
+                  if "(" in lines[j] and "{" in lines[j]:
+                    current_decl=lines[j].strip()
+                    break
 
-              am=add_re.search(line)
-              if not am:
-                continue
-              reg=am.group("reg")
-              page=int(am.group("page"),0)
-              mre=re.compile(mem_re_tpl.format(reg=reg),re.I)
+              im=imm_re.search(line)
+              if not im: continue
+              v=int(im.group(1),0)
+              if v not in smi: continue
 
-              for j in range(i+1,min(len(lines),i+14)):
-                mm=mre.search(lines[j])
-                if not mm:
-                  continue
-                low=int(mm.group("imm"),0)
-                effective=(page<<12)+low
-                for t in targets:
-                  if effective==t["offset"]:
-                    lo=max(0,i-220); hi=min(len(lines),j+380)
-                    xrefs.append({
-                      "target":t,
-                      "mode":"split_add_mem",
-                      "path":str(p.relative_to(out)),
-                      "line":i+1,
-                      "match_lines":[line,lines[j]],
-                      "effective":hex(effective),
-                      "context":"\n".join(lines[lo:hi])
-                    })
-                    selected.add(p)
+              lo=max(0,i-80); hi=min(len(lines),i+180)
+              ctx="\n".join(lines[lo:hi])
+              hits.append({
+                "value":v,
+                "value_hex":hex(v),
+                "meaning":smi[v],
+                "path":str(p.relative_to(out)),
+                "line":i+1,
+                "function_addr":current_addr,
+                "function_addr_hex":hex(current_addr) if current_addr is not None else None,
+                "function_decl":current_decl,
+                "instruction":line.strip(),
+                "context":ctx
+              })
 
-          # De-duplicate exact xrefs.
-          dedup=[]
-          seen=set()
-          for x in xrefs:
-            k=(x["target"]["offset"],x["path"],x["line"],x["mode"])
-            if k in seen: continue
-            seen.add(k); dedup.append(x)
+          (ev/"20_SMI_COMMAND_HITS.json").write_text(
+              json.dumps(hits,indent=2,ensure_ascii=False)+"\n")
 
-          (ev/"30_SPLIT_PP_XREFS.json").write_text(
-            json.dumps(dedup,indent=2,ensure_ascii=False)+"\n")
+          by={}
+          for h in hits:
+            by[h["meaning"]]=by.get(h["meaning"],0)+1
+          (ev/"21_SMI_COMMAND_COUNTS.json").write_text(
+              json.dumps(by,indent=2,ensure_ascii=False)+"\n")
 
-          sel=out/"review/selected-asm"
-          sel.mkdir(parents=True,exist_ok=True)
-          for p in selected:
-            shutil.copy2(p,sel/p.name)
-
-          (ev/"31_SELECTED_ASM_FILES.txt").write_text(
-            "\n".join(sorted(str(p.relative_to(out)) for p in selected))+"\n")
-
-          print("split_pp_xrefs",len(dedup))
-          print("selected_asm_files",len(selected))
+          print(json.dumps(by,indent=2))
           PY
 
-      - name: Locate exact known classes and function addresses
+      - name: Raw-disassemble hidden and protocol-cluster functions
         shell: bash
         run: |
           set -euo pipefail
           python3 - <<'PY'
           from pathlib import Path
-          import os,re,json,shutil
+          import os,json,re
+          from elftools.elf.elffile import ELFFile
+          from capstone import Cs, CS_ARCH_ARM64, CS_MODE_LITTLE_ENDIAN
+          from capstone.arm64 import ARM64_OP_IMM
 
           out=Path(os.environ["OUT"])
           ev=out/"evidence"
-          asmroot=out/"blutter/out/asm"
-          addr_rows=json.loads((ev/"21_NEARBY_FUNCTION_ADDRESSES.json").read_text())
-          addresses={x["address"].lower() for x in addr_rows}
+          lib=out/"android/raw/lib/arm64-v8a/libapp.so"
 
-          class_names={"aLe","MKe","Bs","tr"}
-          hits=[]
-          selected=set()
+          index=json.loads((ev/"13_FUNCTION_ADDRESS_INDEX.json").read_text())
+          addr_to_row={r["addr"]:r for r in index}
+          sorted_addrs=sorted(addr_to_row)
 
-          for p in asmroot.rglob("*.dart"):
-            try: txt=p.read_text(errors="ignore")
-            except Exception: continue
-            lines=txt.splitlines()
-            low=txt.lower()
-
-            # Exact address anchors.
-            for addr in addresses:
-              pos=low.find(addr.lower())
-              while pos>=0:
-                line_no=txt.count("\n",0,pos)
-                lo=max(0,line_no-180); hi=min(len(lines),line_no+420)
-                hits.append({
-                  "kind":"address",
-                  "needle":addr,
-                  "path":str(p.relative_to(out)),
-                  "line":line_no+1,
-                  "context":"\n".join(lines[lo:hi])
-                })
-                selected.add(p)
-                pos=low.find(addr.lower(),pos+1)
-
-            # Blutter obfuscated class/function anchors.
-            for cls in class_names:
-              pats=[
-                rf'\bclass\s+{re.escape(cls)}\b',
-                rf'\b{re.escape(cls)}\s+[A-Za-z_$][\w$]*\s*\(',
-              ]
-              for pat in pats:
-                for m in re.finditer(pat,txt):
-                  line_no=txt.count("\n",0,m.start())
-                  lo=max(0,line_no-80); hi=min(len(lines),line_no+500)
-                  hits.append({
-                    "kind":"symbol",
-                    "needle":cls,
-                    "path":str(p.relative_to(out)),
-                    "line":line_no+1,
-                    "context":"\n".join(lines[lo:hi])
-                  })
-                  selected.add(p)
-
-          (ev/"32_SYMBOL_ADDRESS_HITS.json").write_text(
-            json.dumps(hits,indent=2,ensure_ascii=False)+"\n")
-
-          sel=out/"review/anchor-asm"
-          sel.mkdir(parents=True,exist_ok=True)
-          for p in selected:
-            shutil.copy2(p,sel/p.name)
-
-          print("symbol_address_hits",len(hits))
-          print("anchor_files",len(selected))
-          PY
-
-      - name: Extract function-local read-frame evidence
-        shell: bash
-        run: |
-          set -euo pipefail
-          python3 - <<'PY'
-          from pathlib import Path
-          import os,re,json
-
-          out=Path(os.environ["OUT"])
-          ev=out/"evidence"
-          xrefs=json.loads((ev/"30_SPLIT_PP_XREFS.json").read_text())
-          anchors=json.loads((ev/"32_SYMBOL_ADDRESS_HITS.json").read_text())
-
-          command_ids={
-            0x58:"READ_SENSOR",
-            0x61:"READ_SENSOR_FIFO",
-            0x63:"READ_SENSOR_BULK",
-            0x60:"RESPONSE_READ_SENSOR",
-            0x62:"RESPONSE_FIFO",
-            0x64:"RESPONSE_BULK",
-            0x82:"CONTINUE_BULK",
+          targets={
+            # Flutter UFE / protocol cluster from R98-R99
+            0x2515070:"MKe_main_closure",
+            0x25170dc:"MKe_os_closure",
+            0x2517118:"MKe_object_callback",
+            0x2517274:"MKe_ByteData_callback",
+            0x25173fc:"MKe_js_closure",
+            0x2517414:"MKe_object_callback_2",
+            0x2517568:"MKe_ByteData_callback_2",
+            0x251761c:"MKe_null_closure",
+            0x2517708:"aLe_repeated_call_target",
+            0x25177c4:"aLe_Bs_ByteData_closure",
+            0x2545288:"aLe_protocol_call_2545288",
+            0x2545420:"aLe_protocol_call_2545420",
+            0x25465f0:"aLe_protocol_call_25465f0",
+            0x2546850:"aLe_or_closure",
+            0x254690c:"aLe_nr_closure",
+            0x2546a08:"aLe_mr_closure",
+            0x2546ad0:"MKe_xs_callback",
+            0x2546c24:"MKe_zs_callback",
+            0x2546c5c:"MKe_ys_callback",
+            0x2546c94:"MKe_As_callback",
+            0x2546d8c:"MKe_pr_closure",
+            0x2546dc8:"MKe_dynamic_closure",
+            0x2546f4c:"MKe_vr_closure",
+            0x25c2234:"aLe_protocol_helper",
+            # Known parser where RESPONSE_BULK Smi 0xC8 was observed.
+            0x266c0dc:"aLe_Bs_response_parser",
           }
-          # Dart Smi often stores integer value shifted left by one.
-          smi_ids={k<<1:v+"_SMI" for k,v in command_ids.items()}
 
-          rows=[]
-          for source in xrefs+anchors:
-            ctx=source.get("context","")
-            lines=ctx.splitlines()
+          with lib.open("rb") as f:
+            elf=ELFFile(f)
+            blob=f.read() if False else None
+            segments=[]
+            for seg in elf.iter_segments():
+              if seg["p_type"]=="PT_LOAD":
+                segments.append({
+                  "vaddr":int(seg["p_vaddr"]),
+                  "memsz":int(seg["p_memsz"]),
+                  "offset":int(seg["p_offset"]),
+                  "filesz":int(seg["p_filesz"]),
+                  "flags":int(seg["p_flags"]),
+                })
 
-            constants=[]
-            stores=[]
-            loads=[]
-            calls=[]
-            terms=[]
+            def read_vaddr(addr, size):
+              for s in segments:
+                if s["vaddr"] <= addr < s["vaddr"]+s["filesz"]:
+                  take=min(size,s["vaddr"]+s["filesz"]-addr)
+                  off=s["offset"]+(addr-s["vaddr"])
+                  f.seek(off)
+                  return f.read(take),off,s
+              return None,None,None
 
-            for line in lines:
-              l=line.lower()
+            def next_known(addr):
+              for a in sorted_addrs:
+                if a>addr:
+                  return a
+              return None
 
-              # Only count immediate constants in value-producing instructions,
-              # not stack offsets or class field offsets.
-              m=re.search(
-                r'\b(?:movz|movn|mov|orr)\s+[xw]\d+,\s*(?:xzr,\s*)?#(0x[0-9a-f]+|\d+)',
-                l
-              )
-              if m:
-                v=int(m.group(1),0)
-                if v in command_ids:
-                  constants.append({"value":v,"meaning":command_ids[v],"line":line.strip()})
-                if v in smi_ids:
-                  constants.append({"value":v,"meaning":smi_ids[v],"line":line.strip()})
+            md=Cs(CS_ARCH_ARM64,CS_MODE_LITTLE_ENDIAN)
+            md.detail=True
 
-              if re.search(r'\b(?:strb|sturb|strh|sturh|str\s+w\d+)\b',l):
-                stores.append(line.strip())
-              if re.search(r'\b(?:ldrb|ldurb|ldrh|ldurh|ldr\s+w\d+)\b',l):
-                loads.append(line.strip())
-              if re.search(r'\bbl\s+#0x[0-9a-f]+\b',l):
-                calls.append(line.strip())
+            results=[]
+            smi_map={
+              0xB0:"READ_SENSOR_0x58",
+              0xC2:"READ_FIFO_0x61",
+              0xC6:"READ_BULK_0x63",
+              0xC0:"RESPONSE_READ_0x60",
+              0xC4:"RESPONSE_FIFO_0x62",
+              0xC8:"RESPONSE_BULK_0x64",
+              0x104:"CONTINUE_BULK_0x82",
+            }
 
-              for word in ("memoffset","sensorid","bulk receive","device description",
-                           "uint8","uint16","bytedata","setuint","getuint","length"):
-                if word in l:
-                  terms.append({"term":word,"line":line.strip()})
+            for addr,label in targets.items():
+              nxt=next_known(addr)
+              # Prefer next Blutter function as a conservative bound, but clamp
+              # hidden/stub functions to avoid swallowing unrelated code.
+              if nxt and 4 <= nxt-addr <= 0x3000:
+                size=nxt-addr
+              else:
+                size=0x1000
+              size=max(4,min(size,0x3000))
 
-            rows.append({
-              "source_kind":source.get("kind",source.get("mode","xref")),
-              "needle":source.get("needle"),
-              "target":source.get("target"),
-              "path":source.get("path"),
-              "line":source.get("line"),
-              "command_immediates":constants[:200],
-              "byte_word_stores":stores[:300],
-              "byte_word_loads":loads[:300],
-              "calls":calls[:300],
-              "semantic_terms":terms[:300],
-              "context":ctx
+              data,foff,seg=read_vaddr(addr,size)
+              if not data:
+                results.append({
+                  "addr":hex(addr),"label":label,
+                  "mapped":False,"next_known":hex(nxt) if nxt else None
+                })
+                continue
+
+              insns=[]
+              command_hits=[]
+              stores=[]
+              calls=[]
+              for ins in md.disasm(data,addr):
+                text=f"{ins.mnemonic} {ins.op_str}".strip()
+                row={"address":hex(ins.address),"mnemonic":ins.mnemonic,"op_str":ins.op_str}
+
+                # Direct BL target annotation.
+                if ins.mnemonic=="bl" and ins.operands and ins.operands[0].type==ARM64_OP_IMM:
+                  target=int(ins.operands[0].imm)
+                  sym=addr_to_row.get(target)
+                  call={
+                    "at":hex(ins.address),
+                    "target":hex(target),
+                    "symbol":sym
+                  }
+                  calls.append(call)
+                  row["call_target"]=call
+
+                if ins.mnemonic in ("strb","sturb","strh","sturh","str","stur","stp"):
+                  stores.append({"at":hex(ins.address),"text":text})
+
+                # Capstone normalizes movz/mov immediates.
+                if ins.mnemonic in ("mov","movz","orr"):
+                  for op in ins.operands:
+                    if op.type==ARM64_OP_IMM:
+                      v=int(op.imm)
+                      if v in smi_map:
+                        ch={
+                          "at":hex(ins.address),
+                          "value":v,
+                          "value_hex":hex(v),
+                          "meaning":smi_map[v],
+                          "text":text
+                        }
+                        command_hits.append(ch)
+                        row["ufe_command_smi"]=ch
+
+                insns.append(row)
+
+              results.append({
+                "addr":hex(addr),
+                "label":label,
+                "mapped":True,
+                "file_offset":hex(foff),
+                "segment":seg,
+                "requested_size":size,
+                "next_known":hex(nxt) if nxt else None,
+                "blutter_symbol":addr_to_row.get(addr),
+                "raw_hex":data[:512].hex().upper(),
+                "command_smi_hits":command_hits,
+                "stores":stores[:500],
+                "calls":calls[:500],
+                "instructions":insns[:5000],
+              })
+
+          (ev/"30_RAW_TARGET_DISASSEMBLY.json").write_text(
+              json.dumps(results,indent=2,ensure_ascii=False)+"\n")
+
+          concise=[]
+          for r in results:
+            concise.append({
+              "addr":r["addr"],
+              "label":r["label"],
+              "mapped":r.get("mapped"),
+              "next_known":r.get("next_known"),
+              "command_smi_hits":r.get("command_smi_hits",[]),
+              "store_count":len(r.get("stores",[])),
+              "calls":r.get("calls",[])[:100],
             })
+          (ev/"31_RAW_TARGET_SUMMARY.json").write_text(
+              json.dumps(concise,indent=2,ensure_ascii=False)+"\n")
 
-          high=[
-            r for r in rows
-            if r["command_immediates"]
-            and r["byte_word_stores"]
-            and (
-              r.get("target")
-              or any(t["term"] in ("memoffset","sensorid","bulk receive") for t in r["semantic_terms"])
-            )
+          print("targets",len(results))
+          print("mapped",sum(1 for r in results if r.get("mapped")))
+          print("command_hits",sum(len(r.get("command_smi_hits",[])) for r in results))
+          PY
+
+      - name: Correlate command constants with hidden raw functions
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import os,json,re
+
+          out=Path(os.environ["OUT"])
+          ev=out/"evidence"
+
+          global_hits=json.loads((ev/"20_SMI_COMMAND_HITS.json").read_text())
+          raw=json.loads((ev/"30_RAW_TARGET_DISASSEMBLY.json").read_text())
+
+          read_meanings={"READ_SENSOR_0x58","READ_FIFO_0x61","READ_BULK_0x63"}
+          response_meanings={"RESPONSE_READ_0x60","RESPONSE_FIFO_0x62","RESPONSE_BULK_0x64"}
+
+          candidates=[]
+          calibrations=[]
+
+          for r in raw:
+            hits=r.get("command_smi_hits",[])
+            meanings={h["meaning"] for h in hits}
+            if meanings & read_meanings:
+              candidates.append({
+                "addr":r["addr"],
+                "label":r["label"],
+                "meanings":sorted(meanings),
+                "command_hits":hits,
+                "stores":r.get("stores",[])[:200],
+                "calls":r.get("calls",[])[:200],
+                "instructions":r.get("instructions",[])[:1600],
+              })
+            if meanings & response_meanings:
+              calibrations.append({
+                "addr":r["addr"],
+                "label":r["label"],
+                "meanings":sorted(meanings),
+                "command_hits":hits,
+              })
+
+          # Global Blutter functions containing read-Smi constants are strong
+          # locator evidence, but not yet sufficient to prove packet layout.
+          global_read=[
+            h for h in global_hits
+            if h["meaning"] in read_meanings
           ]
 
-          (ev/"40_FUNCTION_LOCAL_EVIDENCE.json").write_text(
-            json.dumps(rows,indent=2,ensure_ascii=False)+"\n")
-          (ev/"41_HIGH_CONFIDENCE_FRAME_BUILDERS.json").write_text(
-            json.dumps(high,indent=2,ensure_ascii=False)+"\n")
-
-          print("function_local_windows",len(rows))
-          print("high_confidence_frame_builders",len(high))
-          PY
-
-      - name: Produce conservative R99 verdict
-        shell: bash
-        run: |
-          set -euo pipefail
-          python3 - <<'PY'
-          from pathlib import Path
-          import os,json
-
-          out=Path(os.environ["OUT"])
-          ev=out/"evidence"
-
-          def load(name):
-            p=ev/name
-            return json.loads(p.read_text(errors="ignore")) if p.exists() else []
-
-          xrefs=load("30_SPLIT_PP_XREFS.json")
-          anchors=load("32_SYMBOL_ADDRESS_HITS.json")
-          high=load("41_HIGH_CONFIDENCE_FRAME_BUILDERS.json")
-
-          exact=bool(high)
-
           verdict={
-            "split_pp_xrefs":len(xrefs),
-            "symbol_or_address_hits":len(anchors),
-            "high_confidence_frame_builders":len(high),
+            "global_read_smi_hits":len(global_read),
+            "raw_target_read_candidates":len(candidates),
+            "response_smi_calibrations":len(calibrations),
             "read_command_ids_proven":True,
-            "exact_read_frame_layout_proven":exact,
+            "dart_smi_encoding_calibrated":bool(calibrations),
+            "exact_read_frame_layout_proven":False,
             "full_flash_readback_proven":False,
             "live_board_commands_allowed":False,
-            "reason":"Even if a read frame builder is recovered, full flash access remains unproven until the sensor/address namespace is shown to map to firmware flash and the response path is bounded/non-destructive."
+            "rule":"Raw read-Smi constants locate candidate functions; frame layout is promoted only after argument/field stores and transport call chain are independently reconstructed."
           }
-          (ev/"50_R99_VERDICT.json").write_text(
-            json.dumps(verdict,indent=2,ensure_ascii=False)+"\n")
+
+          # Conservative promotion: require a hidden/raw function to contain a
+          # read command Smi, at least 2 stores, and at least 1 resolved call.
+          strong=[]
+          for c in candidates:
+            if len(c["stores"])>=2 and c["calls"]:
+              strong.append(c)
+          verdict["strong_raw_read_builders"]=len(strong)
+          verdict["exact_read_frame_layout_proven"]=False
+
+          (ev/"40_READ_BUILDER_CANDIDATES.json").write_text(
+              json.dumps(candidates,indent=2,ensure_ascii=False)+"\n")
+          (ev/"41_STRONG_RAW_READ_BUILDERS.json").write_text(
+              json.dumps(strong,indent=2,ensure_ascii=False)+"\n")
+          (ev/"42_R100_VERDICT.json").write_text(
+              json.dumps(verdict,indent=2,ensure_ascii=False)+"\n")
 
           lines=[
-            "OKN R99 ARM64 PP-XREF UFE FRAME MINER",
+            "OKN R100 FLUTTER RAW-AOT UFE COMMAND MINER",
             "OFFLINE_ONLY=true",
-            f"SPLIT_PP_XREFS={len(xrefs)}",
-            f"SYMBOL_OR_ADDRESS_HITS={len(anchors)}",
-            f"HIGH_CONFIDENCE_FRAME_BUILDERS={len(high)}",
+            f"GLOBAL_READ_SMI_HITS={len(global_read)}",
+            f"RAW_TARGET_READ_CANDIDATES={len(candidates)}",
+            f"RESPONSE_SMI_CALIBRATIONS={len(calibrations)}",
+            f"STRONG_RAW_READ_BUILDERS={len(strong)}",
+            f"DART_SMI_ENCODING_CALIBRATED={str(bool(calibrations)).lower()}",
             "READ_COMMAND_IDS_PROVEN=true",
-            f"EXACT_READ_FRAME_LAYOUT_PROVEN={str(exact).lower()}",
+            "EXACT_READ_FRAME_LAYOUT_PROVEN=false",
             "FULL_FLASH_READBACK_PROVEN=false",
             "LIVE_BOARD_COMMANDS_ALLOWED=false",
           ]
-          (ev/"51_R99_SUMMARY.txt").write_text("\n".join(lines)+"\n")
+          (ev/"43_R100_SUMMARY.txt").write_text("\n".join(lines)+"\n")
           print("\n".join(lines))
           PY
 
@@ -552,15 +578,17 @@ jobs:
         shell: bash
         run: |
           {
-            echo "## OKN R99 ARM64 PP-XREF UFE Frame Miner"
+            echo "## OKN R100 Flutter Raw-AOT UFE Command Miner"
             echo
-            echo "- Offline/static only."
-            echo "- Reconstructs split ARM64 PP addressing rather than matching raw numbers."
-            echo "- No board USB access and no host-to-device packet."
+            echo "- Offline/static analysis only."
+            echo "- Searches Dart-Smi encoded UFE IDs in value-producing ARM64 instructions."
+            echo "- Raw-disassembles hidden size:-1 AOT functions directly from libapp.so."
+            echo "- No board USB access and no host-to-device packets."
             echo
             for f in \
               "$OUT/evidence/12_BLUTTER_STATUS.txt" \
-              "$OUT/evidence/51_R99_SUMMARY.txt"; do
+              "$OUT/evidence/21_SMI_COMMAND_COUNTS.json" \
+              "$OUT/evidence/43_R100_SUMMARY.txt"; do
               if [ -f "$f" ]; then
                 echo "### $(basename "$f")"
                 echo '```text'
@@ -570,11 +598,11 @@ jobs:
             done
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Upload R99 evidence
+      - name: Upload R100 evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: R99-ARM64-PP-XREF-UFE-FRAME-EVIDENCE
-          path: /tmp/okn-r99/review
+          name: R100-FLUTTER-RAW-AOT-UFE-COMMAND-EVIDENCE
+          path: /tmp/okn-r100/review
           if-no-files-found: error
           retention-days: 30
