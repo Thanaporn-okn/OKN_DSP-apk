@@ -1,4 +1,4 @@
-name: OKN R118C Phase2 Metadata Provenance + R118B Continuation OFFLINE ONLY
+name: OKN R118E Phase2 ALL-IN-ONE Evidence Batch OFFLINE ONLY
 
 on:
   push:
@@ -12,7 +12,7 @@ permissions:
   actions: read
 
 concurrency:
-  group: okn-r118c-phase2-provenance-${{ github.ref }}
+  group: okn-r118e-phase2-batch-${{ github.ref }}
   cancel-in-progress: true
 
 env:
@@ -31,7 +31,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     env:
-      OUT: /tmp/r118c
+      OUT: /tmp/r118e
 
     steps:
       - name: Fail-closed static-only safety gate
@@ -1583,6 +1583,8 @@ jobs:
 
           active=collections.deque([initial])
           finished=[]
+          exhausted=[]
+          PATH_STEP_LIMIT=400000
           seen={}
           MAX_PATHS=1536
           MAX_STEPS=8000000
@@ -1607,7 +1609,7 @@ jobs:
               branch_out=[]
               local_budget=5000
 
-              while local_budget>0 and s.steps<120000:
+              while local_budget>0 and s.steps<PATH_STEP_LIMIT:
                   local_budget-=1; s.steps+=1; total_steps+=1
                   if s.ip<0 or s.ip>=len(ins):
                       finished.append(s); break
@@ -2074,6 +2076,10 @@ jobs:
                   s.milestones.append({"kind":"UNSUPPORTED","label":lab,"op":op,"arg":arg})
                   s.ip=nxt
 
+              if s.steps>=PATH_STEP_LIMIT and not branch_out:
+                  exhausted.append(s)
+                  GLOBAL_EVENTS.append({"kind":"PATH_STEP_LIMIT","step":s.steps,"ip":s.ip,"limit":PATH_STEP_LIMIT})
+                  continue
               if branch_out:
                   for x in branch_out:
                       k=key(x);best=seen.get(k)
@@ -2106,7 +2112,7 @@ jobs:
                       if best is None or s.unknown_branches<best:
                           seen[k]=s.unknown_branches;active.append(s)
 
-          allstates=finished+list(active)
+          allstates=finished+list(active)+exhausted
           interesting=[]
           for s in allstates:
               kinds=[m["kind"] for m in s.milestones]
@@ -2141,11 +2147,16 @@ jobs:
               "switch_target_count":len(switch_targets),
               "switch_392":switch_targets[392] if len(switch_targets)>392 else None,
               "total_vm_steps":total_steps,
-              "finished_or_active_states":len(allstates),
+              "finished_or_active_states":len(finished)+len(active),
+              "retained_states_including_exhausted":len(allstates),
+              "exhausted_state_count":len(exhausted),
+              "path_step_limit":PATH_STEP_LIMIT,
+              "global_step_limit_hit":bool(active and total_steps>=MAX_STEPS),
+              "analysis_incomplete":bool(exhausted or active),
               "interesting_states":len(interesting),
               "best_score":interesting[0][0] if interesting else 0,
-              "reached_resource_open":any(any(m["kind"]=="resource_open" for m in s.milestones) for s in allstates),
-              "reached_local12":any(any(m["kind"]=="LOCAL12_SET" for m in s.milestones) for s in allstates),
+              "reached_resource_open":any(e.get("kind")=="resource_open" for e in GLOBAL_EVENTS),
+              "reached_local12":any(e.get("kind")=="LOCAL12_SET" for e in GLOBAL_EVENTS),
               "reached_create_decryptor":any(any(m["kind"]=="CreateDecryptor" for m in s.milestones) for s in allstates),
               "reached_aes_decrypt":any(any(m["kind"]=="AES_DECRYPT" for m in s.milestones) for s in allstates),
               "reached_plaintext":any(any(m["kind"]=="LOCAL29_PLAINTEXT" for m in s.milestones) for s in allstates),
@@ -2155,12 +2166,12 @@ jobs:
               "global_reach":GLOBAL_REACH[-5000:],
               "nested_switch_events":GLOBAL_NESTED_SWITCHES[-5000:],
               "main_state_snapshots":GLOBAL_SNAPSHOTS[-1000:],
-              "unknown_calls":UNKNOWN_CALLS[-5000:],
+              "unknown_calls":UNKNOWN_CALLS,
               "key_write_events":KEY_WRITE_EVENTS[-10000:],
               "hashtable_ctor_events":HASHTABLE_CTOR_EVENTS[-1000:],
               "parser_violations":PARSER_VIOLATIONS[-2000:],
               "parser_semantically_valid":len(PARSER_VIOLATIONS)==0,
-              "global_events":GLOBAL_EVENTS[-15000:],
+              "global_events":GLOBAL_EVENTS,
               "write_process_memory_count":len(WPM_WRITES),
               "write_process_memory_events":WPM_WRITES[-5000:],
               "global_reached_create_decryptor":any(
@@ -2823,6 +2834,206 @@ jobs:
               json.dumps(result,indent=2,ensure_ascii=False)+"\n")
           PY
 
+      - name: Audit stage2 record boundaries and structural method candidates offline
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > "$OUT/protocol/audit_stage2_records.py" <<'RECORD_PY'
+          """Offline structural audit only. Does not patch a PE, load target code or contact a device."""
+          import json,hashlib,struct,sys
+          from pathlib import Path
+          
+          def scan_records(data,start):
+              records=[];pos=start;seen=set()
+              while pos<len(data):
+                  if len(data)-pos<12:raise ValueError('Incomplete record header')
+                  key,tag,length=struct.unpack_from('<iii',data,pos)
+                  if key<0 or key in seen:raise ValueError('Invalid or duplicate key')
+                  if not 0<=tag<0x70000000:raise ValueError('Unimplemented flagged-record branch')
+                  if length<0 or pos+12+length>len(data):raise ValueError('Invalid payload length')
+                  seen.add(key)
+                  payload=data[pos+12:pos+12+length]
+                  records.append({'record_offset':pos,'raw_key':key,'raw_tag':tag,'payload_offset':pos+12,'length':length,'payload_sha256':hashlib.sha256(payload).hexdigest()})
+                  pos+=12+length
+              return records
+          
+          def run(root,out):
+              root=Path(root);out=Path(out);out.mkdir(parents=True,exist_ok=True)
+              read=lambda n:json.loads((root/n).read_text())
+              data=(root/'decrypted/stage2_qword_xor.bin').read_bytes()
+              vm=read('review/30_VM_SUMMARY.json') if (root/'review/30_VM_SUMMARY.json').exists() else read('evidence/30_VM_SUMMARY.json')
+              ev=vm['global_events'];m=read('protocol/results/methods.json')
+              # Start is grounded in the observed state565 ReadInt32, not guessed from a magic.
+              counts=[e for e in ev if e.get('kind')=='ReadInt32' and e.get('main_state')==565]
+              layouts={(e['before'],e['after'],e['value']) for e in counts}
+              if len(layouts)!=1:raise ValueError('Missing or conflicting table position evidence')
+              count_offset,start,capacity_hint=layouts.pop()
+              if struct.unpack_from('<i',data,count_offset)[0]!=capacity_hint:raise ValueError('Trace/input mismatch')
+              il=(root/'evidence/20_N9_METHOD.il').read_text()
+              for proof in ['IL_3b86: call int32','IL_3b8d: sub','IL_3d3a: blt IL_135f','IL_1366: stloc.s 97','IL_5f02: call object','IL_6251: call void']:
+                  if proof not in il:raise ValueError('Required record-parser IL site absent: '+proof)
+              records=scan_records(data,start)
+              by_entry={}
+              for method in m:
+                  if 'header_size' in method:
+                      by_entry.setdefault(int(method['rva'],16)+method['header_size'],[]).append(method)
+              for rec in records:
+                  matches=by_entry.get(rec['raw_key'],[])
+                  rec['candidate_methods']=[{k:x[k] for k in ['token','owner','name','rva','header_size']} for x in matches]
+                  rec['mapping_status']='STRUCTURAL_MATCH_NOT_RUNTIME_PROOF' if len(matches)==1 else 'UNKNOWN'
+              # Independently compare all observed state439 block reads with scanned boundaries.
+              spans={(r['payload_offset'],r['length']) for r in records}
+              reads=[e for e in ev if e.get('kind')=='ReadBytes' and e.get('main_state')==439]
+              mismatches=[e for e in reads if (e['before'],e['requested']) not in spans or e['returned']!=e['requested']]
+              target=[r for r in records if any(m['token']=='0x0600082C' for m in r['candidate_methods'])]
+              selected=[r for r in records if any(x['token'] in ['0x0600082C','0x060007D1','0x060007D6','0x060007DB','0x06000783','0x06000784','0x06000778','0x06000496','0x06000497'] for x in r['candidate_methods'])]
+              for rec in selected:rec['candidate_payload_hex']=data[rec['payload_offset']:rec['payload_offset']+rec['length']].hex()
+              summary={'stage2_sha256':hashlib.sha256(data).hexdigest(),'stage2_length':len(data),'record_start':start,'capacity_hint':capacity_hint,'record_count':len(records),'end_offset':records[-1]['payload_offset']+records[-1]['length'],'unique_entry_matches':sum(len(r['candidate_methods'])==1 for r in records),'observed_body_read_events':len(reads),'observed_body_read_mismatches':mismatches,'global_resource_open_events':sum(e.get('kind')=='resource_open' for e in ev),'global_local12_events':sum(e.get('kind')=='LOCAL12_SET' for e in ev),'summary_resource_open':vm.get('reached_resource_open'),'retained_states':vm.get('finished_or_active_states'),'max_event_step':max(e.get('step',0) for e in ev),'unknown_call_count':len(vm.get('unknown_calls',[])),'target_candidates':target,'PROTECTED_UPDATE_BODY_RECOVERED':False,'TRUE_FIRMWARE_READBACK_PRIMITIVE_PROVEN':False,'FULL_FLASH_READBACK_PROVEN':False,'PHASE2_GATE_PASSED':False,'LIVE_BOARD_USB':'NO','HOST_TO_DEVICE_USB':'NO','FLASH_ERASE_WRITE':'NO','FLASH_ALLOWED':'NO','limitations':['Raw key matches IL-entry RVA; local99/module-base provenance still requires closure.','No target code executed or PE patched.','Record grammar success does not prove parser side effects or runtime reachability.','Body candidates are not approved USB commands.']}
+              for name,obj in [('record_index.json',records),('selected_candidates.json',selected),('audit_summary.json',summary)]:
+                  (out/name).write_text(json.dumps(obj,indent=2)+'\n')
+              print(json.dumps(summary,indent=2))
+          if __name__=='__main__':run(sys.argv[1],sys.argv[2])
+          RECORD_PY
+          python3 "$OUT/protocol/audit_stage2_records.py" "$OUT" "$OUT/protocol/record_audit"
+
+      - name: Phase2 ALL-IN-ONE candidate graph transport matrix and phase gates
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$OUT/protocol"
+          cat > "$OUT/protocol/phase2_batch.py" <<'BATCH_PY'
+          """One-pass offline Phase 2 review. Candidate IL is decoded as data, never executed."""
+          import hashlib,json,re,struct,sys
+          from pathlib import Path
+          from dncil.cil.body import CilMethodBody
+          from dncil.cil.body.reader import CilMethodBodyReaderBytes
+          
+          EXPECTED_EXE='3ca54171c53f7badd963ffe6851b8b3e2faf8aee8ba2afcb7040990e22ae09b2'
+          BRANCH_COND=('beq','bge','bgt','ble','blt','bne.un','brfalse','brtrue')
+          
+          def decode_candidate(raw):
+              # This header is an offline decoder adapter; it is not a recovered original header.
+              synthetic=struct.pack('<HHII',0x3003,8,len(raw),0)
+              body=CilMethodBody(CilMethodBodyReaderBytes(synthetic+raw))
+              ins=[]
+              for item in body.instructions:
+                  op=item.opcode.name;value=item.operand;token=getattr(value,'value',None)
+                  row={'offset':item.offset-12,'opcode':op,'operand':str(value)}
+                  if token is not None:row['token']=f'0x{token:08X}'
+                  if op=='switch':row['branch_targets']=[v-12 for v in value]
+                  elif op in ('br','br.s','leave','leave.s') or op.startswith(BRANCH_COND):
+                      row['branch_targets']=[value-12]
+                  ins.append(row)
+              byoff={x['offset']:x for x in ins};reachable=set();todo=[0];bad_targets=[]
+              nextoff={x['offset']:(ins[i+1]['offset'] if i+1<len(ins) else len(raw)) for i,x in enumerate(ins)}
+              while todo:
+                  off=todo.pop()
+                  if off in reachable:continue
+                  if off not in byoff:bad_targets.append(off);continue
+                  reachable.add(off);x=byoff[off];op=x['opcode']
+                  if op in ('ret','throw','rethrow','endfinally','endfilter','jmp'):continue
+                  if op in ('br','br.s','leave','leave.s'):todo.extend(x['branch_targets']);continue
+                  todo.extend(x.get('branch_targets',[]))
+                  if nextoff[off]<len(raw):todo.append(nextoff[off])
+              for x in ins:x['normal_flow_may_reach']=x['offset'] in reachable
+              return {'instructions':ins,'bad_branch_targets':sorted(set(bad_targets)),
+                      'limitations':['Conditional branches are overapproximated, not executed.','Exception-handler edges are not reconstructed.','Candidate mapping is structural, not runtime proof.']}
+          
+          def run(root,out):
+              root=Path(root);out=Path(out);out.mkdir(parents=True,exist_ok=True)
+              def load(path):return json.loads((root/path).read_text())
+              modules={};errors=[]
+              def attempt(name,fn):
+                  try:
+                      val=fn();modules[name]={'status':'COMPLETED'};return val
+                  except Exception as e:
+                      modules[name]={'status':'BLOCKED','reason':type(e).__name__+': '+str(e)}
+                      errors.append({'module':name,**modules[name]});return None
+              status=attempt('target_identity',lambda:load('protocol/results/status.json'))
+              if status is not None and status.get('target_sha256')!=EXPECTED_EXE:
+                  raise SystemExit('Identity mismatch; STOP')
+              records=attempt('record_inventory',lambda:load('protocol/record_audit/record_index.json'))
+              stage=attempt('stage2_input',lambda:(root/'decrypted/stage2_qword_xor.bin').read_bytes())
+              methods=attempt('method_metadata',lambda:load('protocol/results/methods.json'))
+              fields=attempt('field_metadata',lambda:load('protocol/results/fields.json'))
+              constants=attempt('command_constants',lambda:load('protocol/results/constants.json'))
+              imports=attempt('transport_imports',lambda:load('protocol/results/imports.json'))
+              catalog={m['token']:m['owner']+'::'+m['name'] for m in methods or []}
+              catalog.update({m['token']:m['owner']+'::'+m['name'] for m in fields or []})
+              imports_by_token={i['method_token']:i for i in imports or []}
+              decoded=[];edges=[];candidates=[]
+              relevant=re.compile(r'UFEcommandBridge|ReadSensor|WriteActuator|HIDInterface|\.Hid::|UpdateCommandThread|Firmware|Flash|Erase|Unlock|DeviceDescription',re.I)
+              if records is not None and stage is not None and methods is not None and status is not None:
+                  for record in records:
+                      mapped=record.get('candidate_methods',[])
+                      if len(mapped)!=1:
+                          errors.append({'record_offset':record.get('record_offset'),'status':'AMBIGUOUS_MAPPING'});continue
+                      m=mapped[0];start=record['payload_offset'];length=record['length'];raw=stage[start:start+length]
+                      if len(raw)!=length or hashlib.sha256(raw).hexdigest()!=record['payload_sha256']:
+                          raise SystemExit('Record bytes differ from audited index; STOP')
+                      entry={'method':m,'record_offset':record['record_offset'],'payload_offset':start,'length':length,'payload_sha256':record['payload_sha256'],'evidence_status':'INFERRED_STRUCTURAL_CANDIDATE'}
+                      try:
+                          entry.update(decode_candidate(raw))
+                          for ins in entry['instructions']:
+                              if 'token' in ins:ins['resolved_name']=catalog.get(ins['token'],'UNRESOLVED_EXTERNAL_OR_METADATA_TOKEN')
+                              if ins['opcode'] in ('call','callvirt','newobj','ldftn','ldvirtftn','jmp','calli'):
+                                  edges.append({'caller':m['token'],'caller_name':catalog[m['token']],
+                                                'offset':ins['offset'],'opcode':ins['opcode'],'target_token':ins.get('token'),
+                                                'target_name':ins.get('resolved_name',ins['operand']),
+                                                'normal_flow_may_reach':ins['normal_flow_may_reach'],
+                                                'import':imports_by_token.get(ins.get('token')),
+                                                'evidence_status':'CANDIDATE_REFERENCE_NOT_RUNTIME_PROOF'})
+                      except Exception as e:
+                          entry['decode_error']=type(e).__name__+': '+str(e)
+                          errors.append({'token':m['token'],'status':'DECODE_ERROR','reason':entry['decode_error']})
+                      decoded.append(entry)
+                      if relevant.search(catalog[m['token']]):candidates.append(entry)
+                  modules['candidate_body_decode']={'status':'COMPLETED_WITH_ERRORS' if any('decode_error' in x for x in decoded) else 'COMPLETED','count':len(decoded)}
+              else:modules['candidate_body_decode']={'status':'BLOCKED','reason':'Required inputs unavailable'}
+              # Existence of a body, constant, or import never proves read-only semantics.
+              matrix=[]
+              for c in constants or []:
+                  if c['owner'].endswith('.UFEHeader'):
+                      matrix.append({'name':c['name'],'metadata_token':c['token'],'value':c['integer_le'],
+                          'constant_evidence':'PROVEN_TARGET_METADATA','request_wire_layout':'UNKNOWN',
+                          'response_parser_link':'UNKNOWN','non_destructive_semantics':'UNKNOWN','live_allowed':False})
+              target=[d for d in decoded if d['method']['token']=='0x0600082C']
+              gates={'mode':'OFFLINE_ONLY','batch_modules':modules,'phases':{
+                  '1':{'status':'NOT_CERTIFIED','missing':'Complete actual update-flow provenance'},
+                  '2':{'status':'BLOCKED','missing':['Same-path request and response proof','Non-destructive operation semantics','Arbitrary flash read provenance']},
+                  '3':{'status':'BLOCKED_BY_PHASE2','required':['Proven read-only transport','Real board access','Two full matching dumps']},
+                  '4':{'status':'BLOCKED_BY_PHASE3','required':['Verified dump','Proven memory map and protected ranges']},
+                  '5':{'status':'BLOCKED_BY_PHASE3_AND_PHASE4','required':['Verified backup','Proven safe test range','Controlled authorization'],'implementation_created':False},
+                  '6':{'status':'BLOCKED_BY_PHASE5','required':['Full compatibility checks','Readback verification','Boot confirmation'],'implementation_created':False},
+                  '7':{'status':'BLOCKED_BY_PROVEN_ENGINE','required':['Proven firmware engine','UI safety interlocks']}},
+                  'TRUE_FIRMWARE_READBACK_PRIMITIVE_PROVEN':False,'FULL_FLASH_READBACK_PROVEN':False,
+                  'LIVE_BOARD_USB':'NO','HOST_TO_DEVICE_USB':'NO','FLASH_ERASE_WRITE':'NO','FLASH_ALLOWED':'NO'}
+              summary={'target_sha256':status.get('target_sha256') if status else None,
+                  'candidate_records_decoded':len(decoded),'candidate_decode_errors':sum('decode_error' in d for d in decoded),
+                  'branch_target_error_methods':sum(bool(d.get('bad_branch_targets')) for d in decoded),
+                  'relevant_candidate_methods':len(candidates),'candidate_reference_count':len(edges),
+                  'normal_flow_candidate_references':sum(e['normal_flow_may_reach'] for e in edges),
+                  'candidate_transport_import_references':[e for e in edges if e['import'] and e['normal_flow_may_reach']],
+                  'update_target_candidate':target,'errors':errors,'gate_passed':False}
+              for name,obj in [('candidate_bodies.json',decoded),('candidate_call_graph.json',edges),('relevant_candidates.json',candidates),('command_evidence_matrix.json',matrix),('phase_gates.json',gates),('batch_summary.json',summary)]:
+                  (out/name).write_text(json.dumps(obj,indent=2)+'\n')
+              lines=['# Phase 2 one-run offline review','',
+                  'Batch processing completed; Phase 2 gate remains BLOCKED. Generated candidates are not executable device commands.',
+                  '',f'Target SHA-256: {summary["target_sha256"]}',
+                  f'Candidate records decoded: {len(decoded)}; errors: {summary["candidate_decode_errors"]}; relevant methods: {len(candidates)}.',
+                  '', '## Modules', '', '| Module | Status |','|---|---|']
+              lines += [f'| {name} | {m["status"]} |' for name,m in modules.items()]
+              lines += ['', '## Candidate function inventory', '', '| Token | Function | Record offset | Bytes | Status |','|---|---|---|---|---|']
+              lines += [f'| {c["method"]["token"]} | {catalog[c["method"]["token"]]} | {c["record_offset"]} | {c["length"]} | STRUCTURAL CANDIDATE |' for c in candidates]
+              lines += ['', '## Gate verdict', '', 'UNKNOWN: runtime body mapping, exact same-path request/response, non-destructive semantics and arbitrary flash read. No phase promotion. No erase/write implementation.', '', 'Conditional branches are overapproximated and exception handlers are not reconstructed. A may-reach call edge is not an observed runtime call. Metadata constants are not request frames.', '', 'LIVE_BOARD_USB=NO; HOST_TO_DEVICE_USB=NO; FLASH_ERASE_WRITE=NO; FLASH_ALLOWED=NO']
+              (out/'PHASE2_BATCH_REPORT.md').write_text('\n'.join(lines)+'\n')
+              print(json.dumps({k:v for k,v in summary.items() if k not in ('update_target_candidate','candidate_transport_import_references','errors')},indent=2))
+          if __name__=='__main__':run(sys.argv[1],sys.argv[2])
+          BATCH_PY
+          python3 "$OUT/protocol/phase2_batch.py" "$OUT" "$OUT/protocol/batch"
+          cat "$OUT/protocol/batch/PHASE2_BATCH_REPORT.md" >> "$GITHUB_STEP_SUMMARY"
+
       - name: Build conservative R118B current-track verdict and artifact
         shell: bash
         run: |
@@ -2856,7 +3067,8 @@ jobs:
               if key not in [(y.get("rva",y.get("proven_exe_rva")),y.get("new_hex"),y.get("source",y.get("kind"))) for y in exact_patch_events]:
                   exact_patch_events.append(x)
           strict_recovered=bool(
-              static_status.get("target_methoddef_identity_exact")
+              not vm.get("analysis_incomplete",True)
+              and static_status.get("target_methoddef_identity_exact")
               and sw.get("switch_target_count")==689
               and main_audit.get("main_target_mismatch_count",0)==0
               and sanity.get("parser_input_semantically_valid",False)
@@ -2959,7 +3171,7 @@ jobs:
 
           (
             cd "$OUT/review"
-            find . -type f -print0 | sort -z | xargs -0 sha256sum
+            find . -type f ! -name SHA256SUMS.txt -print0 | sort -z | xargs -0 sha256sum
           ) > "$OUT/review/SHA256SUMS.txt"
 
       - name: Publish summary
@@ -2986,11 +3198,12 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: R118C-PHASE2-PLUS-R118B-CONTINUATION-EVIDENCE
+          name: R118E-PHASE2-ALL-IN-ONE-EVIDENCE
           path: |
-            /tmp/r118c/review
-            /tmp/r118c/evidence
-            /tmp/r118c/decrypted
-            /tmp/r118c/protocol
+            /tmp/r118e/review
+            /tmp/r118e/evidence
+            /tmp/r118e/decrypted
+            /tmp/r118e/protocol
           if-no-files-found: warn
           retention-days: 30
+
