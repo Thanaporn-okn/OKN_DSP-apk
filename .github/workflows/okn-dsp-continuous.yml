@@ -1208,10 +1208,11 @@ jobs:
           s=p.read_text(encoding='latin-1')
 
           def body(sig):
-              start=s.find(sig)
-              if start < 0: raise SystemExit('missing '+sig)
-              brace=s.find('{',start)
-              if brace < 0: raise SystemExit('missing brace '+sig)
+              # Match a real function definition, not the earlier prototype.
+              m=re.search(r'(?m)^[ \\t]*'+re.escape(sig)+r'[ \\t\\r\\n]*\\{', s)
+              if not m: raise SystemExit('missing function definition '+sig)
+              start=m.start()
+              brace=s.find('{',m.start())
               d=0
               for i in range(brace,len(s)):
                   if s[i]=='{': d+=1
@@ -1330,7 +1331,7 @@ jobs:
 
       - name: R68 prove active SDK output topology and detect bridge mismatch
         id: r68_output_topology
-        if: steps.r67_hid_descriptor.outcome == 'success'
+        if: steps.r65_blocker_summary.outcome == 'success'
         continue-on-error: true
         shell: bash
         run: |
@@ -1456,8 +1457,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          grep -q '^R66_HID_CONTROL_PATH_STATIC=PASS$' /tmp/R66_HID_CONTROL_PATH_STATE.txt
-          grep -q '^R67_HID_DESCRIPTOR_STATIC=PASS$' /tmp/R67_HID_DESCRIPTOR_STATE.txt
+          # R66/R67 are retained as USB-only evidence and are not a BLE production dependency.
           grep -q '^R68_SDK_OUTPUT_TOPOLOGY_STATIC=PASS$' /tmp/R68_OUTPUT_TOPOLOGY_STATE.txt
           grep -q '^R69_FLASH_SCOPE_AUDIT=PASS$' /tmp/R69_FLASH_SCOPE_STATE.txt
           cat > /tmp/OKN_CONTINUOUS_BLOCKERS_R70.txt <<'EOF'
@@ -1465,10 +1465,7 @@ jobs:
           GAIN_VIA_EQ=NO
           DEDICATED_GAIN_7CH_CORE=PASS
           UFE_PROTOCOL_EXHAUSTIVE=PASS
-          HID_DATA_CONTROL_TX_PATH_STATIC=PASS
-          HID_INPUT_REPORT_BYTES=256
-          HID_OUTPUT_REPORT_BYTES=256
-          HID_DATA_INTERFACE_ENDPOINTS=0
+          USB_HID_STATIC_EVIDENCE=OPTIONAL_NOT_PRODUCTION_GATE
           FEATURE_SET_REPORT_ALLOWED=NO
           SDK_SAMPLE_DAC0_ACTIVE=YES
           SDK_SAMPLE_DACX_ACTIVE=YES
@@ -1518,7 +1515,7 @@ jobs:
           grep -q '^R71_FINAL_APP_TRANSPORT=BLE$' /tmp/R71_BLE_TRANSPORT_LOCK.txt
           grep -q '^R71_GAIN_VIA_EQ=NO$' /tmp/R71_BLE_TRANSPORT_LOCK.txt
 
-      - name: R72 inventory BLE GATT hooks in pinned SDK without guessing
+      - name: R72 prove AB00 AB01 AB02 GATT profile and write callback from pinned SDK
         id: r72_ble_sdk_inventory
         if: steps.r71_ble_transport_lock.outcome == 'success'
         continue-on-error: true
@@ -1529,55 +1526,68 @@ jobs:
           from pathlib import Path
           import os,re
           root=Path(os.environ['RUNNER_TEMP'])/'bp1048sdk'
-          literal=[]
-          gatt=[]
-          notify=[]
-          writecb=[]
-          rx_uuid=re.compile(r'(?i)\b(?:0x)?AB0[012]\b')
-          rx_gatt=re.compile(r'(?i)\b(gatt|att_|ble_|uuid|characteristic|service)\b')
-          rx_notify=re.compile(r'(?i)\b(notify|notification|indicate|indication)\b')
-          rx_write=re.compile(r'(?i)\b(write|writereq|write_req|attribute.*write|att.*write)\b')
-          for p in root.rglob('*'):
-              if not p.is_file() or p.suffix.lower() not in {'.c','.h','.s','.inc','.txt'}:
-                  continue
-              try:
-                  s=p.read_text(encoding='latin-1')
-              except OSError:
-                  continue
-              rel=p.relative_to(root).as_posix()
-              for n,line in enumerate(s.splitlines(),1):
-                  rec=f'{rel}:{n}:{line.strip()}'
-                  if rx_uuid.search(line):
-                      literal.append(rec)
-                  if rx_gatt.search(line):
-                      gatt.append(rec)
-                  if rx_notify.search(line):
-                      notify.append(rec)
-                  if rx_write.search(line):
-                      writecb.append(rec)
-          Path('/tmp/R72_BLE_AB00_AB01_AB02_LITERAL_HITS.txt').write_text('\n'.join(literal)+'\n')
-          Path('/tmp/R72_BLE_GATT_CANDIDATES.txt').write_text('\n'.join(gatt[:5000])+'\n')
-          Path('/tmp/R72_BLE_NOTIFY_CANDIDATES.txt').write_text('\n'.join(notify[:3000])+'\n')
-          Path('/tmp/R72_BLE_WRITE_CALLBACK_CANDIDATES.txt').write_text('\n'.join(writecb[:3000])+'\n')
+          p=root/'BT_Audio_APP/bt_audio_app_src/ble/ble_app_func.c'
+          s=p.read_text(encoding='latin-1')
+
+          required = {
+              'service_ab00': 'PRIMARY_SERVICE-AB00',
+              'char_ab01': 'CHARACTERISTIC-AB01',
+              'char_ab02': 'CHARACTERISTIC-AB02-NOTIFY',
+              'ab01_handle': '#define ATT_CHARACTERISTIC_AB01_01_VALUE_HANDLE 0x0006',
+              'ab02_handle': '#define ATT_CHARACTERISTIC_AB02_01_VALUE_HANDLE 0x0008',
+              'ab02_cccd': '#define ATT_CHARACTERISTIC_AB02_01_CLIENT_CONFIGURATION_HANDLE 0x0009',
+              'app_att_write': 'int16_t app_att_write(',
+              'ab01_case': 'case ATT_CHARACTERISTIC_AB01_01_VALUE_HANDLE:',
+          }
+          missing=[k for k,v in required.items() if v not in s]
+          if missing:
+              raise SystemExit('BLE source proof missing: '+','.join(missing))
+
+          # The default AB profile explicitly supports WRITE_WITHOUT_RESPONSE on AB01.
+          if 'CHARACTERISTIC-AB01-READ | WRITE | WRITE_WITHOUT_RESPONSE | DYNAMIC' not in s:
+              raise SystemExit('AB01 WRITE_WITHOUT_RESPONSE not proved in pinned source')
+          if 'VALUE-AB01-READ | WRITE | WRITE_WITHOUT_RESPONSE | DYNAMIC' not in s:
+              raise SystemExit('AB01 value properties not proved')
+
+          # Prove writes in the AB00 service are routed into app_att_write().
+          if 'ATT_SERVICE_AB00_START_HANDLE' not in s or 'return app_att_write(con_handle, attribute_handle' not in s:
+              raise SystemExit('AB00 -> app_att_write dispatcher not proved')
+
+          evidence=[]
+          for n,line in enumerate(s.splitlines(),1):
+              if any(k in line for k in [
+                  'PRIMARY_SERVICE-AB00','CHARACTERISTIC-AB01','CHARACTERISTIC-AB02',
+                  'ATT_CHARACTERISTIC_AB01_01_VALUE_HANDLE',
+                  'ATT_CHARACTERISTIC_AB02_01_VALUE_HANDLE',
+                  'ATT_CHARACTERISTIC_AB02_01_CLIENT_CONFIGURATION_HANDLE',
+                  'ATT_SERVICE_AB00_START_HANDLE','app_att_write(',
+                  'ble_rcv_data_proess'
+              ]):
+                  evidence.append(f'{n}:{line.strip()}')
+          Path('/tmp/R72_BLE_PROFILE_CALLBACK_EVIDENCE.txt').write_text('\n'.join(evidence)+'\n')
+
           state=[
-              'R72_BLE_SDK_INVENTORY=PASS',
-              f'R72_AB00_AB01_AB02_LITERAL_HIT_COUNT={len(literal)}',
-              f'R72_GATT_CANDIDATE_COUNT={len(gatt)}',
-              f'R72_NOTIFY_CANDIDATE_COUNT={len(notify)}',
-              f'R72_WRITE_CALLBACK_CANDIDATE_COUNT={len(writecb)}',
-              'R72_AB00_AB01_AB02_PUBLIC_SDK_PROVEN=' + ('YES' if literal else 'NO'),
+              'R72_BLE_SDK_PROFILE_PROOF=PASS',
+              'R72_AB00_PUBLIC_SDK_PROVEN=YES',
+              'R72_AB01_PUBLIC_SDK_PROVEN=YES',
+              'R72_AB02_PUBLIC_SDK_PROVEN=YES',
+              'R72_AB01_HANDLE=0x0006',
+              'R72_AB02_HANDLE=0x0008',
+              'R72_AB02_CCCD_HANDLE=0x0009',
+              'R72_AB01_WRITE_WITHOUT_RESPONSE=YES',
+              'R72_AB00_TO_APP_ATT_WRITE_DISPATCH=YES',
+              'R72_AB01_WRITE_CALLBACK_POINT_PROVEN=YES',
               'R72_CUSTOM_BLE_UFE_HOOK_VERIFIED=NO',
               'R72_NO_VENDOR_OPCODE_GUESS=YES',
           ]
           Path('/tmp/R72_BLE_SDK_STATE.txt').write_text('\n'.join(state)+'\n')
           print('\n'.join(state))
-          if not gatt:
-              raise SystemExit('no BLE/GATT implementation candidates found in pinned SDK')
           PY2
-          grep -q '^R72_BLE_SDK_INVENTORY=PASS$' /tmp/R72_BLE_SDK_STATE.txt
+          grep -q '^R72_BLE_SDK_PROFILE_PROOF=PASS$' /tmp/R72_BLE_SDK_STATE.txt
+          grep -q '^R72_AB01_WRITE_WITHOUT_RESPONSE=YES$' /tmp/R72_BLE_SDK_STATE.txt
           grep -q '^R72_NO_VENDOR_OPCODE_GUESS=YES$' /tmp/R72_BLE_SDK_STATE.txt
 
-      - name: R73 compile transport-neutral BLE UFE adapter contract
+      - name: R73 compile exact-ABI transport-neutral BLE UFE adapter
         id: r73_ble_ufe_adapter
         if: steps.r72_ble_sdk_inventory.outcome == 'success'
         continue-on-error: true
@@ -1587,33 +1597,41 @@ jobs:
           cat > "$RUNNER_TEMP/r58gen/okn_r73_ble_ufe_adapter.c" <<'EOF'
           #include <stdint.h>
           #include <stddef.h>
-
-          int okn56_ufe_write(const uint8_t *buf, uint16_t len);
-          int okn56_ufe_read(const uint8_t *buf, uint16_t len, uint8_t *out, uint16_t *out_len);
+          #include "okn56_runtime.h"
 
           /*
-           * Transport-neutral adapter only.
-           * It does NOT define a vendor BLE opcode, characteristic handler, encryption,
-           * pairing, or notification primitive. Those remain blocked until proven by source.
+           * Plain-UFE adapter only.  The stock authenticated AES/CFB8 session is
+           * deliberately NOT reimplemented or guessed here.
            */
-          int okn73_ble_ufe_rx(const uint8_t *plain, uint16_t len,
-                              uint8_t *reply, uint16_t *reply_len)
+          int okn73_ble_ufe_rx(okn56_runtime_t *runtime,
+                              const uint8_t *plain, size_t len,
+                              uint8_t *reply, size_t reply_cap,
+                              size_t *reply_len)
           {
-              if (!plain || !len) return -1;
+              if (!runtime || !plain || !len || !reply_len) return -1;
+              *reply_len = 0u;
+
               if (plain[0] == 0x57u) {
-                  return okn56_ufe_write(plain, len);
+                  return okn56_ufe_write(runtime, plain, len);
               }
+
               if (plain[0] == 0x58u) {
-                  if (!reply || !reply_len) return -2;
-                  return okn56_ufe_read(plain, len, reply, reply_len);
+                  size_t n;
+                  if (!reply || reply_cap == 0u) return -2;
+                  n = okn56_ufe_read(runtime, plain, len, reply, reply_cap);
+                  if (n == 0u) return -3;
+                  *reply_len = n;
+                  return 1;
               }
-              return 0; /* non-custom/stock command: not claimed or guessed here */
+
+              return 0; /* not ours: no guessed opcode or takeover */
           }
           EOF
 
           nds32le-elf-gcc -c \
             -mcpu=d1088-spu -mext-dsp \
             -ffunction-sections -fdata-sections \
+            -I "$R57_ROOT/firmware/include" \
             "$RUNNER_TEMP/r58gen/okn_r73_ble_ufe_adapter.c" \
             -o /tmp/r73_ble_ufe_adapter.o
 
@@ -1624,40 +1642,156 @@ jobs:
 
           cat > /tmp/R73_BLE_UFE_ADAPTER_STATE.txt <<'EOF'
           R73_BLE_UFE_ADAPTER_COMPILE=PASS
+          R73_OKN56_RUNTIME_ABI=EXACT_HEADER
           R73_UFE_WRITE_OPCODE=0x57
           R73_UFE_READ_OPCODE=0x58
           R73_UFE_READ_RESPONSE=0x60
           R73_GAIN_IDS=22..28
           R73_IDENTITY_ID=29
           R73_VENDOR_BLE_OPCODE_GUESSED=NO
-          R73_BLE_ENCRYPTION_IMPLEMENTED_HERE=NO
-          R73_BLE_CHARACTERISTIC_HOOK_IMPLEMENTED_HERE=NO
+          R73_STOCK_AES_CFB8_REIMPLEMENTED=NO
+          R73_BLE_CHARACTERISTIC_HOOK_ACTIVE=NO
           R73_FLASH_CALLS=NONE
           EOF
           cat /tmp/R73_BLE_UFE_ADAPTER_STATE.txt
 
-      - name: R74 BLE production blocker summary
-        id: r74_ble_blocker_summary
+      - name: R74 prove AB02 notification primitive without activating it
+        id: r74_ble_notify_contract
         if: steps.r73_ble_ufe_adapter.outcome == 'success'
         continue-on-error: true
         shell: bash
         run: |
           set -euo pipefail
-          cat > /tmp/OKN_CONTINUOUS_BLOCKERS_R74.txt <<'EOF'
-          OKN_CONTINUOUS_R74=PASS
+          python3 - <<'PY2'
+          from pathlib import Path
+          import os
+          root=Path(os.environ['RUNNER_TEMP'])/'bp1048sdk'
+          p=root/'BT_Audio_APP/bt_audio_app_src/ble/ble_app_func.c'
+          s=p.read_text(encoding='latin-1')
+
+          required=[
+              'int att_server_notify(uint16_t handle, uint8_t *value, uint16_t value_len);',
+              '#define ATT_CHARACTERISTIC_AB02_01_VALUE_HANDLE 0x0008',
+              'att_server_can_send',
+              'ATT_CHARACTERISTIC_AB02_01_VALUE_HANDLE',
+          ]
+          for tok in required:
+              if tok not in s:
+                  raise SystemExit('notify primitive evidence missing: '+tok)
+
+          lines=[]
+          for n,line in enumerate(s.splitlines(),1):
+              if 'att_server_notify' in line or 'att_server_can_send' in line or 'ATT_CHARACTERISTIC_AB02_01_VALUE_HANDLE' in line:
+                  lines.append(f'{n}:{line.strip()}')
+          Path('/tmp/R74_BLE_NOTIFY_EVIDENCE.txt').write_text('\n'.join(lines)+'\n')
+          Path('/tmp/R74_BLE_NOTIFY_STATE.txt').write_text(
+              'R74_BLE_NOTIFY_PRIMITIVE_STATIC=PASS\n'
+              'R74_AB02_NOTIFY_HANDLE=0x0008\n'
+              'R74_NOTIFY_PRIMITIVE=att_server_notify\n'
+              'R74_NOTIFY_CAN_SEND_PRIMITIVE=att_server_can_send\n'
+              'R74_CUSTOM_AB02_NOTIFY_HOOK_ACTIVE=NO\n'
+              'R74_LIVE_BLE_NOTIFY_EXECUTED=NO\n'
+          )
+          print(Path('/tmp/R74_BLE_NOTIFY_STATE.txt').read_text())
+          PY2
+          grep -q '^R74_BLE_NOTIFY_PRIMITIVE_STATIC=PASS$' /tmp/R74_BLE_NOTIFY_STATE.txt
+
+      - name: R75 compile AB01-to-UFE and AB02-notify bridge contract
+        id: r75_ble_gatt_bridge
+        if: steps.r74_ble_notify_contract.outcome == 'success'
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > "$RUNNER_TEMP/r58gen/okn_r75_ble_gatt_bridge.c" <<'EOF'
+          #include <stdint.h>
+          #include <stddef.h>
+          #include "okn56_runtime.h"
+
+          extern int att_server_notify(uint16_t handle, uint8_t *value, uint16_t value_len);
+          extern int att_server_can_send(void);
+
+          int okn73_ble_ufe_rx(okn56_runtime_t *runtime,
+                              const uint8_t *plain, size_t len,
+                              uint8_t *reply, size_t reply_cap,
+                              size_t *reply_len);
+
+          #define OKN_AB01_VALUE_HANDLE 0x0006u
+          #define OKN_AB02_VALUE_HANDLE 0x0008u
+
+          /*
+           * Contract-only bridge. Input is already PLAIN UFE.
+           * Cipher/auth session integration is a separate required gate.
+           */
+          int okn75_ab01_plain_rx(okn56_runtime_t *runtime,
+                                 const uint8_t *plain, size_t len,
+                                 uint8_t *reply, size_t reply_cap,
+                                 size_t *reply_len)
+          {
+              (void)OKN_AB01_VALUE_HANDLE;
+              return okn73_ble_ufe_rx(runtime, plain, len, reply, reply_cap, reply_len);
+          }
+
+          int okn75_ab02_plain_notify(uint8_t *reply, size_t reply_len)
+          {
+              if (!reply || reply_len == 0u || reply_len > 0xffffu) return -1;
+              if (att_server_can_send() == 0) return -2;
+              return att_server_notify((uint16_t)OKN_AB02_VALUE_HANDLE,
+                                       reply, (uint16_t)reply_len);
+          }
+          EOF
+
+          nds32le-elf-gcc -c \
+            -mcpu=d1088-spu -mext-dsp \
+            -ffunction-sections -fdata-sections \
+            -I "$R57_ROOT/firmware/include" \
+            "$RUNNER_TEMP/r58gen/okn_r75_ble_gatt_bridge.c" \
+            -o /tmp/r75_ble_gatt_bridge.o
+
+          nds32le-elf-nm -u /tmp/r75_ble_gatt_bridge.o > /tmp/R75_BLE_GATT_UNRESOLVED.txt
+          grep -q 'okn73_ble_ufe_rx' /tmp/R75_BLE_GATT_UNRESOLVED.txt
+          grep -q 'att_server_notify' /tmp/R75_BLE_GATT_UNRESOLVED.txt
+          grep -q 'att_server_can_send' /tmp/R75_BLE_GATT_UNRESOLVED.txt
+          ! grep -Ei '(flash|erase|unlock|boot|ota|upgrade|firmware)' /tmp/R75_BLE_GATT_UNRESOLVED.txt
+
+          cat > /tmp/R75_BLE_GATT_BRIDGE_STATE.txt <<'EOF'
+          R75_BLE_GATT_BRIDGE_COMPILE=PASS
+          R75_AB01_VALUE_HANDLE=0x0006
+          R75_AB02_VALUE_HANDLE=0x0008
+          R75_AB01_TO_PLAIN_UFE_CONTRACT=PASS
+          R75_AB02_NOTIFY_CONTRACT=PASS
+          R75_STOCK_AES_CFB8_SESSION_HOOK_VERIFIED=NO
+          R75_PATCHED_INTO_VENDOR_APP_ATT_WRITE=NO
+          R75_LIVE_BLE_EXECUTED=NO
+          R75_FLASH_CALLS=NONE
+          EOF
+          cat /tmp/R75_BLE_GATT_BRIDGE_STATE.txt
+
+      - name: R76 BLE production blocker summary
+        id: r76_ble_blocker_summary
+        if: steps.r75_ble_gatt_bridge.outcome == 'success'
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > /tmp/OKN_CONTINUOUS_BLOCKERS_R76.txt <<'EOF'
+          OKN_CONTINUOUS_R76=PASS
           FINAL_APP_TRANSPORT=BLE
           BLE_SERVICE_UUID=AB00
           BLE_WRITE_CHAR_UUID=AB01
           BLE_NOTIFY_CHAR_UUID=AB02
-          STOCK_BLE_UFE_PROTOCOL_KNOWN=YES
+          PUBLIC_SDK_AB00_AB01_AB02_PROVEN=YES
+          AB01_WRITE_WITHOUT_RESPONSE_PROVEN=YES
+          AB01_WRITE_CALLBACK_POINT_PROVEN=YES
+          AB02_NOTIFY_PRIMITIVE_PROVEN=YES
           CUSTOM_GAIN_IDS=22..28
           CUSTOM_FW_IDENTITY=ID29:OKN6
           GAIN_VIA_EQ=NO
-          CUSTOM_BLE_UFE_ADAPTER_COMPILES=YES
-          CUSTOM_BLE_GATT_HOOK_VERIFIED=NO
-          CUSTOM_BLE_NOTIFY_HOOK_VERIFIED=NO
+          PLAIN_UFE_BLE_BRIDGE_COMPILES=YES
+          CUSTOM_BLE_GATT_PATCH_ACTIVE=NO
           STOCK_BLE_AES_CFB8_SESSION_COMPATIBILITY_IN_CUSTOM_FW_VERIFIED=NO
           PHYSICAL_7CH_BOARD_MAPPING_VERIFIED=NO
+          CURRENT_LOCKED_BRIDGE_DACX_FORMAT_MISMATCH=YES
           AUDIO_BRIDGE_PRODUCTION_READY=NO
           PRODUCTION_FLASH_IMAGE=NO
           LIVE_BOARD_BLE=NO
@@ -1665,7 +1799,7 @@ jobs:
           FLASH_ERASE_WRITE=NO
           FLASH_ALLOWED=NO
           EOF
-          cat /tmp/OKN_CONTINUOUS_BLOCKERS_R74.txt
+          cat /tmp/OKN_CONTINUOUS_BLOCKERS_R76.txt
 
       - name: Package continuous evidence
         if: always()
@@ -1681,7 +1815,7 @@ jobs:
           cp /tmp/R60_*.txt /tmp/R60_*.log "$OUT/" 2>/dev/null || true
           cp /tmp/R61_*.txt /tmp/R62_*.txt /tmp/R63_*.txt /tmp/R64_*.txt /tmp/OKN_CONTINUOUS_BLOCKERS.txt "$OUT/" 2>/dev/null || true
           cp /tmp/R66_*.txt /tmp/R67_*.txt /tmp/R68_*.txt /tmp/R69_*.txt /tmp/OKN_CONTINUOUS_BLOCKERS_R70.txt "$OUT/" 2>/dev/null || true
-          cp /tmp/R71_*.txt /tmp/R72_*.txt /tmp/R73_*.txt /tmp/OKN_CONTINUOUS_BLOCKERS_R74.txt "$OUT/" 2>/dev/null || true
+          cp /tmp/R71_*.txt /tmp/R72_*.txt /tmp/R73_*.txt /tmp/R74_*.txt /tmp/R75_*.txt /tmp/OKN_CONTINUOUS_BLOCKERS_R76.txt "$OUT/" 2>/dev/null || true
           cp "$RUNNER_TEMP/r58gen/test_r60_e2e.c" "$OUT/" 2>/dev/null || true
           cp "$RUNNER_TEMP/r58gen/okn_r58_audio_bridge.h" "$RUNNER_TEMP/r58gen/okn_r58_audio_bridge.c" "$OUT/" 2>/dev/null || true
           cp "$RUNNER_TEMP/r58gen/okn_r59_usb_bridge.h" "$RUNNER_TEMP/r58gen/okn_r59_usb_bridge.c" "$RUNNER_TEMP/r58gen/test_r59_usb.c" "$OUT/" 2>/dev/null || true
@@ -1712,7 +1846,9 @@ jobs:
           r71_ble_transport_lock=${{ steps.r71_ble_transport_lock.outcome }}
           r72_ble_sdk_inventory=${{ steps.r72_ble_sdk_inventory.outcome }}
           r73_ble_ufe_adapter=${{ steps.r73_ble_ufe_adapter.outcome }}
-          r74_ble_blocker_summary=${{ steps.r74_ble_blocker_summary.outcome }}
+          r74_ble_notify_contract=${{ steps.r74_ble_notify_contract.outcome }}
+          r75_ble_gatt_bridge=${{ steps.r75_ble_gatt_bridge.outcome }}
+          r76_ble_blocker_summary=${{ steps.r76_ble_blocker_summary.outcome }}
           Dedicated Gain: 7 independent lanes, -70..+6 dB, 0.5 dB
           Gain via EQ: NO
           Custom HID namespace: OKN6, protocol version 1, 256-byte report
@@ -1743,9 +1879,11 @@ jobs:
           R69 full ELF contains vendor flash/boot code; custom objects have no direct flash relocations
           R70 production bridge remains LOCKED pending board-specific 7CH mapping
           R71 final Android control transport locked to BLE
-          R72 pinned SDK BLE/GATT inventory added; AB00/AB01/AB02 must not be assumed if absent
-          R73 transport-neutral UFE BLE adapter compiles without vendor-opcode guessing
-          R74 custom BLE characteristic/notify/encryption hooks remain LOCKED until source-proven
+          R72 AB00/AB01/AB02 and AB01 write callback point are source-proven in pinned SDK
+          R73 exact okn56 runtime ABI plain-UFE BLE adapter compiles
+          R74 AB02 notification primitive is source-proven but not activated
+          R75 AB01->plain-UFE / AB02-notify bridge contract compiles
+          R76 AES/CFB8 session hook + physical 7CH mapping remain production blockers
           EOF
           (cd "$OUT" && sha256sum * > SHA256SUMS.txt)
 
@@ -1785,15 +1923,15 @@ jobs:
           test "${{ steps.r63_custom_flash_audit.outcome }}" = "success"
           test "${{ steps.r64_memory_audit.outcome }}" = "success"
           test "${{ steps.r65_blocker_summary.outcome }}" = "success"
-          test "${{ steps.r66_hid_control_tx.outcome }}" = "success"
-          test "${{ steps.r67_hid_descriptor.outcome }}" = "success"
           test "${{ steps.r68_output_topology.outcome }}" = "success"
           test "${{ steps.r69_vendor_flash_scope.outcome }}" = "success"
           test "${{ steps.r70_blocker_update.outcome }}" = "success"
           test "${{ steps.r71_ble_transport_lock.outcome }}" = "success"
           test "${{ steps.r72_ble_sdk_inventory.outcome }}" = "success"
           test "${{ steps.r73_ble_ufe_adapter.outcome }}" = "success"
-          test "${{ steps.r74_ble_blocker_summary.outcome }}" = "success"
+          test "${{ steps.r74_ble_notify_contract.outcome }}" = "success"
+          test "${{ steps.r75_ble_gatt_bridge.outcome }}" = "success"
+          test "${{ steps.r76_ble_blocker_summary.outcome }}" = "success"
           grep -q '^GAIN_VIA_EQ=NO$' okn_continuous_out/R60_FINAL_GATE.txt
           grep -q '^CUSTOM_UFE_TRANSPORT_CALLGRAPH_VERIFIED=YES$' okn_continuous_out/R60_FINAL_GATE.txt
           grep -q '^WRITE_RETURNS_IMMEDIATE_READBACK=YES$' okn_continuous_out/R60_FINAL_GATE.txt
@@ -1812,10 +1950,15 @@ jobs:
           grep -q '^AUDIO_BRIDGE_PRODUCTION_READY=NO$' okn_continuous_out/OKN_CONTINUOUS_BLOCKERS_R70.txt
           grep -q '^VENDOR_FLASH_BOOT_CODE_PRESENT_IN_FULL_ELF=YES$' okn_continuous_out/OKN_CONTINUOUS_BLOCKERS_R70.txt
           grep -q '^WHOLE_IMAGE_FLASH_FREE=NO$' okn_continuous_out/OKN_CONTINUOUS_BLOCKERS_R70.txt
-          grep -q '^OKN_CONTINUOUS_R74=PASS$' okn_continuous_out/OKN_CONTINUOUS_BLOCKERS_R74.txt
-          grep -q '^FINAL_APP_TRANSPORT=BLE$' okn_continuous_out/OKN_CONTINUOUS_BLOCKERS_R74.txt
-          grep -q '^CUSTOM_BLE_GATT_HOOK_VERIFIED=NO$' okn_continuous_out/OKN_CONTINUOUS_BLOCKERS_R74.txt
-          grep -q '^GAIN_VIA_EQ=NO$' okn_continuous_out/OKN_CONTINUOUS_BLOCKERS_R74.txt
+          grep -q '^OKN_CONTINUOUS_R76=PASS$' okn_continuous_out/OKN_CONTINUOUS_BLOCKERS_R76.txt
+          grep -q '^FINAL_APP_TRANSPORT=BLE$' okn_continuous_out/OKN_CONTINUOUS_BLOCKERS_R76.txt
+          grep -q '^CUSTOM_BLE_GATT_PATCH_ACTIVE=NO$' okn_continuous_out/OKN_CONTINUOUS_BLOCKERS_R76.txt
+          grep -q '^GAIN_VIA_EQ=NO$' okn_continuous_out/OKN_CONTINUOUS_BLOCKERS_R76.txt
+          grep -q '^PUBLIC_SDK_AB00_AB01_AB02_PROVEN=YES$' okn_continuous_out/OKN_CONTINUOUS_BLOCKERS_R76.txt
+          grep -q '^AB01_WRITE_WITHOUT_RESPONSE_PROVEN=YES$' okn_continuous_out/OKN_CONTINUOUS_BLOCKERS_R76.txt
+          grep -q '^AB02_NOTIFY_PRIMITIVE_PROVEN=YES$' okn_continuous_out/OKN_CONTINUOUS_BLOCKERS_R76.txt
+          grep -q '^STOCK_BLE_AES_CFB8_SESSION_COMPATIBILITY_IN_CUSTOM_FW_VERIFIED=NO$' okn_continuous_out/OKN_CONTINUOUS_BLOCKERS_R76.txt
+          grep -q '^PHYSICAL_7CH_BOARD_MAPPING_VERIFIED=NO$' okn_continuous_out/OKN_CONTINUOUS_BLOCKERS_R76.txt
           echo 'OKN_DSP_CONTINUOUS=PASS'
           echo 'GAIN_VIA_EQ=NO'
           echo 'FLASH_ALLOWED=NO'
