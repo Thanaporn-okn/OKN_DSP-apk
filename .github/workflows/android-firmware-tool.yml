@@ -1,4 +1,4 @@
-name: OKN R117 MEGA Main-Switch + WriteProcessMemory Recovery OFFLINE ONLY
+name: OKN R118 MEGA JIT Store + PE Provenance Recovery OFFLINE ONLY
 
 on:
   push:
@@ -12,11 +12,14 @@ permissions:
   actions: read
 
 concurrency:
-  group: okn-r117-main-wpm-${{ github.ref }}
+  group: okn-r118-jit-pe-provenance-${{ github.ref }}
   cancel-in-progress: true
 
 env:
   WINDOWS_URL: "https://golodsp.com/wp-content/uploads/2026/05/golopine_audio_turning_release_2026-04-08.exe_.zip"
+  EXPECTED_WINDOWS_SHA256: "3ca54171c53f7badd963ffe6851b8b3e2faf8aee8ba2afcb7040990e22ae09b2"
+  EXPECTED_WINDOWS_SIZE: "3307008"
+  EXECUTE_OFFICIAL_CLIENT: "NO"
   LIVE_BOARD_USB: "NO"
   HOST_TO_DEVICE_USB: "NO"
   FLASH_ERASE_WRITE: "NO"
@@ -24,17 +27,18 @@ env:
 
 jobs:
   recover:
-    name: Stage2 store parser and native patch tracing
+    name: Static protector store, helper, and exact PE patch recovery
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     env:
-      OUT: /tmp/r117
+      OUT: /tmp/r118
 
     steps:
       - name: Fail-closed static-only safety gate
         shell: bash
         run: |
           set -euo pipefail
+          test "$EXECUTE_OFFICIAL_CLIENT" = "NO"
           test "$LIVE_BOARD_USB" = "NO"
           test "$HOST_TO_DEVICE_USB" = "NO"
           test "$FLASH_ERASE_WRITE" = "NO"
@@ -44,9 +48,10 @@ jobs:
           mkdir -p "$OUT"/{downloads,pkg,il,resources,decrypted,evidence,review}
 
           cat > "$OUT/evidence/00_SCOPE.txt" <<'EOF'
-          REVISION=R117
+          REVISION=R118
           MODE=OFFLINE_STATIC_ONLY
           TARGET_EXECUTED=false
+          EXECUTE_OFFICIAL_CLIENT=NO
           BOARD_USB_ACCESS=NO
           HOST_TO_DEVICE_USB=NO
           FLASH_ERASE_WRITE=NO
@@ -58,7 +63,7 @@ jobs:
           TARGET_METHOD=UpdateCommandThread
           TARGET_METHOD_TOKEN=0x0600082C
           TARGET_METHOD_RID=2092
-          GOAL=Separate_main_and_nested_switches_model_WriteProcessMemory_and_recover_exact_method_patch_writes_statically
+          GOAL=Recover_exact_UpdateCommandThread_patch_bytes_with_strict_PE_image_provenance_while_resolving_JIT_store_and_R117_unknown_helpers_statically
           EOF
 
       - name: Install static-analysis dependencies
@@ -91,6 +96,11 @@ jobs:
           test -n "$EXE"
           cp "$EXE" "$OUT/dstech.exe"
 
+          ACTUAL_SHA="$(sha256sum "$OUT/dstech.exe" | awk '{print $1}')"
+          ACTUAL_SIZE="$(stat -c%s "$OUT/dstech.exe")"
+          test "$ACTUAL_SHA" = "$EXPECTED_WINDOWS_SHA256"
+          test "$ACTUAL_SIZE" = "$EXPECTED_WINDOWS_SIZE"
+
           export PATH="$PATH:$HOME/.dotnet/tools"
           if ! command -v ilspycmd >/dev/null 2>&1; then
             dotnet tool install --global ilspycmd >/dev/null
@@ -101,6 +111,9 @@ jobs:
           {
             file "$OUT/dstech.exe"
             sha256sum "$OUT/dstech.exe"
+            echo "EXPECTED_SHA256=$EXPECTED_WINDOWS_SHA256"
+            echo "EXPECTED_SIZE=$EXPECTED_WINDOWS_SIZE"
+            echo "IDENTITY_MATCHED=true"
             echo "IL_BYTES=$(stat -c%s "$OUT/il/all.il")"
           } > "$OUT/evidence/02_IDENTITY.txt"
 
@@ -529,6 +542,292 @@ jobs:
           },indent=2))
           PY
 
+      - name: Extract exact JIT hook and protected method-store architecture
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import os,re,json,hashlib
+
+          out=Path(os.environ["OUT"]); ev=out/"evidence"
+          il=(out/"il/all.il").read_text(errors="ignore")
+          n9=(ev/"20_N9_METHOD.il").read_text(errors="ignore")
+
+          def method_body(name):
+              # Direct string slicing only; no whole-file catastrophic regex.
+              hits=[m.start() for m in re.finditer(re.escape(name)+r"\s*\(",il)]
+              for pos in hits:
+                  start=il.rfind(".method",0,pos)
+                  if start < 0: continue
+                  end=il.find("// end of method",pos)
+                  if end < 0: continue
+                  endline=il.find("\n",end)
+                  body=il[start:(len(il) if endline<0 else endline)]
+                  if f"::{name}" in body or name in body.splitlines()[1:8].__str__():
+                      return body
+              return ""
+
+          hook=method_body("k1AjZJVRlM")
+          (ev/"36_JIT_HOOK_k1AjZJVRlM.il").write_text(hook)
+
+          # Store insertion windows in the N9 initializer.
+          lines=n9.splitlines()
+          windows=[]
+          for i,line in enumerate(lines):
+              if "XdYe0BEvZM" in line or "nEgLdGKpl9ybhlqqVWH" in line:
+                  windows.append("\n".join(lines[max(0,i-18):min(len(lines),i+22)]))
+          (ev/"37_JIT_STORE_INSERTION_WINDOWS.txt").write_text("\n\n===== WINDOW =====\n\n".join(windows)+"\n")
+
+          # FLb value-type definition containing the protected IL body.
+          spos=il.find("FLbSabevQJis3PSAQ7x")
+          sstart=il.rfind(".class",0,spos) if spos>=0 else -1
+          send=il.find("} // end of class FLbSabevQJis3PSAQ7x",spos) if spos>=0 else -1
+          struct_body=il[sstart:send+len("} // end of class FLbSabevQJis3PSAQ7x")] if sstart>=0 and send>=0 else ""
+          (ev/"38_PROTECTED_BODY_STRUCT.il").write_text(struct_body)
+
+          # Delegate signature around compileMethod-style hook.
+          dpos=il.find("LEm1G3eTTCan1v8wMMZ")
+          dstart=il.rfind(".class",0,dpos) if dpos>=0 else -1
+          dend=il.find("} // end of class LEm1G3eTTCan1v8wMMZ",dpos) if dpos>=0 else -1
+          delegate_body=il[dstart:dend+len("} // end of class LEm1G3eTTCan1v8wMMZ")] if dstart>=0 and dend>=0 else ""
+          (ev/"39_JIT_DELEGATE_CLASS.il").write_text(delegate_body)
+
+          proof={
+            "hook_method_found":bool(hook),
+            "hook_method_sha256":hashlib.sha256(hook.encode()).hexdigest() if hook else None,
+            "hook_is_nonstub":len(hook)>1000,
+            "hook_uses_XdYe0BEvZM":"XdYe0BEvZM" in hook,
+            "hook_reads_protected_body_field":"ooDeh1nBCT" in hook,
+            "hook_reads_flag_field":"SeQe2D5cRo" in hook,
+            "hook_has_compile_method_signature":(("uint32 k1AjZJVRlM (" in hook) and hook.count("native int")>=4 and "uint32&" in hook),
+            "hook_allocates_or_copies_body":any(x in hook for x in ("FVFlMaN4yjieIa4tnLI","k9Crj1NA5t36RJYQaeH","AllocCoTaskMem","Marshal::Copy")),
+            "hook_changes_page_protection":any(x in hook for x in ("KNljOOvDry","VirtualProtect")),
+            "initializer_installs_hook":"ldftn uint32 Q9Wet0jLP4YxXSyJBiC.q71r2Rj8SiD9GF1BI50::k1AjZJVRlM" in n9,
+            "store_insert_call_count":n9.count("nEgLdGKpl9ybhlqqVWH"),
+            "store_symbol_count":n9.count("XdYe0BEvZM"),
+            "protected_struct_found":bool(struct_body),
+            "protected_struct_has_bool":"SeQe2D5cRo" in struct_body,
+            "protected_struct_has_byte_array":"ooDeh1nBCT" in struct_body,
+            "delegate_class_found":bool(delegate_body),
+            "delegate_compile_method_shape":all(x in delegate_body for x in ("native int", "uint32", "Invoke")),
+            "interpretation":"Official client protector stores protected method IL/body bytes in XdYe0BEvZM and supplies them through a JIT compileMethod hook. This is static architecture evidence, not yet a mapping of UpdateCommandThread to one store entry."
+          }
+          proof["jit_store_architecture_proven"]=all(proof[k] for k in (
+            "hook_method_found","hook_is_nonstub","hook_uses_XdYe0BEvZM",
+            "hook_reads_protected_body_field","initializer_installs_hook",
+            "protected_struct_found","protected_struct_has_byte_array"
+          ))
+          (ev/"36_JIT_STORE_ARCHITECTURE.json").write_text(json.dumps(proof,indent=2,ensure_ascii=False)+"\n")
+          print(json.dumps(proof,indent=2,ensure_ascii=False))
+          PY
+
+      - name: Resolve all N9 JIT helpers and R117 blocker wrapper chains statically
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import os,re,json,collections
+
+          out=Path(os.environ["OUT"]); ev=out/"evidence"
+          text=(out/"il/all.il").read_text(errors="replace")
+          n9=(ev/"20_N9_METHOD.il").read_text(errors="replace")
+          hook=(ev/"36_JIT_HOOK_k1AjZJVRlM.il").read_text(errors="replace")
+
+          def called_names(body):
+              return [m.group(1) for m in re.finditer(
+                  r'(?m)^\s*IL_[0-9A-Fa-f]+:\s+call(?:virt)?\s+.+?::([A-Za-z0-9_]+)\s*\(', body)]
+
+          requested=set(called_names(n9)) | set(called_names(hook))
+          blockers={
+            "OENbNnN7DFqnujmv13f","SMPFNLNr5St51O5T1Ai","BVUDNWKaRepeWLIgaBG",
+            "sr6wPbKWSDX3hWy8TAY","Bjp8CNKZDSll9YMJaBT","l5ZnY5KdvdQ3hp82Mw5",
+            "IBOK1sNMCPak9gPh7y1","k9Crj1NA5t36RJYQaeH","fvbj6XN1po7KOwRE0UL",
+            "wXOoXMNhkaDkYMRWNd9","vml6RVN553UfRTfZJaS","zWct5BNlyiRacwo0U8Y",
+            "Y4mRnEKeBbcRNvnWree","TSAMwxKIbYodtJW1Fqu","OqRPwWNg7T0cT923rlN",
+            "ypCsUaKBUndybVbUNMZ","EIaSDVKslbrUYNOK7yS","gYLuV2Kuy3GDdc4Ja6a",
+            "v9UkSMNVklJVJngBkws","jy9FNMNipKPYGuE5Qho","Aci0oWNJo73Ce3a19V1",
+            "zGvKxcN627eLqESQJMV","eFjc9jNqE58aJBxjPnk","FVFlMaN4yjieIa4tnLI",
+            "aTRtVMNntQrtqvTxqHY","UHVb2WNe2pWw9W9EXxe","JDfCboNIYIw8VbTtNrA",
+            "oR8P3tNZV5rU94RqIMg","O4TWuUKjsPejWiKyMyP","DD2WALKyLudZcN08ACL",
+            "KNljOOvDry","cWTufTK81AUpaDL6ruM","BNORmcKAAUDY68Xwmq1","KuuCh5KnIvpdYGDMMPL"
+          }
+          requested |= blockers
+
+          method_starts=[m.start() for m in re.finditer(r'(?m)^\s*\.method\b',text)]
+          def method_bodies(name):
+              found=[]
+              pat=re.compile(r'\b'+re.escape(name)+r'\s*\(')
+              for a in method_starts:
+                  near=text[a:min(len(text),a+1400)]
+                  if not pat.search(near): continue
+                  e=text.find("// end of method",a)
+                  if e<0: continue
+                  z=text.find("\n",e)
+                  body=text[a:(len(text) if z<0 else z)]
+                  if pat.search(body[:1800]): found.append(body)
+              return list(dict.fromkeys(found))
+
+          rules=[
+            ("WriteProcessMemory","WriteProcessMemory"),
+            ("VirtualProtect","VirtualProtect"),
+            ("Marshal::WriteInt32","Marshal_WriteInt32"),
+            ("Marshal::ReadInt32","Marshal_ReadInt32"),
+            ("Marshal::ReadInt64","Marshal_ReadInt64"),
+            ("GetFunctionPointer","RuntimeMethodHandle_GetFunctionPointer"),
+            ("PrepareMethod","RuntimeHelpers_PrepareMethod"),
+            ("GetHINSTANCE","Marshal_GetHINSTANCE"),
+            ("GetModules","Assembly_GetModules"),
+            ("get_Modules","Process_Modules"),
+            ("get_ModuleName","ProcessModule_Name"),
+            ("get_BaseAddress","ProcessModule_BaseAddress"),
+            ("get_ModuleMemorySize","ProcessModule_MemorySize"),
+            ("GetDelegateForFunctionPointer","Marshal_GetDelegateForFunctionPointer"),
+            ("GetFunctionPointerForDelegate","Marshal_GetFunctionPointerForDelegate"),
+            ("BitConverter::GetBytes","BitConverter_GetBytes"),
+            ("AllocCoTaskMem","Marshal_AllocCoTaskMem"),
+            ("AllocHGlobal","Marshal_AllocHGlobal"),
+            ("mscorjit","MSCORJIT"),("getJit","GETJIT"),
+            ("m_ptr","RuntimeModule_m_ptr"),("m_pData","RuntimeModule_m_pData"),
+          ]
+
+          defs=[]; by={}
+          for name in sorted(requested):
+              arr=method_bodies(name)
+              if not arr:
+                  defs.append({"name":name,"found":False,"is_r117_blocker":name in blockers})
+                  continue
+              for idx,body in enumerate(arr):
+                  calls=[]
+                  for mm in re.finditer(r'(?m)^\s*IL_[0-9A-Fa-f]+:\s+call(?:virt)?\s+(.+?)::([A-Za-z0-9_]+)\((.*?)\)',body):
+                      calls.append({"owner_sig":mm.group(1).strip(),"name":mm.group(2),"args":mm.group(3).strip()})
+                  tags=sorted({tag for needle,tag in rules if needle.lower() in body.lower()})
+                  if re.search(r'\bpinvokeimpl\b',body,re.I): tags.append("PINVOKE")
+                  d={
+                    "name":name,"found":True,"variant":idx,"is_r117_blocker":name in blockers,
+                    "stub_like":bool(re.search(r'(?s)IL_0000:\s+nop\s+IL_0001:\s+nop\s+IL_0002:\s+nop\s+IL_0003:\s+ret',body)),
+                    "tags":sorted(set(tags)),"callees":calls,
+                    "strings":re.findall(r'ldstr\s+"([^"]*)"',body),"body":body
+                  }
+                  defs.append(d)
+                  if name not in by: by[name]=d
+
+          # Conservative one-call chains only. Never infer through branches/switches.
+          resolved={}
+          for name in by:
+              cur=name; chain=[name]; seen={name}
+              for _ in range(16):
+                  d=by.get(cur)
+                  if not d: break
+                  cs=d.get("callees",[])
+                  complex_ctl=bool(re.search(r'(?m)^\s*IL_[0-9A-Fa-f]+:\s+(?:br|brtrue|brfalse|switch|leave|throw|rethrow)\b',d["body"]))
+                  if len(cs)!=1 or complex_ctl: break
+                  nxt=cs[0]["name"]; chain.append(nxt)
+                  if nxt in seen: break
+                  seen.add(nxt)
+                  if nxt not in by:
+                      resolved[name]={"chain":chain,"terminal":nxt,"terminal_owner":cs[0]["owner_sig"]}
+                      break
+                  cur=nxt
+
+          missing=sorted(x for x in requested if x not in by)
+          blocker_missing=sorted(x for x in blockers if x not in by)
+          tag_counts=collections.Counter(t for d in defs if d.get("found") for t in d.get("tags",[]))
+          report={
+            "requested_unique":len(requested),"found_unique":len(by),"missing":missing,
+            "r117_blocker_count":len(blockers),"r117_blocker_missing":blocker_missing,
+            "semantic_tag_counts":dict(tag_counts),"definitions":defs,"resolved_one_call_chains":resolved,
+            "interpretation":"Static helper resolution only. Complex wrapper chains are intentionally left unresolved rather than guessed."
+          }
+          (ev/"36A_ALL_HELPER_RESOLUTION.json").write_text(json.dumps(report,indent=2,ensure_ascii=False)+"\n")
+
+          # Exact contexts for direct native/JIT APIs anywhere in the official IL.
+          needles=["WriteProcessMemory","VirtualProtect","Marshal::WriteInt32","Marshal::ReadInt32",
+                   "Marshal::ReadInt64","GetHINSTANCE","PrepareMethod","GetFunctionPointer",
+                   "GetDelegateForFunctionPointer","GetFunctionPointerForDelegate","mscorjit","getJit"]
+          direct=[]
+          for needle in needles:
+              for m in re.finditer(re.escape(needle),text,re.I):
+                  a=text.rfind(".method",0,m.start()); e=text.find("// end of method",m.end())
+                  if a<0 or e<0: continue
+                  z=text.find("\n",e); body=text[a:(len(text) if z<0 else z)]
+                  direct.append({"needle":needle,"body":body})
+          seen=set(); uniq=[]
+          for d in direct:
+              key=d["body"]
+              if key in seen: continue
+              seen.add(key); uniq.append(d)
+          (ev/"36B_DIRECT_NATIVE_JIT_METHODS.json").write_text(json.dumps(uniq,indent=2,ensure_ascii=False)+"\n")
+
+          print(json.dumps({
+            "requested_unique":len(requested),"found_unique":len(by),
+            "r117_blocker_missing":blocker_missing,"semantic_tag_counts":dict(tag_counts),
+            "direct_native_jit_methods":len(uniq)
+          },indent=2))
+          PY
+
+      - name: Prove target MethodDef identity and keep pointer provenance domains separate
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import os,json,hashlib,re
+          import pefile,dnfile
+
+          out=Path(os.environ["OUT"]); ev=out/"evidence"; exe=out/"dstech.exe"
+          pe=pefile.PE(str(exe),fast_load=False)
+          dn=dnfile.dnPE(str(exe))
+          image_base=int(pe.OPTIONAL_HEADER.ImageBase); image_size=int(pe.OPTIONAL_HEADER.SizeOfImage)
+          target_rva=0xA3F4; target_rid=2092; target_token=0x0600082C
+          raw=exe.read_bytes()
+          try: target_off=int(pe.get_offset_from_rva(target_rva))
+          except Exception: target_off=None
+          target_disk=raw[target_off:target_off+64] if target_off is not None else b""
+
+          table=getattr(getattr(getattr(dn,"net",None),"mdtables",None),"MethodDef",None)
+          rows=getattr(table,"rows",[]) if table else []
+          row=rows[target_rid-1] if len(rows)>=target_rid else None
+          method_name=str(getattr(row,"Name","")) if row is not None else ""
+          method_rva=int((getattr(row,"Rva",None) if row is not None else 0) or (getattr(row,"RVA",0) if row is not None else 0) or 0)
+          method_identity_proven=(method_name=="UpdateCommandThread" and method_rva==target_rva and len(rows)>=target_rid)
+
+          helpers=json.loads((ev/"36A_ALL_HELPER_RESOLUTION.json").read_text())
+          defs=helpers.get("definitions",[])
+          domains={"PE_IMAGE":[],"CLR_RUNTIME_MODULE_PRIVATE":[],"JIT_OR_DELEGATE":[],"PROCESS_OR_EXTERNAL_MODULE":[],"ALLOCATED_BUFFER":[],"UNCLASSIFIED":[]}
+          for d in defs:
+              if not d.get("found"): continue
+              body=d.get("body",""); name=d.get("name")
+              hits=[]
+              if "GetHINSTANCE" in body: hits.append("PE_IMAGE:GetHINSTANCE")
+              if "m_ptr" in body or "m_pData" in body or "RuntimeModule" in body: hits.append("CLR_RUNTIME_MODULE_PRIVATE")
+              if any(x in body for x in ("mscorjit","getJit","GetFunctionPointer","GetDelegateForFunctionPointer","GetFunctionPointerForDelegate")): hits.append("JIT_OR_DELEGATE")
+              if any(x in body for x in ("ProcessModule","get_BaseAddress","get_Modules")): hits.append("PROCESS_OR_EXTERNAL_MODULE")
+              if any(x in body for x in ("AllocCoTaskMem","AllocHGlobal","VirtualAlloc")): hits.append("ALLOCATED_BUFFER")
+              if not hits: hits=["UNCLASSIFIED"]
+              for h in hits:
+                  key=h.split(":",1)[0]
+                  domains[key].append({"helper":name,"evidence":h})
+
+          result={
+            "target_method":{"rid":target_rid,"token":f"0x{target_token:08X}","metadata_name":method_name,
+                             "metadata_rva":f"0x{method_rva:X}","expected_rva":"0xA3F4",
+                             "method_identity_proven":method_identity_proven},
+            "pe_image":{"image_base":f"0x{image_base:X}","size_of_image":image_size,
+                        "target_va":f"0x{image_base+target_rva:X}","target_file_offset":target_off,
+                        "target_disk_head64":target_disk.hex().upper(),
+                        "exe_sha256":hashlib.sha256(raw).hexdigest()},
+            "pointer_domains":domains,
+            "hard_rule":"PE_IMAGE, CLR_RUNTIME_MODULE_PRIVATE, PROCESS_OR_EXTERNAL_MODULE, JIT_OR_DELEGATE, and ALLOCATED_BUFFER are distinct provenance domains and must never be conflated.",
+            "promotion_rule":"A3F4 recovery requires an exact write with PE_IMAGE provenance plus exact bytes; a raw numeric address merely falling inside the PE range is not provenance."
+          }
+          (ev/"36C_TARGET_METHOD_PE_PROVENANCE.json").write_text(json.dumps(result,indent=2,ensure_ascii=False)+"\n")
+          if not method_identity_proven:
+              raise SystemExit("target MethodDef RID/name/RVA identity gate failed")
+          print(json.dumps(result["target_method"],indent=2))
+          PY
+
       - name: Run exact emulator with accelerated stage1 and stage2 loops
         shell: bash
         run: |
@@ -581,13 +880,18 @@ jobs:
           class Crypto:
               def __init__(self,mem,tr): self.mem=mem; self.tr=tr; self.inp=bytearray()
 
+          class ProvInt(int):
+              def __new__(cls,value,origin="UNPROVEN"):
+                  obj=int.__new__(cls,int(value)); obj.origin=str(origin); return obj
+
           class Ptr:
-              def __init__(self,region,offset=0,buf=None):
+              def __init__(self,region,offset=0,buf=None,origin="UNPROVEN"):
                   self.region=region
                   self.offset=int(offset)
                   self.buf=buf
+                  self.origin=str(origin)
               def __repr__(self):
-                  return f"Ptr({self.region},{self.offset:#x})"
+                  return f"Ptr({self.region},{self.offset:#x},origin={self.origin})"
 
           class LocalRef:
               def __init__(self,index): self.index=int(index)
@@ -614,14 +918,17 @@ jobs:
           class RuntimeModuleObj:
               def __init__(self,name="dstech.exe"):
                   self.name=name
-                  self.private={"m_pData":Ptr("runtime_module_private",0),"m_ptr":Ptr("runtime_module_private",0)}
+                  self.private={
+                      "m_pData":Ptr("runtime_module_private",0,origin="CLR_RUNTIME_MODULE_PRIVATE:m_pData"),
+                      "m_ptr":Ptr("runtime_module_private",0,origin="CLR_RUNTIME_MODULE_PRIVATE:m_ptr")
+                  }
 
           class FieldInfoObj:
               def __init__(self,name): self.name=name
 
           class ProcessModuleObj:
               def __init__(self,name,region="external_module",size=None):
-                  self.name=name; self.base=Ptr(region,0); self.size=size
+                  self.name=name; self.base=Ptr(region,0,origin="PROCESS_OR_EXTERNAL_MODULE:"+str(name)); self.size=size
 
           class EnumeratorObj:
               def __init__(self,items): self.items=list(items); self.index=-1
@@ -635,6 +942,9 @@ jobs:
           GLOBAL_NESTED_SWITCHES=[]
           GLOBAL_SNAPSHOTS=[]
           UNKNOWN_CALLS=[]
+          KEY_WRITE_EVENTS=[]
+          PARSER_VIOLATIONS=[]
+          HASHTABLE_CTOR_EVENTS=[]
 
           def deref_value(s,v):
               if isinstance(v,LocalRef): return s.locals[v.index]
@@ -643,7 +953,7 @@ jobs:
 
           def ptr_add(v,delta):
               if isinstance(v,Ptr) and isinstance(delta,int):
-                  return Ptr(v.region,v.offset+delta,v.buf)
+                  return Ptr(v.region,v.offset+delta,v.buf,v.origin)
               return None
 
           def ptr_read(s,p,n):
@@ -681,6 +991,8 @@ jobs:
                   if 0<=off and off+len(data)<=len(MODULE_IMAGE):
                       old=bytes(MODULE_IMAGE[off:off+len(data)])
                       MODULE_IMAGE[off:off+len(data)]=data
+                      pe_provenance=str(p.origin).startswith("PE_IMAGE:")
+                      reader_positions=sorted({x.s.pos for x in s.locals if isinstance(x,Reader)})
                       evt={
                           "region":"module",
                           "rva":off,
@@ -689,6 +1001,11 @@ jobs:
                           "old_hex":old.hex().upper(),
                           "new_hex":bytes(data).hex().upper(),
                           "source":source,
+                          "target_origin":p.origin,
+                          "pe_image_provenance":pe_provenance,
+                          "step":s.steps,
+                          "main_state":s.statics.get("__last_main_state"),
+                          "reader_positions":reader_positions,
                       }
                       MODULE_WRITES.append(evt)
                       return True
@@ -771,13 +1088,20 @@ jobs:
 
           def binary(a,b,op):
               if unk(a) or unk(b): return U(f"{op}")
+              if op in ("add","sub"):
+                  if isinstance(a,ProvInt) and isinstance(b,int) and not isinstance(b,ProvInt):
+                      return ProvInt((int(a)+int(b)) if op=="add" else (int(a)-int(b)),a.origin)
+                  if op=="add" and isinstance(b,ProvInt) and isinstance(a,int) and not isinstance(a,ProvInt):
+                      return ProvInt(int(a)+int(b),b.origin)
+                  if isinstance(a,ProvInt) and isinstance(b,ProvInt) and a.origin==b.origin:
+                      return ProvInt((int(a)+int(b)) if op=="add" else (int(a)-int(b)),a.origin)
               if op=="add":
                   q=ptr_add(a,b)
                   if q is not None: return q
                   q=ptr_add(b,a)
                   if q is not None: return q
               if op=="sub" and isinstance(a,Ptr) and isinstance(b,int):
-                  return Ptr(a.region,a.offset-b,a.buf)
+                  return Ptr(a.region,a.offset-b,a.buf,a.origin)
               try:
                   if op=="add":return a+b
                   if op=="sub":return a-b
@@ -808,7 +1132,7 @@ jobs:
                   obj=deref_value(s,args[0]) if args else None
                   return obj.assembly if isinstance(obj,TypeObj) else AssemblyObj()
               if name=="xxguFuNtTvdBm7aDJwf": return [RuntimeModuleObj("dstech.exe")]
-              if name=="IjE6SaNG6WjwQEgWM2s": return Ptr("module",0)
+              if name=="IjE6SaNG6WjwQEgWM2s": return Ptr("module",0,origin="PE_IMAGE:Marshal.GetHINSTANCE")
               if name=="KIoEb3NS3a1HTR21GpN": return str(OUT/"dstech.exe")
               if name=="GetType":
                   obj=deref_value(s,args[0]) if args else None
@@ -831,7 +1155,7 @@ jobs:
               if name=="xAknZ0KVmw55ytiqn7f":
                   v=deref_value(s,args[-1]) if args else 0
                   if isinstance(v,Ptr):
-                      return (MODULE_BASE+v.offset) & 0xffffffff
+                      return ProvInt((MODULE_BASE+v.offset) & 0xffffffff,v.origin)
                   return int(v) & 0xffffffff if isinstance(v,int) else U("ToInt32")
               if name=="UCB7PIKitQ3s1yf5LMj":
                   return "UTF8"
@@ -878,12 +1202,12 @@ jobs:
                   v=deref_value(s,args[0]) if args else U("intptr")
                   if isinstance(v,Ptr):
                       if v.region=="module":
-                          return MODULE_BASE+v.offset
+                          return ProvInt(MODULE_BASE+v.offset,v.origin)
                       return v.offset
                   return int(v) if isinstance(v,int) else U("ToInt64")
               if name=="ToInt32":
                   v=deref_value(s,args[0]) if args else U("intptr")
-                  if isinstance(v,Ptr): return ((MODULE_BASE+v.offset) if v.region=="module" else v.offset) & 0xffffffff
+                  if isinstance(v,Ptr): return ProvInt((((MODULE_BASE+v.offset) if v.region=="module" else v.offset) & 0xffffffff),v.origin)
                   if isinstance(v,int): return v & 0xffffffff
                   return U("ToInt32")
               if name=="eqi2r0KcrOaTC3ZyU8v":
@@ -919,8 +1243,8 @@ jobs:
               if name=="wZpVQeKHR2LgHlcdA4Q":
                   return deref_value(s,args[-2]) is not deref_value(s,args[-1]) if len(args)>=2 else False
               if name=="WNmMncNCfRVWy71yyLn": return None
-              if name=="jcKjQE0JEe": return Ptr("library:"+str(deref_value(s,args[-1]) if args else "lib"),0)
-              if name=="GGVjFPcji2": return Ptr("proc:"+str(deref_value(s,args[-1]) if args else "proc"),0)
+              if name=="jcKjQE0JEe": return Ptr("library:"+str(deref_value(s,args[-1]) if args else "lib"),0,origin="JIT_OR_DELEGATE:LoadLibrary")
+              if name=="GGVjFPcji2": return Ptr("proc:"+str(deref_value(s,args[-1]) if args else "proc"),0,origin="JIT_OR_DELEGATE:GetProcAddress")
               if name=="W2LAoeKqqLWW7C8olgw":
                   p=deref_value(s,args[-2]) if len(args)>=2 else None
                   return DelegateObj("native_delegate",p if isinstance(p,Ptr) else None)
@@ -929,15 +1253,24 @@ jobs:
                   return d.ptr if isinstance(d,DelegateObj) and d.ptr is not None else U("delegate_invoke")
               if name=="mPc1IeK1xtUZnJaFY6v":
                   d=deref_value(s,args[-1]) if args else None
-                  return d.ptr if isinstance(d,DelegateObj) and d.ptr is not None else Ptr("delegate_fn",0)
+                  return d.ptr if isinstance(d,DelegateObj) and d.ptr is not None else Ptr("delegate_fn",0,origin="JIT_OR_DELEGATE:delegate_function")
               if name=="bf6jCcnr8J":
                   if len(args)>=5:
                       process,target,buf,count,written=args[-5:]
                       target=deref_value(s,target); buf=deref_value(s,buf); count=deref_value(s,count)
                       data=bytes(buf)[:count] if isinstance(buf,(bytes,bytearray)) and isinstance(count,int) and count>=0 else None
-                      evt={"kind":"WriteProcessMemory","target":repr(target),"count":count if isinstance(count,int) else None,"data_hex":data.hex().upper() if data is not None else None,"step":s.steps,"proven_exe_rva":None}
+                      evt={
+                          "kind":"WriteProcessMemory","target":repr(target),
+                          "target_origin":target.origin if isinstance(target,Ptr) else None,
+                          "pe_image_provenance":bool(isinstance(target,Ptr) and target.region=="module" and str(target.origin).startswith("PE_IMAGE:")),
+                          "count":count if isinstance(count,int) else None,
+                          "data_hex":data.hex().upper() if data is not None else None,
+                          "step":s.steps,"main_state":s.statics.get("__last_main_state"),"proven_exe_rva":None
+                      }
                       if isinstance(target,Ptr) and target.region=="module" and data is not None:
-                          evt["proven_exe_rva"]=target.offset; ptr_write(s,target,data,"WriteProcessMemory")
+                          if evt["pe_image_provenance"]:
+                              evt["proven_exe_rva"]=target.offset
+                          ptr_write(s,target,data,"WriteProcessMemory")
                       WPM_WRITES.append(evt); GLOBAL_EVENTS.append(evt)
                       if isinstance(written,LocalRef) and isinstance(count,int): s.locals[written.index]=count
                   return 1
@@ -978,9 +1311,13 @@ jobs:
               if name=="sWg0PuN2fLSfxi2LB0D":
                   if len(args)>=2 and isinstance(args[-2],Reader) and isinstance(args[-1],int):
                       r=args[-2]; n=max(0,args[-1]); before=r.s.pos
+                      remaining=max(0,len(r.s.data)-before)
                       data=r.s.data[before:before+n]; r.s.pos+=len(data)
                       rr={"kind":"ReadBytes","before":before,"after":r.s.pos,
-                          "requested":n,"returned":len(data),"step":s.steps}
+                          "requested":n,"returned":len(data),"remaining_before":remaining,"step":s.steps}
+                      if n > remaining:
+                          violation={"kind":"READBYTES_EXCEEDS_REMAINING","before":before,"requested":n,"remaining":remaining,"step":s.steps}
+                          PARSER_VIOLATIONS.append(violation); GLOBAL_EVENTS.append(violation)
                       s.reads.append({"op":"ReadBytes","before":before,"after":r.s.pos,"requested":n,"returned":len(data)})
                       GLOBAL_EVENTS.append(rr)
                       return bytes(data)
@@ -1127,6 +1464,16 @@ jobs:
                       val=pop(s);idx=pop(s);a=pop(s)
                       if isinstance(a,bytearray) and isinstance(idx,int) and 0<=idx<len(a) and isinstance(val,int):
                           a[idx]=val&255
+                          roles=[]
+                          for li,role in ((17,"key_local17"),(47,"key_local47"),(100,"iv_local100"),(8,"iv_local8")):
+                              if 0 <= li < len(s.locals) and s.locals[li] is a:
+                                  roles.append(role)
+                          if roles:
+                              KEY_WRITE_EVENTS.append({
+                                  "roles":roles,"index":idx,"value":val&255,
+                                  "il_label":lab,"step":s.steps,
+                                  "main_state":s.statics.get("__last_main_state")
+                              })
                       s.ip=nxt;continue
                   if op in ("ldelem.u1","ldelem.i1"):
                       idx=pop(s);a=pop(s)
@@ -1144,9 +1491,12 @@ jobs:
                   if op.startswith("conv."):
                       a=pop(s)
                       if isinstance(a,int):
-                          if op in ("conv.u1",):a&=0xff
-                          elif op in ("conv.u2",):a&=0xffff
-                          elif op in ("conv.u4",):a&=0xffffffff
+                          origin=a.origin if isinstance(a,ProvInt) else None
+                          v=int(a)
+                          if op in ("conv.u1",):v&=0xff
+                          elif op in ("conv.u2",):v&=0xffff
+                          elif op in ("conv.u4",):v&=0xffffffff
+                          a=ProvInt(v,origin) if origin is not None else v
                       push(s,a);s.ip=nxt;continue
 
                   if op=="ldsfld":
@@ -1161,6 +1511,8 @@ jobs:
                       ts=re.findall(r'IL_[0-9A-Fa-f]+',arg)
                       is_main=(lab=="IL_0012" and len(ts)==len(switch_targets))
                       if isinstance(v,int) and 0<=v<len(ts):
+                          if is_main:
+                              s.statics["__last_main_state"]=v
                           if not is_main:
                               GLOBAL_NESTED_SWITCHES.append({"switch_at":lab,"switch_size":len(ts),"case":v,"target":ts[v],"step":s.steps})
                           if is_main and v in (626,631,313,458,96,206,510,487,162,464,94,52,289,292,558,565,75,16,305,533,569,17,157,0,281,402):
@@ -1170,6 +1522,12 @@ jobs:
                                   "step":s.steps,
                                   "local38":s.locals[38] if isinstance(s.locals[38],int) else None,
                                   "local98":s.locals[98] if isinstance(s.locals[98],int) else None,
+                                  "local105":s.locals[105] if isinstance(s.locals[105],int) else None,
+                                  "local118":s.locals[118] if isinstance(s.locals[118],int) else None,
+                                  "local110":s.locals[110] if isinstance(s.locals[110],int) else None,
+                                  "source_local27_len":len(s.locals[27]) if isinstance(s.locals[27],(bytes,bytearray)) else None,
+                                  "source_local27_sha256":hashlib.sha256(bytes(s.locals[27])).hexdigest() if isinstance(s.locals[27],(bytes,bytearray)) else None,
+                                  "source_local27_head32":bytes(s.locals[27])[:32].hex().upper() if isinstance(s.locals[27],(bytes,bytearray)) else None,
                                   "key_local17_hex":(
                                       bytes(s.locals[17]).hex().upper()
                                       if isinstance(s.locals[17],bytearray) else None
@@ -1378,11 +1736,18 @@ jobs:
                           if isinstance(v,Ptr): push(s,v)
                           elif isinstance(v,int):
                               if MODULE_BASE <= v < MODULE_BASE+MODULE_SIZE:
-                                  push(s,Ptr("module",v-MODULE_BASE))
+                                  origin=v.origin if isinstance(v,ProvInt) else "UNPROVEN:raw_numeric_inside_PE_range"
+                                  push(s,Ptr("module",v-MODULE_BASE,origin=origin))
                               else:
                                   push(s,v)
                           else: push(s,U("IntPtr"))
                       elif "Hashtable::.ctor" in arg:
+                          cap=deref_value(s,args[-1]) if args else 0
+                          evt={"kind":"HashtableCtor","capacity":cap if isinstance(cap,int) else None,"step":s.steps,"main_state":s.statics.get("__last_main_state")}
+                          HASHTABLE_CTOR_EVENTS.append(evt); GLOBAL_EVENTS.append(evt)
+                          if isinstance(cap,int) and (cap < 0 or cap > 1000000):
+                              violation={"kind":"IMPLAUSIBLE_HASHTABLE_CAPACITY","capacity":cap,"step":s.steps,"main_state":s.statics.get("__last_main_state")}
+                              PARSER_VIOLATIONS.append(violation); GLOBAL_EVENTS.append(violation)
                           push(s,HashTable())
                       elif "MemoryStream::.ctor" in arg:
                           if args and isinstance(args[-1],(bytes,bytearray)):
@@ -1410,7 +1775,7 @@ jobs:
                   if op=="ldelema":
                       idxv=pop(s); arr=pop(s)
                       if isinstance(arr,(bytes,bytearray)) and isinstance(idxv,int):
-                          push(s,Ptr("array",idxv,arr))
+                          push(s,Ptr("array",idxv,arr,origin="ARRAY:managed"))
                       else:
                           push(s,U("ldelema"))
                       s.ip=nxt;continue
@@ -1595,7 +1960,11 @@ jobs:
               "nested_switch_events":GLOBAL_NESTED_SWITCHES[-5000:],
               "main_state_snapshots":GLOBAL_SNAPSHOTS[-1000:],
               "unknown_calls":UNKNOWN_CALLS[-5000:],
-              "global_events":GLOBAL_EVENTS[-10000:],
+              "key_write_events":KEY_WRITE_EVENTS[-10000:],
+              "hashtable_ctor_events":HASHTABLE_CTOR_EVENTS[-1000:],
+              "parser_violations":PARSER_VIOLATIONS[-2000:],
+              "parser_semantically_valid":len(PARSER_VIOLATIONS)==0,
+              "global_events":GLOBAL_EVENTS[-15000:],
               "write_process_memory_count":len(WPM_WRITES),
               "write_process_memory_events":WPM_WRITES[-5000:],
               "global_reached_create_decryptor":any(
@@ -1610,6 +1979,7 @@ jobs:
               "update_rva_A3F4_write_hits":[
                   x for x in MODULE_WRITES
                   if x.get("rva") is not None
+                  and x.get("pe_image_provenance") is True
                   and x["rva"] <= 0xA3F4 < x["rva"]+x["size"]
               ],
           }
@@ -1625,6 +1995,7 @@ jobs:
                   "update_rva_A3F4_hits":[
                       x for x in MODULE_WRITES
                       if x.get("rva") is not None
+                      and x.get("pe_image_provenance") is True
                       and x["rva"] <= 0xA3F4 < x["rva"]+x["size"]
                   ],
               },indent=2)+"\n"
@@ -1984,6 +2355,166 @@ jobs:
           },indent=2))
           PY
 
+      - name: Validate stage1 transform key provenance and parser sanity fail-closed
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import os,json,hashlib,struct,re,collections
+
+          out=Path(os.environ["OUT"]); ev=out/"evidence"
+          vm=json.loads((ev/"30_VM_SUMMARY.json").read_text())
+          sw=json.loads((ev/"21_EXACT_SWITCH_MAP.json").read_text())
+          n9=(ev/"20_N9_METHOD.il").read_text(errors="ignore")
+          rmap=json.loads((ev/"10_RESOURCE_MAP.json").read_text())
+          h=next(x for x in rmap if x["name"]=="h15IL2i6yy2BZV8RqM.YuRwd1JALC4oy32W66")
+          source=(out/"resources"/h["file"]).read_bytes()
+          stage1=(out/"decrypted/stage1_local37.bin").read_bytes() if (out/"decrypted/stage1_local37.bin").exists() else b""
+          stage2=(out/"decrypted/stage2_qword_xor.bin").read_bytes() if (out/"decrypted/stage2_qword_xor.bin").exists() else b""
+
+          ev313=next((x for x in vm.get("global_reach_main_only",[]) if x.get("state")==313),{})
+          keyhex=ev313.get("key_local47_hex") or ""
+          key=bytes.fromhex(keyhex) if keyhex and len(keyhex)%2==0 else b""
+
+          # Independent literal transcription of the exact IL arithmetic in state 46.
+          MASK=0xffffffff
+          U=lambda x:x&MASK
+          def il_state46(acc):
+              l64=330109516; l11=725701736; l74=7651480; l75=1474240118
+              l89=U(acc)
+              l75=U(l75-l11)
+              l64=U(658242601 ^ 1092075823 ^ 1441417454)
+              l11=U(l11-l75)
+              l30=U(l74 & 1431655765)
+              l86=U(l74 & 0xAAAAAAAA)
+              l30=U(((l30>>1) | U(l86<<1)) ^ l75)  # dead local, kept to mirror IL
+              l74=U(U(l74<<11) | (l74>>21))
+              l89=U(l89+l75)
+              l89=U(l89 ^ U(l89<<6))
+              l89=U(l89+l11)
+              l89=U(l89 ^ (l89>>11))
+              l89=U(l89+l74)
+              l89=U(l89 ^ U(l89<<1))
+              l89=U(l89+l89)
+              l89=U((U(U(l64<<16)+l11) ^ l11) - l89)
+              return U(acc+l89)
+
+          recomputed=None; prefix_match=False; compare_len=0
+          if key and len(key)%4==0 and len(source)>=4:
+              kws=[struct.unpack_from("<I",key,i)[0] for i in range(0,len(key),4)]
+              total=(len(source)+3)//4
+              complete=max(0,total-1)
+              outb=bytearray(len(source))
+              acc=0
+              for ii in range(complete):
+                  acc=U(acc+kws[ii%len(kws)])
+                  acc=il_state46(acc)
+                  src=struct.unpack_from("<I",source,ii*4)[0]
+                  struct.pack_into("<I",outb,ii*4,U(acc^src))
+              recomputed=bytes(outb)
+              compare_len=complete*4
+              prefix_match=bool(stage1) and stage1[:compare_len]==recomputed[:compare_len]
+
+          # Static links proving the buffers/index/key relationships used by the loop.
+          exact_il={
+            "source_local12_to_local27":"IL_0fa8: ldloc.s 12" in n9 and "IL_0faa: stloc.s 27" in n9,
+            "key_local17_to_local47":"IL_2f34: ldloc 17" in n9 and "IL_2f38: stloc.s 47" in n9,
+            "initial_accumulator_zero":"IL_261f: ldc.i4.0" in n9 and "IL_2620: stloc.s 105" in n9,
+            "index_times_4":"IL_1940: ldloc.s 38" in n9 and "IL_1942: ldc.i4.4" in n9,
+            "key_word_state117":sw["all_targets"][117]=="IL_57bb",
+            "key_add_state299":sw["all_targets"][299]=="IL_6117" and "IL_6117: ldloc.s 105" in n9 and "IL_6119: ldloc.s 53" in n9,
+            "source_word_state342":sw["all_targets"][342]=="IL_61af",
+            "mix_state46":sw["all_targets"][46]=="IL_5be0",
+            "xor_output_state57":sw["all_targets"][57]=="IL_1172" and "IL_1172: ldloc.s 105" in n9 and "IL_1174: ldloc.s 82" in n9,
+            "loop_increment_state451":sw["all_targets"][451]=="IL_50eb",
+            "loop_test_state458":sw["all_targets"][458]=="IL_4121",
+          }
+
+          # Key write provenance: concrete writes only, grouped by byte index.
+          kw=vm.get("key_write_events",[])
+          key17=[x for x in kw if "key_local17" in x.get("roles",[])]
+          byidx=collections.defaultdict(list)
+          for x in key17: byidx[x.get("index")].append(x)
+          concrete_indices=sorted(i for i,xs in byidx.items() if isinstance(i,int) and all(isinstance(x.get("value"),int) for x in xs))
+          value_sets={str(i):sorted(set(x.get("value") for x in xs if isinstance(x.get("value"),int))) for i,xs in byidx.items() if isinstance(i,int)}
+          unique_value_per_index=all(len(v)==1 for v in value_sets.values()) and len(value_sets)==32
+          key_matches_unique_writes=(
+              len(key)==32 and unique_value_per_index and
+              all(key[i]==value_sets[str(i)][0] for i in range(32))
+          )
+
+          # Parser fail-closed checks. R117 had a saturating multi-GB ReadBytes and a
+          # ~1.9B Hashtable capacity, which a real .NET process cannot silently accept.
+          violations=list(vm.get("parser_violations",[]))
+          ctor=list(vm.get("hashtable_ctor_events",[]))
+          reads=[x for x in vm.get("global_events",[]) if x.get("kind") in ("ReadInt32","ReadBytes")]
+          if not violations:
+              for x in reads:
+                  if x.get("kind")=="ReadBytes" and isinstance(x.get("requested"),int):
+                      rem=x.get("remaining_before")
+                      if isinstance(rem,int) and x["requested"]>rem:
+                          violations.append({"kind":"READBYTES_EXCEEDS_REMAINING","event":x})
+          for x in ctor:
+              c=x.get("capacity")
+              if isinstance(c,int) and (c<0 or c>1000000):
+                  violations.append({"kind":"IMPLAUSIBLE_HASHTABLE_CAPACITY","event":x})
+
+          # If older path did not emit ctor events, tie state565's static +1 constructor
+          # to the ReadInt32 at the exact reader position snapshot.
+          snaps=[x for x in vm.get("main_state_snapshots",[]) if x.get("main_state")==565]
+          derived_caps=[]
+          for s in snaps:
+              pos=s.get("reader_pos")
+              q=next((x for x in reads if x.get("kind")=="ReadInt32" and x.get("before")==pos),None)
+              if q and isinstance(q.get("value"),int): derived_caps.append(q["value"]+1)
+          for c in derived_caps:
+              if c<0 or c>1000000:
+                  violations.append({"kind":"DERIVED_STATE565_HASHTABLE_CAPACITY_IMPLAUSIBLE","capacity":c})
+
+          # Qword stage2 literal check on complete qwords.
+          qmatch=False; qlen=0
+          if stage1 and stage2:
+              qlen=(len(stage1)//8)*8
+              q=bytearray(stage1)
+              for off in range(0,qlen,8):
+                  v=struct.unpack_from("<Q",q,off)[0]
+                  struct.pack_into("<Q",q,off,v ^ 0x3800CD0D)
+              qmatch=(bytes(q[:qlen])==stage2[:qlen])
+
+          result={
+            "source_length":len(source),
+            "source_sha256":hashlib.sha256(source).hexdigest(),
+            "state313_source_length":ev313.get("source_local27_len"),
+            "state313_source_sha256":ev313.get("source_local27_sha256"),
+            "state313_source_equals_h15":ev313.get("source_local27_sha256")==hashlib.sha256(source).hexdigest(),
+            "state313_initial_accumulator":ev313.get("local105"),
+            "state313_key_hex":keyhex,
+            "key_length":len(key),
+            "key_write_event_count":len(key17),
+            "key_concrete_indices":concrete_indices,
+            "key_all_32_indices_observed":concrete_indices==list(range(32)),
+            "key_observed_value_sets":value_sets,
+            "key_unique_value_per_index":unique_value_per_index,
+            "state313_key_matches_unique_writes":key_matches_unique_writes,
+            "exact_il_transform_links":exact_il,
+            "exact_il_transform_links_all":all(exact_il.values()),
+            "reference_recompute_compare_len":compare_len,
+            "reference_recompute_matches_stage1_prefix":prefix_match,
+            "qword_xor_compare_len":qlen,
+            "qword_xor_matches_stage2_prefix":qmatch,
+            "hashtable_ctor_events":ctor,
+            "derived_state565_capacities":derived_caps,
+            "parser_violations":violations,
+            "parser_input_semantically_valid":len(violations)==0,
+            "native_path_semantically_trusted":len(violations)==0,
+            "stage2_first_int_is_not_a_format_proof":True,
+            "interpretation":"If transform links and recomputation match but parser sanity fails, do not treat later native/JIT/WPM control flow as executed semantics. Next target becomes key/path provenance or a missing pre-parser transform, while the JIT-store architecture remains independently proven statically."
+          }
+          (ev/"49_STAGE1_KEY_PARSER_SANITY.json").write_text(json.dumps(result,indent=2,ensure_ascii=False)+"\n")
+          print(json.dumps(result,indent=2,ensure_ascii=False))
+          PY
+
       - name: Validate any recovered plaintext and search method-store mappings
         shell: bash
         run: |
@@ -2019,17 +2550,82 @@ jobs:
                   "rid_2092_le_offsets":[m.start() for m in re.finditer(re.escape(struct.pack("<I",2092)),data)][:100],
               })
 
+          try: jit=json.loads((ev/"36_JIT_STORE_ARCHITECTURE.json").read_text())
+          except: jit={}
+          try: sanity=json.loads((ev/"49_STAGE1_KEY_PARSER_SANITY.json").read_text())
+          except: sanity={}
           result={
               "plaintext_milestone_candidates":candidates[:100],
               "decrypted_files":files,
+              "jit_store_architecture_proven":jit.get("jit_store_architecture_proven",False),
+              "parser_input_semantically_valid":sanity.get("parser_input_semantically_valid",False),
+              "store_entry_extraction_allowed":bool(jit.get("jit_store_architecture_proven")) and bool(sanity.get("parser_input_semantically_valid")),
               "update_method_body_recovered":False,
-              "note":"A token/RID hit alone is not sufficient; body mapping must be tied to protector store format."
+              "note":"A token/RID hit alone is not sufficient. Exact mapping from one XdYe0BEvZM key/value entry to UpdateCommandThread token 0x0600082C/RVA 0xA3F4 is required. Invalid parser input blocks semantic use of emulator-generated store/native paths."
           }
           (ev/"50_METHOD_STORE_SEARCH.json").write_text(
               json.dumps(result,indent=2,ensure_ascii=False)+"\n")
           PY
 
-      - name: Build conservative R117 verdict and artifact
+      - name: Build exact A3F4 patch-byte promotion gate fail-closed
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import os,json
+
+          out=Path(os.environ["OUT"]); ev=out/"evidence"
+          def load(name,default):
+              try:return json.loads((ev/name).read_text())
+              except:return default
+
+          native=load("35_NATIVE_WRITE_TRACE.json",{})
+          sanity=load("49_STAGE1_KEY_PARSER_SANITY.json",{})
+          target=load("36C_TARGET_METHOD_PE_PROVENANCE.json",{})
+          store=load("50_METHOD_STORE_SEARCH.json",{})
+          a3f4=0xA3F4
+          exact=[]
+          for w in native.get("writes",[]):
+              r=w.get("rva"); n=w.get("size"); hx=w.get("new_hex")
+              if not (isinstance(r,int) and isinstance(n,int) and isinstance(hx,str)): continue
+              if not (r <= a3f4 < r+n): continue
+              try: data=bytes.fromhex(hx)
+              except: continue
+              if len(data)!=n: continue
+              off=a3f4-r
+              exact.append({
+                "write_rva":r,"write_rva_hex":hex(r),"write_size":n,
+                "source":w.get("source"),"target_origin":w.get("target_origin"),
+                "pe_image_provenance":w.get("pe_image_provenance") is True,
+                "main_state":w.get("main_state"),"step":w.get("step"),
+                "old_hex":w.get("old_hex"),"new_hex":hx,
+                "offset_to_A3F4":off,"bytes_from_A3F4_hex":data[off:].hex().upper(),
+                "reader_positions":w.get("reader_positions",[])
+              })
+
+          proven=[x for x in exact if x["pe_image_provenance"] and str(x.get("target_origin","")).startswith("PE_IMAGE:")]
+          method_identity=bool(target.get("target_method",{}).get("method_identity_proven"))
+          parser_valid=bool(sanity.get("parser_input_semantically_valid"))
+          # The current dynamic/native path is only semantically usable if its parser input is valid.
+          promotion=bool(method_identity and parser_valid and proven)
+          gate={
+            "target_rid":2092,"target_token":"0x0600082C","target_rva":"0xA3F4",
+            "method_identity_proven":method_identity,
+            "parser_input_semantically_valid":parser_valid,
+            "jit_store_architecture_proven":bool(store.get("jit_store_architecture_proven")),
+            "all_A3F4_covering_write_candidates":exact,
+            "pe_proven_A3F4_writes":proven,
+            "exact_patch_bytes_proven":promotion,
+            "protected_update_body_recovered":promotion,
+            "fail_closed_reason":None if promotion else "Requires MethodDef identity + semantically valid parser/native path + exact write covering A3F4 whose pointer origin is explicitly PE_IMAGE (for example Marshal.GetHINSTANCE-derived). Raw numeric-in-range pointers do not qualify.",
+            "live_board_commands_allowed":False
+          }
+          (ev/"53_EXACT_TARGET_PATCH_GATE.json").write_text(json.dumps(gate,indent=2,ensure_ascii=False)+"\n")
+          print(json.dumps(gate,indent=2,ensure_ascii=False))
+          PY
+
+      - name: Build conservative R118 verdict and artifact
         shell: bash
         run: |
           set -euo pipefail
@@ -2048,6 +2644,11 @@ jobs:
           hyp=load("11_H15_HEADER15_HYPOTHESIS.json",{})
           multi=load("45_EXACT_CRYPTO_GATE_REPORT.json",{})
           store=load("50_METHOD_STORE_SEARCH.json",{})
+          sanity=load("49_STAGE1_KEY_PARSER_SANITY.json",{})
+          jit=load("36_JIT_STORE_ARCHITECTURE.json",{})
+          patchgate=load("53_EXACT_TARGET_PATCH_GATE.json",{})
+          helperres=load("36A_ALL_HELPER_RESOLUTION.json",{})
+          targetprov=load("36C_TARGET_METHOD_PE_PROVENANCE.json",{})
 
           verdict={
               "exact_switch_mapping_corrected":sw.get("state_392_mapping_correct",False),
@@ -2062,21 +2663,27 @@ jobs:
               "vm_reached_local12":vm.get("reached_local12",False),
               "vm_reached_create_decryptor":multi.get("create_decryptor_reached",vm.get("reached_create_decryptor",False)),
               "vm_reached_aes_decrypt":multi.get("aes_decrypt_reached",vm.get("reached_aes_decrypt",False)),
-              "protected_update_body_recovered":(
-              bool(load("47_STAGE2_PARSER_NATIVE_ANALYSIS.json",{}).get("update_rva_A3F4_write_hits"))
-              or store.get("update_method_body_recovered",False)
-            ),
+              "stage1_reference_recompute_matches":sanity.get("reference_recompute_matches_stage1_prefix",False),
+              "qword_xor_matches_stage2":sanity.get("qword_xor_matches_stage2_prefix",False),
+              "parser_input_semantically_valid":sanity.get("parser_input_semantically_valid",False),
+              "jit_store_architecture_proven":jit.get("jit_store_architecture_proven",False),
+              "native_path_semantically_trusted":sanity.get("native_path_semantically_trusted",False),
+              "target_method_identity_proven":targetprov.get("target_method",{}).get("method_identity_proven",False),
+              "r117_blocker_missing_count":len(helperres.get("r117_blocker_missing",[])),
+              "pe_proven_A3F4_write_count":len(patchgate.get("pe_proven_A3F4_writes",[])),
+              "exact_patch_bytes_proven":patchgate.get("exact_patch_bytes_proven",False),
+              "protected_update_body_recovered":patchgate.get("protected_update_body_recovered",False),
               "firmware_readback_primitive_proven":False,
               "full_flash_readback_proven":False,
               "live_board_commands_allowed":False,
-              "next_gate":"Accept UpdateCommandThread recovery only when a Marshal or WriteProcessMemory event has exact PE-image provenance and covers RVA 0xA3F4. Nested-switch cases never count as main-state evidence."
+              "next_gate":"Require exact PE_IMAGE-proven write bytes covering RVA 0xA3F4 and valid parser/native semantics. Continue resolving R117 blocker wrappers and XdYe0BEvZM key/value mapping. No live USB promotion from protector evidence."
           }
 
-          (review/"60_R117_VERDICT.json").write_text(
+          (review/"60_R118_VERDICT.json").write_text(
               json.dumps(verdict,indent=2,ensure_ascii=False)+"\n")
 
           lines=[
-              "OKN R117 MAIN-SWITCH + WRITEPROCESSMEMORY RECOVERY",
+              "OKN R118 JIT STORE + PE PROVENANCE RECOVERY",
               "OFFLINE_ONLY=true",
               f"EXACT_SWITCH_MAPPING_CORRECTED={str(verdict['exact_switch_mapping_corrected']).lower()}",
               f"SWITCH_TARGET_COUNT={verdict['switch_target_count']}",
@@ -2088,12 +2695,21 @@ jobs:
               f"VM_REACHED_LOCAL12={str(verdict['vm_reached_local12']).lower()}",
               f"VM_REACHED_CREATE_DECRYPTOR={str(verdict['vm_reached_create_decryptor']).lower()}",
               f"VM_REACHED_AES_DECRYPT={str(verdict['vm_reached_aes_decrypt']).lower()}",
-              "PROTECTED_UPDATE_BODY_RECOVERED=false",
+              f"STAGE1_REFERENCE_RECOMPUTE_MATCHES={str(verdict['stage1_reference_recompute_matches']).lower()}",
+              f"QWORD_XOR_MATCHES_STAGE2={str(verdict['qword_xor_matches_stage2']).lower()}",
+              f"PARSER_INPUT_SEMANTICALLY_VALID={str(verdict['parser_input_semantically_valid']).lower()}",
+              f"JIT_STORE_ARCHITECTURE_PROVEN={str(verdict['jit_store_architecture_proven']).lower()}",
+              f"NATIVE_PATH_SEMANTICALLY_TRUSTED={str(verdict['native_path_semantically_trusted']).lower()}",
+              f"TARGET_METHOD_IDENTITY_PROVEN={str(verdict['target_method_identity_proven']).lower()}",
+              f"R117_BLOCKER_MISSING_COUNT={verdict['r117_blocker_missing_count']}",
+              f"PE_PROVEN_A3F4_WRITE_COUNT={verdict['pe_proven_A3F4_write_count']}",
+              f"EXACT_PATCH_BYTES_PROVEN={str(verdict['exact_patch_bytes_proven']).lower()}",
+              f"PROTECTED_UPDATE_BODY_RECOVERED={str(verdict['protected_update_body_recovered']).lower()}",
               "FIRMWARE_READBACK_PRIMITIVE_PROVEN=false",
               "FULL_FLASH_READBACK_PROVEN=false",
               "LIVE_BOARD_COMMANDS_ALLOWED=false"
           ]
-          (review/"61_R117_SUMMARY.txt").write_text("\n".join(lines)+"\n")
+          (review/"61_R118_SUMMARY.txt").write_text("\n".join(lines)+"\n")
 
           for p in ev.iterdir():
               if p.is_file():shutil.copy2(p,review/p.name)
@@ -2104,6 +2720,9 @@ jobs:
 
           print("\n".join(lines))
           PY
+
+          mkdir -p "$OUT/review/decrypted"
+          cp -f "$OUT/decrypted/"* "$OUT/review/decrypted/" 2>/dev/null || true
 
           cat > "$OUT/review/99_SAFETY_ATTESTATION.txt" <<'EOF'
           OFFLINE_STATIC_ONLY=true
@@ -2125,7 +2744,7 @@ jobs:
         shell: bash
         run: |
           {
-            echo "## OKN R117 MEGA Main-Switch + WriteProcessMemory Recovery"
+            echo "## OKN R118 MEGA JIT Store + PE Provenance Recovery"
             echo
             echo "- Static/offline only; official EXE is never executed."
             echo "- Uses deterministic N9 method slicing; avoids the catastrophic R110 regex."
@@ -2133,21 +2752,21 @@ jobs:
             echo "- Accelerates both proven transforms, traces BinaryReader records, models key Marshal/IntPtr operations, and records static module writes."
             echo "- No DSP/USB activity."
             echo
-            if [ -f "$OUT/review/61_R117_SUMMARY.txt" ]; then
+            if [ -f "$OUT/review/61_R118_SUMMARY.txt" ]; then
               echo '```text'
-              cat "$OUT/review/61_R117_SUMMARY.txt"
+              cat "$OUT/review/61_R118_SUMMARY.txt"
               echo '```'
             fi
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Upload R117 evidence
+      - name: Upload R118 evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: R117-MAIN-SWITCH-WPM-RECOVERY-EVIDENCE
+          name: R118-JIT-STORE-PE-PROVENANCE-EVIDENCE
           path: |
-            /tmp/r117/review
-            /tmp/r117/evidence
-            /tmp/r117/decrypted
+            /tmp/r118/review
+            /tmp/r118/evidence
+            /tmp/r118/decrypted
           if-no-files-found: warn
           retention-days: 30
