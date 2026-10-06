@@ -1,4 +1,4 @@
-name: OKN R118 MEGA Main-Switch + JIT Store + PE Provenance Recovery OFFLINE ONLY
+name: OKN R118B CURRENT Pre-Parser + JIT Store + PE Provenance Recovery OFFLINE ONLY
 
 on:
   push:
@@ -12,7 +12,7 @@ permissions:
   actions: read
 
 concurrency:
-  group: okn-r118-main-jitstore-peprov-${{ github.ref }}
+  group: okn-r118b-current-preparser-jitstore-peprov-${{ github.ref }}
   cancel-in-progress: true
 
 env:
@@ -27,11 +27,11 @@ env:
 
 jobs:
   recover:
-    name: Stage2 store parser and native patch tracing
+    name: R118B pre-parser semantics + Stage2 store + PE patch tracing
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     env:
-      OUT: /tmp/r118
+      OUT: /tmp/r118b
 
     steps:
       - name: Fail-closed static-only safety gate
@@ -48,7 +48,7 @@ jobs:
           mkdir -p "$OUT"/{downloads,pkg,il,resources,decrypted,evidence,review}
 
           cat > "$OUT/evidence/00_SCOPE.txt" <<'EOF'
-          REVISION=R118
+          REVISION=R118B_CURRENT_TRACK
           MODE=OFFLINE_STATIC_ONLY
           TARGET_EXECUTED=false
           EXECUTE_OFFICIAL_CLIENT=NO
@@ -844,6 +844,21 @@ jobs:
           RM=json.loads((OUT/"evidence/10_RESOURCE_MAP.json").read_text())
           RESOURCE_BY_NAME={r["name"]:(OUT/"resources"/r["file"]).read_bytes() for r in RM}
 
+          # Exact self-assembly public-key token reconstructed from the static IL
+          # .publickey blob. Assembly.GetName().GetPublicKeyToken() is used by the
+          # protector before the stage1 transform; R118 incorrectly left this as
+          # UNKNOWN and also failed to model the adjacent Array.Reverse call.
+          ALL_IL=(OUT/"il/all.il").read_text(errors="ignore")
+          OFFICIAL_PUBLIC_KEY_TOKEN=b""
+          asm_match=re.search(r'(?ms)^\.assembly\s+(?!extern\b)[^\n{]+\{(.*?)^\}',ALL_IL)
+          if asm_match:
+              pk_match=re.search(r'(?is)\.publickey\s*=\s*\((.*?)\)',asm_match.group(1))
+              if pk_match:
+                  hx=re.sub(r'[^0-9A-Fa-f]','',pk_match.group(1))
+                  if hx and len(hx)%2==0:
+                      pk=bytes.fromhex(hx)
+                      OFFICIAL_PUBLIC_KEY_TOKEN=hashlib.sha1(pk).digest()[-8:][::-1]
+
           # Static PE image model. This is only a bytearray representation of the
           # official EXE on the runner; the target executable is never started.
           PE=pefile.PE(str(OUT/"dstech.exe"),fast_load=False)
@@ -907,7 +922,24 @@ jobs:
 
           class AssemblyObj:
               def __init__(self,name="official_client"):
-                  self.name=name; self.entrypoint=object()
+                  self.name=name; self.entrypoint=object(); self.public_key_token=OFFICIAL_PUBLIC_KEY_TOKEN
+
+          class AssemblyNameObj:
+              def __init__(self,assembly):
+                  self.assembly=assembly
+                  self.public_key_token=getattr(assembly,"public_key_token",b"")
+
+          class ProcessObj:
+              def __init__(self,name="current_process"): self.name=name
+
+          class ModuleHandleObj:
+              def __init__(self,module): self.module=module
+
+          class MethodInfoObj:
+              def __init__(self,name="method",ptr=None): self.name=name; self.ptr=ptr or Ptr("delegate_fn",0)
+
+          class RuntimeMethodHandleObj:
+              def __init__(self,method): self.method=method
 
           class RuntimeModuleObj:
               def __init__(self,name="dstech.exe"):
@@ -1117,6 +1149,62 @@ jobs:
               if name in TRUE_FUN:return True
               if name in NULL_FUN:return None
               if name=="tFjbT6Nj4GDWeki27kh":return 4
+              if name=="wXOoXMNhkaDkYMRWNd9":
+                  # Exact wrapper: System.Array.Reverse(Array). Mutates in place.
+                  a=deref_value(s,args[-1]) if args else None
+                  if isinstance(a,bytearray): a.reverse()
+                  elif isinstance(a,list): a.reverse()
+                  return None
+              if name=="vml6RVN553UfRTfZJaS":
+                  # Exact wrapper: Assembly.GetName().
+                  a=deref_value(s,args[-1]) if args else None
+                  return AssemblyNameObj(a) if isinstance(a,AssemblyObj) else U("AssemblyName")
+              if name=="zWct5BNlyiRacwo0U8Y":
+                  # Exact wrapper: AssemblyName.GetPublicKeyToken().
+                  a=deref_value(s,args[-1]) if args else None
+                  return bytes(a.public_key_token) if isinstance(a,AssemblyNameObj) else U("PublicKeyToken")
+              if name=="SMPFNLNr5St51O5T1Ai":
+                  # Exact wrapper: String.Length.
+                  v=deref_value(s,args[-1]) if args else None
+                  return len(v) if isinstance(v,(str,bytes,bytearray,list,tuple)) else U("Length")
+              if name=="fvbj6XN1po7KOwRE0UL":
+                  return ProcessObj()
+              if name=="IBOK1sNMCPak9gPh7y1":
+                  # Exact wrapper: Marshal.ReadIntPtr(ptr,offset). PE32 => 4 bytes.
+                  p=deref_value(s,args[-2]) if len(args)>=2 else None
+                  off=deref_value(s,args[-1]) if args else 0
+                  if isinstance(p,Ptr) and isinstance(off,int):
+                      q=Ptr(p.region,p.offset+off,p.buf); raw=ptr_read(s,q,4)
+                      if isinstance(raw,(bytes,bytearray)) and len(raw)==4:
+                          v=struct.unpack("<I",bytes(raw))[0]
+                          if MODULE_BASE <= v < MODULE_BASE+MODULE_SIZE: return Ptr("module",v-MODULE_BASE)
+                          return v
+                  return U("ReadIntPtr")
+              if name=="OqRPwWNg7T0cT923rlN":
+                  # Stream.Close; no mutation relevant to static bytes.
+                  return None
+              if name=="Y4mRnEKeBbcRNvnWree":
+                  a=deref_value(s,args[-1]) if args else None
+                  return RuntimeModuleObj(getattr(a,"name","dstech.exe")) if isinstance(a,AssemblyObj) else U("ManifestModule")
+              if name=="TSAMwxKIbYodtJW1Fqu":
+                  m=deref_value(s,args[-1]) if args else None
+                  return ModuleHandleObj(m) if isinstance(m,RuntimeModuleObj) else U("ModuleHandle")
+              if name=="DD2WALKyLudZcN08ACL":
+                  obj=deref_value(s,args[-1]) if args else None
+                  return TypeObj(type(obj).__name__)
+              if name=="O4TWuUKjsPejWiKyMyP":
+                  # MethodBase.GetParameters; only length/shape is needed on this path.
+                  return []
+              if name=="BVUDNWKaRepeWLIgaBG":
+                  return None
+              if name=="sr6wPbKWSDX3hWy8TAY":
+                  d=deref_value(s,args[-1]) if args else None
+                  return MethodInfoObj(getattr(d,"name","delegate_method"),getattr(d,"ptr",None)) if isinstance(d,DelegateObj) else U("MethodInfo")
+              if name=="Bjp8CNKZDSll9YMJaBT":
+                  m=deref_value(s,args[-1]) if args else None
+                  return RuntimeMethodHandleObj(m) if isinstance(m,MethodInfoObj) else U("RuntimeMethodHandle")
+              if name=="l5ZnY5KdvdQ3hp82Mw5":
+                  return None
               if name=="KjwCViKMprdN7AYfu5Q": return TypeObj("q71r2Rj8SiD9GF1BI50",AssemblyObj())
               if name=="get_Assembly":
                   obj=deref_value(s,args[0]) if args else None
@@ -1284,7 +1372,7 @@ jobs:
                       before=r.s.pos
                       if before+4<=len(r.s.data):
                           v=struct.unpack_from("<i",r.s.data,before)[0]; r.s.pos+=4
-                          rr={"kind":"ReadInt32","before":before,"after":r.s.pos,"value":v,"step":s.steps}
+                          rr={"kind":"ReadInt32","before":before,"after":r.s.pos,"value":v,"step":s.steps,"main_state":s.statics.get("__last_main_state")}
                           s.reads.append({"op":"ReadInt32","before":before,"after":r.s.pos,"value":v})
                           GLOBAL_EVENTS.append(rr)
                           return v
@@ -1308,7 +1396,8 @@ jobs:
                       remaining=max(0,len(r.s.data)-before)
                       data=r.s.data[before:before+n]; r.s.pos+=len(data)
                       rr={"kind":"ReadBytes","before":before,"after":r.s.pos,
-                          "requested":n,"returned":len(data),"remaining_before":remaining,"step":s.steps}
+                          "requested":n,"returned":len(data),"remaining_before":remaining,"step":s.steps,
+                          "main_state":s.statics.get("__last_main_state")}
                       if n > remaining:
                           violation={"kind":"READBYTES_EXCEEDS_REMAINING","before":before,"requested":n,"remaining":remaining,"step":s.steps}
                           PARSER_VIOLATIONS.append(violation); GLOBAL_EVENTS.append(violation)
@@ -1535,6 +1624,9 @@ jobs:
                                       bytes(s.locals[8]).hex().upper()
                                       if isinstance(s.locals[8],(bytes,bytearray)) else None
                                   ),
+                                  "local29_len":len(s.locals[29]) if isinstance(s.locals[29],(bytes,bytearray)) else None,
+                                  "local29_sha256":hashlib.sha256(bytes(s.locals[29])).hexdigest() if isinstance(s.locals[29],(bytes,bytearray)) else None,
+                                  "local29_head64":bytes(s.locals[29])[:64].hex().upper() if isinstance(s.locals[29],(bytes,bytearray)) else None,
                               }
                               if v==96 and isinstance(s.locals[37],bytearray):
                                   stage=bytes(s.locals[37])
@@ -2253,7 +2345,13 @@ jobs:
           main=vm.get("global_reach_main_only",[]); nested=vm.get("nested_switch_events",[])
           ints=[x for x in vm.get("global_events",[]) if x.get("kind")=="ReadInt32"]
           first=next((x.get("value") for x in ints if x.get("before")==0),None)
-          selector="AES_FORMAT_4" if first==4 else ("FORMAT_1" if first==1 else ("UNKNOWN_NO_READ" if first is None else "NATIVE_OTHER_FORMAT"))
+          snap289=next((x for x in vm.get("main_state_snapshots",[]) if x.get("main_state")==289),{})
+          selector_before=snap289.get("reader_pos")
+          selector_event=next((x for x in ints if x.get("before")==selector_before and x.get("main_state")==289),None)
+          if selector_event is None:
+              selector_event=next((x for x in ints if x.get("before")==selector_before),None)
+          selector_value=selector_event.get("value") if selector_event else None
+          selector="AES_FORMAT_4" if selector_value==4 else ("FORMAT_1" if selector_value==1 else ("UNKNOWN_NO_READ" if selector_value is None else "NATIVE_OTHER_FORMAT"))
           mism=[]
           for x in main:
             st=x.get("state")
@@ -2262,7 +2360,12 @@ jobs:
             "canonical_main_switch_size":len(sw["all_targets"]),
             "main_event_count":len(main),"nested_switch_event_count":len(nested),
             "main_target_mismatch_count":len(mism),"main_target_mismatches":mism[:100],
-            "stage2_first_int32":first,"stage2_format_selector":selector,
+            "stage2_first_int32":first,
+            "format_selector_source_main_state":289,
+            "format_selector_test_main_state":292,
+            "format_selector_reader_offset":selector_before,
+            "format_selector_value":selector_value,
+            "stage2_format_selector":selector,
             "state289_main_target":sw["all_targets"][289],"state292_main_target":sw["all_targets"][292],
             "state402_main_target":sw["all_targets"][402],"state281_main_target":sw["all_targets"][281],
             "h15_full_resource_read_proven":any(x.get("kind")=="ReadBytes" and x.get("before")==0 and x.get("requested")==607967 and x.get("returned")==607967 for x in vm.get("global_events",[])),
@@ -2348,6 +2451,50 @@ jobs:
             "native_write_count":result["native_write_count"],
             "update_rva_hits":len(result["update_rva_A3F4_write_hits"]),
           },indent=2))
+          PY
+
+      - name: Prove pre-parser wrapper semantics and exact format-selector provenance
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import os,json,re,hashlib,struct
+          out=Path(os.environ["OUT"]); ev=out/"evidence"
+          vm=json.loads((ev/"30_VM_SUMMARY.json").read_text())
+          audit=json.loads((ev/"48_MAIN_SWITCH_NATIVE_SELECTOR_AUDIT.json").read_text())
+          helpers=json.loads((ev/"53_R117_BLOCKER_HELPER_RESOLUTION.json").read_text())
+          n9=(ev/"20_N9_METHOD.il").read_text(errors="ignore")
+
+          exact={
+            "array_reverse_wrapper": any(d.get("name")=="wXOoXMNhkaDkYMRWNd9" and "System.Array::Reverse" in d.get("body","") for d in helpers.get("definitions",[])),
+            "assembly_getname_wrapper": any(d.get("name")=="vml6RVN553UfRTfZJaS" and "Assembly::GetName" in d.get("body","") for d in helpers.get("definitions",[])),
+            "public_key_token_wrapper": any(d.get("name")=="zWct5BNlyiRacwo0U8Y" and "AssemblyName::GetPublicKeyToken" in d.get("body","") for d in helpers.get("definitions",[])),
+            "selector_read_state289": "IL_1969: ldloc.s 114" in n9 and "IL_196b: call int32" in n9 and "qfkv4ZNDynVciIciQy6" in n9[n9.find("IL_1969:"):n9.find("IL_1969:")+250],
+            "selector_test_state292_eq4": "IL_59b1: ldloc.s 28" in n9 and "IL_59b3: ldc.i4.4" in n9 and "IL_59b4: bne.un IL_5d8f" in n9,
+            "selector_test_fallback_eq1": "IL_5d8f: ldloc.s 28" in n9 and "IL_5d91: ldc.i4.1" in n9 and "IL_5d92: bne.un IL_45a9" in n9,
+          }
+          unknown=vm.get("unknown_calls",[])
+          pre=[x for x in unknown if isinstance(x.get("step"),int) and x["step"] < min([e.get("step",10**18) for e in vm.get("global_events",[]) if e.get("kind")=="ReadInt32"] or [10**18])]
+          critical_names={"wXOoXMNhkaDkYMRWNd9","vml6RVN553UfRTfZJaS","zWct5BNlyiRacwo0U8Y","SMPFNLNr5St51O5T1Ai"}
+          critical_unknown=[x for x in pre if x.get("name") in critical_names]
+
+          snaps=vm.get("global_reach_main_only",[])
+          parser_gate=[x for x in snaps if x.get("state") in (96,206,510,487,162,464,94,52,289,292,558,565)]
+          s94=next((x for x in parser_gate if x.get("state")==94),{})
+          result={
+            "current_track":"R118B",
+            "exact_static_wrapper_proofs":exact,
+            "all_static_wrapper_proofs":all(exact.values()),
+            "critical_preparser_unknown_calls_remaining":critical_unknown,
+            "critical_preparser_unknown_count":len(critical_unknown),
+            "parser_gate_main_states":[x.get("state") for x in parser_gate],
+            "local29_at_state94":{"length":s94.get("local29_len"),"sha256":s94.get("local29_sha256"),"head64":s94.get("local29_head64")},
+            "format_selector":{"source_main_state":audit.get("format_selector_source_main_state"),"test_main_state":audit.get("format_selector_test_main_state"),"reader_offset":audit.get("format_selector_reader_offset"),"value":audit.get("format_selector_value"),"classification":audit.get("stage2_format_selector")},
+            "rule":"Do not promote native parser/write semantics when the exact state289 selector stream is not semantically valid. First eliminate proven pre-parser wrapper unknowns and preserve canonical main/nested switch separation."
+          }
+          (ev/"58_R118B_PREPARSER_SELECTOR_PROVENANCE.json").write_text(json.dumps(result,indent=2,ensure_ascii=False)+"\n")
+          print(json.dumps(result,indent=2,ensure_ascii=False))
           PY
 
       - name: Validate stage1 transform key provenance and parser sanity fail-closed
@@ -2562,7 +2709,7 @@ jobs:
               json.dumps(result,indent=2,ensure_ascii=False)+"\n")
           PY
 
-      - name: Build conservative R118 verdict and artifact
+      - name: Build conservative R118B current-track verdict and artifact
         shell: bash
         run: |
           set -euo pipefail
@@ -2586,6 +2733,7 @@ jobs:
           native=load("35_NATIVE_WRITE_TRACE.json",{})
           static_status=load("57_STATIC_HELPER_PE_STATUS.json",{})
           main_audit=load("48_MAIN_SWITCH_NATIVE_SELECTOR_AUDIT.json",{})
+          prep=load("58_R118B_PREPARSER_SELECTOR_PROVENANCE.json",{})
           pe_hits=[x for x in native.get("update_rva_A3F4_hits",[]) if x.get("pointer_provenance")=="PE_IMAGE" and x.get("new_hex")]
           wpm_hits=[x for x in native.get("write_process_memory_A3F4_hits",[]) if x.get("pointer_provenance")=="PE_IMAGE" and x.get("new_hex")]
           exact_patch_events=[]
@@ -2621,6 +2769,10 @@ jobs:
               "native_path_semantically_trusted":sanity.get("native_path_semantically_trusted",False),
               "target_methoddef_identity_exact":static_status.get("target_methoddef_identity_exact",False),
               "canonical_main_target_mismatches":main_audit.get("main_target_mismatch_count"),
+              "format_selector_reader_offset":main_audit.get("format_selector_reader_offset"),
+              "format_selector_value":main_audit.get("format_selector_value"),
+              "format_selector_classification":main_audit.get("stage2_format_selector"),
+              "critical_preparser_unknown_count":prep.get("critical_preparser_unknown_count"),
               "pe_image_A3F4_write_hit_count":len(pe_hits),
               "write_process_memory_A3F4_hit_count":len(wpm_hits),
               "exact_pe_patch_events":exact_patch_events,
@@ -2631,11 +2783,11 @@ jobs:
               "next_gate":"Accept recovery only when exact new bytes from an official-protector Marshal/WriteProcessMemory-equivalent event have PE_IMAGE provenance and cover RVA 0xA3F4, with canonical 689-state main-switch evidence kept separate from nested switches. No live USB promotion from protector evidence."
           }
 
-          (review/"60_R118_VERDICT.json").write_text(
+          (review/"60_R118B_VERDICT.json").write_text(
               json.dumps(verdict,indent=2,ensure_ascii=False)+"\n")
 
           lines=[
-              "OKN R118 MAIN-SWITCH + JIT STORE + PE PROVENANCE RECOVERY",
+              "OKN R118B CURRENT-TRACK PRE-PARSER + JIT STORE + PE PROVENANCE RECOVERY",
               "OFFLINE_ONLY=true",
               f"EXACT_SWITCH_MAPPING_CORRECTED={str(verdict['exact_switch_mapping_corrected']).lower()}",
               f"SWITCH_TARGET_COUNT={verdict['switch_target_count']}",
@@ -2654,6 +2806,10 @@ jobs:
               f"NATIVE_PATH_SEMANTICALLY_TRUSTED={str(verdict['native_path_semantically_trusted']).lower()}",
               f"TARGET_METHODDEF_IDENTITY_EXACT={str(verdict['target_methoddef_identity_exact']).lower()}",
               f"CANONICAL_MAIN_TARGET_MISMATCHES={verdict['canonical_main_target_mismatches']}",
+              f"FORMAT_SELECTOR_OFFSET={verdict['format_selector_reader_offset']}",
+              f"FORMAT_SELECTOR_VALUE={verdict['format_selector_value']}",
+              f"FORMAT_SELECTOR_CLASS={verdict['format_selector_classification']}",
+              f"CRITICAL_PREPARSER_UNKNOWNS={verdict['critical_preparser_unknown_count']}",
               f"PE_IMAGE_A3F4_WRITE_HITS={verdict['pe_image_A3F4_write_hit_count']}",
               f"WRITEPROCESSMEMORY_A3F4_HITS={verdict['write_process_memory_A3F4_hit_count']}",
               f"PROTECTED_UPDATE_BODY_RECOVERED={str(verdict['protected_update_body_recovered']).lower()}",
@@ -2661,7 +2817,7 @@ jobs:
               "FULL_FLASH_READBACK_PROVEN=false",
               "LIVE_BOARD_COMMANDS_ALLOWED=false"
           ]
-          (review/"61_R118_SUMMARY.txt").write_text("\n".join(lines)+"\n")
+          (review/"61_R118B_SUMMARY.txt").write_text("\n".join(lines)+"\n")
 
           for p in ev.iterdir():
               if p.is_file():shutil.copy2(p,review/p.name)
@@ -2697,7 +2853,7 @@ jobs:
         shell: bash
         run: |
           {
-            echo "## OKN R118 MEGA Main-Switch + JIT Store + PE Provenance Recovery"
+            echo "## OKN R118B CURRENT-TRACK Pre-Parser + JIT Store + PE Provenance Recovery"
             echo
             echo "- Static/offline only; official EXE is never executed."
             echo "- Uses deterministic N9 method slicing; avoids the catastrophic R110 regex."
@@ -2705,21 +2861,21 @@ jobs:
             echo "- Accelerates both proven transforms, traces BinaryReader records, models key Marshal/IntPtr operations, and records static module writes."
             echo "- No DSP/USB activity."
             echo
-            if [ -f "$OUT/review/61_R118_SUMMARY.txt" ]; then
+            if [ -f "$OUT/review/61_R118B_SUMMARY.txt" ]; then
               echo '```text'
-              cat "$OUT/review/61_R118_SUMMARY.txt"
+              cat "$OUT/review/61_R118B_SUMMARY.txt"
               echo '```'
             fi
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Upload R118 evidence
+      - name: Upload R118B current-track evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: R118-MAIN-JIT-PE-PROVENANCE-EVIDENCE
+          name: R118B-CURRENT-PREPARSER-JIT-PE-PROVENANCE-EVIDENCE
           path: |
-            /tmp/r118/review
-            /tmp/r118/evidence
-            /tmp/r118/decrypted
+            /tmp/r118b/review
+            /tmp/r118b/evidence
+            /tmp/r118b/decrypted
           if-no-files-found: warn
           retention-days: 30
