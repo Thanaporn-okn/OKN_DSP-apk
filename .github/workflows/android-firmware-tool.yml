@@ -1,4 +1,4 @@
-name: OKN R118B CURRENT Pre-Parser + JIT Store + PE Provenance Recovery OFFLINE ONLY
+name: OKN R118C Phase2 Metadata Provenance + R118B Continuation OFFLINE ONLY
 
 on:
   push:
@@ -12,7 +12,7 @@ permissions:
   actions: read
 
 concurrency:
-  group: okn-r118b-current-preparser-jitstore-peprov-${{ github.ref }}
+  group: okn-r118c-phase2-provenance-${{ github.ref }}
   cancel-in-progress: true
 
 env:
@@ -27,11 +27,11 @@ env:
 
 jobs:
   recover:
-    name: R118B pre-parser semantics + Stage2 store + PE patch tracing
+    name: Stage2 store parser and native patch tracing
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     env:
-      OUT: /tmp/r118b
+      OUT: /tmp/r118c
 
     steps:
       - name: Fail-closed static-only safety gate
@@ -74,7 +74,7 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             unzip p7zip-full file curl python3 python3-pip
           python3 -m pip install --break-system-packages --quiet \
-            pefile dnfile pycryptodome capstone
+            pefile==2024.8.26 dnfile==0.18.0 dncil==1.0.2 pycryptodome capstone
 
       - name: Download official Windows client and dump IL
         shell: bash
@@ -116,6 +116,120 @@ jobs:
             echo "IDENTITY_MATCHED=true"
             echo "IL_BYTES=$(stat -c%s "$OUT/il/all.il")"
           } > "$OUT/evidence/02_IDENTITY.txt"
+
+      - name: Extract Phase2 metadata and exact on-disk IL provenance
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$OUT/protocol"
+          cat > "$OUT/protocol/analyze_client.py" <<'PHASE2_PY'
+          """Read-only PE metadata/IL inventory. Never loads or executes the target assembly."""
+          import hashlib,json,sys,re
+          from pathlib import Path
+          import dnfile
+          from dncil.cil.body import CilMethodBody
+          from dncil.cil.body.reader import CilMethodBodyReaderBytes
+          EXPECTED='3ca54171c53f7badd963ffe6851b8b3e2faf8aee8ba2afcb7040990e22ae09b2'
+          src=Path(sys.argv[1]);out=Path(sys.argv[2]);out.mkdir(parents=True,exist_ok=True)
+          data=src.read_bytes(); digest=hashlib.sha256(data).hexdigest()
+          if digest!=EXPECTED:raise SystemExit('Target SHA256 mismatch; STOP')
+          p=dnfile.dnPE(data=data); md=p.net.mdtables
+          type_names={}
+          for rid,t in enumerate(md.TypeDef.rows,1):
+           type_names[rid]=(str(t.TypeNamespace)+'.' if str(t.TypeNamespace) else '')+str(t.TypeName)
+          if md.NestedClass:
+           for _ in range(len(md.NestedClass.rows)+1):
+            changed=False
+            for n in md.NestedClass.rows:
+             rid=n.NestedClass.row_index; parent=n.EnclosingClass.row_index
+             name=type_names[parent]+'/'+str(n.NestedClass.row.TypeName)
+             if type_names[rid]!=name:type_names[rid]=name;changed=True
+            if not changed:break
+          owners={}
+          for rid,t in enumerate(md.TypeDef.rows,1):
+           owner=type_names[rid]
+           for index in t.MethodList:owners[index.row_index]=owner
+          
+          def resolve(tok):
+           val=getattr(tok,'value',tok)
+           if not isinstance(val,int):return str(tok)
+           table=val>>24;rid=val&0xffffff
+           if table==0x70:
+            try:return repr(p.net.user_strings.get(rid).value)
+            except Exception:return 'UNRESOLVED_USER_STRING:'+hex(val)
+           names={1:'TypeRef',2:'TypeDef',4:'Field',6:'MethodDef',10:'MemberRef',43:'MethodSpec'}
+           name=names.get(table)
+           if not name:return 'TOKEN:'+hex(val)
+           rows=getattr(md,name,None)
+           if rows is None or not 1<=rid<=len(rows.rows):return 'UNRESOLVED:'+hex(val)
+           row=rows.rows[rid-1]
+           if table==6:return owners.get(rid,'UNKNOWN')+'::'+str(row.Name)
+           if table==43:return 'MethodSpec:'+resolve((row.Method.table.number<<24)|row.Method.row_index)
+           if table==10:
+            parent=row.Class.row
+            label=str(getattr(parent,'TypeNamespace',''))+'.'+str(getattr(parent,'TypeName',getattr(parent,'Name','?')))
+            return label+'::'+str(row.Name)
+           return str(getattr(row,'TypeName',getattr(row,'Name',name)))
+          
+          methods=[];edges=[];errors=[]
+          for rid,m in enumerate(md.MethodDef.rows,1):
+           tok=0x06000000|rid
+           rec={'token':f'0x{tok:08X}','rid':rid,'owner':owners.get(rid),'name':str(m.Name),'rva':hex(m.Rva),'signature_hex':m.Signature.value.hex(),'instructions':[]}
+           if m.Rva:
+            try:
+             offset=p.get_offset_from_rva(m.Rva)
+             body=CilMethodBody(CilMethodBodyReaderBytes(data[offset:]))
+             rec.update(file_offset=offset,header_size=body.header_size,code_size=body.code_size,body_sha256=hashlib.sha256(body.raw_bytes).hexdigest())
+             ops=[]
+             for ins in body.instructions:
+              op=str(ins.opcode.name);operand=ins.operand
+              target=getattr(operand,'value',None)
+              rendered=resolve(operand) if target is not None else str(operand)
+              item={'il_offset':ins.offset-body.header_size,'opcode':op,'operand':rendered}
+              if target is not None:item['operand_token']=f'0x{target:08X}'
+              rec['instructions'].append(item);ops.append(op)
+              if op in ('call','callvirt','newobj','ldftn','ldvirtftn','jmp','calli'):
+               edges.append({'caller':rec['token'],'caller_name':owners.get(rid,'?')+'::'+str(m.Name),'il_offset':item['il_offset'],'opcode':op,'target_token':item.get('operand_token'),'target':rendered,'edge_kind':'method_reference' if op in ('ldftn','ldvirtftn') else 'call_site','runtime_dispatch_proven':False})
+             rec['minimal_body_pattern']=('void_return' if ops==['nop','nop','nop','ret'] else 'null_return' if ops==['nop','nop','ldnull','ret'] else 'constant_return' if len(ops)==4 and ops[:2]==['nop','nop'] and ops[2].startswith('ldc.i4') and ops[3]=='ret' else 'null_unbox_return' if ops==['nop','ldnull','unbox.any','ret'] else None)
+             rec['stub_like']= bool(ops) and ops[-1]=='ret' and all(x=='nop' for x in ops[:-1])
+            except Exception as e:
+             rec['parse_error']=type(e).__name__+': '+str(e);errors.append({'token':rec['token'],'error':rec['parse_error']})
+           methods.append(rec)
+          terms=re.compile(r'Update|Firmware|Flash|ReadSensor|WriteActuator|DeviceDescription|HidD_|ReadFile|WriteFile|SendCommand|Response|Receive|Reset|Unlock|Erase|Program',re.I)
+          candidates=[m for m in methods if terms.search((m['owner'] or '')+'::'+m['name'])]
+          target=next(m for m in methods if m['token']=='0x0600082C')
+          assert target['name']=='UpdateCommandThread' and target['rva']=='0xa3f4'
+          incoming=[e for e in edges if e['target_token']==target['token']]
+          caller_tokens={e['caller'] for e in incoming}
+          focus=[m for m in methods if m['token'] in caller_tokens or m['token']==target['token']]
+          status={'target_sha256':digest,'target_size':len(data),'method_count':len(methods),'parsed_body_count':sum('code_size' in m for m in methods),'parse_error_count':len(errors),'target':{k:v for k,v in target.items() if k!='instructions'},'incoming_direct_methoddef_references':incoming,'outgoing_references':[e for e in edges if e['caller']==target['token']],'candidate_count':len(candidates),'LIVE_BOARD_USB':'NO','HOST_TO_DEVICE_USB':'NO','FLASH_ERASE_WRITE':'NO','FLASH_ALLOWED':'NO','TRUE_FIRMWARE_READBACK_PRIMITIVE_PROVEN':False,'PHASE2_GATE_PASSED':False}
+          for name,obj in [('status.json',status),('methods.json',methods),('references.json',edges),('parse_errors.json',errors),('candidate_methods.json',candidates),('update_focus.json',focus)]:
+           (out/name).write_text(json.dumps(obj,indent=2,ensure_ascii=False)+'\n')
+          print(json.dumps(status,indent=2))
+          
+          # Preserve metadata facts without treating imports or enum names as proven runtime paths.
+          fields=[]
+          for rid,t in enumerate(md.TypeDef.rows,1):
+           for f in t.FieldList:
+            fields.append({'token':f'0x{0x04000000|f.row_index:08X}','owner':type_names[rid],'name':str(f.row.Name),'signature_hex':f.row.Signature.value.hex()})
+          by_field={int(x['token'],16):x for x in fields}
+          constants=[]
+          for c in md.Constant.rows:
+           if c.Parent.table.name=='Field':
+            token=0x04000000|c.Parent.row_index
+            f=by_field[token]
+            raw=c.Value.value
+            constants.append({**f,'constant_type':c.Type,'value_hex':raw.hex(),'integer_le':int.from_bytes(raw,'little',signed=c.Type in (4,6,8,10)) if c.Type in (2,3,4,5,6,7,8,9,10,11) else None})
+          imports=[]
+          for im in md.ImplMap.rows:
+           rid=im.MemberForwarded.row_index
+           imports.append({'method_token':f'0x{0x06000000|rid:08X}','managed_name':owners.get(rid,'?')+'::'+str(im.MemberForwarded.row.Name),'module':str(im.ImportScope.row.Name),'entry_point':str(im.ImportName),'signature_hex':im.MemberForwarded.row.Signature.value.hex(),'runtime_path_proven':False})
+          for name,obj in [('fields.json',fields),('constants.json',constants),('imports.json',imports)]:
+           (out/name).write_text(json.dumps(obj,indent=2,ensure_ascii=False)+'\n')
+          PHASE2_PY
+          python3 "$OUT/protocol/analyze_client.py" "$OUT/dstech.exe" "$OUT/protocol/results" \
+            > "$OUT/protocol/parser_stdout.txt" 2> "$OUT/protocol/parser_stderr.txt"
+          cp "$OUT/il/all.il" "$OUT/protocol/all.il"
 
       - name: Extract h15 and all managed resources statically
         shell: bash
@@ -2872,10 +2986,11 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: R118B-CURRENT-PREPARSER-JIT-PE-PROVENANCE-EVIDENCE
+          name: R118C-PHASE2-PLUS-R118B-CONTINUATION-EVIDENCE
           path: |
-            /tmp/r118b/review
-            /tmp/r118b/evidence
-            /tmp/r118b/decrypted
+            /tmp/r118c/review
+            /tmp/r118c/evidence
+            /tmp/r118c/decrypted
+            /tmp/r118c/protocol
           if-no-files-found: warn
           retention-days: 30
