@@ -32,7 +32,7 @@ env:
 
 jobs:
   okn-dsp-continuous:
-    name: End-to-end UFE conformance + USB TX static proof / offline only
+    name: Continuous dedicated-gain firmware proof / offline only
     runs-on: ubuntu-24.04
     timeout-minutes: 180
     steps:
@@ -890,6 +890,146 @@ jobs:
           grep -q '^R60_USB_REPLY_COPY_TO_HID_TX_BUF=PASS$' /tmp/R60_USB_TX_STATIC_GATE.txt
           grep -q '^R60_LIVE_USB_TX_VERIFIED=NO$' /tmp/R60_USB_TX_STATIC_GATE.txt
 
+
+      - name: R61 discover actual HID TX consumer + USB descriptor evidence
+        id: r61_usb_tx_discovery
+        if: steps.r60_usb_tx_static.outcome == 'success'
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY2'
+          from pathlib import Path
+          import os,re
+          root=Path(os.environ['RUNNER_TEMP'])/'bp1048sdk'
+          refs=[]
+          descriptor_hits=[]
+          for base in [root/'BT_Audio_APP', root/'MVsB1_Base_SDK']:
+              for p in base.rglob('*'):
+                  if not p.is_file() or p.suffix.lower() not in {'.c','.h','.s','.inc'}:
+                      continue
+                  try:
+                      t=p.read_text(encoding='latin-1')
+                  except OSError:
+                      continue
+                  rel=p.relative_to(root).as_posix()
+                  for n,line in enumerate(t.splitlines(),1):
+                      if 'hid_tx_buf' in line:
+                          refs.append(f'{rel}:{n}:{line.strip()}')
+                      u=line.upper()
+                      if ('HID' in u or 'USB' in u) and any(k in u for k in ['REPORT','ENDPOINT','EP','DESCRIPTOR','0X81','256']):
+                          descriptor_hits.append(f'{rel}:{n}:{line.strip()}')
+          Path('/tmp/R61_HID_TX_ALL_REFS.txt').write_text('\n'.join(refs)+'\n')
+          Path('/tmp/R61_USB_DESCRIPTOR_CANDIDATES.txt').write_text('\n'.join(descriptor_hits[:2000])+'\n')
+          external=[x for x in refs if 'BT_Audio_APP/bt_audio_app_src/audio/communication.c:' not in x]
+          Path('/tmp/R61_HID_TX_EXTERNAL_REFS.txt').write_text('\n'.join(external)+'\n')
+          state=[
+              'R61_USB_TX_DISCOVERY=PASS',
+              f'R61_HID_TX_REF_COUNT={len(refs)}',
+              f'R61_HID_TX_EXTERNAL_REF_COUNT={len(external)}',
+              f'R61_USB_DESCRIPTOR_CANDIDATE_COUNT={len(descriptor_hits)}',
+              'R61_LIVE_USB_EXECUTED=NO',
+              'R61_HOST_TO_DEVICE_USB=NO',
+          ]
+          if external:
+              state.append('R61_HID_TX_CONSUMER_CANDIDATES_FOUND=YES')
+          else:
+              state.append('R61_HID_TX_CONSUMER_CANDIDATES_FOUND=NO')
+          Path('/tmp/R61_USB_TX_DISCOVERY_STATE.txt').write_text('\n'.join(state)+'\n')
+          print('\n'.join(state))
+          if len(refs) < 2:
+              raise SystemExit('insufficient hid_tx_buf references')
+          PY2
+          grep -q '^R61_USB_TX_DISCOVERY=PASS$' /tmp/R61_USB_TX_DISCOVERY_STATE.txt
+          grep -q '^R61_LIVE_USB_EXECUTED=NO$' /tmp/R61_USB_TX_DISCOVERY_STATE.txt
+
+      - name: R62 discover SDK sample output config without enabling hardware
+        id: r62_output_discovery
+        if: steps.r61_usb_tx_discovery.outcome == 'success'
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY2'
+          from pathlib import Path
+          import os,re
+          root=Path(os.environ['RUNNER_TEMP'])/'bp1048sdk'
+          cfg=root/'BT_Audio_APP/bt_audio_app_src/inc/app_config.h'
+          s=cfg.read_text(encoding='latin-1')
+          active=[]
+          for n,line in enumerate(s.splitlines(),1):
+              m=re.match(r'^\s*#define\s+([A-Za-z0-9_]+)(?:\s+(.*))?$', line)
+              if m and any(k in m.group(1) for k in ['I2S','DAC','AUDIO','USB','SPDIF']):
+                  active.append(f'app_config.h:{n}:{line.strip()}')
+          Path('/tmp/R62_ACTIVE_AUDIO_OUTPUT_MACROS.txt').write_text('\n'.join(active)+'\n')
+
+          pin_hits=[]
+          api_hits=[]
+          rx_pin=re.compile(r'(I2S|DAC|GPIO|PIN|IOMUX|MFP|FUNC_SEL|PORT)', re.I)
+          rx_api=re.compile(r'(AudioI2S[01]_|AudioDAC|DAC[0-9A-Za-z_]*|I2S[01]_[A-Za-z0-9_]+)')
+          for base in [root/'BT_Audio_APP',root/'MVsB1_Base_SDK/driver',root/'MVsB1_Base_SDK/middleware']:
+              for p in base.rglob('*'):
+                  if not p.is_file() or p.suffix.lower() not in {'.c','.h'}: continue
+                  try:t=p.read_text(encoding='latin-1')
+                  except OSError:continue
+                  rel=p.relative_to(root).as_posix()
+                  for n,line in enumerate(t.splitlines(),1):
+                      if rx_pin.search(line) and any(k in line for k in ['CFG_','GPIO','Pin','PIN','I2S','DAC']):
+                          pin_hits.append(f'{rel}:{n}:{line.strip()}')
+                      if rx_api.search(line):
+                          api_hits.append(f'{rel}:{n}:{line.strip()}')
+          Path('/tmp/R62_PINMUX_OUTPUT_CANDIDATES.txt').write_text('\n'.join(pin_hits[:3000])+'\n')
+          Path('/tmp/R62_OUTPUT_API_CANDIDATES.txt').write_text('\n'.join(api_hits[:3000])+'\n')
+          state=[
+              'R62_OUTPUT_CONFIG_DISCOVERY=PASS',
+              f'R62_ACTIVE_AUDIO_MACRO_COUNT={len(active)}',
+              f'R62_PINMUX_CANDIDATE_COUNT={len(pin_hits)}',
+              f'R62_OUTPUT_API_CANDIDATE_COUNT={len(api_hits)}',
+              'R62_SDK_SAMPLE_CONFIG_DISCOVERED=YES',
+              'R62_PHYSICAL_7CH_BOARD_MAPPING_VERIFIED=NO',
+              'R62_OUTPUT_HARDWARE_INIT_ENABLED=NO',
+              'R62_LIVE_BOARD_USB=NO',
+          ]
+          Path('/tmp/R62_OUTPUT_DISCOVERY_STATE.txt').write_text('\n'.join(state)+'\n')
+          print('\n'.join(state))
+          if not active or not api_hits:
+              raise SystemExit('insufficient SDK output configuration evidence')
+          PY2
+          grep -q '^R62_OUTPUT_CONFIG_DISCOVERY=PASS$' /tmp/R62_OUTPUT_DISCOVERY_STATE.txt
+          grep -q '^R62_PHYSICAL_7CH_BOARD_MAPPING_VERIFIED=NO$' /tmp/R62_OUTPUT_DISCOVERY_STATE.txt
+
+      - name: R63 prove custom gain/transport/audio objects have no flash call path
+        id: r63_custom_flash_audit
+        if: steps.r62_output_discovery.outcome == 'success'
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          : > /tmp/R63_CUSTOM_RELOCS.txt
+          for obj in /tmp/r59_usb_bridge.o /tmp/r58_audio_bridge.o /tmp/r58_gain_obj/*.o; do
+            test -s "$obj"
+            echo "===== $obj =====" >> /tmp/R63_CUSTOM_RELOCS.txt
+            nds32le-elf-readelf -rW "$obj" >> /tmp/R63_CUSTOM_RELOCS.txt
+          done
+          if grep -Ei '[[:space:]](flash|erase|unlock|boot|ota|upgrade|firmware|protect)[A-Za-z0-9_]*([[:space:]]|$)' /tmp/R63_CUSTOM_RELOCS.txt; then
+            echo 'dangerous custom relocation found' >&2
+            exit 1
+          fi
+          ! grep -RniE '\b(flash|erase|unlock|boot|ota|upgrade|firmware|protect)\b' \
+            "$R57_ROOT/firmware/src/okn56_gain7.c" \
+            "$R57_ROOT/firmware/src/okn56_runtime.c" \
+            "$RUNNER_TEMP/r58gen/okn_r58_audio_bridge.c" \
+            "$RUNNER_TEMP/r58gen/okn_r59_usb_bridge.c"
+          cat > /tmp/R63_CUSTOM_FLASH_AUDIT_STATE.txt <<'EOF'
+          R63_CUSTOM_PATH_FLASH_AUDIT=PASS
+          R63_CUSTOM_PATH_FLASH_RELOCS=NONE
+          R63_CUSTOM_PATH_ERASE_WRITE_CALLS=NONE
+          R63_CUSTOM_PATH_BOOT_UNLOCK_CALLS=NONE
+          R63_FLASH_ALLOWED=NO
+          R63_HOST_TO_DEVICE_USB=NO
+          EOF
+          cat /tmp/R63_CUSTOM_FLASH_AUDIT_STATE.txt
+
       - name: Provide SDK UART mutex compatibility
         id: compat
         if: steps.audio_callgraph.outcome == 'success' && steps.transport_callgraph.outcome == 'success'
@@ -949,6 +1089,40 @@ jobs:
           sha256sum "$ELF" "$MAP" > /tmp/R58_IMAGE_SHA256.txt
           test ! -e /tmp/OKN_R60_CURRENT_E2E_CONFORMANCE_NOT_FOR_FLASH.bin
 
+
+      - name: R64 inspect linked ELF memory layout and keep image non-flashable
+        id: r64_memory_audit
+        if: steps.full_link.outcome == 'success'
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          ELF=/tmp/OKN_R60_CURRENT_E2E_CONFORMANCE_NOT_FOR_FLASH.elf
+          MAP=/tmp/OKN_R60_CURRENT_E2E_CONFORMANCE_NOT_FOR_FLASH.map
+          test -s "$ELF"
+          test -s "$MAP"
+          nds32le-elf-size -A "$ELF" > /tmp/R64_ELF_SIZE_A.txt
+          nds32le-elf-readelf -lW "$ELF" > /tmp/R64_PROGRAM_HEADERS.txt
+          nds32le-elf-readelf -SW "$ELF" > /tmp/R64_SECTION_HEADERS.txt
+          awk '
+            BEGIN{p=0}
+            /^MEMORY[[:space:]]*$/ {p=1}
+            p {print}
+            p && /^}/ {exit}
+          ' "$RUNNER_TEMP/bp1048sdk/BT_Audio_APP/nds32-ae210p.ld" > /tmp/R64_LINKER_MEMORY_BLOCK.txt || true
+          test -s /tmp/R64_PROGRAM_HEADERS.txt
+          test -s /tmp/R64_SECTION_HEADERS.txt
+          test ! -e /tmp/OKN_R60_CURRENT_E2E_CONFORMANCE_NOT_FOR_FLASH.bin
+          cat > /tmp/R64_MEMORY_AUDIT_STATE.txt <<'EOF'
+          R64_ELF_MEMORY_LAYOUT_INSPECTED=YES
+          R64_LINKER_LAYOUT_SOURCE=BT_Audio_APP/nds32-ae210p.ld
+          R64_RAW_BIN_GENERATED=NO
+          R64_PRODUCTION_FLASH_IMAGE=NO
+          R64_BOARD_FLASH_LAYOUT_VERIFIED=NO
+          R64_FLASH_ALLOWED=NO
+          EOF
+          cat /tmp/R64_MEMORY_AUDIT_STATE.txt
+
       - name: Gate final linked transport + audio callgraph and fail closed
         id: final_gate
         if: steps.full_link.outcome == 'success'
@@ -986,24 +1160,57 @@ jobs:
           echo 'PRODUCTION_FLASH_IMAGE=NO' >> /tmp/R60_FINAL_GATE.txt
           echo 'FLASH_ALLOWED=NO' >> /tmp/R60_FINAL_GATE.txt
 
-      - name: Package R60 evidence
+
+      - name: R65 continuous blocker summary
+        id: r65_blocker_summary
+        if: steps.final_gate.outcome == 'success'
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -q '^R61_USB_TX_DISCOVERY=PASS$' /tmp/R61_USB_TX_DISCOVERY_STATE.txt
+          grep -q '^R62_OUTPUT_CONFIG_DISCOVERY=PASS$' /tmp/R62_OUTPUT_DISCOVERY_STATE.txt
+          grep -q '^R63_CUSTOM_PATH_FLASH_AUDIT=PASS$' /tmp/R63_CUSTOM_FLASH_AUDIT_STATE.txt
+          grep -q '^R64_ELF_MEMORY_LAYOUT_INSPECTED=YES$' /tmp/R64_MEMORY_AUDIT_STATE.txt
+          cat > /tmp/OKN_CONTINUOUS_BLOCKERS.txt <<'EOF'
+          OKN_CONTINUOUS_OFFLINE_PIPELINE=PASS
+          GAIN_VIA_EQ=NO
+          DEDICATED_GAIN_7CH=PASS
+          UFE_PROTOCOL_EXHAUSTIVE=PASS
+          CUSTOM_USB_CALLGRAPH=PASS
+          USB_REPLY_TO_HID_TX_BUF_STATIC=PASS
+          CUSTOM_PATH_FLASH_CALLS=NONE
+          LIVE_USB_TRANSPORT_VERIFIED=NO
+          PHYSICAL_7CH_BOARD_MAPPING_VERIFIED=NO
+          OUTPUT_HARDWARE_INIT=LOCKED
+          BOARD_FLASH_LAYOUT_VERIFIED=NO
+          PRODUCTION_FLASH_IMAGE=NO
+          LIVE_BOARD_USB=NO
+          HOST_TO_DEVICE_USB=NO
+          FLASH_ERASE_WRITE=NO
+          FLASH_ALLOWED=NO
+          EOF
+          cat /tmp/OKN_CONTINUOUS_BLOCKERS.txt
+
+      - name: Package continuous evidence
         if: always()
         shell: bash
         run: |
           set -euo pipefail
-          OUT="$GITHUB_WORKSPACE/r60_current_out"; rm -rf "$OUT"; mkdir -p "$OUT"
+          OUT="$GITHUB_WORKSPACE/okn_continuous_out"; rm -rf "$OUT"; mkdir -p "$OUT"
           cp "$RUNNER_TEMP/R57_SOURCE.zip" "$OUT/OKN_R57_CURRENT_BASE_SOURCE.zip" 2>/dev/null || true
           cp "$RUNNER_TEMP/R58_BASE_AUDIT.txt" "$RUNNER_TEMP/R58_HOST_TEST.log" "$RUNNER_TEMP/R58_SANITIZE.log" "$RUNNER_TEMP/R58_TOOLCHAIN.txt" "$OUT/" 2>/dev/null || true
           cp "$RUNNER_TEMP/R58_BRIDGE_GATE.txt" "$RUNNER_TEMP/R59_USB_HOST_TEST.log" "$RUNNER_TEMP/R59_USB_SANITIZE.log" "$RUNNER_TEMP/R59_TRANSPORT_STATE.txt" "$OUT/" 2>/dev/null || true
           cp /tmp/R58_*.txt /tmp/R58_*.tsv /tmp/R58_*.diff /tmp/R58_*.log "$OUT/" 2>/dev/null || true
           cp /tmp/R59_*.txt /tmp/R59_*.diff /tmp/R59_*.log "$OUT/" 2>/dev/null || true
           cp /tmp/R60_*.txt /tmp/R60_*.log "$OUT/" 2>/dev/null || true
+          cp /tmp/R61_*.txt /tmp/R62_*.txt /tmp/R63_*.txt /tmp/R64_*.txt /tmp/OKN_CONTINUOUS_BLOCKERS.txt "$OUT/" 2>/dev/null || true
           cp "$RUNNER_TEMP/r58gen/test_r60_e2e.c" "$OUT/" 2>/dev/null || true
           cp "$RUNNER_TEMP/r58gen/okn_r58_audio_bridge.h" "$RUNNER_TEMP/r58gen/okn_r58_audio_bridge.c" "$OUT/" 2>/dev/null || true
           cp "$RUNNER_TEMP/r58gen/okn_r59_usb_bridge.h" "$RUNNER_TEMP/r58gen/okn_r59_usb_bridge.c" "$RUNNER_TEMP/r58gen/test_r59_usb.c" "$OUT/" 2>/dev/null || true
           cp /tmp/OKN_R60_CURRENT_E2E_CONFORMANCE_NOT_FOR_FLASH.elf /tmp/OKN_R60_CURRENT_E2E_CONFORMANCE_NOT_FOR_FLASH.map "$OUT/" 2>/dev/null || true
           cat > "$OUT/BUILD_SCOPE.txt" <<EOF
-          OKN R60 CURRENT END-TO-END UFE CONFORMANCE + USB TX STATIC GATE
+          OKN DSP CONTINUOUS OFFLINE PIPELINE
           compile_vendor=${{ steps.compile_vendor.outcome }}
           compile_gain=${{ steps.compile_gain.outcome }}
           compile_transport=${{ steps.compile_transport.outcome }}
@@ -1015,6 +1222,11 @@ jobs:
           r60_conformance=${{ steps.r60_conformance.outcome }}
           r60_usb_tx_static=${{ steps.r60_usb_tx_static.outcome }}
           final_gate=${{ steps.final_gate.outcome }}
+          r61_usb_tx_discovery=${{ steps.r61_usb_tx_discovery.outcome }}
+          r62_output_discovery=${{ steps.r62_output_discovery.outcome }}
+          r63_custom_flash_audit=${{ steps.r63_custom_flash_audit.outcome }}
+          r64_memory_audit=${{ steps.r64_memory_audit.outcome }}
+          r65_blocker_summary=${{ steps.r65_blocker_summary.outcome }}
           Dedicated Gain: 7 independent lanes, -70..+6 dB, 0.5 dB
           Gain via EQ: NO
           Custom HID namespace: OKN6, protocol version 1, 256-byte report
@@ -1035,15 +1247,19 @@ jobs:
           FLASH_ERASE_WRITE=NO
           FLASH_ALLOWED=NO
           FEATURE_SET_REPORT_ALLOWED=NO
+          R61 USB TX/descriptor discovery: completed offline
+          R62 SDK output/pin candidate discovery: completed offline; physical mapping still unproven
+          R63 custom path flash callgraph: NONE
+          R64 linked ELF memory layout: inspected; production flash image still NO
           EOF
           (cd "$OUT" && sha256sum * > SHA256SUMS.txt)
 
-      - name: Upload R60 artifact
+      - name: Upload continuous artifact
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: OKN_R60_CURRENT_E2E_CONFORMANCE_GATE
-          path: r60_current_out/*
+          name: OKN_DSP_CONTINUOUS_EVIDENCE
+          path: okn_continuous_out/*
           if-no-files-found: error
           retention-days: 30
           compression-level: 6
@@ -1069,16 +1285,23 @@ jobs:
           test "${{ steps.compat.outcome }}" = "success"
           test "${{ steps.full_link.outcome }}" = "success"
           test "${{ steps.final_gate.outcome }}" = "success"
-          grep -q '^GAIN_VIA_EQ=NO$' r60_current_out/R60_FINAL_GATE.txt
-          grep -q '^CUSTOM_UFE_TRANSPORT_CALLGRAPH_VERIFIED=YES$' r60_current_out/R60_FINAL_GATE.txt
-          grep -q '^WRITE_RETURNS_IMMEDIATE_READBACK=YES$' r60_current_out/R60_FINAL_GATE.txt
-          grep -q '^ALL_7CH_ALL_HALF_DB_POINTS=PASS$' r60_current_out/R60_FINAL_GATE.txt
-          grep -q '^USB_REPLY_COPY_TO_HID_TX_BUF=PASS$' r60_current_out/R60_FINAL_GATE.txt
-          grep -q '^LIVE_USB_TX_VERIFIED=NO$' r60_current_out/R60_FINAL_GATE.txt
-          grep -q '^STOCK_USB_FALLBACK_RETAINED=YES$' r60_current_out/R60_FINAL_GATE.txt
-          grep -q '^LIVE_USB_TRANSPORT_VERIFIED=NO$' r60_current_out/R60_FINAL_GATE.txt
-          grep -q '^OUTPUT_HARDWARE_INIT=LOCKED$' r60_current_out/R60_FINAL_GATE.txt
-          test ! -e r60_current_out/OKN_R60_CURRENT_E2E_CONFORMANCE_NOT_FOR_FLASH.bin
-          echo 'R60_CURRENT=PASS'
+          test "${{ steps.r61_usb_tx_discovery.outcome }}" = "success"
+          test "${{ steps.r62_output_discovery.outcome }}" = "success"
+          test "${{ steps.r63_custom_flash_audit.outcome }}" = "success"
+          test "${{ steps.r64_memory_audit.outcome }}" = "success"
+          test "${{ steps.r65_blocker_summary.outcome }}" = "success"
+          grep -q '^GAIN_VIA_EQ=NO$' okn_continuous_out/R60_FINAL_GATE.txt
+          grep -q '^CUSTOM_UFE_TRANSPORT_CALLGRAPH_VERIFIED=YES$' okn_continuous_out/R60_FINAL_GATE.txt
+          grep -q '^WRITE_RETURNS_IMMEDIATE_READBACK=YES$' okn_continuous_out/R60_FINAL_GATE.txt
+          grep -q '^ALL_7CH_ALL_HALF_DB_POINTS=PASS$' okn_continuous_out/R60_FINAL_GATE.txt
+          grep -q '^USB_REPLY_COPY_TO_HID_TX_BUF=PASS$' okn_continuous_out/R60_FINAL_GATE.txt
+          grep -q '^LIVE_USB_TX_VERIFIED=NO$' okn_continuous_out/R60_FINAL_GATE.txt
+          grep -q '^STOCK_USB_FALLBACK_RETAINED=YES$' okn_continuous_out/R60_FINAL_GATE.txt
+          grep -q '^LIVE_USB_TRANSPORT_VERIFIED=NO$' okn_continuous_out/R60_FINAL_GATE.txt
+          grep -q '^OUTPUT_HARDWARE_INIT=LOCKED$' okn_continuous_out/R60_FINAL_GATE.txt
+          test ! -e okn_continuous_out/OKN_R60_CURRENT_E2E_CONFORMANCE_NOT_FOR_FLASH.bin
+          grep -q '^OKN_CONTINUOUS_OFFLINE_PIPELINE=PASS$' okn_continuous_out/OKN_CONTINUOUS_BLOCKERS.txt
+          grep -q '^CUSTOM_PATH_FLASH_CALLS=NONE$' okn_continuous_out/OKN_CONTINUOUS_BLOCKERS.txt
+          echo 'OKN_DSP_CONTINUOUS=PASS'
           echo 'GAIN_VIA_EQ=NO'
           echo 'FLASH_ALLOWED=NO'
