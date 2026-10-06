@@ -1490,6 +1490,183 @@ jobs:
           EOF
           cat /tmp/OKN_CONTINUOUS_BLOCKERS_R70.txt
 
+
+      - name: R71 lock final app transport to BLE
+        id: r71_ble_transport_lock
+        if: steps.r70_blocker_update.outcome == 'success'
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > /tmp/R71_BLE_TRANSPORT_LOCK.txt <<'EOF'
+          R71_FINAL_APP_TRANSPORT=BLE
+          R71_USB_FINAL_CONTROL_PATH=NO
+          R71_BLE_SERVICE_UUID=AB00
+          R71_BLE_WRITE_CHAR_UUID=AB01
+          R71_BLE_NOTIFY_CHAR_UUID=AB02
+          R71_STOCK_BLE_UFE_WRITE_OPCODE=0x57
+          R71_STOCK_BLE_UFE_READ_OPCODE=0x58
+          R71_STOCK_BLE_UFE_READ_RESPONSE=0x60
+          R71_CUSTOM_GAIN_IDS=22..28
+          R71_CUSTOM_FW_IDENTITY_ID=29
+          R71_CUSTOM_FW_IDENTITY_RAW=OKN6
+          R71_GAIN_VIA_EQ=NO
+          R71_LIVE_BOARD_BLE=NO
+          R71_FLASH_ALLOWED=NO
+          EOF
+          cat /tmp/R71_BLE_TRANSPORT_LOCK.txt
+          grep -q '^R71_FINAL_APP_TRANSPORT=BLE$' /tmp/R71_BLE_TRANSPORT_LOCK.txt
+          grep -q '^R71_GAIN_VIA_EQ=NO$' /tmp/R71_BLE_TRANSPORT_LOCK.txt
+
+      - name: R72 inventory BLE GATT hooks in pinned SDK without guessing
+        id: r72_ble_sdk_inventory
+        if: steps.r71_ble_transport_lock.outcome == 'success'
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY2'
+          from pathlib import Path
+          import os,re
+          root=Path(os.environ['RUNNER_TEMP'])/'bp1048sdk'
+          literal=[]
+          gatt=[]
+          notify=[]
+          writecb=[]
+          rx_uuid=re.compile(r'(?i)\b(?:0x)?AB0[012]\b')
+          rx_gatt=re.compile(r'(?i)\b(gatt|att_|ble_|uuid|characteristic|service)\b')
+          rx_notify=re.compile(r'(?i)\b(notify|notification|indicate|indication)\b')
+          rx_write=re.compile(r'(?i)\b(write|writereq|write_req|attribute.*write|att.*write)\b')
+          for p in root.rglob('*'):
+              if not p.is_file() or p.suffix.lower() not in {'.c','.h','.s','.inc','.txt'}:
+                  continue
+              try:
+                  s=p.read_text(encoding='latin-1')
+              except OSError:
+                  continue
+              rel=p.relative_to(root).as_posix()
+              for n,line in enumerate(s.splitlines(),1):
+                  rec=f'{rel}:{n}:{line.strip()}'
+                  if rx_uuid.search(line):
+                      literal.append(rec)
+                  if rx_gatt.search(line):
+                      gatt.append(rec)
+                  if rx_notify.search(line):
+                      notify.append(rec)
+                  if rx_write.search(line):
+                      writecb.append(rec)
+          Path('/tmp/R72_BLE_AB00_AB01_AB02_LITERAL_HITS.txt').write_text('\n'.join(literal)+'\n')
+          Path('/tmp/R72_BLE_GATT_CANDIDATES.txt').write_text('\n'.join(gatt[:5000])+'\n')
+          Path('/tmp/R72_BLE_NOTIFY_CANDIDATES.txt').write_text('\n'.join(notify[:3000])+'\n')
+          Path('/tmp/R72_BLE_WRITE_CALLBACK_CANDIDATES.txt').write_text('\n'.join(writecb[:3000])+'\n')
+          state=[
+              'R72_BLE_SDK_INVENTORY=PASS',
+              f'R72_AB00_AB01_AB02_LITERAL_HIT_COUNT={len(literal)}',
+              f'R72_GATT_CANDIDATE_COUNT={len(gatt)}',
+              f'R72_NOTIFY_CANDIDATE_COUNT={len(notify)}',
+              f'R72_WRITE_CALLBACK_CANDIDATE_COUNT={len(writecb)}',
+              'R72_AB00_AB01_AB02_PUBLIC_SDK_PROVEN=' + ('YES' if literal else 'NO'),
+              'R72_CUSTOM_BLE_UFE_HOOK_VERIFIED=NO',
+              'R72_NO_VENDOR_OPCODE_GUESS=YES',
+          ]
+          Path('/tmp/R72_BLE_SDK_STATE.txt').write_text('\n'.join(state)+'\n')
+          print('\n'.join(state))
+          if not gatt:
+              raise SystemExit('no BLE/GATT implementation candidates found in pinned SDK')
+          PY2
+          grep -q '^R72_BLE_SDK_INVENTORY=PASS$' /tmp/R72_BLE_SDK_STATE.txt
+          grep -q '^R72_NO_VENDOR_OPCODE_GUESS=YES$' /tmp/R72_BLE_SDK_STATE.txt
+
+      - name: R73 compile transport-neutral BLE UFE adapter contract
+        id: r73_ble_ufe_adapter
+        if: steps.r72_ble_sdk_inventory.outcome == 'success'
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > "$RUNNER_TEMP/r58gen/okn_r73_ble_ufe_adapter.c" <<'EOF'
+          #include <stdint.h>
+          #include <stddef.h>
+
+          int okn56_ufe_write(const uint8_t *buf, uint16_t len);
+          int okn56_ufe_read(const uint8_t *buf, uint16_t len, uint8_t *out, uint16_t *out_len);
+
+          /*
+           * Transport-neutral adapter only.
+           * It does NOT define a vendor BLE opcode, characteristic handler, encryption,
+           * pairing, or notification primitive. Those remain blocked until proven by source.
+           */
+          int okn73_ble_ufe_rx(const uint8_t *plain, uint16_t len,
+                              uint8_t *reply, uint16_t *reply_len)
+          {
+              if (!plain || !len) return -1;
+              if (plain[0] == 0x57u) {
+                  return okn56_ufe_write(plain, len);
+              }
+              if (plain[0] == 0x58u) {
+                  if (!reply || !reply_len) return -2;
+                  return okn56_ufe_read(plain, len, reply, reply_len);
+              }
+              return 0; /* non-custom/stock command: not claimed or guessed here */
+          }
+          EOF
+
+          nds32le-elf-gcc -c \
+            -mcpu=d1088-spu -mext-dsp \
+            -ffunction-sections -fdata-sections \
+            "$RUNNER_TEMP/r58gen/okn_r73_ble_ufe_adapter.c" \
+            -o /tmp/r73_ble_ufe_adapter.o
+
+          nds32le-elf-nm -u /tmp/r73_ble_ufe_adapter.o > /tmp/R73_BLE_UFE_UNRESOLVED.txt
+          grep -q 'okn56_ufe_write' /tmp/R73_BLE_UFE_UNRESOLVED.txt
+          grep -q 'okn56_ufe_read' /tmp/R73_BLE_UFE_UNRESOLVED.txt
+          ! grep -Ei '(flash|erase|unlock|boot|ota|upgrade|firmware)' /tmp/R73_BLE_UFE_UNRESOLVED.txt
+
+          cat > /tmp/R73_BLE_UFE_ADAPTER_STATE.txt <<'EOF'
+          R73_BLE_UFE_ADAPTER_COMPILE=PASS
+          R73_UFE_WRITE_OPCODE=0x57
+          R73_UFE_READ_OPCODE=0x58
+          R73_UFE_READ_RESPONSE=0x60
+          R73_GAIN_IDS=22..28
+          R73_IDENTITY_ID=29
+          R73_VENDOR_BLE_OPCODE_GUESSED=NO
+          R73_BLE_ENCRYPTION_IMPLEMENTED_HERE=NO
+          R73_BLE_CHARACTERISTIC_HOOK_IMPLEMENTED_HERE=NO
+          R73_FLASH_CALLS=NONE
+          EOF
+          cat /tmp/R73_BLE_UFE_ADAPTER_STATE.txt
+
+      - name: R74 BLE production blocker summary
+        id: r74_ble_blocker_summary
+        if: steps.r73_ble_ufe_adapter.outcome == 'success'
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > /tmp/OKN_CONTINUOUS_BLOCKERS_R74.txt <<'EOF'
+          OKN_CONTINUOUS_R74=PASS
+          FINAL_APP_TRANSPORT=BLE
+          BLE_SERVICE_UUID=AB00
+          BLE_WRITE_CHAR_UUID=AB01
+          BLE_NOTIFY_CHAR_UUID=AB02
+          STOCK_BLE_UFE_PROTOCOL_KNOWN=YES
+          CUSTOM_GAIN_IDS=22..28
+          CUSTOM_FW_IDENTITY=ID29:OKN6
+          GAIN_VIA_EQ=NO
+          CUSTOM_BLE_UFE_ADAPTER_COMPILES=YES
+          CUSTOM_BLE_GATT_HOOK_VERIFIED=NO
+          CUSTOM_BLE_NOTIFY_HOOK_VERIFIED=NO
+          STOCK_BLE_AES_CFB8_SESSION_COMPATIBILITY_IN_CUSTOM_FW_VERIFIED=NO
+          PHYSICAL_7CH_BOARD_MAPPING_VERIFIED=NO
+          AUDIO_BRIDGE_PRODUCTION_READY=NO
+          PRODUCTION_FLASH_IMAGE=NO
+          LIVE_BOARD_BLE=NO
+          HOST_TO_DEVICE_USB=NO
+          FLASH_ERASE_WRITE=NO
+          FLASH_ALLOWED=NO
+          EOF
+          cat /tmp/OKN_CONTINUOUS_BLOCKERS_R74.txt
+
       - name: Package continuous evidence
         if: always()
         shell: bash
@@ -1504,6 +1681,7 @@ jobs:
           cp /tmp/R60_*.txt /tmp/R60_*.log "$OUT/" 2>/dev/null || true
           cp /tmp/R61_*.txt /tmp/R62_*.txt /tmp/R63_*.txt /tmp/R64_*.txt /tmp/OKN_CONTINUOUS_BLOCKERS.txt "$OUT/" 2>/dev/null || true
           cp /tmp/R66_*.txt /tmp/R67_*.txt /tmp/R68_*.txt /tmp/R69_*.txt /tmp/OKN_CONTINUOUS_BLOCKERS_R70.txt "$OUT/" 2>/dev/null || true
+          cp /tmp/R71_*.txt /tmp/R72_*.txt /tmp/R73_*.txt /tmp/OKN_CONTINUOUS_BLOCKERS_R74.txt "$OUT/" 2>/dev/null || true
           cp "$RUNNER_TEMP/r58gen/test_r60_e2e.c" "$OUT/" 2>/dev/null || true
           cp "$RUNNER_TEMP/r58gen/okn_r58_audio_bridge.h" "$RUNNER_TEMP/r58gen/okn_r58_audio_bridge.c" "$OUT/" 2>/dev/null || true
           cp "$RUNNER_TEMP/r58gen/okn_r59_usb_bridge.h" "$RUNNER_TEMP/r58gen/okn_r59_usb_bridge.c" "$RUNNER_TEMP/r58gen/test_r59_usb.c" "$OUT/" 2>/dev/null || true
@@ -1531,6 +1709,10 @@ jobs:
           r68_output_topology=${{ steps.r68_output_topology.outcome }}
           r69_vendor_flash_scope=${{ steps.r69_vendor_flash_scope.outcome }}
           r70_blocker_update=${{ steps.r70_blocker_update.outcome }}
+          r71_ble_transport_lock=${{ steps.r71_ble_transport_lock.outcome }}
+          r72_ble_sdk_inventory=${{ steps.r72_ble_sdk_inventory.outcome }}
+          r73_ble_ufe_adapter=${{ steps.r73_ble_ufe_adapter.outcome }}
+          r74_ble_blocker_summary=${{ steps.r74_ble_blocker_summary.outcome }}
           Dedicated Gain: 7 independent lanes, -70..+6 dB, 0.5 dB
           Gain via EQ: NO
           Custom HID namespace: OKN6, protocol version 1, 256-byte report
@@ -1560,6 +1742,10 @@ jobs:
           R68 SDK sample outputs: DAC0 + DACX active; I2SOUT disabled; current locked DACX-mono bridge mismatch detected
           R69 full ELF contains vendor flash/boot code; custom objects have no direct flash relocations
           R70 production bridge remains LOCKED pending board-specific 7CH mapping
+          R71 final Android control transport locked to BLE
+          R72 pinned SDK BLE/GATT inventory added; AB00/AB01/AB02 must not be assumed if absent
+          R73 transport-neutral UFE BLE adapter compiles without vendor-opcode guessing
+          R74 custom BLE characteristic/notify/encryption hooks remain LOCKED until source-proven
           EOF
           (cd "$OUT" && sha256sum * > SHA256SUMS.txt)
 
@@ -1604,6 +1790,10 @@ jobs:
           test "${{ steps.r68_output_topology.outcome }}" = "success"
           test "${{ steps.r69_vendor_flash_scope.outcome }}" = "success"
           test "${{ steps.r70_blocker_update.outcome }}" = "success"
+          test "${{ steps.r71_ble_transport_lock.outcome }}" = "success"
+          test "${{ steps.r72_ble_sdk_inventory.outcome }}" = "success"
+          test "${{ steps.r73_ble_ufe_adapter.outcome }}" = "success"
+          test "${{ steps.r74_ble_blocker_summary.outcome }}" = "success"
           grep -q '^GAIN_VIA_EQ=NO$' okn_continuous_out/R60_FINAL_GATE.txt
           grep -q '^CUSTOM_UFE_TRANSPORT_CALLGRAPH_VERIFIED=YES$' okn_continuous_out/R60_FINAL_GATE.txt
           grep -q '^WRITE_RETURNS_IMMEDIATE_READBACK=YES$' okn_continuous_out/R60_FINAL_GATE.txt
@@ -1622,6 +1812,10 @@ jobs:
           grep -q '^AUDIO_BRIDGE_PRODUCTION_READY=NO$' okn_continuous_out/OKN_CONTINUOUS_BLOCKERS_R70.txt
           grep -q '^VENDOR_FLASH_BOOT_CODE_PRESENT_IN_FULL_ELF=YES$' okn_continuous_out/OKN_CONTINUOUS_BLOCKERS_R70.txt
           grep -q '^WHOLE_IMAGE_FLASH_FREE=NO$' okn_continuous_out/OKN_CONTINUOUS_BLOCKERS_R70.txt
+          grep -q '^OKN_CONTINUOUS_R74=PASS$' okn_continuous_out/OKN_CONTINUOUS_BLOCKERS_R74.txt
+          grep -q '^FINAL_APP_TRANSPORT=BLE$' okn_continuous_out/OKN_CONTINUOUS_BLOCKERS_R74.txt
+          grep -q '^CUSTOM_BLE_GATT_HOOK_VERIFIED=NO$' okn_continuous_out/OKN_CONTINUOUS_BLOCKERS_R74.txt
+          grep -q '^GAIN_VIA_EQ=NO$' okn_continuous_out/OKN_CONTINUOUS_BLOCKERS_R74.txt
           echo 'OKN_DSP_CONTINUOUS=PASS'
           echo 'GAIN_VIA_EQ=NO'
           echo 'FLASH_ALLOWED=NO'
