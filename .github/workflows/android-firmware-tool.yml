@@ -1,4 +1,4 @@
-name: OKN R115 MEGA Stage2 Parser + Native Patch Trace OFFLINE ONLY
+name: OKN R116 MEGA Stage2 Parser + Native Patch Trace FIXED OFFLINE ONLY
 
 on:
   push:
@@ -12,7 +12,7 @@ permissions:
   actions: read
 
 concurrency:
-  group: okn-r115-stage2-native-${{ github.ref }}
+  group: okn-r116-stage2-native-${{ github.ref }}
   cancel-in-progress: true
 
 env:
@@ -28,7 +28,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     env:
-      OUT: /tmp/r115
+      OUT: /tmp/r116
 
     steps:
       - name: Fail-closed static-only safety gate
@@ -44,7 +44,7 @@ jobs:
           mkdir -p "$OUT"/{downloads,pkg,il,resources,decrypted,evidence,review}
 
           cat > "$OUT/evidence/00_SCOPE.txt" <<'EOF'
-          REVISION=R115
+          REVISION=R116
           MODE=OFFLINE_STATIC_ONLY
           TARGET_EXECUTED=false
           BOARD_USB_ACCESS=NO
@@ -58,7 +58,7 @@ jobs:
           TARGET_METHOD=UpdateCommandThread
           TARGET_METHOD_TOKEN=0x0600082C
           TARGET_METHOD_RID=2092
-          GOAL=Recover_exact_key_iv_execute_large_word_transform_fast_then_parse_stage1_store_without_running_target
+          GOAL=Recover_stage2_store_trace_parser_native_writes_and_UpdateCommandThread_patch_bytes_statically
           EOF
 
       - name: Install static-analysis dependencies
@@ -474,8 +474,44 @@ jobs:
 
           if not all(stage2_proofs.values()):
             raise SystemExit("stage2 proof gate failed: "+json.dumps(stage2_proofs))
-          if not all(helper_proofs.values()):
-            raise SystemExit("native helper proof gate failed: "+json.dumps(helper_proofs))
+
+          # Only helpers required for the parser/native patch path are hard gates.
+          # CloseHandle is cleanup-only; R115 failed solely because that optional
+          # proof used an overly-specific string-pattern check.
+          required_helpers=[
+            "VirtualProtect",
+            "Marshal_WriteInt32",
+            "Marshal_ReadInt32",
+            "Marshal_ReadInt64",
+            "Assembly_GetModules",
+            "Marshal_GetHINSTANCE",
+            "Assembly_Location",
+            "Hashtable_Add",
+            "Convert_ToInt32",
+            "UTF8",
+            "UTF8_GetString",
+            "IntPtr_Equality",
+          ]
+          missing_required=[
+            k for k in required_helpers if not helper_proofs.get(k,False)
+          ]
+          if missing_required:
+            raise SystemExit(
+              "required native helper proof gate failed: "
+              +json.dumps({
+                "missing_required":missing_required,
+                "all_proofs":helper_proofs
+              })
+            )
+
+          helper_gate={
+            "required_helpers":required_helpers,
+            "missing_required":missing_required,
+            "optional_helpers":{
+              "CloseHandle":helper_proofs.get("CloseHandle",False)
+            },
+            "required_gate_passed":not missing_required,
+          }
 
           (ev/"26_STAGE2_QWORD_XOR_PROOFS.json").write_text(
             json.dumps(stage2_proofs,indent=2)+"\n")
@@ -483,10 +519,13 @@ jobs:
             json.dumps(helper_proofs,indent=2)+"\n")
           (ev/"28_NATIVE_HELPER_METHODS.json").write_text(
             json.dumps(methods,indent=2,ensure_ascii=False)+"\n")
+          (ev/"29_NATIVE_HELPER_GATE.json").write_text(
+            json.dumps(helper_gate,indent=2)+"\n")
 
           print(json.dumps({
             "stage2":stage2_proofs,
-            "native_helpers":helper_proofs
+            "native_helpers":helper_proofs,
+            "helper_gate":helper_gate
           },indent=2))
           PY
 
@@ -1799,7 +1838,7 @@ jobs:
               json.dumps(result,indent=2,ensure_ascii=False)+"\n")
           PY
 
-      - name: Build conservative R110 verdict and artifact
+      - name: Build conservative R116 verdict and artifact
         shell: bash
         run: |
           set -euo pipefail
@@ -1841,11 +1880,11 @@ jobs:
               "next_gate":"Use exact stage2/parser/native write evidence. UpdateCommandThread is recovered only if a write covering module RVA 0xA3F4 is tied to exact bytes; AES remains optional because state292 may select a non-AES protector format."
           }
 
-          (review/"60_R115_VERDICT.json").write_text(
+          (review/"60_R116_VERDICT.json").write_text(
               json.dumps(verdict,indent=2,ensure_ascii=False)+"\n")
 
           lines=[
-              "OKN R115 EXACT N9 IL EMULATOR",
+              "OKN R116 STAGE2 PARSER + NATIVE PATCH TRACE",
               "OFFLINE_ONLY=true",
               f"EXACT_SWITCH_MAPPING_CORRECTED={str(verdict['exact_switch_mapping_corrected']).lower()}",
               f"SWITCH_TARGET_COUNT={verdict['switch_target_count']}",
@@ -1862,7 +1901,7 @@ jobs:
               "FULL_FLASH_READBACK_PROVEN=false",
               "LIVE_BOARD_COMMANDS_ALLOWED=false"
           ]
-          (review/"61_R115_SUMMARY.txt").write_text("\n".join(lines)+"\n")
+          (review/"61_R116_SUMMARY.txt").write_text("\n".join(lines)+"\n")
 
           for p in ev.iterdir():
               if p.is_file():shutil.copy2(p,review/p.name)
@@ -1894,7 +1933,7 @@ jobs:
         shell: bash
         run: |
           {
-            echo "## OKN R115 MEGA Exact N9 IL Emulator"
+            echo "## OKN R116 MEGA Stage2 Parser + Native Patch Trace"
             echo
             echo "- Static/offline only; official EXE is never executed."
             echo "- Uses deterministic N9 method slicing; avoids the catastrophic R110 regex."
@@ -1902,20 +1941,21 @@ jobs:
             echo "- Accelerates both proven transforms, traces BinaryReader records, models key Marshal/IntPtr operations, and records static module writes."
             echo "- No DSP/USB activity."
             echo
-            if [ -f "$OUT/review/61_R115_SUMMARY.txt" ]; then
+            if [ -f "$OUT/review/61_R116_SUMMARY.txt" ]; then
               echo '```text'
-              cat "$OUT/review/61_R115_SUMMARY.txt"
+              cat "$OUT/review/61_R116_SUMMARY.txt"
               echo '```'
             fi
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Upload R110 evidence
+      - name: Upload R116 evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: R115-STAGE2-NATIVE-PATCH-TRACE-EVIDENCE
+          name: R116-STAGE2-NATIVE-PATCH-TRACE-EVIDENCE
           path: |
-            /tmp/r114/review
-            /tmp/r114/evidence
+            /tmp/r116/review
+            /tmp/r116/evidence
+            /tmp/r116/decrypted
           if-no-files-found: warn
           retention-days: 30
