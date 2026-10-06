@@ -1192,6 +1192,304 @@ jobs:
           EOF
           cat /tmp/OKN_CONTINUOUS_BLOCKERS.txt
 
+
+      - name: R66 prove exact HID input-report control TX path
+        id: r66_hid_control_tx
+        if: steps.r65_blocker_summary.outcome == 'success'
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY2'
+          from pathlib import Path
+          import os,re
+          root=Path(os.environ['RUNNER_TEMP'])/'bp1048sdk'
+          p=root/'MVsB1_Base_SDK/driver/driver_api/src/otg/device/otg_device_standard_request.c'
+          s=p.read_text(encoding='latin-1')
+
+          def body(sig):
+              start=s.find(sig)
+              if start < 0: raise SystemExit('missing '+sig)
+              brace=s.find('{',start)
+              if brace < 0: raise SystemExit('missing brace '+sig)
+              d=0
+              for i in range(brace,len(s)):
+                  if s[i]=='{': d+=1
+                  elif s[i]=='}':
+                      d-=1
+                      if d==0: return s[start:i+1]
+              raise SystemExit('unterminated '+sig)
+
+          tx=body('void hid_send_data(void)')
+          cls=body('void OTG_DeviceClassRequest()')
+          if 'OTG_DeviceControlSend(hid_tx_buf,256,6);' not in tx:
+              raise SystemExit('exact hid_tx_buf control-send sink missing')
+          required=[
+              'Setup[4] == InterfaceNum[HID_DATA_INTERFACE_NUM]',
+              'Setup[3] == 0x02',
+              'Setup[0] == 0x21',
+              'hid_recive_data();',
+              'Setup[3] == 0x01',
+              'Setup[0] == 0xA1',
+              'hid_send_data();',
+              'Setup[3] == 0x03',
+          ]
+          for tok in required:
+              if tok not in cls: raise SystemExit('class request evidence missing '+tok)
+
+          lines=[]
+          for n,line in enumerate(s.splitlines(),1):
+              if any(k in line for k in [
+                  'HID_DATA_INTERFACE_NUM','hid_recive_data','hid_send_data',
+                  'OTG_DeviceControlSend(hid_tx_buf','GetReport (Feature Report)',
+                  'SetReport (Feature Report)'
+              ]):
+                  lines.append(f'{n}:{line.strip()}')
+          Path('/tmp/R66_HID_CONTROL_PATH_EVIDENCE.txt').write_text('\n'.join(lines)+'\n')
+          state=[
+              'R66_HID_CONTROL_PATH_STATIC=PASS',
+              'R66_HID_INPUT_REPORT_REQUEST_BMREQUESTTYPE=0xA1',
+              'R66_HID_INPUT_REPORT_WVALUE_HIGH=0x01',
+              'R66_HID_OUTPUT_REPORT_REQUEST_BMREQUESTTYPE=0x21',
+              'R66_HID_OUTPUT_REPORT_WVALUE_HIGH=0x02',
+              'R66_HID_TX_SINK=OTG_DeviceControlSend(hid_tx_buf,256,6)',
+              'R66_FEATURE_REPORT_PATH_SEPARATE=YES',
+              'R66_FEATURE_SET_REPORT_ALLOWED=NO',
+              'R66_LIVE_USB_EXECUTED=NO',
+              'R66_HOST_TO_DEVICE_USB=NO',
+          ]
+          Path('/tmp/R66_HID_CONTROL_PATH_STATE.txt').write_text('\n'.join(state)+'\n')
+          print('\n'.join(state))
+          PY2
+          grep -q '^R66_HID_CONTROL_PATH_STATIC=PASS$' /tmp/R66_HID_CONTROL_PATH_STATE.txt
+          grep -q '^R66_FEATURE_SET_REPORT_ALLOWED=NO$' /tmp/R66_HID_CONTROL_PATH_STATE.txt
+
+      - name: R67 prove HID data report descriptor and control-only interface
+        id: r67_hid_descriptor
+        if: steps.r66_hid_control_tx.outcome == 'success'
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY2'
+          from pathlib import Path
+          import os,re
+          root=Path(os.environ['RUNNER_TEMP'])/'bp1048sdk'
+          p=root/'MVsB1_Base_SDK/driver/driver_api/src/otg/device/otg_device_descriptor.h'
+          s=p.read_text(encoding='latin-1')
+          a=s.find('const uint8_t HidDataReportDescriptor[]')
+          if a < 0: raise SystemExit('HidDataReportDescriptor missing')
+          b=s.find('};',a)
+          if b < 0: raise SystemExit('HidDataReportDescriptor unterminated')
+          arr=s[a:b+2]
+          compact=re.sub(r'\s+','',arr).lower()
+
+          # 0x96 0x00 0x01 => REPORT_COUNT 0x0100 (256), first INPUT then OUTPUT.
+          if compact.count('0x96,0x00,0x01') < 2:
+              raise SystemExit('256-byte input/output report counts not both present')
+          if '0x81,0x02' not in compact or '0x91,0x02' not in compact:
+              raise SystemExit('input/output main items missing')
+          if '0x95,0x08' not in compact or '0xb1,0x02' not in compact:
+              raise SystemExit('8-byte feature report missing')
+
+          lines=s.splitlines()
+          data_if=[]
+          for i,line in enumerate(lines):
+              if 'sizeof(HidDataReportDescriptor)' in line:
+                  prev='\n'.join(lines[max(0,i-4):i+1])
+                  # HID data interface descriptor has bNumEndpoints = 0.
+                  if re.search(r'0x09\s*,\s*0x04\s*,[^\n]*0x00\s*,\s*0x03\s*,\s*0x00\s*,\s*0x00\s*,\s*0x00',prev,re.I):
+                      data_if.append((i+1,prev))
+          if not data_if:
+              raise SystemExit('no zero-endpoint HID data interface descriptor proved')
+
+          ev=[
+              'HidDataReportDescriptor: INPUT Report Count 0x0100 = 256 bytes',
+              'HidDataReportDescriptor: OUTPUT Report Count 0x0100 = 256 bytes',
+              'HidDataReportDescriptor: FEATURE Report Count 0x08 = 8 bytes',
+              f'Zero-endpoint HID data interface descriptor instances={len(data_if)}',
+          ]
+          Path('/tmp/R67_HID_DESCRIPTOR_EVIDENCE.txt').write_text('\n'.join(ev)+'\n\n'+
+              '\n---\n'.join(x[1] for x in data_if)+'\n')
+          state=[
+              'R67_HID_DESCRIPTOR_STATIC=PASS',
+              'R67_HID_INPUT_REPORT_BYTES=256',
+              'R67_HID_OUTPUT_REPORT_BYTES=256',
+              'R67_HID_FEATURE_REPORT_BYTES=8',
+              'R67_HID_DATA_INTERFACE_ENDPOINTS=0',
+              'R67_HID_DATA_PATH=CONTROL_TRANSFER_STATIC',
+              'R67_INTERRUPT_IN_NOT_REQUIRED_FOR_HID_DATA_STATIC=YES',
+              'R67_FEATURE_SET_REPORT_ALLOWED=NO',
+              'R67_LIVE_USB_VERIFIED=NO',
+          ]
+          Path('/tmp/R67_HID_DESCRIPTOR_STATE.txt').write_text('\n'.join(state)+'\n')
+          print('\n'.join(state))
+          PY2
+          grep -q '^R67_HID_DESCRIPTOR_STATIC=PASS$' /tmp/R67_HID_DESCRIPTOR_STATE.txt
+          grep -q '^R67_HID_DATA_INTERFACE_ENDPOINTS=0$' /tmp/R67_HID_DESCRIPTOR_STATE.txt
+
+      - name: R68 prove active SDK output topology and detect bridge mismatch
+        id: r68_output_topology
+        if: steps.r67_hid_descriptor.outcome == 'success'
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY2'
+          from pathlib import Path
+          import os,re
+          root=Path(os.environ['RUNNER_TEMP'])/'bp1048sdk'
+          cfg=root/'BT_Audio_APP/bt_audio_app_src/inc/app_config.h'
+          main=root/'BT_Audio_APP/bt_audio_app_src/apps/main_task.c'
+          bridge=Path(os.environ['RUNNER_TEMP'])/'r58gen/okn_r58_audio_bridge.c'
+          c=cfg.read_text(encoding='latin-1')
+          m=main.read_text(encoding='latin-1')
+          b=bridge.read_text(encoding='latin-1')
+
+          def active_define(name):
+              return bool(re.search(r'(?m)^\s*#define\s+'+re.escape(name)+r'\b',c))
+          dac0=active_define('CFG_RES_AUDIO_DAC0_EN')
+          dacx=active_define('CFG_RES_AUDIO_DACX_EN')
+          i2so=active_define('CFG_RES_AUDIO_I2SOUT_EN')
+          if not dac0 or not dacx:
+              raise SystemExit('expected active DAC0/DACX sample sinks not both enabled')
+          if i2so:
+              raise SystemExit('sample unexpectedly enables I2SOUT; re-audit required')
+
+          def sink_fmt(sym):
+              rx=re.compile(re.escape(sym)+r'\]\.PcmFormat\s*=\s*(\d+)\s*;')
+              mm=rx.search(m)
+              if not mm: raise SystemExit('PcmFormat missing for '+sym)
+              return int(mm.group(1))
+          f0=sink_fmt('AUDIO_DAC0_SINK_NUM')
+          fx=sink_fmt('AUDIO_DACX_SINK_NUM')
+          if f0 != 2 or fx != 2:
+              raise SystemExit(f'unexpected sink formats DAC0={f0} DACX={fx}')
+
+          for tok in ['AudioDAC0DataSet','AudioDAC1DataSet','AudioCoreSinkEnable(AUDIO_DAC0_SINK_NUM)',
+                      'AudioCoreSinkEnable(AUDIO_DACX_SINK_NUM)']:
+              if tok not in m: raise SystemExit('active sink evidence missing '+tok)
+
+          # Current locked bridge treats DACX buffer as a single stride-1 lane.
+          bridge_mismatch=('dacx_mono' in b and
+                           re.search(r'okn56_process_lane\(&s_runtime,\s*2u,\s*dacx_mono,\s*frames,\s*1u\)',b) is not None)
+          if not bridge_mismatch:
+              raise SystemExit('expected current locked bridge representation not found; re-audit mapping')
+
+          evidence=[
+              f'CFG_RES_AUDIO_DAC0_EN={dac0}',
+              f'CFG_RES_AUDIO_DACX_EN={dacx}',
+              f'CFG_RES_AUDIO_I2SOUT_EN={i2so}',
+              f'DAC0_PcmFormat={f0}',
+              f'DACX_PcmFormat={fx}',
+              'DAC0 FuncDataSet=AudioDAC0DataSet',
+              'DACX FuncDataSet=AudioDAC1DataSet',
+              'Current locked bridge labels DACX as dacx_mono and uses stride=1',
+          ]
+          Path('/tmp/R68_OUTPUT_TOPOLOGY_EVIDENCE.txt').write_text('\n'.join(evidence)+'\n')
+          state=[
+              'R68_SDK_OUTPUT_TOPOLOGY_STATIC=PASS',
+              'R68_SAMPLE_DAC0_ACTIVE=YES',
+              'R68_SAMPLE_DACX_ACTIVE=YES',
+              'R68_SAMPLE_I2SOUT_ACTIVE=NO',
+              'R68_DAC0_PCMFORMAT=2',
+              'R68_DACX_PCMFORMAT=2',
+              'R68_CURRENT_LOCKED_BRIDGE_DACX_FORMAT_MISMATCH=YES',
+              'R68_AUDIO_BRIDGE_PRODUCTION_READY=NO',
+              'R68_PHYSICAL_7CH_BOARD_MAPPING_VERIFIED=NO',
+              'R68_OUTPUT_HARDWARE_INIT_ENABLED=NO',
+          ]
+          Path('/tmp/R68_OUTPUT_TOPOLOGY_STATE.txt').write_text('\n'.join(state)+'\n')
+          print('\n'.join(state))
+          PY2
+          grep -q '^R68_SDK_OUTPUT_TOPOLOGY_STATIC=PASS$' /tmp/R68_OUTPUT_TOPOLOGY_STATE.txt
+          grep -q '^R68_CURRENT_LOCKED_BRIDGE_DACX_FORMAT_MISMATCH=YES$' /tmp/R68_OUTPUT_TOPOLOGY_STATE.txt
+          grep -q '^R68_AUDIO_BRIDGE_PRODUCTION_READY=NO$' /tmp/R68_OUTPUT_TOPOLOGY_STATE.txt
+
+      - name: R69 distinguish custom-path safety from vendor flash code presence
+        id: r69_vendor_flash_scope
+        if: steps.r68_output_topology.outcome == 'success' && steps.r64_memory_audit.outcome == 'success'
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY2'
+          from pathlib import Path
+          import re
+          files=[
+              Path('/tmp/R58_FINAL_SYMBOLS.txt'),
+              Path('/tmp/R64_SECTION_HEADERS.txt'),
+              Path('/tmp/OKN_R60_CURRENT_E2E_CONFORMANCE_NOT_FOR_FLASH.map'),
+          ]
+          hits=[]
+          rx=re.compile(r'(flash|erase|boot|upgrade|ota)',re.I)
+          for p in files:
+              if not p.exists(): continue
+              for n,line in enumerate(p.read_text(errors='replace').splitlines(),1):
+                  if rx.search(line):
+                      hits.append(f'{p.name}:{n}:{line}')
+          Path('/tmp/R69_VENDOR_FLASH_SYMBOL_EVIDENCE.txt').write_text('\n'.join(hits[:3000])+'\n')
+          if not hits:
+              raise SystemExit('expected vendor flash/boot symbols/sections not found; scope must be re-audited')
+          custom=Path('/tmp/R63_CUSTOM_FLASH_AUDIT_STATE.txt').read_text()
+          if 'R63_CUSTOM_PATH_FLASH_RELOCS=NONE' not in custom:
+              raise SystemExit('custom direct-relocation proof missing')
+          state=[
+              'R69_FLASH_SCOPE_AUDIT=PASS',
+              f'R69_VENDOR_FLASH_BOOT_HIT_COUNT={len(hits)}',
+              'R69_VENDOR_FLASH_BOOT_CODE_PRESENT_IN_FULL_ELF=YES',
+              'R69_CUSTOM_DIRECT_FLASH_RELOCS=NONE',
+              'R69_WHOLE_IMAGE_FLASH_FREE=NO',
+              'R69_PRODUCTION_FLASH_IMAGE=NO',
+              'R69_FLASH_ALLOWED=NO',
+          ]
+          Path('/tmp/R69_FLASH_SCOPE_STATE.txt').write_text('\n'.join(state)+'\n')
+          print('\n'.join(state))
+          PY2
+          grep -q '^R69_FLASH_SCOPE_AUDIT=PASS$' /tmp/R69_FLASH_SCOPE_STATE.txt
+          grep -q '^R69_WHOLE_IMAGE_FLASH_FREE=NO$' /tmp/R69_FLASH_SCOPE_STATE.txt
+
+      - name: R70 continuous evidence and blocker update
+        id: r70_blocker_update
+        if: steps.r69_vendor_flash_scope.outcome == 'success'
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -q '^R66_HID_CONTROL_PATH_STATIC=PASS$' /tmp/R66_HID_CONTROL_PATH_STATE.txt
+          grep -q '^R67_HID_DESCRIPTOR_STATIC=PASS$' /tmp/R67_HID_DESCRIPTOR_STATE.txt
+          grep -q '^R68_SDK_OUTPUT_TOPOLOGY_STATIC=PASS$' /tmp/R68_OUTPUT_TOPOLOGY_STATE.txt
+          grep -q '^R69_FLASH_SCOPE_AUDIT=PASS$' /tmp/R69_FLASH_SCOPE_STATE.txt
+          cat > /tmp/OKN_CONTINUOUS_BLOCKERS_R70.txt <<'EOF'
+          OKN_CONTINUOUS_R70=PASS
+          GAIN_VIA_EQ=NO
+          DEDICATED_GAIN_7CH_CORE=PASS
+          UFE_PROTOCOL_EXHAUSTIVE=PASS
+          HID_DATA_CONTROL_TX_PATH_STATIC=PASS
+          HID_INPUT_REPORT_BYTES=256
+          HID_OUTPUT_REPORT_BYTES=256
+          HID_DATA_INTERFACE_ENDPOINTS=0
+          FEATURE_SET_REPORT_ALLOWED=NO
+          SDK_SAMPLE_DAC0_ACTIVE=YES
+          SDK_SAMPLE_DACX_ACTIVE=YES
+          SDK_SAMPLE_I2SOUT_ACTIVE=NO
+          CURRENT_LOCKED_BRIDGE_DACX_FORMAT_MISMATCH=YES
+          AUDIO_BRIDGE_PRODUCTION_READY=NO
+          VENDOR_FLASH_BOOT_CODE_PRESENT_IN_FULL_ELF=YES
+          CUSTOM_DIRECT_FLASH_RELOCS=NONE
+          WHOLE_IMAGE_FLASH_FREE=NO
+          LIVE_USB_TRANSPORT_VERIFIED=NO
+          PHYSICAL_7CH_BOARD_MAPPING_VERIFIED=NO
+          OUTPUT_HARDWARE_INIT=LOCKED
+          BOARD_FLASH_LAYOUT_VERIFIED=NO
+          PRODUCTION_FLASH_IMAGE=NO
+          LIVE_BOARD_USB=NO
+          HOST_TO_DEVICE_USB=NO
+          FLASH_ERASE_WRITE=NO
+          FLASH_ALLOWED=NO
+          EOF
+          cat /tmp/OKN_CONTINUOUS_BLOCKERS_R70.txt
+
       - name: Package continuous evidence
         if: always()
         shell: bash
@@ -1205,6 +1503,7 @@ jobs:
           cp /tmp/R59_*.txt /tmp/R59_*.diff /tmp/R59_*.log "$OUT/" 2>/dev/null || true
           cp /tmp/R60_*.txt /tmp/R60_*.log "$OUT/" 2>/dev/null || true
           cp /tmp/R61_*.txt /tmp/R62_*.txt /tmp/R63_*.txt /tmp/R64_*.txt /tmp/OKN_CONTINUOUS_BLOCKERS.txt "$OUT/" 2>/dev/null || true
+          cp /tmp/R66_*.txt /tmp/R67_*.txt /tmp/R68_*.txt /tmp/R69_*.txt /tmp/OKN_CONTINUOUS_BLOCKERS_R70.txt "$OUT/" 2>/dev/null || true
           cp "$RUNNER_TEMP/r58gen/test_r60_e2e.c" "$OUT/" 2>/dev/null || true
           cp "$RUNNER_TEMP/r58gen/okn_r58_audio_bridge.h" "$RUNNER_TEMP/r58gen/okn_r58_audio_bridge.c" "$OUT/" 2>/dev/null || true
           cp "$RUNNER_TEMP/r58gen/okn_r59_usb_bridge.h" "$RUNNER_TEMP/r58gen/okn_r59_usb_bridge.c" "$RUNNER_TEMP/r58gen/test_r59_usb.c" "$OUT/" 2>/dev/null || true
@@ -1227,6 +1526,11 @@ jobs:
           r63_custom_flash_audit=${{ steps.r63_custom_flash_audit.outcome }}
           r64_memory_audit=${{ steps.r64_memory_audit.outcome }}
           r65_blocker_summary=${{ steps.r65_blocker_summary.outcome }}
+          r66_hid_control_tx=${{ steps.r66_hid_control_tx.outcome }}
+          r67_hid_descriptor=${{ steps.r67_hid_descriptor.outcome }}
+          r68_output_topology=${{ steps.r68_output_topology.outcome }}
+          r69_vendor_flash_scope=${{ steps.r69_vendor_flash_scope.outcome }}
+          r70_blocker_update=${{ steps.r70_blocker_update.outcome }}
           Dedicated Gain: 7 independent lanes, -70..+6 dB, 0.5 dB
           Gain via EQ: NO
           Custom HID namespace: OKN6, protocol version 1, 256-byte report
@@ -1251,6 +1555,11 @@ jobs:
           R62 SDK output/pin candidate discovery: completed offline; physical mapping still unproven
           R63 custom path flash callgraph: NONE
           R64 linked ELF memory layout: inspected; production flash image still NO
+          R66 HID data TX: exact control-transfer input-report path proved statically
+          R67 HID data descriptor: 256-byte input/output, 8-byte feature, zero data-interface endpoints
+          R68 SDK sample outputs: DAC0 + DACX active; I2SOUT disabled; current locked DACX-mono bridge mismatch detected
+          R69 full ELF contains vendor flash/boot code; custom objects have no direct flash relocations
+          R70 production bridge remains LOCKED pending board-specific 7CH mapping
           EOF
           (cd "$OUT" && sha256sum * > SHA256SUMS.txt)
 
@@ -1290,6 +1599,11 @@ jobs:
           test "${{ steps.r63_custom_flash_audit.outcome }}" = "success"
           test "${{ steps.r64_memory_audit.outcome }}" = "success"
           test "${{ steps.r65_blocker_summary.outcome }}" = "success"
+          test "${{ steps.r66_hid_control_tx.outcome }}" = "success"
+          test "${{ steps.r67_hid_descriptor.outcome }}" = "success"
+          test "${{ steps.r68_output_topology.outcome }}" = "success"
+          test "${{ steps.r69_vendor_flash_scope.outcome }}" = "success"
+          test "${{ steps.r70_blocker_update.outcome }}" = "success"
           grep -q '^GAIN_VIA_EQ=NO$' okn_continuous_out/R60_FINAL_GATE.txt
           grep -q '^CUSTOM_UFE_TRANSPORT_CALLGRAPH_VERIFIED=YES$' okn_continuous_out/R60_FINAL_GATE.txt
           grep -q '^WRITE_RETURNS_IMMEDIATE_READBACK=YES$' okn_continuous_out/R60_FINAL_GATE.txt
@@ -1302,6 +1616,12 @@ jobs:
           test ! -e okn_continuous_out/OKN_R60_CURRENT_E2E_CONFORMANCE_NOT_FOR_FLASH.bin
           grep -q '^OKN_CONTINUOUS_OFFLINE_PIPELINE=PASS$' okn_continuous_out/OKN_CONTINUOUS_BLOCKERS.txt
           grep -q '^CUSTOM_PATH_FLASH_CALLS=NONE$' okn_continuous_out/OKN_CONTINUOUS_BLOCKERS.txt
+          grep -q '^OKN_CONTINUOUS_R70=PASS$' okn_continuous_out/OKN_CONTINUOUS_BLOCKERS_R70.txt
+          grep -q '^HID_DATA_CONTROL_TX_PATH_STATIC=PASS$' okn_continuous_out/OKN_CONTINUOUS_BLOCKERS_R70.txt
+          grep -q '^CURRENT_LOCKED_BRIDGE_DACX_FORMAT_MISMATCH=YES$' okn_continuous_out/OKN_CONTINUOUS_BLOCKERS_R70.txt
+          grep -q '^AUDIO_BRIDGE_PRODUCTION_READY=NO$' okn_continuous_out/OKN_CONTINUOUS_BLOCKERS_R70.txt
+          grep -q '^VENDOR_FLASH_BOOT_CODE_PRESENT_IN_FULL_ELF=YES$' okn_continuous_out/OKN_CONTINUOUS_BLOCKERS_R70.txt
+          grep -q '^WHOLE_IMAGE_FLASH_FREE=NO$' okn_continuous_out/OKN_CONTINUOUS_BLOCKERS_R70.txt
           echo 'OKN_DSP_CONTINUOUS=PASS'
           echo 'GAIN_VIA_EQ=NO'
           echo 'FLASH_ALLOWED=NO'
