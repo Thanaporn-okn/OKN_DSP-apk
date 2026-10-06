@@ -1,4 +1,4 @@
-name: OKN R114 FAST Stage1 Store + N9 Parser Recovery OFFLINE ONLY
+name: OKN R115 MEGA Stage2 Parser + Native Patch Trace OFFLINE ONLY
 
 on:
   push:
@@ -12,7 +12,7 @@ permissions:
   actions: read
 
 concurrency:
-  group: okn-r114-fast-stage1-${{ github.ref }}
+  group: okn-r115-stage2-native-${{ github.ref }}
   cancel-in-progress: true
 
 env:
@@ -24,11 +24,11 @@ env:
 
 jobs:
   recover:
-    name: Fast stage1 store recovery and second-stage parser tracing
+    name: Stage2 store parser and native patch tracing
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     env:
-      OUT: /tmp/r114
+      OUT: /tmp/r115
 
     steps:
       - name: Fail-closed static-only safety gate
@@ -44,7 +44,7 @@ jobs:
           mkdir -p "$OUT"/{downloads,pkg,il,resources,decrypted,evidence,review}
 
           cat > "$OUT/evidence/00_SCOPE.txt" <<'EOF'
-          REVISION=R114
+          REVISION=R115
           MODE=OFFLINE_STATIC_ONLY
           TARGET_EXECUTED=false
           BOARD_USB_ACCESS=NO
@@ -383,7 +383,114 @@ jobs:
           print(json.dumps(proofs,indent=2))
           PY
 
-      - name: Run exact IL emulator with accelerated stage1 word loop
+      - name: Prove stage2 qword XOR and native helper semantics
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import os,json
+
+          out=Path(os.environ["OUT"])
+          il=(out/"il/all.il").read_text(errors="ignore")
+          n9=(out/"evidence/20_N9_METHOD.il").read_text(errors="ignore")
+          ev=out/"evidence"
+
+          # Exact stage2 loop:
+          #   local50 + local93*8
+          #   ldind.i8
+          #   XOR 939576589 (0x3800CD0D)
+          #   stind.i8
+          # state110 increments local93 and state667 returns to loop check.
+          stage2_proofs={
+            "loop_check_local93_lt_local7":
+              "IL_6710: ldloc.s 93" in n9 and
+              "IL_6712: ldloc.s 7" in n9 and
+              "IL_6714: blt IL_4952" in n9,
+            "qword_address_local50_plus_index_times8":
+              "IL_4952: ldloc.s 50" in n9 and
+              "IL_4954: ldloc.s 93" in n9 and
+              "IL_4956: ldc.i4.8" in n9 and
+              "IL_4958: add" in n9,
+            "qword_xor_constant":
+              "IL_495c: ldc.i4 939576589" in n9 and
+              "IL_4962: xor" in n9 and
+              "IL_4963: stind.i8" in n9,
+            "loop_increment":
+              "IL_554f: ldloc.s 93" in n9 and
+              "IL_5551: ldc.i4.1" in n9 and
+              "IL_5553: stloc.s 93" in n9,
+          }
+
+          helper_names=[
+            "KNljOOvDry","cWTufTK81AUpaDL6ruM","BNORmcKAAUDY68Xwmq1",
+            "KuuCh5KnIvpdYGDMMPL","P0T0NFKL9aLp41lKdXX",
+            "xxguFuNtTvdBm7aDJwf","IjE6SaNG6WjwQEgWM2s",
+            "KIoEb3NS3a1HTR21GpN","nEgLdGKpl9ybhlqqVWH",
+            "xAknZ0KVmw55ytiqn7f","UCB7PIKitQ3s1yf5LMj",
+            "qWLJesKJ6PiuJOY9SUb","G3Ih2dK6qwO4xxmhWW0"
+          ]
+          methods={}
+          for name in helper_names:
+            tag="// end of method q71r2Rj8SiD9GF1BI50::"+name
+            e=il.find(tag)
+            if e < 0:
+              methods[name]=""
+              continue
+            s=il.rfind(".method",0,e)
+            nl=il.find("\n",e)
+            methods[name]=il[s:(len(il) if nl<0 else nl)]
+
+          helper_proofs={
+            "VirtualProtect":
+              '"Virtual "' in methods["KNljOOvDry"] and
+              '"Protect"' in methods["KNljOOvDry"],
+            "Marshal_WriteInt32":
+              "Marshal::WriteInt32" in methods["cWTufTK81AUpaDL6ruM"],
+            "Marshal_ReadInt32":
+              "Marshal::ReadInt32" in methods["BNORmcKAAUDY68Xwmq1"],
+            "Marshal_ReadInt64":
+              "Marshal::ReadInt64" in methods["KuuCh5KnIvpdYGDMMPL"],
+            "CloseHandle":
+              '"Close "' in methods["P0T0NFKL9aLp41lKdXX"] and
+              '"Handle"' in methods["P0T0NFKL9aLp41lKdXX"],
+            "Assembly_GetModules":
+              "Assembly::GetModules()" in methods["xxguFuNtTvdBm7aDJwf"],
+            "Marshal_GetHINSTANCE":
+              "Marshal::GetHINSTANCE" in methods["IjE6SaNG6WjwQEgWM2s"],
+            "Assembly_Location":
+              "Assembly::get_Location()" in methods["KIoEb3NS3a1HTR21GpN"],
+            "Hashtable_Add":
+              "Hashtable::Add" in methods["nEgLdGKpl9ybhlqqVWH"],
+            "Convert_ToInt32":
+              "System.Convert::ToInt32(int64)" in methods["xAknZ0KVmw55ytiqn7f"],
+            "UTF8":
+              "System.Text.Encoding::get_UTF8()" in methods["UCB7PIKitQ3s1yf5LMj"],
+            "UTF8_GetString":
+              "System.Text.Encoding::GetString(uint8[])" in methods["qWLJesKJ6PiuJOY9SUb"],
+            "IntPtr_Equality":
+              "System.IntPtr::op_Equality" in methods["G3Ih2dK6qwO4xxmhWW0"],
+          }
+
+          if not all(stage2_proofs.values()):
+            raise SystemExit("stage2 proof gate failed: "+json.dumps(stage2_proofs))
+          if not all(helper_proofs.values()):
+            raise SystemExit("native helper proof gate failed: "+json.dumps(helper_proofs))
+
+          (ev/"26_STAGE2_QWORD_XOR_PROOFS.json").write_text(
+            json.dumps(stage2_proofs,indent=2)+"\n")
+          (ev/"27_NATIVE_HELPER_PROOFS.json").write_text(
+            json.dumps(helper_proofs,indent=2)+"\n")
+          (ev/"28_NATIVE_HELPER_METHODS.json").write_text(
+            json.dumps(methods,indent=2,ensure_ascii=False)+"\n")
+
+          print(json.dumps({
+            "stage2":stage2_proofs,
+            "native_helpers":helper_proofs
+          },indent=2))
+          PY
+
+      - name: Run exact emulator with accelerated stage1 and stage2 loops
         shell: bash
         run: |
           set -euo pipefail
@@ -391,6 +498,7 @@ jobs:
           from pathlib import Path
           from dataclasses import dataclass, field
           import os,re,json,copy,struct,hashlib,collections
+          import pefile
           from Crypto.Cipher import AES
           from Crypto.Util.Padding import unpad
 
@@ -398,6 +506,23 @@ jobs:
           N9=(OUT/"evidence/20_N9_METHOD.il").read_text(errors="ignore")
           RM=json.loads((OUT/"evidence/10_RESOURCE_MAP.json").read_text())
           RESOURCE_BY_NAME={r["name"]:(OUT/"resources"/r["file"]).read_bytes() for r in RM}
+
+          # Static PE image model. This is only a bytearray representation of the
+          # official EXE on the runner; the target executable is never started.
+          PE=pefile.PE(str(OUT/"dstech.exe"),fast_load=False)
+          MODULE_BASE=int(PE.OPTIONAL_HEADER.ImageBase)
+          MODULE_SIZE=int(PE.OPTIONAL_HEADER.SizeOfImage)
+          MODULE_IMAGE=bytearray(MODULE_SIZE)
+          RAW_EXE=(OUT/"dstech.exe").read_bytes()
+          hdr=min(len(RAW_EXE),int(PE.OPTIONAL_HEADER.SizeOfHeaders))
+          MODULE_IMAGE[:hdr]=RAW_EXE[:hdr]
+          for sec in PE.sections:
+              va=int(sec.VirtualAddress)
+              data=sec.get_data()
+              end=min(MODULE_SIZE,va+len(data))
+              if 0<=va<end:
+                  MODULE_IMAGE[va:end]=data[:end-va]
+          MODULE_WRITES=[]
 
           class U:
               def __init__(self,name="unknown"): self.name=name
@@ -416,6 +541,88 @@ jobs:
               def __init__(self): self.data=bytearray()
           class Crypto:
               def __init__(self,mem,tr): self.mem=mem; self.tr=tr; self.inp=bytearray()
+
+          class Ptr:
+              def __init__(self,region,offset=0,buf=None):
+                  self.region=region
+                  self.offset=int(offset)
+                  self.buf=buf
+              def __repr__(self):
+                  return f"Ptr({self.region},{self.offset:#x})"
+
+          class LocalRef:
+              def __init__(self,index): self.index=int(index)
+              def __repr__(self): return f"LocalRef({self.index})"
+
+          class FieldRef:
+              def __init__(self,obj,field): self.obj=obj; self.field=field
+
+          class HashTable(dict):
+              pass
+
+          def deref_value(s,v):
+              if isinstance(v,LocalRef):
+                  return s.locals[v.index]
+              return v
+
+          def ptr_add(v,delta):
+              if isinstance(v,Ptr) and isinstance(delta,int):
+                  return Ptr(v.region,v.offset+delta,v.buf)
+              return None
+
+          def ptr_read(s,p,n):
+              if isinstance(p,LocalRef):
+                  v=s.locals[p.index]
+                  if isinstance(v,int):
+                      return v
+                  return 0
+              if not isinstance(p,Ptr):
+                  return None
+              if p.region=="module":
+                  off=p.offset
+                  if 0<=off and off+n<=len(MODULE_IMAGE):
+                      return bytes(MODULE_IMAGE[off:off+n])
+              if p.region=="array" and isinstance(p.buf,(bytes,bytearray)):
+                  off=p.offset
+                  if 0<=off and off+n<=len(p.buf):
+                      return bytes(p.buf[off:off+n])
+              return None
+
+          def ptr_write(s,p,data,source="unknown"):
+              if isinstance(p,LocalRef):
+                  if len(data)==4:
+                      s.locals[p.index]=struct.unpack("<i",data)[0]
+                      return True
+                  if len(data)==8:
+                      s.locals[p.index]=struct.unpack("<q",data)[0]
+                      return True
+                  return False
+              if not isinstance(p,Ptr):
+                  return False
+
+              if p.region=="module":
+                  off=p.offset
+                  if 0<=off and off+len(data)<=len(MODULE_IMAGE):
+                      old=bytes(MODULE_IMAGE[off:off+len(data)])
+                      MODULE_IMAGE[off:off+len(data)]=data
+                      evt={
+                          "region":"module",
+                          "rva":off,
+                          "rva_hex":hex(off),
+                          "size":len(data),
+                          "old_hex":old.hex().upper(),
+                          "new_hex":bytes(data).hex().upper(),
+                          "source":source,
+                      }
+                      MODULE_WRITES.append(evt)
+                      return True
+
+              if p.region=="array" and isinstance(p.buf,bytearray):
+                  off=p.offset
+                  if 0<=off and off+len(data)<=len(p.buf):
+                      p.buf[off:off+len(data)]=data
+                      return True
+              return False
 
           # Parse IL instruction labels.
           ins=[]
@@ -488,6 +695,13 @@ jobs:
 
           def binary(a,b,op):
               if unk(a) or unk(b): return U(f"{op}")
+              if op=="add":
+                  q=ptr_add(a,b)
+                  if q is not None: return q
+                  q=ptr_add(b,a)
+                  if q is not None: return q
+              if op=="sub" and isinstance(a,Ptr) and isinstance(b,int):
+                  return Ptr(a.region,a.offset-b,a.buf)
               try:
                   if op=="add":return a+b
                   if op=="sub":return a-b
@@ -513,6 +727,65 @@ jobs:
               if name in TRUE_FUN:return True
               if name in NULL_FUN:return None
               if name=="tFjbT6Nj4GDWeki27kh":return 4
+              if name=="xxguFuNtTvdBm7aDJwf":
+                  return ["module0"]
+              if name=="IjE6SaNG6WjwQEgWM2s":
+                  return Ptr("module",0)
+              if name=="KIoEb3NS3a1HTR21GpN":
+                  return str(OUT/"dstech.exe")
+              if name=="xAknZ0KVmw55ytiqn7f":
+                  v=deref_value(s,args[-1]) if args else 0
+                  if isinstance(v,Ptr):
+                      return (MODULE_BASE+v.offset) & 0xffffffff
+                  return int(v) & 0xffffffff if isinstance(v,int) else U("ToInt32")
+              if name=="UCB7PIKitQ3s1yf5LMj":
+                  return "UTF8"
+              if name=="qWLJesKJ6PiuJOY9SUb":
+                  if len(args)>=2 and args[-2]=="UTF8" and isinstance(args[-1],(bytes,bytearray)):
+                      return bytes(args[-1]).decode("utf-8",errors="replace")
+                  return U("UTF8.GetString")
+              if name=="G3Ih2dK6qwO4xxmhWW0":
+                  if len(args)>=2:
+                      a=deref_value(s,args[-2]); b=deref_value(s,args[-1])
+                      if isinstance(a,Ptr) and isinstance(b,Ptr):
+                          return a.region==b.region and a.offset==b.offset
+                      return a==b
+                  return False
+              if name=="nEgLdGKpl9ybhlqqVWH":
+                  if len(args)>=3 and isinstance(args[-3],HashTable):
+                      args[-3][repr(args[-2])]=args[-1]
+                  return None
+              if name=="KNljOOvDry":
+                  # VirtualProtect: static model only. Return nonzero success and
+                  # populate old-protect byref when possible.
+                  if len(args)>=4:
+                      old=args[-1]
+                      if isinstance(old,LocalRef):
+                          s.locals[old.index]=0x20
+                  return 1
+              if name=="cWTufTK81AUpaDL6ruM":
+                  if len(args)>=2:
+                      p=deref_value(s,args[-2]); v=deref_value(s,args[-1])
+                      if isinstance(v,int):
+                          ptr_write(s,p,struct.pack("<I",v & 0xffffffff),"Marshal.WriteInt32")
+                  return None
+              if name=="BNORmcKAAUDY68Xwmq1":
+                  p=deref_value(s,args[-1]) if args else None
+                  data=ptr_read(s,p,4)
+                  return struct.unpack("<i",data)[0] if data else U("ReadInt32Ptr")
+              if name=="KuuCh5KnIvpdYGDMMPL":
+                  p=deref_value(s,args[-1]) if args else None
+                  data=ptr_read(s,p,8)
+                  return struct.unpack("<q",data)[0] if data else U("ReadInt64Ptr")
+              if name=="P0T0NFKL9aLp41lKdXX":
+                  return 1
+              if name=="ToInt64":
+                  v=deref_value(s,args[0]) if args else U("intptr")
+                  if isinstance(v,Ptr):
+                      if v.region=="module":
+                          return MODULE_BASE+v.offset
+                      return v.offset
+                  return int(v) if isinstance(v,int) else U("ToInt64")
               if name=="gH6uphNOsYQyRXDZmHu":
                   nm=args[-1] if args else U()
                   if isinstance(nm,str) and nm in RESOURCE_BY_NAME:
@@ -528,7 +801,9 @@ jobs:
                       before=r.s.pos
                       if before+4<=len(r.s.data):
                           v=struct.unpack_from("<i",r.s.data,before)[0]; r.s.pos+=4
+                          rr={"kind":"ReadInt32","before":before,"after":r.s.pos,"value":v,"step":s.steps}
                           s.reads.append({"op":"ReadInt32","before":before,"after":r.s.pos,"value":v})
+                          GLOBAL_EVENTS.append(rr)
                           return v
                   return U("ReadInt32")
               if name=="oNNQE6NTi9uesXTTGZJ":
@@ -548,7 +823,10 @@ jobs:
                   if len(args)>=2 and isinstance(args[-2],Reader) and isinstance(args[-1],int):
                       r=args[-2]; n=max(0,args[-1]); before=r.s.pos
                       data=r.s.data[before:before+n]; r.s.pos+=len(data)
+                      rr={"kind":"ReadBytes","before":before,"after":r.s.pos,
+                          "requested":n,"returned":len(data),"step":s.steps}
                       s.reads.append({"op":"ReadBytes","before":before,"after":r.s.pos,"requested":n,"returned":len(data)})
+                      GLOBAL_EVENTS.append(rr)
                       return bytes(data)
                   return U("ReadBytes")
               if name=="trEuKPNkgB3p5fLuROn":return SymAlg()
@@ -607,12 +885,13 @@ jobs:
           # .NET zero-initialized static field before N9 first-call guard.
           # This assumption is explicit and alternate branches are still forked when unknown.
           initial.statics["NaheA732Kj"]=False
+          initial.statics["lWgjKLKxo2"]="official_client_assembly"
 
           active=collections.deque([initial])
           finished=[]
           seen={}
-          MAX_PATHS=1024
-          MAX_STEPS=5000000
+          MAX_PATHS=1536
+          MAX_STEPS=8000000
           total_steps=0
           GLOBAL_REACH=[]
           GLOBAL_EVENTS=[]
@@ -721,7 +1000,7 @@ jobs:
                       v=pop(s)
                       ts=re.findall(r'IL_[0-9A-Fa-f]+',arg)
                       if isinstance(v,int) and 0<=v<len(ts):
-                          if v in (626,631,313,458,96,206,94,289,292,402,40,281):
+                          if v in (626,631,313,458,96,206,510,487,162,464,94,52,289,292,402,40,281,533,569,0,16,75):
                               evt={
                                   "state":v,
                                   "target":ts[v],
@@ -833,6 +1112,35 @@ jobs:
                                   "step":s.steps
                               })
 
+                          if (
+                              v==162
+                              and isinstance(s.locals[93],int) and s.locals[93]==0
+                              and isinstance(s.locals[7],int) and s.locals[7]>1000
+                              and isinstance(s.locals[29],bytearray)
+                          ):
+                              qwords=s.locals[7]
+                              buf=s.locals[29]
+                              mask=939576589  # exact ldc.i4 at IL_495c
+                              for ii in range(qwords):
+                                  off=ii*8
+                                  vv=struct.unpack_from("<Q",buf,off)[0]
+                                  struct.pack_into("<Q",buf,off,vv ^ mask)
+
+                              s.locals[93]=qwords
+                              stage2=bytes(buf)
+                              (OUT/"decrypted/stage2_qword_xor.bin").write_bytes(stage2)
+                              event={
+                                  "kind":"FAST_QWORD_XOR_LOOP",
+                                  "iterations":qwords,
+                                  "mask_hex":"0x3800CD0D",
+                                  "length":len(stage2),
+                                  "sha256":hashlib.sha256(stage2).hexdigest(),
+                                  "head64":stage2[:64].hex().upper(),
+                                  "step":s.steps
+                              }
+                              s.milestones.append(event)
+                              GLOBAL_EVENTS.append(event)
+
                           s.trace.append({"state":v,"target":ts[v],"step":s.steps})
                           if v in (626,631,289,292,402,40,281):
                               s.milestones.append({
@@ -896,6 +1204,17 @@ jobs:
                       n=argc(arg);args=[pop(s) for _ in range(n)][::-1]
                       if "Y7Uor8e58M9K22QZF7H::.ctor" in arg:
                           push(s,Reader(args[-1]) if args and isinstance(args[-1],Stream) else U("Reader"))
+                      elif "System.IntPtr::.ctor" in arg:
+                          v=deref_value(s,args[-1]) if args else 0
+                          if isinstance(v,Ptr): push(s,v)
+                          elif isinstance(v,int):
+                              if MODULE_BASE <= v < MODULE_BASE+MODULE_SIZE:
+                                  push(s,Ptr("module",v-MODULE_BASE))
+                              else:
+                                  push(s,v)
+                          else: push(s,U("IntPtr"))
+                      elif "Hashtable::.ctor" in arg:
+                          push(s,HashTable())
                       elif "MemoryStream::.ctor" in arg:
                           if args and isinstance(args[-1],(bytes,bytearray)):
                               # Exact IL at IL_51f2: new MemoryStream(local29),
@@ -913,13 +1232,99 @@ jobs:
                           push(s,U("newobj"))
                       s.ip=nxt;continue
 
-                  # Address/pointer/native instructions not needed for the
-                  # resource/key phase are modelled conservatively.
-                  if op.startswith(("ldloca","ldarga","ldarg","ldfld","ldflda","ldind","ldelema","ldtoken")):
+                  # Address / pointer / object operations used by the anti-tamper parser.
+                  if op in ("ldloca","ldloca.s"):
+                      try: push(s,LocalRef(int(arg.split()[0])))
+                      except: push(s,U("ldloca"))
+                      s.ip=nxt;continue
+
+                  if op=="ldelema":
+                      idxv=pop(s); arr=pop(s)
+                      if isinstance(arr,(bytes,bytearray)) and isinstance(idxv,int):
+                          push(s,Ptr("array",idxv,arr))
+                      else:
+                          push(s,U("ldelema"))
+                      s.ip=nxt;continue
+
+                  if op in ("ldind.i4","ldind.u4","ldind.i8","ldind.i1","ldind.u1"):
+                      p=pop(s)
+                      size=8 if op=="ldind.i8" else (1 if op in ("ldind.i1","ldind.u1") else 4)
+                      data=ptr_read(s,p,size)
+                      if data:
+                          if size==8: val=struct.unpack("<q",data)[0]
+                          elif size==4: val=struct.unpack("<i",data)[0]
+                          else: val=data[0]
+                          push(s,val)
+                      else:
+                          push(s,U(op))
+                      s.ip=nxt;continue
+
+                  if op in ("stind.i4","stind.i8","stind.i1"):
+                      val=pop(s); p=pop(s)
+                      if isinstance(val,int):
+                          if op=="stind.i8": data=struct.pack("<Q",val & 0xffffffffffffffff)
+                          elif op=="stind.i4": data=struct.pack("<I",val & 0xffffffff)
+                          else: data=bytes([val & 0xff])
+                          ptr_write(s,p,data,op)
+                      s.ip=nxt;continue
+
+                  if op=="initobj":
+                      r=pop(s)
+                      if isinstance(r,LocalRef):
+                          s.locals[r.index]={}
+                      s.ip=nxt;continue
+
+                  if op=="stfld":
+                      val=pop(s); obj=pop(s)
+                      fld=arg.split("::")[-1]
+                      if isinstance(obj,LocalRef):
+                          cur=s.locals[obj.index]
+                          if not isinstance(cur,dict): cur={}
+                          cur[fld]=val; s.locals[obj.index]=cur
+                      elif isinstance(obj,dict):
+                          obj[fld]=val
+                      s.ip=nxt;continue
+
+                  if op=="ldfld":
+                      obj=pop(s); fld=arg.split("::")[-1]
+                      obj=deref_value(s,obj)
+                      push(s,obj.get(fld,U("field:"+fld)) if isinstance(obj,dict) else U("field:"+fld))
+                      s.ip=nxt;continue
+
+                  if op=="ldflda":
+                      obj=pop(s); fld=arg.split("::")[-1]
+                      obj=deref_value(s,obj)
+                      push(s,FieldRef(obj,fld))
+                      s.ip=nxt;continue
+
+                  if op=="box" or op=="castclass" or op=="isinst":
+                      # Stack representation already uses Python objects.
+                      s.ip=nxt;continue
+
+                  if op=="ldelem.ref":
+                      idxv=pop(s); arr=pop(s)
+                      if isinstance(arr,(list,tuple)) and isinstance(idxv,int) and 0<=idxv<len(arr):
+                          push(s,arr[idxv])
+                      else:
+                          push(s,U("ldelem.ref"))
+                      s.ip=nxt;continue
+
+                  if op=="stelem.ref":
+                      val=pop(s); idxv=pop(s); arr=pop(s)
+                      if isinstance(arr,list) and isinstance(idxv,int) and 0<=idxv<len(arr):
+                          arr[idxv]=val
+                      s.ip=nxt;continue
+
+                  if op=="ldftn":
+                      push(s,("fn",arg));s.ip=nxt;continue
+
+                  if op=="ldtoken":
+                      push(s,("token",arg));s.ip=nxt;continue
+
+                  if op.startswith(("ldarga","ldarg")):
                       push(s,U(op));s.ip=nxt;continue
-                  if op.startswith(("stfld","stind","initobj","cpblk","stobj")):
-                      # conservative stack cleanup is intentionally omitted;
-                      # unknown later branch will fork rather than invent truth.
+
+                  if op in ("cpblk","stobj"):
                       s.ip=nxt;continue
                   if op=="ret":
                       finished.append(s);break
@@ -1012,7 +1417,28 @@ jobs:
               "global_reached_state292":any(x.get("state")==292 for x in GLOBAL_REACH),
               "global_reached_state402":any(x.get("state")==402 for x in GLOBAL_REACH),
               "global_reached_state281":any(x.get("state")==281 for x in GLOBAL_REACH),
+              "module_write_count":len(MODULE_WRITES),
+              "module_writes":MODULE_WRITES[-5000:],
+              "update_rva_A3F4_write_hits":[
+                  x for x in MODULE_WRITES
+                  if x.get("rva") is not None
+                  and x["rva"] <= 0xA3F4 < x["rva"]+x["size"]
+              ],
           }
+
+          (OUT/"evidence/35_NATIVE_WRITE_TRACE.json").write_text(
+              json.dumps({
+                  "module_base":hex(MODULE_BASE),
+                  "module_size":MODULE_SIZE,
+                  "write_count":len(MODULE_WRITES),
+                  "writes":MODULE_WRITES,
+                  "update_rva_A3F4_hits":[
+                      x for x in MODULE_WRITES
+                      if x.get("rva") is not None
+                      and x["rva"] <= 0xA3F4 < x["rva"]+x["size"]
+                  ],
+              },indent=2)+"\n"
+          )
 
           (OUT/"evidence/30_VM_SUMMARY.json").write_text(json.dumps(summary,indent=2)+"\n")
           (OUT/"evidence/31_VM_INTERESTING_PATHS.json").write_text(
@@ -1023,7 +1449,7 @@ jobs:
 
           echo "EXACT_WRAPPERS: zfos=true omT=null"
           set +e
-          timeout 480s python3 "$OUT/n9_emulator.py" \
+          timeout 600s python3 "$OUT/n9_emulator.py" \
             > "$OUT/evidence/32_VM_STDOUT.txt" \
             2> "$OUT/evidence/33_VM_STDERR.txt"
           RC=$?
@@ -1258,6 +1684,76 @@ jobs:
           },indent=2))
           PY
 
+      - name: Analyze stage2 store, parser reads and native patch trace
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import os,json,hashlib,struct,math,collections,re
+
+          out=Path(os.environ["OUT"]); ev=out/"evidence"
+          stage1=out/"decrypted/stage1_local37.bin"
+          stage2=out/"decrypted/stage2_qword_xor.bin"
+
+          def info(p):
+            if not p.exists(): return {"exists":False}
+            data=p.read_bytes()
+            ctr=collections.Counter(data); n=len(data)
+            ent=-sum((v/n)*math.log2(v/n) for v in ctr.values()) if n else 0
+            return {
+              "exists":True,
+              "length":n,
+              "sha256":hashlib.sha256(data).hexdigest(),
+              "head64":data[:64].hex().upper(),
+              "first_int32_le":struct.unpack_from("<i",data,0)[0] if n>=4 else None,
+              "entropy":ent,
+              "token_0600082c_offsets":[
+                m.start() for m in re.finditer(re.escape(bytes.fromhex("2C080006")),data)
+              ][:100],
+              "rid_2092_le_offsets":[
+                m.start() for m in re.finditer(re.escape(struct.pack("<I",2092)),data)
+              ][:100],
+            }
+
+          try: vm=json.loads((ev/"30_VM_SUMMARY.json").read_text())
+          except: vm={}
+          try: native=json.loads((ev/"35_NATIVE_WRITE_TRACE.json").read_text())
+          except: native={}
+
+          read_events=[
+            x for x in vm.get("global_events",[])
+            if x.get("kind") in ("ReadInt32","ReadBytes")
+          ]
+          state_hits=sorted(set(
+            x.get("state") for x in vm.get("global_reach",[])
+            if x.get("state") is not None
+          ))
+
+          result={
+            "stage1":info(stage1),
+            "stage2":info(stage2),
+            "critical_state_hits":state_hits,
+            "reader_events":read_events[-2000:],
+            "reader_event_count":len(read_events),
+            "native_write_count":native.get("write_count",0),
+            "update_rva_A3F4_write_hits":native.get("update_rva_A3F4_hits",[]),
+            "protected_update_body_recovered":bool(native.get("update_rva_A3F4_hits")),
+          }
+
+          (ev/"47_STAGE2_PARSER_NATIVE_ANALYSIS.json").write_text(
+            json.dumps(result,indent=2,ensure_ascii=False)+"\n")
+
+          print(json.dumps({
+            "stage1_sha256":result["stage1"].get("sha256"),
+            "stage2_sha256":result["stage2"].get("sha256"),
+            "critical_state_hits":state_hits,
+            "reader_event_count":len(read_events),
+            "native_write_count":result["native_write_count"],
+            "update_rva_hits":len(result["update_rva_A3F4_write_hits"]),
+          },indent=2))
+          PY
+
       - name: Validate any recovered plaintext and search method-store mappings
         shell: bash
         run: |
@@ -1335,18 +1831,21 @@ jobs:
               "vm_reached_local12":vm.get("reached_local12",False),
               "vm_reached_create_decryptor":multi.get("create_decryptor_reached",vm.get("reached_create_decryptor",False)),
               "vm_reached_aes_decrypt":multi.get("aes_decrypt_reached",vm.get("reached_aes_decrypt",False)),
-              "protected_update_body_recovered":store.get("update_method_body_recovered",False),
+              "protected_update_body_recovered":(
+              bool(load("47_STAGE2_PARSER_NATIVE_ANALYSIS.json",{}).get("update_rva_A3F4_write_hits"))
+              or store.get("update_method_body_recovered",False)
+            ),
               "firmware_readback_primitive_proven":False,
               "full_flash_readback_proven":False,
               "live_board_commands_allowed":False,
-              "next_gate":"Use the exact stage1 buffer plus BinaryReader event positions to identify the second-stage parser path. Promote AES only if state292 reads value 4 and state402 is reached with the same key/IV path."
+              "next_gate":"Use exact stage2/parser/native write evidence. UpdateCommandThread is recovered only if a write covering module RVA 0xA3F4 is tied to exact bytes; AES remains optional because state292 may select a non-AES protector format."
           }
 
-          (review/"60_R114_VERDICT.json").write_text(
+          (review/"60_R115_VERDICT.json").write_text(
               json.dumps(verdict,indent=2,ensure_ascii=False)+"\n")
 
           lines=[
-              "OKN R114 EXACT N9 IL EMULATOR",
+              "OKN R115 EXACT N9 IL EMULATOR",
               "OFFLINE_ONLY=true",
               f"EXACT_SWITCH_MAPPING_CORRECTED={str(verdict['exact_switch_mapping_corrected']).lower()}",
               f"SWITCH_TARGET_COUNT={verdict['switch_target_count']}",
@@ -1363,7 +1862,7 @@ jobs:
               "FULL_FLASH_READBACK_PROVEN=false",
               "LIVE_BOARD_COMMANDS_ALLOWED=false"
           ]
-          (review/"61_R114_SUMMARY.txt").write_text("\n".join(lines)+"\n")
+          (review/"61_R115_SUMMARY.txt").write_text("\n".join(lines)+"\n")
 
           for p in ev.iterdir():
               if p.is_file():shutil.copy2(p,review/p.name)
@@ -1395,17 +1894,17 @@ jobs:
         shell: bash
         run: |
           {
-            echo "## OKN R114 MEGA Exact N9 IL Emulator"
+            echo "## OKN R115 MEGA Exact N9 IL Emulator"
             echo
             echo "- Static/offline only; official EXE is never executed."
             echo "- Uses deterministic N9 method slicing; avoids the catastrophic R110 regex."
             echo "- Models the real h15 resource and BinaryReader position."
-            echo "- Preserves the real 16-byte XOR loop, accelerates the 151k-word transform from exact IL, and models MemoryStream(byte[]) correctly."
+            echo "- Accelerates both proven transforms, traces BinaryReader records, models key Marshal/IntPtr operations, and records static module writes."
             echo "- No DSP/USB activity."
             echo
-            if [ -f "$OUT/review/61_R114_SUMMARY.txt" ]; then
+            if [ -f "$OUT/review/61_R115_SUMMARY.txt" ]; then
               echo '```text'
-              cat "$OUT/review/61_R114_SUMMARY.txt"
+              cat "$OUT/review/61_R115_SUMMARY.txt"
               echo '```'
             fi
           } >> "$GITHUB_STEP_SUMMARY"
@@ -1414,7 +1913,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: R114-FAST-STAGE1-N9-PARSER-EVIDENCE
+          name: R115-STAGE2-NATIVE-PATCH-TRACE-EVIDENCE
           path: |
             /tmp/r114/review
             /tmp/r114/evidence
