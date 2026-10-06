@@ -1,0 +1,629 @@
+name: OKN R58 CURRENT Vendor Audio Callgraph + Dedicated Gain Gate
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - ".github/workflows/build-r58-current-vendor-audio-callgraph.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: okn-r58-current-vendor-audio-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  SDK_REPO: https://github.com/leadercxn/bp1048_sdk_v0.1.12.git
+  SDK_COMMIT: 8105bd864b04995d81c9f9ae77cb158259f39015
+  TOOLCHAIN_REPO: https://github.com/xingrz/nds-builder.git
+  TOOLCHAIN_COMMIT: 572969caccb1d0c576b2893c905fa7b3396815e4
+  TOOLCHAIN_SHA256: a231682172de4af23ac94726c021a824f1ae7d1f7c72a4619093b90caa7de0e4
+  SOURCE_ZIP_SHA256: b3d7ddfcac0343af4fec8433437ad633f31109e47daa2555aebf80e9e04d3eab
+  LIVE_BOARD_USB: "NO"
+  HOST_TO_DEVICE_USB: "NO"
+  FLASH_ERASE_WRITE: "NO"
+  FLASH_ALLOWED: "NO"
+  FEATURE_SET_REPORT_ALLOWED: "NO"
+  EXECUTE_VENDOR_EXE: "NO"
+
+jobs:
+  r58-current-vendor-audio:
+    name: Full vendor callgraph + 7-lane dedicated gain / offline only
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Fail-closed safety gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$LIVE_BOARD_USB" = "NO"
+          test "$HOST_TO_DEVICE_USB" = "NO"
+          test "$FLASH_ERASE_WRITE" = "NO"
+          test "$FLASH_ALLOWED" = "NO"
+          test "$FEATURE_SET_REPORT_ALLOWED" = "NO"
+          test "$EXECUTE_VENDOR_EXE" = "NO"
+          echo 'OFFLINE_ONLY=YES'
+          echo 'FLASH_ALLOWED=NO'
+
+      - name: Restore exact R57 CURRENT source
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > "$RUNNER_TEMP/R57_SOURCE.b64" <<'R57_B64'
+          UEsDBAoAAAAAAApKRl0AAAAAAAAAAAAAAAAGAAAAdGVzdHMvUEsDBBQAAAAIAHhJRl0HFfebHQQAAGMLAAAQAAAAdGVzdHMvdGVzdF9yNTcuY61WW0/jRhR+51dMs1Jkw8D6FhtqgoQguxstBRqgVRVFIxOPyWgTjy9jFhrlv/eMPQmOEyhUzYM1Ppfv3L6c8ScWj6dFSFGL/4g7HgmKkHEy4fzHwaS182mpPQ7ynGbiYHJSk+UiZPEWGW+KMhY/SNlOLgLBxuiRsxD9NN17qhWAcEjEboKLOGcPMQ3Roz5Phsaou9Tp2uPJyaHuJ0OzJnz0F+twtvUBOMtp4kmp6UqptS20/VboqBY3mvJAoEifS5FtEYEKf0Zn4+RZaxe4HeEycj2foplJoWJaDWGVnt2QylIW660VNBeEhTQWTDyTIA7JmMci41NNqvWd+Q6Cnxy4S7ICrGYU8sz8UqywUTo0IdTcWGC+PFUGFRW0dXcWM6G1M+wcGoZRYKPQdX+nNE9lsVffL8H47kuPDHqn576aVrpnYuuo0H1FhnTPww68boYpIkoyGoQyRIqPCsxxzv6mPNK4rne7pt3wkh2fJRrfO8ItiO22oO3drrHMCdQ5FVqKjSVMqiuARrp/Dvq3vbV8rc18JQNSCLXvHhjRa+n/zJigVf4y3f8jlS2tW6ZibGTyy1upbCPQGIjDwkBQ4k2DGEac8ymY8Pg9LAISmS68hsbwELhjAiuwJR9vnhYN56ehA862VK8/GoasiuJIdUc+3jw1nc3S2ZVqTz7ePCnnalu+tIgXIilEDnC8Ow8NHD5hZmBmwlAWatLv/99sWD8ELCZAEzIJphEJ78HjQMoAHe+bFvigz7tolQ06+9ZBPJ4+o93PTTBY8Ukyfd6SOo+iKYtLXrQ5Nl8oqrxhlMDHrhwWarflZGFrdeXY1lOGqUk7e0PBKgBHATAJcNzZNDNLM3dpZpZxvMpuG1GTjIfFWDITGgUFzQqwoDmJuZjAzfNBulqSrqb8o1sLGKMMPrdtewHzLHWO4+BOpwPvZvnuui72PK9Bqnsa8YwOvRcwDCBYOeN1p3eTyWySSW4HT+7UC+KdfSNXd7fXd7fkt9Pr6/7lV/JHb9D/0u+dw+bbulX/Iwlr/APrfavcNVuWzZJqtfmoyiqONXwUv1TnjFGNZEpmVrKnup012koypbVHK6atZM5I0apm1xnVqKZk7qjiG4wUzaDYNR6tPi+Yj1Y3/TTIBbS6ygcwNNY1fHZsduzCZ3t7tW+CtFvr6ZjTKCKp5Wiaoo9ennS2bzoGdEmVlp7IALpfhknh0t8+ohc4A+686v743XLI3WX/9i/VrNe/EOoGr98Adat/+/utzwe+BsubuUH5Ej8OZlQD9uHW+emZQS5a6s7+iLsr3fvWjUkGdfeSda3r05sbNOh46OxuMOhd3v6KQhqyMSCESPauXJoY5c+xmFC5ZLx9iYxWhWP0Ui2QIkmgQCSrRhdXZ9975y0VLqOiyGJkSAL9A1BLAwQKAAAAAAAKSkZdAAAAAAAAAAAAAAAABgAAAHRvb2xzL1BLAwQUAAAACAB4SUZdNQHzc00HAADqEAAAFgAAAHRvb2xzL3Nka19yNTdfcHJvYmUucHmVV2tT6sgW/c6v6JnzoRONARwdlVPUVAxRqQOE4uGce5HbFZIGesyruhMHx/K/z+5OeHnQ46VK7Mfea/dj7bWbL79Uc8GrMxZXafyE0udsmcS/VeY8iVDqZcuQzRCL0oRnqA/dStn+SySxwakhnkVFBI9NOadBx/T44mlSn+ompyIJn6imf0VJnr0xOP3BwIweA8a11OM0zkRzxHNq0BUTGUkeVU+veGnahFhVfD0iVh6whFj9fnWWEU91YJoI7ldZ7Fdl20/iOVuYS1xR859xVb3im9D5nPoZSXniUyFMH1f8JIo+jyKt85j5XsaSWLpHuWD+5/2VOYHz8CKaUV7tyr7EmSccpYjFSAMHQxkbMpihPPRGBcGHzVGcZCg1mSBzFsIpNxD3mKBo+CwyGjkrlmlzHDEhWLxAw9Y3JM0a6CV9xXqlEtA54oGWSjea5TwGKE69gGR0lWk09pMA/Jo4hO3FJ3VsUM4TLpqY0zT0fAoYEsLzM/ZECTRZTLVslRkxbGcLOkuSUOPUFNTj/lLjc6z9Een/m6CHbHr0pXBTneMXsKLC91KqKYjXhxk2AFDXK1YTVgpnAURyVFMeCXRs2ZEnA+2ubBcHVCkX5S9Z2gRUiBF4ISzj3diafXNL7Lt2n0ysk/96J//UTq7I9FiXS7D0yixM/EfRnEzV1UTyakpYBhcHuLWVNgEX6+TGO5lPX05f9QdxZMBf9eHo1mMxsZM440n4cFTFRhdOp0A0YU80DjTwx8eRueBJnmp13cxhmGv6JrCAhKSBJmimFSMw9QV1EqAeRWHyN+UnIX2iISwsoBIRMgy1T4fI6reR2ieTHBXVgPoh8E11zAo7Lagjd/YVLRlk5ctjYzJFcpePioBYsRigaqTlZd6QZtjYjNUPjJV2KTCkQ+PbQ/Y7c/rrluyQNyZfhMlMw0f4XZIjaW6KfD5nK1NtHcakjVotZI+BQRDghEEcgLg5XeNg2C1eW6ampNja/41x1lR58RWOIY+D5o0XimJicyzyqIoFluBqNNsOyY80mjxO13csMtA+yDCZT8DNLNFgw7q+CSMVcL1WNdJAm/v5GUYFNkIUA0iQe2FTkr0Mv79oSZt+PguZD93FsmRNIYSqGCBBQ2gLlMRUMQiEO80zNIMDpxzNnpHMlIEzJDBJ+u5gZFakvoSUyNUW3qgpiTNutV1p5Y5HZNjufSO9cRfLhTjIiwOE3wLtzgFWjUDoN2P17Zhe4dRPeECiJE4g4FudweU0OEAaPkzgS8jGFBuOLp1lkWu+wIljOEMiRYRlhK5SWD8NcANf1mvns+Dy97NZ7ezq6jy4rPtX8yuPXlz4s/r55en51fy3q1r9HBsSY0dxSOT5PBG4sTOmbGZpvXZ2mZ6RJJUJCIWHCkhUiLVRn+u+NOmfqT1a+14lHIhJqm4QFutFaUg3gUoNtowDeLrCCjy/RmjszUK5xYNu8kaKq2tZdo04va3r6v9x/b513eGHJF1J1M9ilQzaoO1AbBknCPCVyCvFjR/oqNy2dCCgJZI0RCyh1uDGDo+U5X4uKRwvZdvb2p9/47K2lsmGG/JbGcRFwi5kKfCLUkAKJceN4v+7Zj5ogYxK47X2K9O9x8e+xxLSJaQcNzRs71k5xYNHFqSyHime2e8ieosFpwsoMhJLjYBBtjOs3Iv0vLXaPWK7vdHA7ZCRdd1xdsH3FhgwAVrjL0n2nFICKdT4IXt9T9AHcVw/h5xtYMPWyzVCKBZAZHIRenDj5RVOsCJrB8RfNQZF4zvpuj0X2qouddaNQdGor0fqMDJV8GViSUGAV+ETBQaxKA8zCJXkglyQQg2JjA03pypDyS5gygXsqDSIQLCBhuSJcjZnkuVbWz8XWRKRfA4Czr1YSNaSZZI8HrSGdQS5r65kHnpiSVjkLejG4rWiQcgqHpxfEHjiEee+3XJ6tmPK5zvWzb85vFCKJ50cMYM8SoVWqJ/B1EOheWrQWOScEk/4jBX1Tj/GD+D/Hjo8y/bBpbX5V8JibaKKmHRB9ngwcHoj9fZUyXxy57rf0BpFKSdU1V8te9S+dwrF6lr2wB02X2QdV3g7Kqq//rp2WQsbcfujttsjfRAMCAV+/3GGWNbQYo+Td1V3iijsE2EgyBa2P77utG3ifLe6/Y6zkU9SrPAj9HfV+aM4pcTKZGkdAN+T65/gfP8YZ/UpHCjTt7BtWZHfR/tYzg/C37Vv70jHuXc6xO05m4pPhk7HsQ9d2s9E/mCUjvtnGaQ1tjoqCrx/D1BjX8EPQfUsxcg9TbvuuPa3XWaWcvyxl+2OZewd+d7a2263O+61bUtRWLndWb1WxxkcOJJPCP6BU8Hrm4Xs7Q/ceyirw3Z33BlZPccdD0HSoLj2ob52YGDYlGpZ5q8DR3hh363nu/BDFthB7p1B+6YNxNia2uPhyO2S8Y1DRgOrN1RXKzP9kDEsojW21YZvOtbwjrS71q1TGEzXqpNyFmfah9qz/amqg3wFTQxu/wJQSwMEFAAAAAgAeElGXYi97cMJAwAAEgcAABIAAAB0b29scy9hdWRpdF9yNTcucHmVVF1v2zYUfdevINAHSYCjOMFabx30oMV2I9S1PFvuVmTGBS1dR0woUiGppNnQ/15STprYWz5mQPAl7zmXh/eDGyVr0lBTcbYmrG6kMmRml96dfaGl6Cn0lJQmdo4AYMM4AoSRQi35NQZh1FCFwuizo5XnvSGZ4LcuFsfa7lLDpCCOo4mFEV1QIbAkG6lIIduGM3H+Kyll0T6ga3pLStSFYmskpkKi8KplyrKkKlFFTh2Pzzxif07Zob9hqr6x4Q+1Kg7lpXj7Ds4pE4Oo8HvPw1QrDKvxJeAAaFsyCZWUl09hmSh4W+LO+dVroPcaXgHe0eHwK8/gVxP7fwk/upBMBI0tDC3B7QaolFQ69tm5kAr9sMt6Q5jo6hNGXN6gCkLPbRt5icK5Ar/BK7/nr9lVS0tr2ORTzv5G1dlAm4bfWtPW1KDq7umH7zvhVGu0XbMNJaRx4ZyQHtn49ow1K0vruC/7Fvee/NP9f/P3ZWg0oND1oTuNU10BKqrxx+pGMeNWreCyuIRGSYOF6yCn3uYQLtq6+X/aOLvGgy7uv9R5VRy8quLhowqEnnqB9VD8XR59lrfXB3vU7VX9NyVumECSfZzagz4k6RQ+2e80mYxh+BsJDo5+6oe+S0T1LCf584FzdPwKRjqEcTpf5OT4uO3QilBRPgWdJA758x3yibjpcDTN0/yLNcjxL89hBzAfJRMYnJxCtsxny9xeYDZLpx/g82iejtPRkPS3fOrp2L1wdg5oqYO7fM9thEWe5MtF5Jy7uf2RXH3mu3rDNaNgx2VFmCZjyjU+AhSVe+u49ldxPNgnKirOEcq1c54dDPpRv/cu6q/2Ydpgc4fqR28fea0oDoOiAtmapjVQ27m0QwXXqNiGYfmEpFYbWUO7QTBWgXbT1TXRC7ztwFHuXowdSKOYMEGXtJPlfG6LBMlymOYwSxYLP7z3d7X+nCYw+j2eZg/7w9EwPUny0XDbDdl08iXeZb5UzJ1wJ8tFnn2C5XgE+TyZLmbZPIfTLPv43/Cxbb1TSCaT7I97z3dQSwMEFAAAAAgACkpGXawL2yokAwAAfQUAABEAAABTT1VSQ0VfSEFTSEVTLnR4dH1U224cNwx936/IF9iiRIrio4EGbYDGLRL3eSCSYrO1sxvsrlH078t1YBQBmmAwM5gBdA51LpreWJwJYtQJtcMsylEDWiut5dfysgg6gVZjNHUvYUs1cg1je/Pm5vb9fFyxf1q7MmcJGUW0Nl1RumATaLDIQBxJc70yMGknNV+LaDXWNkDISOAK9oF4+/hw9/DHx5u/zsfDDpot0IlVbVhBUNRa+5ThwRWBO0ITolrBY3FQ87yrIFFoRf6K+fbup/dvt4dfbj77LgasNVQNtRQydA3sJOHUxBtFVZrVpcOAIgXY2WG2vAZa44JXQD/a+fbd/cPbnz/cPbz77X77/de7+1f8il37jJE76zawVRxrteLk6qN2zl+IaKkyDKldjam4sdica4Be8WN/+vz3PK3b/cGenn3dHh8P1Lc/5/7AN592ONmtLClNKvdKPHn0AU171+JYMaK1mrL5aKrTCbwtitV6WE1Bf0Bxej5c9p9XkoyJUyA4mvtid5KuItNHqYMHLag+azTzkFV6D5ahvfEytshJ4LskvM1n3x+3T8fjY/KQRSmVwtqS1qkaWRVQy/lHA9Y6qrgC549rEEIa9TnU11QoJvINz/lk32hlO0mTq9WZGS5Aq6cFzTI6HKU5lkCXkFnKzN1hadV6iSq1rBAp0fAH8Ntl6tNVKlagwuaoq6ylFkOYaoasm4NULDl2Mme/EIaO1Mq6SzPJiKau8R2OVy9sh+E5oKSqfU3GldOr1o4+yWFE5qG698GwZr4XLarsJZtVyrV/+r8E3/hgu+Ett+EDRwYSLFaBEjF8RCQmQBajTOHClBuZWZEMdNpPKIje5rpynP1xs3nwvc/Lq9n+PJ+2fT1vdjxcTtMuydUDFzpm+cEwycZkiVLrFIQys39pdzIy9WUyRGfql7ZRVhCpzpdT57LOl/PLczvR1emUdNSiIXmCLcipiYu3TGfn5sUQwcVaMoGyTAhA6FVjMNduk+gF9Hh8Ot9edfmK+uWfXcYHRlk5UojlWbWUstsySXxm8SJPBiLk0h14+ksj+roGuHkuXPYf7FWdBN2+nI66rtD/AlBLAwQUAAAACAB3SUZdW1JOZ2gBAAA6AgAADwAAAFI1N19TVEFUVVMuanNvbm1RXW/bMAx8z68w9KwEjprEmd+2bA9Dm4+66zCgGATNoh1iiuRadNqi6H8vY6PNNuztdHcij+TzKElEC0eMGLzIRTHP9Oq2KL5svgl50si0NRAr6+836LAMPvm0m6az5W42GMq98R5cFHnWv2uDXh/RaLgXeWVchJ6OZGrgMk2INIZHjIS+HkNVQUkxsWCxNAQ2uV5O1CzZrdbJqZA4l2yNr0HbXyK/G2fpJJWLSfrzLEeCplfTyfzMouVcd0pJdSHVTKq5VAupMqmWw1e04AnpSeTPjEWuPkjRmCcXjNUmloiceHu5WQjJS2IueMdeajt4GYY33qLl4Dp01HSkD6ZpeDBuKj5/XKX6in/2oBjAD73ebraMv6qbQe1BMYDpGzNlZkjIbZ3Oyv0/DfQRWqwQ7J87LrtI4aC7CjTxumITWtL7EH7/1111zummDbYriY+v8cAXOhFH8H/5nIl7bZwLD+8FRi+jV1BLAwQUAAAACAB4SUZdWZDVVGUCAADTAwAADAAAAFJFQURNRV9USC5tZF1SQU8TURC+91dM4kUD3dZGWjThUGiFRixlocRb+7L7YF/c7tvsboO9UTSpNRw8VEghIVFCTGpItGp8+29e/CXOzlpouGxm58038833zQPYelEHc6kEa03TrNZ34e/RCCrcFhaLuA3rTHhgcuZmy11byOyGlK8xGfFMZh6k1Scdv9fqRiv8TrXqY88i6PhYq5FWX3T8TqvPSUn8VqsPOh5CdRtRZ1r9pBm5Pel2OxwRRwkiHhDumHqNjExGq4lWv2jGgGC/MYZQdgMLQWpMiWHakDhcJeVq8CyTndtme9koPEl3KgHxSDkPFiFbyhvGQhHs1UUII+5D3ljCH4Rb3TCSnRRVq4RQKBhGYRkWIODMzkrP7YGwuReJqIfvhaewAm0UtdhG7AH3eCAsKGVd5nFgpKGTaMhs5kc8AFoMKX8jyj+0OgeLebawkTCEDvM5VMpredjMmTgSw1fQkZ7EuFbYmaUxfJyEONEPpN21IiG9+WlanWoVoy1aXZO4N4lFD9tmtbzZKq1ttLaau43mbutludGo1ddbe1Wz9rxWrazk24+A9BwT+CspNqXM98RRlD2hfk3UseAjvY7Bd3ohiu5Ch/m+8A6AzLwh984puNLxCZl8ZxbSl/v7rkClHBlGEHH8kEBTmjWlylO6kQuCjObEulU07tOMc+BvfFdYIkqv6lKrPzPDLwk9IU1oufgELId5HndBhNJlJCDBzmYrj5Mdkxsb4zne3vN/DfozdpP0RqG5s5rbqFWAKi/uLQ338MADFvLcYSAintt3WeikW1wnKt+VTqjBkEYN5p1OIaLDDriR+QdQSwMECgAAAAAAID1GXQAAAAAAAAAAAAAAAAkAAABmaXJtd2FyZS9QSwMECgAAAAAAd0lGXQAAAAAAAAAAAAAAAA0AAABmaXJtd2FyZS9zcmMvUEsDBBQAAAAIAHdJRl351bzBFQIAAPgFAAAfAAAAZmlybXdhcmUvc3JjL29rbjU3X2F1ZGlvX2hvb2suY6WUbW/aMBDH3+dTHCChsKUTYSudlpUpgmyLRgOitJo0VZabmGE12Mixq1Ztv/vsPDAysZYNvzpfLj//z3fnFmVxqhICTX7Djk8QVgnlaMn5zZtl07IyiSWNgTIJtzilCbpWLEmJHXOWSSh+iTFLaIIlQVzJtZIZkvCKd6wHC/QSRCrBgEO7DfxosBB4RTIYQFeVngTHXZSK37s7tOKsiqe9bOur3rl651lPllVIiJdY6NP+EJJiRhDTJ9lKS3+vBRlPJalMahtQ2OzH5FukQUM/GoUjfx6gsR8F51dwCsWfZjVH/rCLxk2ntGal9R2dTaKJ2YS98zIgt2al5W58rvblvCdv+46MRvgIOzXAJ63OBFzBB82ILv1xOGrmF2GKUxZvvU7vd9SDLxYpZcQ2UX0kFJN0RUyVhLNJ6+X1XLX/hVOVhNytUxpTWclDkmQSEYav002p6ALshoDHR2jU+o93jO85AjROwVWd6m67nmVVSfTRT0wZWgsekyzLm8Vui6OB8Tq6MZ2ttnSK1KvGdaCnOt6eJLdGgtfgOv9J6m1IxXA4dU3u/qS3Bakcq0Oye1cjHZLd8YbkHqipXyP9XVPZFO7O+dHsRMWScla1+K7BefHxa+neLUZ5FvhjdDL8iiYX8+nFHJ3502kYfUGXwSz8HAaj2ju51yCb48uyt0iakZxg33KadIS3teG1dLsmWiMXOutfUEsDBBQAAAAIACA9Rl0HLBplqAIAAJAGAAAfAAAAZmlybXdhcmUvc3JjL29rbjU2X2dhaW5fdGFibGUuaG2U22oUQRBA3+crGvISQ7LpquorXiABiaJEBN9ElzU7awaTiSazIIj/blf1ZWbBfSm2L1Xd51TP0bAbt/1OfXh3bd366uLt9frTxeX71+s33VEaH8b+v1PDeHO33/bqxdO0HcZpdfuqOz9RH8MKjdrc/7wbpjR7qoaU+7d6qW43d7v19ps6U8dnYPSzlbrqx/5xM/VbtXt8uFegvx5vL8+Rp07Ou6dpMw036uZhfJrUPhUgXE/q4ceYDvJ9M4zrX2g+g6UvKfefTqWfJW33p8o61ByipRQcacfB+ZiC156XeBMNh0hhfyp7g9E8H6L2KURDvCxGWQbaBs4BgEASg+dVgDZA2Q9EKGMGQNaaXB5sIE4Mzuc9KQDHEFBypxK65EAukMYQyfNeJBcDRwta/jsb+WYYwHENjEGOSeA0lhxERm5I1ljeS9463kPRBx43CAY5Gsd1lfEo41ZrvmPjaAQkSP1EEkNGaW1hCRmmiYUmFJw485S8CagLmagpSMkVptZXqLpSNRXrkqtzFSwVshl1Qht8ZYsVLlW6lPFSDEu+VADLjYSwKYglqTCGAlkOyJSNq5jNgrNcXkDbTDqBqqh1ZW0zbIqu0JZcgtsseWMBLm3KxH1DDpU5FeihUa/YwS25UwHvXSWPBb34y+yhwEc5tNDPZgS/OeCPVUDpcT4eNAXQHMwSZgu2avBu6QFdFeFnE7aqcLOL2vG29XzpbNbBb2vho3V+FiZGoClp/S+zIsXOVrBpgQMvTUyob8EHqGp0ew/Sw1kOVTvyLcl6YOlH7p4FUTM0K8LmSIdZUnsjZGPTRP7AE7SXgvLqsin5shVV1FzltSILY7MlaLIuGw99mSZMvmTZmPFNmYvVmRYRWZq4ytb8rC2EA28pS/f3eXfUj9th1/0DUEsDBBQAAAAIACA9Rl3uKPOffgQAAB4PAAAaAAAAZmlybXdhcmUvc3JjL29rbjU2X2dhaW43LmOdV3tv00gQ/9+fYgBd5W3qnpOWtCWJUY+7g+q4IARId6qQZfxILBzHsZ0oKeS7M7vrXe8au02JVMm789h5/ObRZ3HqJ+sghKfLr+nzoTvz4vTidP7UeNZCcEvvSxJq1HESL+KyOJ07hlGUXhn7EKclbLwkDty5l0Ru8MXEm/7QxVtifDMAf3lYrvMUNuBM4N0/U1T/+vpm6v6Lf2+u3/7t/vkHHB0heayTr/8T5JGxN4w16j0boF7FQn8ZRpG7GpzLRysjxNNxBOYT3TzBQYRd9nqkmqmoR8W3VDOpZMDqsP8zs7CKyGYZB4DfeYkRzGdhaSrBRhOPZydAnbnEb38uLFWeTbw0pHwZTOBoZjn0fOvPP3MzZRxWSM4sZ7EuwwBeohvwoj02yMQNETEgXBMqGp6jomBkyGChUqa1EkBxEScuo5HQgJW8DtY5ur9M8dJEowtvkSWhi3chHIMprCZIypHkLgrowdXV1ZrA79C3bZEF1JSHC3QgTmfcQaFY0sM8X+ZIEyIsyQojAR7Sit1f53mYNgyuaEUZZhXB1gjchiDMuyluEc9SnaxGas+DGtB4VJEmK0SQPOimSe8Uk0wRNDPAIKmC0tVG0LjBdbRNlByDjfCwAoRHQOC3Q/UI90wOVVJr6qOmPmGQp9WvYA6z1oV2BlkFFPyW1WyFB1EJdW0o6Z3B9++qONpySUHTvHagfzUQBAE0hwOsrniuuIHSiapIcggdE6GNUyJEoOnPWfrRUjSHd4ZXb66n07/efhhBr4fFrSDx5wK/Q+lv9r6Gj1LrSLprJZzqcOavvh+cu5+mNx//bxfRKvYxEqLvSZDv1U7Zb4NAUYvd2/dO4L6WzdKNYZUTQ8SV3j/Y0GXyuv2pvjin1qzRSkzc6CBHH/QxSpYeNtjaOTotKwQx0raJ8U6nTWr3hOqiRzyMwbqwT+2oOjowxEMzCFugItiBB0jkV5uqqIm5pU8xFS+RsYefzyOs7S12KfqpB6EjxyxcJyAGMNm0NgY6pB4IlfimrIdjgXLT+m4rbpl9PiInjPmRGWcIVRxRUGT6y7RQid3DvdJ6jy+ETnCMfTdoO5egNNyy2v7lNUPfBlaHIFJGu7WbtC8uYkzL8S6VNCchY1+pg7MxxnsaRUzMxoLQm2jzrDZCcjjafqE261VTmk1DbQ/gKqyWFWWvbFM4MglzxR4pt05t/6eb6UfMKG67nK8+S3f0jl8PdyVTlqXvTXQ5Ij/LatubBvhmCvbqgs+KoPA9nI3qrr1VJvtK6XAMRpmavi1dAeUSpONtx487ap7YMEzTymiSMRbI88rsExiPYXBG6LLYvD0nROaF/14AmCY8SkMdyh1m52xwMbyQ8GQnlQE7L727lBz8qAVUNsRdVyvxsizZuXznOHBUbhsNpc4J5qKtJfDWxlsy+79EYcrypR8WBesDB75/nPmLEyjiO9o4IlyIwkIeizKPA9m5q8u42UyeoIb7+jnXIgCs7tNs44r5whVjCvjzdM+KEen+4jZGkHFxuj11BbqaVw0BFqEfUEsDBBQAAAAIAHhJRl2AZmwjYgMAAMsJAAAcAAAAZmlybXdhcmUvc3JjL29rbjU2X3J1bnRpbWUuY7VWa2+aUBj+7q/ANkGOohWtVoe4mNVupg1dqsuyNIZQLoUMAbnYdKX/fe+Bw7Ws3bLNT+e855zned4rHpu2YoWqRh053+3RWPJCOzB3Ws84ahynRzM/8Ez7vmfMGw0/kANToULTDrixFFAeN77TGMWx/SA2TsDWdtGTpwWhZ1NMehExTL52b/vb2WyCIveW2yL+uYg6HGDU4eBVVCa9SaAGpygqGTkwcuOKcZCSDrf1nNZbnmSUL9kmNWQvFAwTrTn7wTFV6iGOYc7JZtE9oCfMJqSHiDnM5xPEY8rceKjixdGr4MU+1uJhQWVAbAXtPPaihnv4Orf1m9yHGtZJHWkiZVgjO+PWLUeGFOo1+csEhEKSYhfxyXWd32k7xX1kaJ2lQxbwSK71qlN60SPyuIicAYUsYAFQEgbwvqARblP3smlLipHVBGWqWYWZ6ly4vhShCT8uVqK0OpcuVjfrDU2b6qxycLVYb94zgIEYU+3WPELvuhwwNzBnqbEl0zYDpmwCrzw2bwRf3rmWJnlyoLGFRgertPNR46lBwY9o9iiaJgSxazE67XXneMeWoVIEvlESFuqa9OCZgVarqpLPPWCaP/ChnSophJLP5Tq6zlqazcdRVww+vmrqTNOLouY+iuzZNIyiPRRkk8T2y8VS+nqz2iwR8a1PHqlCMo72HQ7xGFhIht6+M4I9kGT7M5TxwCuCuzpfipvV5hsscmTqpA0hlNWuY1uPQKGBz8Ej1T6J3yuGkBYK1EeGqRizPihvCtwQtIOQptCHBShoCqdhRTbZFXLja4Gk3uXZybpJMVjonH1nipLckAjn6cFKSWf9WY7Y3OqEQWZXZPfvstcEtDgSdUm8WS7O/2MOE91pSmR3VpONyqurpVgRhH/gA56HReHrz9fiesmTCQ4XOhyLK4B8IrBhxPbDkuGMhdyXUadboXXd4uM1BxSty3QD87YlphuYs61xK39KJII/ie357WL8hf8vqvHf+wozGVumbL830ttMPJQRKe2eJdvarWJse4Hs3UPZG7KlQ+2jUmvEfkK5xyM+qWvXcxTN9yX8vm4cpdWMz9m0WOGTQOpahxGn+ekO/2tStbTQIWQeTbs0jd/OkkB8+LQQxeXVmqaTu3Nwt9CwJTVZ28bc8BUiXAkJduQnUEsDBAoAAAAAAHdJRl0AAAAAAAAAAAAAAAARAAAAZmlybXdhcmUvaW5jbHVkZS9QSwMEFAAAAAgAeElGXUC8ulxxAQAAKQMAACAAAABmaXJtd2FyZS9pbmNsdWRlL29rbjU2X3J1bnRpbWUuaJWRXU/CMBSG7/crTuAGyQI4ZKAYEyJDF3CYbcR41TRbJ43QzbUT0fjfPeP788KrnT7v6dP1tMgjEbIIhn2nYRJ35Pj2k0UetSJCLtgx5yKYZCGDQvwuMHmjXDQr48I2uJUqxM2V8d0+40It2J541LPIi2v7FtS+Gs3sROpanW4etk6H3vPQ8fLdZu2w4aFjO8Tukp7tej4Yxrl80MnjI7/dtfDS/isWYFyfTQeWA1eZVi2DS2fAQyYUV3NI6HwS01AHESuIsFR14wY63r1twxD64IAJ5aqm5gnLxy9VmgUKfmBnqkRB/m3D74qmGbqnjKi2hsM8gFxwVTrog3KqQ4a9dQMXkk6TCSMpVWxJL02kKVIylRe7zixiZJZyxU4Kg1hItRC0FoR96CD5dx4L1KzKrSllNCwtN/1Xp295nKkND2iCB33GPFwZkzQOmJRkQsXpf15r8gYd1ncvJ8F0I41wEkxulvgi+Jh4TJGJkEfaH1BLAwQUAAAACAAgPUZdpr6XCrMBAAC9BAAAHgAAAGZpcm13YXJlL2luY2x1ZGUvb2tuNTZfZ2FpbjcuaI1S20rDQBB9z1cs9KWVKDbWpFAR6rVijYgKisgSs5N2MdnE3Y14wX93ktpc2tg2EDY5c+bMmdlp8UAwCMj1pbtv0/PhhevQkdFCiAtYRLnww5QBOVCaIWNneljHuNA5Vss+Hg1d93R8S5y0QZde4Tsajs/oyRFpb3d7u51G1vChZHWtRc6N1aP37sXdIwZtx3Gsrp12DP2ZQNab0jL1Nfk2CD7osWtTTbQnJ6Dp1AsDyl4GeSzFYB9jUaqBldCehZifSglC0zerZ86T8XswF81JSkNSokWuhMjjOGZpEpAyxmOGcDExCUulp3ksCqV+NYMqPsHQD4lfBTY6QZSGngCqB839FUWVFyUhUBSH0k7eusQIjdQMXdIl2fFUv7vnugMnq45q1WTsRrdrFLKF3TXZMZesdAZGQaxo+jEEQTbP9pz/d12dpfKqvMt/XGRj9acm2UhqrUoQxp4mTenZ8qxJru7ZTCB3VBGprGbbj4XSZJXiP+MT8JHv6Eo3zfW9JAk/6ezONpznByq9x5xVZRIZ+6BUvlkbymwlfmQSxb+yVQxwP0AVv7jonGUTa4FgPDB+AVBLAwQUAAAACAB3SUZdegW8fzACAAClBAAAIwAAAGZpcm13YXJlL2luY2x1ZGUvb2tuNTdfYXVkaW9faG9vay5olVPRbhoxEHy/r1glLylqOJKWUJWqEgrXgpICotA+WuZuj7Nq7Ku9JqFV/73rBBKF0qj1465nZ9YzPlalKbCE8dWo3RG9eX84FoPx+EoMkmOuK4MHW8rkOhQIR/abaV8IFwypFTaro8fWO08FT2hW75/WlKFYS9JGAg24nE+n2WgG03YHSqn0aa6txwJya8jJnN7GS7MKweMaDWi7VLnUsAhlic7DArW9AekQJFz2Rv1hvzfLgClw6SQpa8BXskawRm+a21HKQe1sEfLYP11Y6Qqoq42/G7ySda3MEpQHYwk2SLBGp0qFRcSne68yzXrXonM5EOP5bDKfiU+9yWQ4+ii+ZNPhh2HWh1bYQzyoFNe9UfYZOiFJaFNjNMGTY1XwMwE+vMTZhSBoFDJvCe26sZg2IJemUIUkBC0NemilZ1HXPuRWrKyx3QMQOOer+wh17p8jeZW+PgQ5ewbSTi92EK9+ICNKJ1fou8kviKnpiAeEsIHqQF5QN+YCJg/2wJLbTfiqqII8OIeGANeqQJMjUMUurYIncEjBGWgBT+QKRRVsX8VONqMI1rzlZHv1Rjz6v6M+eRLkuJ57+XeZ0LAv7qUOrKfUlqWODvNYW0KFukZ3HznIbmutcsX0NZ0qE3Pl8HtQjvMEIwsVp+8m5neYjg9K/ZN9y3ZI8d1r/9t5brf/mRNY8BtG4XbRnTxB6EmgkQuN8a34Q7NROe/LBHvcMTDCcDhOdtNihVHHyFfK5DdQSwMECgAAAAAAID1GXQAAAAAAAAAAAAAAAAUAAABkb2NzL1BLAwQUAAAACAB4SUZdMPbrAZcCAACHBAAAGwAAAGRvY3MvSU5URUdSQVRJT05fUExBTl9USC5tZG1TUUvbUBR+z684sLcOrZUNh+BD1kYt1iZL07m3NDZpDaa5IU2RvbVOaB172EOddBuCFhE2BC3T3fyby37J7j1JOplCCOee+91zznfOd56B/nIFinVdV6oGuH7ktEMrcokPbStyJInFfUa/sfiY0RmjPxk9R+OC0SNGfzN6zeIBHvn/hzjSIT6Zitt4lHrE/xoxI3w+wO+W0Qn6LxA5Q+RH9I8xCHdOViWpsAi5XMmx3SYvyYYNy/XB7QSe03H8CIvN5eBPfwyMfs8iTbCuSyz8KrXpDYuPBAOBOWP0Ho0hKG+kZZFCC4ndayL5XWKFNpBeFPQi6FhB4PptyEMUWn43IGEEe4Tsz7OeYJqEKe/PHTbqEonwxJ/TgridNmSSdpX+QqYfBOv4WJKKlm+7NicJHmlzth5096zA4RlORVT+OsNigGNkwWPfAGm1PNd3IHK60arUKMnFJajkdXgO3HwHHeITbpeXa5mbmwU012AFPMt3ug0x7AGSGUHQ2/XcJrzWCksvXkGttIUsBaGr/yc2b6kwxtiJM2TG5RAnM2TxJ5yCeJKmA+zIHcK/IHAAIe+3uJiL5RBTfMXjFIOMMeAU4w8x0TTr/flcU4uwQ8L9lkcOAOH3iD3Bd7z8UcLnoT5EjkSNpwgfPDlBeJSQMx6uSgvQ0BW5Yq4UN021bmh1w9yWNa1c3TDfKnp5vayU1qpqQ+CK9Zqhbpv1dcU0dLla01TdMDdVdesRUtPVUr1olNWquV6Ra5tmeVveULLbxCVXKupO+kTCdt1icZNkiridRyi0OZsh7vuD7c0E9SThYL4RC8lGiBHxVci33LBzYIVcqNZ77gLU4+m/5csKgQfy6OP4ZsB3KU+CJrGdvGXbodPtLkp/AVBLAwQUAAAACAB4SUZd4VnrpysBAAB1AgAACAAAAE1ha2VmaWxllVBdS8MwFH1efsV92MMGtnXKHAyClIA6kHZYQXwKIcm20C4ZSYrOX28SmIwyFB9yk9yPc885hMA9Bs4ReXguH5v4yZwXmM9mkNU3kL2xrgtRfnrL4m2tseE+SMG0VxytKoKz1UbZ/QezslCad72QcJZylqPmheDzRGFaPb+jW6b0IudwoWT7AL+Xl4oLynqhDN0Z0+Yc5eununpfgpfOg2NaefUlIbZ44J1kGqFYWqLReELIFEJMWuMrsJ+mQVfESO080hlPAt8pZGZQQqO8GGYOR78z+ha8MZ0r0taEcjiiE5efzWfOhrP901zINicMzISw0rmrXgu5UVqKf7OnAQuNyqasaL1+XdVVg4X0knsaTGodvoahujSRJC1/FZpcDi12HxgPtl4i8Q1QSwMECgAAAAAAlElGXQAAAAAAAAAAAAAAAA4AAABzZGtfY2FuZGlkYXRlL1BLAwQUAAAACACUSUZdcgyBKWIBAACSAgAAJwAAAHNka19jYW5kaWRhdGUvb2tuNTdfZHVhbF9pMnNfY29udHJhY3QuY5VRS08CMRC+768Y4MISBZbERyKYEEkM0agJ3Dfd7azbUNrabUEU/7tTWIhRY2IP7Ty+R2baEiqXniMMK8eFct3yOmodak0xqFIqoi1Yjt2yGUW9TgQduNFLIyT2pFCL01wrZ1nuwFidIWglN12Yl6KCgjBAr8IVWsBXzL1DDtkGXImw1nZRSL3uBsXpjr7CilrM7fpGKEXo2eSOqEZX1BOKo0G6lIPpYNbv0ZXAi0ePMH6aVgcprgn88Djfa0KmmeVBD6z2Tqhn0BaYd6W24g0BFctkqKIgXwsGrTAUMBn0epGnFVymDvRCnV2k3DOZhsUc5k6Nr8r2SgsOHar3U2lP4JgmuzRIJOekUVi2xCqO3iOgIwpoN2oObLfQqAkh3iNhNIK+j8Gi81ZReHUkjj0XOmwhnTDHZoa+6B7VLbp2DMOD0V/E5D/E3YDxN0+iHCeueb+hk6/o5Ce6tkrI6iP6BFBLAQIeAwoAAAAAAApKRl0AAAAAAAAAAAAAAAAGAAAAAAAAAAAAEADtRQAAAAB0ZXN0cy9QSwECHgMUAAAACAB4SUZdBxX3mx0EAABjCwAAEAAAAAAAAAABAAAApIEkAAAAdGVzdHMvdGVzdF9yNTcuY1BLAQIeAwoAAAAAAApKRl0AAAAAAAAAAAAAAAAGAAAAAAAAAAAAEADtRW8EAAB0b29scy9QSwECHgMUAAAACAB4SUZdNQHzc00HAADqEAAAFgAAAAAAAAABAAAA7YGTBAAAdG9vbHMvc2RrX3I1N19wcm9iZS5weVBLAQIeAxQAAAAIAHhJRl2Ive3DCQMAABIHAAASAAAAAAAAAAEAAACkgRQMAAB0b29scy9hdWRpdF9yNTcucHlQSwECHgMUAAAACAAKSkZdrAvbKiQDAAB9BQAAEQAAAAAAAAABAAAApIFNDwAAU09VUkNFX0hBU0hFUy50eHRQSwECHgMUAAAACAB3SUZdW1JOZ2gBAAA6AgAADwAAAAAAAAABAAAApIGgEgAAUjU3X1NUQVRVUy5qc29uUEsBAh4DFAAAAAgAeElGXVmQ1VRlAgAA0wMAAAwAAAAAAAAAAQAAAKSBNRQAAFJFQURNRV9USC5tZFBLAQIeAwoAAAAAACA9Rl0AAAAAAAAAAAAAAAAJAAAAAAAAAAAAEADtRcQWAABmaXJtd2FyZS9QSwECHgMKAAAAAAB3SUZdAAAAAAAAAAAAAAAADQAAAAAAAAAAABAA7UXrFgAAZmlybXdhcmUvc3JjL1BLAQIeAxQAAAAIAHdJRl351bzBFQIAAPgFAAAfAAAAAAAAAAEAAACkgRYXAABmaXJtd2FyZS9zcmMvb2tuNTdfYXVkaW9faG9vay5jUEsBAh4DFAAAAAgAID1GXQcsGmWoAgAAkAYAAB8AAAAAAAAAAQAAAKSBaBkAAGZpcm13YXJlL3NyYy9va241Nl9nYWluX3RhYmxlLmhQSwECHgMUAAAACAAgPUZd7ijzn34EAAAeDwAAGgAAAAAAAAABAAAApIFNHAAAZmlybXdhcmUvc3JjL29rbjU2X2dhaW43LmNQSwECHgMUAAAACAB4SUZdgGZsI2IDAADLCQAAHAAAAAAAAAABAAAApIEDIQAAZmlybXdhcmUvc3JjL29rbjU2X3J1bnRpbWUuY1BLAQIeAwoAAAAAAHdJRl0AAAAAAAAAAAAAAAARAAAAAAAAAAAAEADtRZ8kAABmaXJtd2FyZS9pbmNsdWRlL1BLAQIeAxQAAAAIAHhJRl1AvLpccQEAACkDAAAgAAAAAAAAAAEAAACkgc4kAABmaXJtd2FyZS9pbmNsdWRlL29rbjU2X3J1bnRpbWUuaFBLAQIeAxQAAAAIACA9Rl2mvpcKswEAAL0EAAAeAAAAAAAAAAEAAACkgX0mAABmaXJtd2FyZS9pbmNsdWRlL29rbjU2X2dhaW43LmhQSwECHgMUAAAACAB3SUZdegW8fzACAAClBAAAIwAAAAAAAAABAAAApIFsKAAAZmlybXdhcmUvaW5jbHVkZS9va241N19hdWRpb19ob29rLmhQSwECHgMKAAAAAAAgPUZdAAAAAAAAAAAAAAAABQAAAAAAAAAAABAA7UXdKgAAZG9jcy9QSwECHgMUAAAACAB4SUZdMPbrAZcCAACHBAAAGwAAAAAAAAABAAAApIEAKwAAZG9jcy9JTlRFR1JBVElPTl9QTEFOX1RILm1kUEsBAh4DFAAAAAgAeElGXeFZ66crAQAAdQIAAAgAAAAAAAAAAQAAAKSB0C0AAE1ha2VmaWxlUEsBAh4DCgAAAAAAlElGXQAAAAAAAAAAAAAAAA4AAAAAAAAAAAAQAO1FIS8AAHNka19jYW5kaWRhdGUvUEsBAh4DFAAAAAgAlElGXXIMgSliAQAAkgIAACcAAAAAAAAAAQAAAKSBTS8AAHNka19jYW5kaWRhdGUvb2tuNTdfZHVhbF9pMnNfY29udHJhY3QuY1BLBQYAAAAAFwAXAOsFAAD0MAAAAAA=
+          R57_B64
+          base64 -d "$RUNNER_TEMP/R57_SOURCE.b64" > "$RUNNER_TEMP/R57_SOURCE.zip"
+          echo "$SOURCE_ZIP_SHA256  $RUNNER_TEMP/R57_SOURCE.zip" | sha256sum -c -
+          rm -rf "$RUNNER_TEMP/r57src"
+          mkdir -p "$RUNNER_TEMP/r57src"
+          unzip -q "$RUNNER_TEMP/R57_SOURCE.zip" -d "$RUNNER_TEMP/r57src"
+          (cd "$RUNNER_TEMP/r57src" && sha256sum -c SOURCE_HASHES.txt)
+          echo "R57_ROOT=$RUNNER_TEMP/r57src" >> "$GITHUB_ENV"
+
+      - name: Re-prove current Dedicated Gain is not EQ
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$R57_ROOT"
+          python3 tools/audit_r57.py | tee "$RUNNER_TEMP/R58_BASE_AUDIT.txt"
+          grep -q '^GAIN_VIA_EQ=NO$' "$RUNNER_TEMP/R58_BASE_AUDIT.txt"
+          grep -q '^DEDICATED_GAIN_ONLY=PASS$' "$RUNNER_TEMP/R58_BASE_AUDIT.txt"
+          ! grep -RniE 'peq|biquad|equalizer|eq_apply|filter_gain' \
+            firmware/src/okn56_gain7.c firmware/src/okn56_runtime.c firmware/src/okn57_audio_hook.c
+          make clean
+          make test | tee "$RUNNER_TEMP/R58_HOST_TEST.log"
+          make sanitize | tee "$RUNNER_TEMP/R58_SANITIZE.log"
+          grep -q 'PASS R57 CURRENT' "$RUNNER_TEMP/R58_HOST_TEST.log"
+
+      - name: Fetch pinned public BP1048 SDK and select BP1048P4
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf "$RUNNER_TEMP/bp1048sdk"
+          git init -q "$RUNNER_TEMP/bp1048sdk"
+          git -C "$RUNNER_TEMP/bp1048sdk" remote add origin "$SDK_REPO"
+          git -C "$RUNNER_TEMP/bp1048sdk" fetch -q --depth 1 origin "$SDK_COMMIT"
+          git -C "$RUNNER_TEMP/bp1048sdk" checkout -q --detach FETCH_HEAD
+          test "$(git -C "$RUNNER_TEMP/bp1048sdk" rev-parse HEAD)" = "$SDK_COMMIT"
+          test -f "$RUNNER_TEMP/bp1048sdk/BT_Audio_APP/nds32-ae210p.ld"
+          python3 - <<'PY2'
+          from pathlib import Path
+          import re, os
+          root=Path(os.environ['RUNNER_TEMP'])/'bp1048sdk'
+          p=root/'BT_Audio_APP/bt_audio_app_src/inc/app_config.h'
+          s=p.read_text(encoding='latin-1')
+          s,n1=re.subn(r'(?m)^[ \t]*#define[ \t]+CFG_CHIP_BP10128\b.*$', '// R58 disabled sample target: CFG_CHIP_BP10128', s, count=1)
+          s,n2=re.subn(r'(?m)^[ \t]*//[ \t]*#define[ \t]+CFG_CHIP_BP1048P4\b.*$', '#define CFG_CHIP_BP1048P4', s, count=1)
+          if (n1,n2)!=(1,1): raise SystemExit(f'chip patch mismatch {n1=} {n2=}')
+          p.write_text(s,encoding='latin-1')
+          active=re.findall(r'(?m)^[ \t]*#define[ \t]+(CFG_CHIP_[A-Za-z0-9_]+)\b',s)
+          if active != ['CFG_CHIP_BP1048P4']: raise SystemExit(f'unexpected chip macros: {active}')
+          print('TARGET_CHIP=BP1048P4')
+          PY2
+
+      - name: Repair Windows-origin header case on Linux
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY2'
+          from pathlib import Path
+          import os,re
+          root=Path(os.environ['RUNNER_TEMP'])/'bp1048sdk'
+          bases=[root/'BT_Audio_APP',root/'MVsB1_Base_SDK/driver',root/'MVsB1_Base_SDK/middleware',root/'develop_lib']
+          headers=[]
+          for base in bases:
+              if base.exists(): headers += [p for p in base.rglob('*') if p.is_file() and p.suffix.lower() in {'.h','.hpp'}]
+          by_lower={}
+          for p in headers: by_lower.setdefault(p.name.lower(),[]).append(p)
+          rx=re.compile(r'^\s*#\s*include\s*[<"]([^">]+)[">]',re.M)
+          spellings=set()
+          for base in bases:
+              if not base.exists(): continue
+              for p in base.rglob('*'):
+                  if not p.is_file() or p.suffix.lower() not in {'.c','.h','.hpp','.s'}: continue
+                  try: text=p.read_bytes().decode('latin-1')
+                  except OSError: continue
+                  for inc in rx.findall(text):
+                      if '/' not in inc and '\\' not in inc: spellings.add(inc)
+          made=0
+          for inc in sorted(spellings):
+              for target in by_lower.get(inc.lower(),[]):
+                  alias=target.with_name(inc)
+                  if alias.name==target.name or alias.exists(): continue
+                  try: alias.symlink_to(target.name)
+                  except OSError: alias.write_bytes(target.read_bytes())
+                  made+=1
+          print('CASE_ALIASES=',made)
+          PY2
+
+      - name: Acquire pinned NDS32 D1088 toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libc6-i386 lib32z1 xz-utils
+          rm -rf "$RUNNER_TEMP/nds-src" "$RUNNER_TEMP/nds"
+          git init -q "$RUNNER_TEMP/nds-src"
+          git -C "$RUNNER_TEMP/nds-src" remote add origin "$TOOLCHAIN_REPO"
+          git -C "$RUNNER_TEMP/nds-src" fetch -q --depth 1 origin "$TOOLCHAIN_COMMIT"
+          git -C "$RUNNER_TEMP/nds-src" checkout -q --detach FETCH_HEAD
+          echo "$TOOLCHAIN_SHA256  $RUNNER_TEMP/nds-src/nds32le-elf-mculib-v3s.4.9.4.txz" | sha256sum -c -
+          mkdir -p "$RUNNER_TEMP/nds"
+          tar -xJf "$RUNNER_TEMP/nds-src/nds32le-elf-mculib-v3s.4.9.4.txz" -C "$RUNNER_TEMP/nds"
+          echo "$RUNNER_TEMP/nds/nds32le-elf-mculib-v3s/bin" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/nds/nds32le-elf-mculib-v3s/bin/nds32le-elf-gcc" --version | tee "$RUNNER_TEMP/R58_TOOLCHAIN.txt"
+
+      - name: Generate R58 locked vendor audio bridge
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/r58gen"
+          cat > "$RUNNER_TEMP/r58gen/okn_r58_audio_bridge.h" <<'H'
+          #ifndef OKN_R58_AUDIO_BRIDGE_H
+          #define OKN_R58_AUDIO_BRIDGE_H
+          #include <stddef.h>
+          #include <stdint.h>
+          #include "okn56_runtime.h"
+          #define OKN58_PHYSICAL_7CH_MAPPING_VERIFIED 0u
+          #define OKN58_OUTPUT_HARDWARE_INIT_VERIFIED 0u
+          void okn58_audio_init(uint32_t sample_rate, uint16_t frames);
+          void okn58_audio_process(int16_t *dac0_lr, int16_t *dacx_mono, uint16_t frames);
+          uint8_t okn58_audio_space_ok(uint16_t frames);
+          uint8_t okn58_audio_push(uint16_t frames);
+          okn56_runtime_t *okn58_runtime(void);
+          #endif
+          H
+          cat > "$RUNNER_TEMP/r58gen/okn_r58_audio_bridge.c" <<'C'
+          #include <stddef.h>
+          #include <stdint.h>
+          #include <string.h>
+          #include "type.h"
+          #include "i2s_interface.h"
+          #include "okn56_runtime.h"
+          #include "okn_r58_audio_bridge.h"
+
+          #define OKN58_MAX_FRAMES 512u
+          static okn56_runtime_t s_runtime;
+          static int16_t s_i2s0_lr[OKN58_MAX_FRAMES * 2u];
+          static int16_t s_i2s1_lr[OKN58_MAX_FRAMES * 2u];
+          static uint16_t s_frames;
+          static uint8_t s_ready;
+          /* Fail-closed: no production code enables this in R58. Volatile keeps
+             both low-level output call paths in the linked call graph. */
+          static volatile uint8_t s_output_enable;
+
+          okn56_runtime_t *okn58_runtime(void) { return &s_runtime; }
+
+          void okn58_audio_init(uint32_t sample_rate, uint16_t frames)
+          {
+              s_ready = 0u;
+              s_output_enable = 0u;
+              if (!sample_rate || !frames || frames > OKN58_MAX_FRAMES) return;
+              if (!okn56_runtime_init(&s_runtime, sample_rate, 5u)) return;
+              memset(s_i2s0_lr, 0, sizeof(s_i2s0_lr));
+              memset(s_i2s1_lr, 0, sizeof(s_i2s1_lr));
+              s_frames = frames;
+              s_ready = 1u;
+          }
+
+          void okn58_audio_process(int16_t *dac0_lr, int16_t *dacx_mono, uint16_t frames)
+          {
+              uint16_t i;
+              if (!s_ready || !dac0_lr || frames != s_frames) return;
+
+              /* Logical sidecar source only: preserve the vendor DAC0 stereo
+                 samples as the source for both additional stereo pairs. */
+              for (i = 0u; i < frames; ++i) {
+                  s_i2s0_lr[2u*i]     = dac0_lr[2u*i];
+                  s_i2s0_lr[2u*i + 1] = dac0_lr[2u*i + 1u];
+                  s_i2s1_lr[2u*i]     = dac0_lr[2u*i];
+                  s_i2s1_lr[2u*i + 1] = dac0_lr[2u*i + 1u];
+              }
+
+              /* Seven independent dedicated gain lanes. No filter coefficients
+                 or tone parameters are touched by this module. */
+              okn56_process_lane(&s_runtime, 0u, dac0_lr,       frames, 2u);
+              okn56_process_lane(&s_runtime, 1u, dac0_lr + 1,   frames, 2u);
+              if (dacx_mono) okn56_process_lane(&s_runtime, 2u, dacx_mono, frames, 1u);
+              okn56_process_lane(&s_runtime, 3u, s_i2s0_lr,     frames, 2u);
+              okn56_process_lane(&s_runtime, 4u, s_i2s0_lr + 1, frames, 2u);
+              okn56_process_lane(&s_runtime, 5u, s_i2s1_lr,     frames, 2u);
+              okn56_process_lane(&s_runtime, 6u, s_i2s1_lr + 1, frames, 2u);
+          }
+
+          uint8_t okn58_audio_space_ok(uint16_t frames)
+          {
+              if (!s_ready || frames != s_frames) return 0u;
+              if (!s_output_enable) return 1u;
+              return (uint8_t)((AudioI2S0_DataSpaceLenGet() >= frames) &&
+                               (AudioI2S1_DataSpaceLenGet() >= frames));
+          }
+
+          uint8_t okn58_audio_push(uint16_t frames)
+          {
+              if (!s_ready || frames != s_frames) return 0u;
+              if (!s_output_enable) return 1u;
+              if (!okn58_audio_space_ok(frames)) return 0u;
+              (void)AudioI2S0_DataSet(s_i2s0_lr, frames);
+              (void)AudioI2S1_DataSet(s_i2s1_lr, frames);
+              return 1u;
+          }
+          C
+          ! grep -RniE 'peq|biquad|equalizer|eq_apply|filter_gain' "$RUNNER_TEMP/r58gen"
+          grep -q 's_output_enable = 0u' "$RUNNER_TEMP/r58gen/okn_r58_audio_bridge.c"
+          echo 'R58_OUTPUT_ENABLE_DEFAULT=0' | tee "$RUNNER_TEMP/R58_BRIDGE_GATE.txt"
+          echo 'R58_PHYSICAL_7CH_MAPPING_VERIFIED=NO' >> "$RUNNER_TEMP/R58_BRIDGE_GATE.txt"
+          echo 'R58_OUTPUT_HARDWARE_INIT_VERIFIED=NO' >> "$RUNNER_TEMP/R58_BRIDGE_GATE.txt"
+
+      - name: Patch vendor audio callgraph only
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY2'
+          from pathlib import Path
+          import os
+          root=Path(os.environ['RUNNER_TEMP'])/'bp1048sdk'
+          main=root/'BT_Audio_APP/bt_audio_app_src/apps/main_task.c'
+          core=root/'BT_Audio_APP/bt_audio_app_src/services/audio_core_api.c'
+
+          def span(text,sig):
+              hits=[]; pos=0
+              while True:
+                  p=text.find(sig,pos)
+                  if p<0: break
+                  j=p+len(sig)
+                  while j<len(text) and text[j].isspace(): j+=1
+                  if j<len(text) and text[j]=='{': hits.append((p,j))
+                  pos=p+len(sig)
+              if len(hits)!=1: raise SystemExit(f'definition count {sig}: {len(hits)}')
+              start,brace=hits[0]; depth=0
+              for i in range(brace,len(text)):
+                  if text[i]=='{': depth+=1
+                  elif text[i]=='}':
+                      depth-=1
+                      if depth==0: return start,brace,i+1
+              raise SystemExit(f'unterminated {sig}')
+
+          m0=main.read_text(encoding='latin-1'); m=m0
+          inc='#include "i2s_interface.h"'
+          if m.count(inc)!=1: raise SystemExit('main include anchor mismatch')
+          m=m.replace(inc,inc+'\n#include "okn_r58_audio_bridge.h"',1)
+          marker='\tAudioCoreSinkEnable(AUDIO_DACX_SINK_NUM);\n#endif\n\n#ifdef CFG_RES_AUDIO_I2SOUT_EN'
+          if m.count(marker)!=1: raise SystemExit('sink marker mismatch')
+          repl='\tAudioCoreSinkEnable(AUDIO_DACX_SINK_NUM);\n#endif\n\n\t/* R58: gain state only; no output pin/peripheral init. */\n\tokn58_audio_init(mainAppCt.SampleRate, mainAppCt.SamplesPreFrame);\n\n#ifdef CFG_RES_AUDIO_I2SOUT_EN'
+          m=m.replace(marker,repl,1)
+          a,b,e=span(m,'void AudioResInit(void)')
+          body=m[a:e]
+          body=body[:-1]+'\n\t/* R58: follow vendor frame-size changes; still output-locked. */\n\tokn58_audio_init(mainAppCt.SampleRate, mainAppCt.SamplesPreFrame);\n}'
+          m=m[:a]+body+m[e:]
+          main.write_text(m,encoding='latin-1')
+          Path('/tmp/R58_main_task_before.c').write_text(m0,encoding='latin-1')
+          Path('/tmp/R58_main_task_after.c').write_text(m,encoding='latin-1')
+
+          c0=core.read_text(encoding='latin-1'); c=c0
+          inc='#include "main_task.h"'
+          if c.count(inc)!=1: raise SystemExit('core include anchor mismatch')
+          c=c.replace(inc,inc+'\n#include "okn_r58_audio_bridge.h"',1)
+          a,b,e=span(c,'static bool AudioCoreSinkDataSet(void)')
+          block=c[a:e]
+          decl='\tuint32_t i;\n'
+          if block.count(decl)!=1: raise SystemExit('sink data decl anchor mismatch')
+          block=block.replace(decl,decl+'\tif(!okn58_audio_space_ok(mainAppCt.SamplesPreFrame)) return FALSE;\n',1)
+          tail='\treturn TRUE;\n}'
+          if block.count(tail)!=1: raise SystemExit('sink data return anchor mismatch')
+          block=block.replace(tail,'\tif(!okn58_audio_push(mainAppCt.SamplesPreFrame)) return FALSE;\n\treturn TRUE;\n}',1)
+          c=c[:a]+block+c[e:]
+          a,b,e=span(c,'void AduioCoreSinkVolSet(void)')
+          block=c[a:e]
+          block=block[:-1]+'\n\t/* R58 real vendor PCM-buffer call; dedicated gain stays identity by default. */\n#ifdef CFG_RES_AUDIO_DACX_EN\n\tokn58_audio_process(AudioCore.AudioSink[AUDIO_DAC0_SINK_NUM].PcmOutBuf, AudioCore.AudioSink[AUDIO_DACX_SINK_NUM].PcmOutBuf, mainAppCt.SamplesPreFrame);\n#else\n\tokn58_audio_process(AudioCore.AudioSink[AUDIO_DAC0_SINK_NUM].PcmOutBuf, (int16_t*)0, mainAppCt.SamplesPreFrame);\n#endif\n}'
+          c=c[:a]+block+c[e:]
+          core.write_text(c,encoding='latin-1')
+          Path('/tmp/R58_audio_core_before.c').write_text(c0,encoding='latin-1')
+          Path('/tmp/R58_audio_core_after.c').write_text(c,encoding='latin-1')
+
+          joined=m+'\n'+c
+          for tok in ['okn58_audio_init(','okn58_audio_process(','okn58_audio_space_ok(','okn58_audio_push(']:
+              if tok not in joined: raise SystemExit('missing vendor hook '+tok)
+          print('R58_VENDOR_AUDIO_PATCH=PASS')
+          PY2
+          diff -u /tmp/R58_main_task_before.c /tmp/R58_main_task_after.c > /tmp/R58_MAIN_TASK_PATCH.diff || true
+          diff -u /tmp/R58_audio_core_before.c /tmp/R58_audio_core_after.c > /tmp/R58_AUDIO_CORE_PATCH.diff || true
+          test -s /tmp/R58_MAIN_TASK_PATCH.diff
+          test -s /tmp/R58_AUDIO_CORE_PATCH.diff
+
+      - name: Build production include response file
+        shell: bash
+        run: |
+          set -euo pipefail
+          S="$RUNNER_TEMP/bp1048sdk"
+          : > "$RUNNER_TEMP/R58_INCLUDES.rsp"
+          for d in \
+            "$S/BT_Audio_APP/bt_audio_app_src/audio" \
+            "$S/develop_lib/util" "$S/develop_lib" "$S/develop_lib/trace" \
+            "$S/BT_Audio_APP/bt_audio_app_src/ai/md5" \
+            "$S/BT_Audio_APP/bt_audio_app_src/ai/speex/include/speex" \
+            "$S/BT_Audio_APP/bt_audio_app_src/ai/speex/include" \
+            "$S/BT_Audio_APP/bt_audio_app_src/ai/speex/libspeex" \
+            "$S/BT_Audio_APP/bt_audio_app_src/ai/speex" "$S/BT_Audio_APP/bt_audio_app_src/ai" \
+            "$S/BT_Audio_APP/bt_audio_app_src/inc" \
+            "$S/MVsB1_Base_SDK/driver/driver_api/inc/otg" \
+            "$S/MVsB1_Base_SDK/middleware/rtc/inc" "$S/MVsB1_Base_SDK/middleware/fatfs/inc" \
+            "$S/MVsB1_Base_SDK/middleware/user/inc" "$S/MVsB1_Base_SDK/middleware/bluetooth/inc" \
+            "$S/MVsB1_Base_SDK/middleware/audio/inc" "$S/MVsB1_Base_SDK/driver/driver/inc" \
+            "$S/MVsB1_Base_SDK/driver/driver_api/inc" "$S/MVsB1_Base_SDK/middleware/mv_utils/inc" \
+            "$S/MVsB1_Base_SDK/middleware/lrc/inc" "$S/MVsB1_Base_SDK/middleware/rtos/rtos_api" \
+            "$S/MVsB1_Base_SDK/middleware/rtos/freertos/inc" "$S/MVsB1_Base_SDK/middleware/flashfs/inc" \
+            "$S/BT_Audio_APP/bt_audio_app_src/display" "$S/BT_Audio_APP/bt_audio_app_src/user" \
+            "$S/MVsB1_Base_SDK/middleware/cec/inc" "$S/BT_Audio_APP/bt_audio_app_src/ble" \
+            "$R57_ROOT/firmware/include" "$R57_ROOT/firmware/src" "$RUNNER_TEMP/r58gen"
+          do
+            test -d "$d" && printf '%s\n' "-I$d" >> "$RUNNER_TEMP/R58_INCLUDES.rsp"
+          done
+          while IFS= read -r d; do
+            grep -Fxq -- "-I$d" "$RUNNER_TEMP/R58_INCLUDES.rsp" || printf '%s\n' "-I$d" >> "$RUNNER_TEMP/R58_INCLUDES.rsp"
+          done < <(find "$S/BT_Audio_APP" "$S/MVsB1_Base_SDK/driver" "$S/MVsB1_Base_SDK/middleware" "$S/develop_lib" -type f -name '*.h' -printf '%h\n' | sort -u)
+          test -s "$RUNNER_TEMP/R58_INCLUDES.rsp"
+
+      - name: Build active vendor source graph
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY2'
+          from pathlib import Path
+          import xml.etree.ElementTree as ET, os
+          sdk=Path(os.environ['RUNNER_TEMP'])/'bp1048sdk'; app=sdk/'BT_Audio_APP'
+          project=ET.parse(app/'.project').getroot(); cproject=ET.parse(app/'.cproject').getroot()
+          exclusions=set()
+          for e in cproject.iter('entry'):
+              raw=e.attrib.get('excluding',''); exclusions.update(x for x in raw.split('|') if x)
+          sources={}
+          local=app/'bt_audio_app_src'
+          for p in local.rglob('*'):
+              if p.is_file() and p.suffix.lower() in {'.c','.s'}: sources[p.resolve()]=p.relative_to(app).as_posix()
+          for link in project.iter('link'):
+              name=(link.findtext('name') or '').strip(); typ=(link.findtext('type') or '').strip(); uri=(link.findtext('locationURI') or '').strip().replace('&amp;','&')
+              if typ!='1' or not name.lower().endswith(('.c','.s')): continue
+              if uri.startswith('PARENT-1-PROJECT_LOC/'): p=sdk/uri[len('PARENT-1-PROJECT_LOC/'):]
+              elif uri.startswith('WORKSPACE_LOC/'): p=sdk/uri[len('WORKSPACE_LOC/'):]
+              else: continue
+              if p.is_file(): sources[p.resolve()]=name
+          def norm(x): return x.replace('\\','/').lower().replace('_','').strip('/')
+          exn=sorted({norm(x) for x in exclusions}); active=[]; excluded=[]
+          for physical,logical in sorted(sources.items(),key=lambda x:x[1].lower()):
+              ln=norm(logical); matches=[e for e in exn if ln==e or ln.endswith('/'+e)]
+              if matches: excluded.append((str(physical),logical,matches[0]))
+              else: active.append((str(physical),logical))
+          Path('/tmp/R58_ACTIVE_SOURCES.tsv').write_text(''.join(f'{p}\t{l}\n' for p,l in active))
+          Path('/tmp/R58_EXCLUDED_SOURCES.tsv').write_text(''.join(f'{p}\t{l}\t{e}\n' for p,l,e in excluded))
+          Path('/tmp/R58_SOURCE_GRAPH_SUMMARY.txt').write_text(f'DISCOVERED={len(sources)}\nACTIVE={len(active)}\nEXCLUDED={len(excluded)}\n')
+          if len(active)<100: raise SystemExit(f'unexpectedly small graph {len(active)}')
+          print(Path('/tmp/R58_SOURCE_GRAPH_SUMMARY.txt').read_text(),end='')
+          PY2
+
+      - name: Compile full vendor source graph
+        id: compile_vendor
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          CC=nds32le-elf-gcc
+          COMMON=(-Os -g3 -mcpu=d1088-spu -mcmodel=medium -mext-dsp -mext-zol -fsingle-precision-constant -ffunction-sections -fdata-sections)
+          APP=(-DFUNC_OS_EN=1 -DCFG_APP_CONFIG -DHAVE_CONFIG_H)
+          rm -rf /tmp/r58obj /tmp/r58compile; mkdir -p /tmp/r58obj /tmp/r58compile
+          : > /tmp/R58_COMPILE_RESULTS.tsv
+          pass=0; fail=0; n=0
+          while IFS=$'\t' read -r src logical; do
+            test -n "$src" || continue; n=$((n+1)); rel="${logical%.*}.o"; obj="/tmp/r58obj/$rel"; log="/tmp/r58compile/${n}.log"; mkdir -p "$(dirname "$obj")"
+            set +e
+            "$CC" "${COMMON[@]}" @"$RUNNER_TEMP/R58_INCLUDES.rsp" "${APP[@]}" -c "$src" -o "$obj" >"$log" 2>&1
+            rc=$?; set -e
+            if [ "$rc" -eq 0 ]; then pass=$((pass+1)); printf 'PASS\t%s\t%s\n' "$logical" "$obj" >> /tmp/R58_COMPILE_RESULTS.tsv
+            else fail=$((fail+1)); printf 'FAIL\t%s\t%s\n' "$logical" "$log" >> /tmp/R58_COMPILE_RESULTS.tsv; fi
+          done < /tmp/R58_ACTIVE_SOURCES.tsv
+          printf 'TOTAL=%d\nPASS=%d\nFAIL=%d\n' "$n" "$pass" "$fail" | tee /tmp/R58_COMPILE_SUMMARY.txt
+          : > /tmp/R58_FIRST_COMPILE_FAILURES.txt
+          awk -F '\t' '$1=="FAIL" && n<20 {print $2"\t"$3; n++}' /tmp/R58_COMPILE_RESULTS.tsv | while IFS=$'\t' read -r logical log; do echo "===== $logical =====" >> /tmp/R58_FIRST_COMPILE_FAILURES.txt; sed -n '1,100p' "$log" >> /tmp/R58_FIRST_COMPILE_FAILURES.txt; done
+          test "$fail" -eq 0
+
+      - name: Compile current gain runtime into vendor ABI
+        id: compile_gain
+        if: steps.compile_vendor.outcome == 'success'
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/r58_gain_obj
+          for src in "$R57_ROOT/firmware/src/okn56_gain7.c" "$R57_ROOT/firmware/src/okn56_runtime.c"; do
+            obj="/tmp/r58_gain_obj/$(basename "${src%.c}").o"
+            nds32le-elf-gcc -std=gnu11 -Os -g3 -mcpu=d1088-spu -mcmodel=medium -mext-dsp -mext-zol -fsingle-precision-constant -ffunction-sections -fdata-sections -Wall -Wextra -Werror @"$RUNNER_TEMP/R58_INCLUDES.rsp" -c "$src" -o "$obj"
+          done
+          nds32le-elf-nm -a /tmp/r58_gain_obj/*.o > /tmp/R58_GAIN_SYMBOLS.txt
+          for sym in okn56_runtime_init okn56_ufe_write okn56_ufe_read okn56_process_lane okn56_gain_process_lane; do grep -Eq "[[:space:]]${sym}$" /tmp/R58_GAIN_SYMBOLS.txt; done
+
+      - name: Compile R58 vendor audio bridge
+        id: compile_bridge
+        if: steps.compile_gain.outcome == 'success'
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          nds32le-elf-gcc -std=gnu11 -Os -g3 -mcpu=d1088-spu -mcmodel=medium -mext-dsp -mext-zol -fsingle-precision-constant -ffunction-sections -fdata-sections -Wall -Wextra -Werror @"$RUNNER_TEMP/R58_INCLUDES.rsp" -DFUNC_OS_EN=1 -DCFG_APP_CONFIG -DHAVE_CONFIG_H -c "$RUNNER_TEMP/r58gen/okn_r58_audio_bridge.c" -o /tmp/r58_audio_bridge.o
+          nds32le-elf-readelf -rW /tmp/r58_audio_bridge.o > /tmp/R58_BRIDGE_RELOCS.txt
+          nds32le-elf-nm -a /tmp/r58_audio_bridge.o > /tmp/R58_BRIDGE_SYMBOLS.txt
+          for dep in okn56_runtime_init okn56_process_lane AudioI2S0_DataSet AudioI2S1_DataSet AudioI2S0_DataSpaceLenGet AudioI2S1_DataSpaceLenGet; do grep -F "$dep" /tmp/R58_BRIDGE_RELOCS.txt >/dev/null; done
+          for sym in okn58_audio_init okn58_audio_process okn58_audio_space_ok okn58_audio_push okn58_runtime; do grep -Eq "[[:space:]]${sym}$" /tmp/R58_BRIDGE_SYMBOLS.txt; done
+          echo 'R58_BRIDGE_COMPILE=PASS'
+
+      - name: Prove vendor audio objects call R58 bridge
+        id: audio_callgraph
+        if: steps.compile_bridge.outcome == 'success'
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          CORE_OBJ="$(find /tmp/r58obj -type f -name audio_core_api.o | head -n1)"
+          MAIN_OBJ="$(find /tmp/r58obj -type f -name main_task.o | head -n1)"
+          test -s "$CORE_OBJ"; test -s "$MAIN_OBJ"
+          nds32le-elf-readelf -rW "$CORE_OBJ" > /tmp/R58_AUDIO_CORE_RELOCS.txt
+          nds32le-elf-readelf -rW "$MAIN_OBJ" > /tmp/R58_MAIN_TASK_RELOCS.txt
+          for sym in okn58_audio_process okn58_audio_space_ok okn58_audio_push; do grep -F "$sym" /tmp/R58_AUDIO_CORE_RELOCS.txt >/dev/null; done
+          grep -F okn58_audio_init /tmp/R58_MAIN_TASK_RELOCS.txt >/dev/null
+          echo 'R58_REAL_VENDOR_PCM_CALLGRAPH=PASS' | tee /tmp/R58_CALLGRAPH_STATE.txt
+          echo 'R58_GAIN_VIA_EQ=NO' >> /tmp/R58_CALLGRAPH_STATE.txt
+          echo 'R58_PHYSICAL_BOARD_MAPPING=UNPROVEN' >> /tmp/R58_CALLGRAPH_STATE.txt
+          echo 'R58_OUTPUT_HARDWARE_INIT=LOCKED' >> /tmp/R58_CALLGRAPH_STATE.txt
+
+      - name: Provide SDK UART mutex compatibility
+        id: compat
+        if: steps.audio_callgraph.outcome == 'success'
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > /tmp/r58_uart_mutex_compat.c <<'C'
+          #include <stddef.h>
+          #include "rtos_api.h"
+          __attribute__((weak)) osMutexId UART0Mutex = NULL;
+          __attribute__((weak)) osMutexId UART1Mutex = NULL;
+          C
+          nds32le-elf-gcc -Os -g3 -mcpu=d1088-spu -mcmodel=medium -mext-dsp -mext-zol @"$RUNNER_TEMP/R58_INCLUDES.rsp" -DFUNC_OS_EN=1 -DCFG_APP_CONFIG -DHAVE_CONFIG_H -c /tmp/r58_uart_mutex_compat.c -o /tmp/r58_uart_mutex_compat.o
+
+      - name: Full-link vendor BT_Audio_APP with current dedicated gain path
+        id: full_link
+        if: steps.compat.outcome == 'success'
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          S="$RUNNER_TEMP/bp1048sdk"
+          ELF=/tmp/OKN_R58_CURRENT_VENDOR_AUDIO_GAIN_NOT_FOR_FLASH.elf
+          MAP=/tmp/OKN_R58_CURRENT_VENDOR_AUDIO_GAIN_NOT_FOR_FLASH.map
+          mapfile -t OBJS < <(find /tmp/r58obj -type f -name '*.o' | sort)
+          mapfile -t GAIN_OBJS < <(find /tmp/r58_gain_obj -type f -name '*.o' | sort)
+          test "${#OBJS[@]}" -gt 100; test "${#GAIN_OBJS[@]}" -eq 2
+          LIBS=(
+            "$S/MVsB1_Base_SDK/driver/driver/libDriver.a"
+            "$S/MVsB1_Base_SDK/middleware/audio/libsra.a"
+            "$S/MVsB1_Base_SDK/middleware/cec/libcec.a"
+            "$S/MVsB1_Base_SDK/middleware/audio/libsbcenc.a"
+            "$S/MVsB1_Base_SDK/middleware/audio/libVocalCut.a"
+            "$S/MVsB1_Base_SDK/middleware/audio/libmp3enc.a"
+            "$S/MVsB1_Base_SDK/middleware/audio/libAudioEffectLibrary.a"
+            "$S/MVsB1_Base_SDK/middleware/audio/libresampler.a"
+            "$S/MVsB1_Base_SDK/middleware/audio/libAudioDecoderLibrary.a"
+            "$S/MVsB1_Base_SDK/middleware/bluetooth/libBtStack.a"
+            "$S/MVsB1_Base_SDK/middleware/flashfs/libFlashFS.a"
+            "$S/MVsB1_Base_SDK/middleware/lrc/libLrc.a"
+            "$S/MVsB1_Base_SDK/middleware/fatfs/libfatfs.a"
+            "$S/MVsB1_Base_SDK/middleware/rtc/libRTC.a"
+            "$S/MVsB1_Base_SDK/middleware/audio/libcvsd_plc.a"
+            "$S/MVsB1_Base_SDK/middleware/audio/libBlueAEC.a"
+            "$S/MVsB1_Base_SDK/middleware/xmai/libxmauth.a"
+            "$S/BT_Audio_APP/bt_audio_app_src/libopus/lib/libopus.a"
+          )
+          for lib in "${LIBS[@]}"; do test -f "$lib"; done
+          set +e
+          nds32le-elf-gcc -static -nostartfiles -g3 -mcpu=d1088-spu -mcmodel=medium -mext-dsp -Wl,--gc-sections -Wl,-Map,"$MAP" -T "$S/BT_Audio_APP/nds32-ae210p.ld" -o "$ELF" "${OBJS[@]}" "${GAIN_OBJS[@]}" /tmp/r58_audio_bridge.o /tmp/r58_uart_mutex_compat.o -Wl,--start-group "${LIBS[@]}" -ldsp -lm -Wl,--end-group > /tmp/R58_LINK.log 2>&1
+          rc=$?; set -e; echo "$rc" > /tmp/R58_LINK_RC.txt
+          if [ "$rc" -ne 0 ]; then sed -n '1,400p' /tmp/R58_LINK.log > /tmp/R58_LINK_FIRST_ERRORS.txt; exit "$rc"; fi
+          nds32le-elf-size "$ELF" > /tmp/R58_SIZE.txt
+          nds32le-elf-readelf -h -S -l -Ws "$ELF" > /tmp/R58_READELF.txt
+          nds32le-elf-nm -a -C "$ELF" > /tmp/R58_FINAL_SYMBOLS.txt
+          sha256sum "$ELF" "$MAP" > /tmp/R58_IMAGE_SHA256.txt
+          test ! -e /tmp/OKN_R58_CURRENT_VENDOR_AUDIO_GAIN_NOT_FOR_FLASH.bin
+
+      - name: Gate final linked callgraph and fail closed
+        id: final_gate
+        if: steps.full_link.outcome == 'success'
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          for sym in okn56_runtime_init okn56_ufe_write okn56_ufe_read okn56_process_lane okn56_gain_process_lane okn58_audio_init okn58_audio_process okn58_audio_space_ok okn58_audio_push AudioI2S0_DataSet AudioI2S1_DataSet AudioI2S0_DataSpaceLenGet AudioI2S1_DataSpaceLenGet; do grep -Eq "[[:space:]]${sym}$" /tmp/R58_FINAL_SYMBOLS.txt; done
+          grep -q '^GAIN_VIA_EQ=NO$' "$RUNNER_TEMP/R58_BASE_AUDIT.txt"
+          grep -q '^R58_OUTPUT_ENABLE_DEFAULT=0$' "$RUNNER_TEMP/R58_BRIDGE_GATE.txt"
+          grep -q '^R58_PHYSICAL_7CH_MAPPING_VERIFIED=NO$' "$RUNNER_TEMP/R58_BRIDGE_GATE.txt"
+          grep -q '^R58_OUTPUT_HARDWARE_INIT_VERIFIED=NO$' "$RUNNER_TEMP/R58_BRIDGE_GATE.txt"
+          test ! -e /tmp/OKN_R58_CURRENT_VENDOR_AUDIO_GAIN_NOT_FOR_FLASH.bin
+          echo 'R58_CURRENT_VENDOR_AUDIO_CALLGRAPH_GATE=PASS' | tee /tmp/R58_FINAL_GATE.txt
+          echo 'GAIN_VIA_EQ=NO' >> /tmp/R58_FINAL_GATE.txt
+          echo 'PHYSICAL_BOARD_MAPPING=UNPROVEN' >> /tmp/R58_FINAL_GATE.txt
+          echo 'OUTPUT_HARDWARE_INIT=LOCKED' >> /tmp/R58_FINAL_GATE.txt
+          echo 'CUSTOM_UFE_TRANSPORT_HOOK_VERIFIED=NO' >> /tmp/R58_FINAL_GATE.txt
+          echo 'PRODUCTION_FLASH_IMAGE=NO' >> /tmp/R58_FINAL_GATE.txt
+          echo 'FLASH_ALLOWED=NO' >> /tmp/R58_FINAL_GATE.txt
+
+      - name: Package R58 evidence
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          OUT="$GITHUB_WORKSPACE/r58_current_out"; rm -rf "$OUT"; mkdir -p "$OUT"
+          cp "$RUNNER_TEMP/R57_SOURCE.zip" "$OUT/OKN_R57_CURRENT_BASE_SOURCE.zip" 2>/dev/null || true
+          cp "$RUNNER_TEMP/R58_BASE_AUDIT.txt" "$RUNNER_TEMP/R58_HOST_TEST.log" "$RUNNER_TEMP/R58_SANITIZE.log" "$RUNNER_TEMP/R58_TOOLCHAIN.txt" "$OUT/" 2>/dev/null || true
+          cp "$RUNNER_TEMP/R58_BRIDGE_GATE.txt" "$OUT/" 2>/dev/null || true
+          cp /tmp/R58_*.txt /tmp/R58_*.tsv /tmp/R58_*.diff /tmp/R58_*.log "$OUT/" 2>/dev/null || true
+          cp "$RUNNER_TEMP/r58gen/okn_r58_audio_bridge.h" "$RUNNER_TEMP/r58gen/okn_r58_audio_bridge.c" "$OUT/" 2>/dev/null || true
+          cp /tmp/OKN_R58_CURRENT_VENDOR_AUDIO_GAIN_NOT_FOR_FLASH.elf /tmp/OKN_R58_CURRENT_VENDOR_AUDIO_GAIN_NOT_FOR_FLASH.map "$OUT/" 2>/dev/null || true
+          cat > "$OUT/BUILD_SCOPE.txt" <<EOF
+          OKN R58 CURRENT VENDOR AUDIO CALLGRAPH + DEDICATED GAIN GATE
+          compile_vendor=${{ steps.compile_vendor.outcome }}
+          compile_gain=${{ steps.compile_gain.outcome }}
+          compile_bridge=${{ steps.compile_bridge.outcome }}
+          audio_callgraph=${{ steps.audio_callgraph.outcome }}
+          compat=${{ steps.compat.outcome }}
+          full_link=${{ steps.full_link.outcome }}
+          final_gate=${{ steps.final_gate.outcome }}
+          Dedicated Gain: 7 independent lanes, -70..+6 dB, 0.5 dB
+          Gain via EQ: NO
+          Logical lane callgraph: DAC0 L/R + DACX logical mono + I2S0 L/R + I2S1 L/R
+          I2S sidecar source in R58: copy of vendor DAC0 stereo before per-lane gain
+          Physical board pin/output identity: UNPROVEN
+          I2S hardware/pin initialization in R58: LOCKED / NOT ENABLED
+          Custom UFE transport hook: NOT YET VERIFIED
+          Production flash image: NO
+          LIVE_BOARD_USB=NO
+          HOST_TO_DEVICE_USB=NO
+          FLASH_ERASE_WRITE=NO
+          FLASH_ALLOWED=NO
+          EOF
+          (cd "$OUT" && sha256sum * > SHA256SUMS.txt)
+
+      - name: Upload R58 artifact
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: OKN_R58_CURRENT_VENDOR_AUDIO_CALLGRAPH_GATE
+          path: r58_current_out/*
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 6
+
+      - name: Final workflow assertion
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$LIVE_BOARD_USB" = "NO"
+          test "$HOST_TO_DEVICE_USB" = "NO"
+          test "$FLASH_ERASE_WRITE" = "NO"
+          test "$FLASH_ALLOWED" = "NO"
+          test "${{ steps.compile_vendor.outcome }}" = "success"
+          test "${{ steps.compile_gain.outcome }}" = "success"
+          test "${{ steps.compile_bridge.outcome }}" = "success"
+          test "${{ steps.audio_callgraph.outcome }}" = "success"
+          test "${{ steps.compat.outcome }}" = "success"
+          test "${{ steps.full_link.outcome }}" = "success"
+          test "${{ steps.final_gate.outcome }}" = "success"
+          grep -q '^GAIN_VIA_EQ=NO$' r58_current_out/R58_FINAL_GATE.txt
+          grep -q '^PHYSICAL_BOARD_MAPPING=UNPROVEN$' r58_current_out/R58_FINAL_GATE.txt
+          grep -q '^OUTPUT_HARDWARE_INIT=LOCKED$' r58_current_out/R58_FINAL_GATE.txt
+          grep -q '^CUSTOM_UFE_TRANSPORT_HOOK_VERIFIED=NO$' r58_current_out/R58_FINAL_GATE.txt
+          test ! -e r58_current_out/OKN_R58_CURRENT_VENDOR_AUDIO_GAIN_NOT_FOR_FLASH.bin
+          echo 'R58_CURRENT=PASS'
+          echo 'GAIN_VIA_EQ=NO'
+          echo 'FLASH_ALLOWED=NO'
