@@ -1,0 +1,58 @@
+name: Cleanup workflows - keep android-firmware-tool only
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Keep only android-firmware-tool.yml
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          KEEP=".github/workflows/android-firmware-tool.yml"
+
+          if [[ ! -f "$KEEP" ]]; then
+            echo "ERROR: $KEEP not found. Refusing to delete anything."
+            exit 1
+          fi
+
+          echo "Keeping: $KEEP"
+          echo "Removing all other .yml/.yaml files in .github/workflows ..."
+
+          find .github/workflows -maxdepth 1 -type f \( -name '*.yml' -o -name '*.yaml' \) -print0 |
+          while IFS= read -r -d '' file; do
+            if [[ "$file" == "$KEEP" ]]; then
+              echo "KEEP   $file"
+            else
+              echo "DELETE $file"
+              git rm -- "$file"
+            fi
+          done
+
+      - name: Commit cleanup
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if git diff --cached --quiet; then
+            echo "Nothing to delete."
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git commit -m "Cleanup workflows: keep android-firmware-tool.yml only"
+          git push origin "HEAD:${GITHUB_REF_NAME}"
