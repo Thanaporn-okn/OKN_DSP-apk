@@ -1,4 +1,4 @@
-name: OKN R113 EXACT Wrapper + Goal-Directed N9 Crypto Recovery OFFLINE ONLY
+name: OKN R114 FAST Stage1 Store + N9 Parser Recovery OFFLINE ONLY
 
 on:
   push:
@@ -12,7 +12,7 @@ permissions:
   actions: read
 
 concurrency:
-  group: okn-r113-goal-n9-${{ github.ref }}
+  group: okn-r114-fast-stage1-${{ github.ref }}
   cancel-in-progress: true
 
 env:
@@ -24,11 +24,11 @@ env:
 
 jobs:
   recover:
-    name: Exact-wrapper goal-directed N9 crypto recovery
+    name: Fast stage1 store recovery and second-stage parser tracing
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     env:
-      OUT: /tmp/r113
+      OUT: /tmp/r114
 
     steps:
       - name: Fail-closed static-only safety gate
@@ -44,7 +44,7 @@ jobs:
           mkdir -p "$OUT"/{downloads,pkg,il,resources,decrypted,evidence,review}
 
           cat > "$OUT/evidence/00_SCOPE.txt" <<'EOF'
-          REVISION=R113
+          REVISION=R114
           MODE=OFFLINE_STATIC_ONLY
           TARGET_EXECUTED=false
           BOARD_USB_ACCESS=NO
@@ -58,7 +58,7 @@ jobs:
           TARGET_METHOD=UpdateCommandThread
           TARGET_METHOD_TOKEN=0x0600082C
           TARGET_METHOD_RID=2092
-          GOAL=Evaluate_real_flattened_IL_path_recover_reader_position_key_iv_and_decrypt_method_store
+          GOAL=Recover_exact_key_iv_execute_large_word_transform_fast_then_parse_stage1_store_without_running_target
           EOF
 
       - name: Install static-analysis dependencies
@@ -337,7 +337,53 @@ jobs:
           print(json.dumps(proofs,indent=2))
           PY
 
-      - name: Run bounded concrete symbolic IL emulator
+      - name: Prove custom reader is plain BinaryReader
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import os,json
+
+          out=Path(os.environ["OUT"])
+          il=(out/"il/all.il").read_text(errors="ignore")
+          ev=out/"evidence"
+
+          names=[
+            ".ctor","mpep2xkqqr","FtHelxtJIP","sXXetjyGMH"
+          ]
+          rows={}
+          for name in names:
+            tag=f"// end of method Y7Uor8e58M9K22QZF7H::{name}"
+            e=il.find(tag)
+            if e < 0:
+              raise SystemExit("reader method missing: "+name)
+            s=il.rfind(".method",0,e)
+            nl=il.find("\n",e)
+            rows[name]=il[s:(len(il) if nl<0 else nl)]
+
+          proofs={
+            "ctor_wraps_BinaryReader":
+              "System.IO.BinaryReader::.ctor" in rows[".ctor"],
+            "base_stream_is_BinaryReader_BaseStream":
+              "System.IO.BinaryReader::get_BaseStream()" in rows["mpep2xkqqr"],
+            "read_bytes_is_BinaryReader_ReadBytes":
+              "System.IO.BinaryReader::ReadBytes(int32)" in rows["FtHelxtJIP"],
+            "read_int32_is_BinaryReader_ReadInt32":
+              "System.IO.BinaryReader::ReadInt32()" in rows["sXXetjyGMH"],
+          }
+
+          if not all(proofs.values()):
+            raise SystemExit("BinaryReader proof gate failed")
+
+          (ev/"24_BINARYREADER_METHODS.json").write_text(
+            json.dumps(rows,indent=2,ensure_ascii=False)+"\n")
+          (ev/"25_BINARYREADER_PROOFS.json").write_text(
+            json.dumps(proofs,indent=2)+"\n")
+          print(json.dumps(proofs,indent=2))
+          PY
+
+      - name: Run exact IL emulator with accelerated stage1 word loop
         shell: bash
         run: |
           set -euo pipefail
@@ -471,7 +517,9 @@ jobs:
                   nm=args[-1] if args else U()
                   if isinstance(nm,str) and nm in RESOURCE_BY_NAME:
                       st=Stream(RESOURCE_BY_NAME[nm])
-                      s.milestones.append({"kind":"resource_open","name":nm,"length":len(st.data),"step":s.steps})
+                      event={"kind":"resource_open","name":nm,"length":len(st.data),"step":s.steps}
+                      s.milestones.append(event)
+                      GLOBAL_EVENTS.append(event)
                       return st
                   return U("resource")
               if name=="qfkv4ZNDynVciIciQy6":
@@ -564,8 +612,10 @@ jobs:
           finished=[]
           seen={}
           MAX_PATHS=1024
-          MAX_STEPS=2500000
+          MAX_STEPS=5000000
           total_steps=0
+          GLOBAL_REACH=[]
+          GLOBAL_EVENTS=[]
 
           def key(s):
               def arrsig(v):
@@ -575,7 +625,7 @@ jobs:
                   if isinstance(v,Stream):return ("stream",v.pos)
                   if isinstance(v,(int,str,bool,type(None))):return v
                   return type(v).__name__
-              focus=[8,12,17,29,47,55,71,78,95,100,114]
+              focus=[8,12,17,27,29,37,38,47,55,67,71,76,78,83,95,98,100,105,110,114,118]
               return (s.ip,tuple(arrsig(s.locals[i]) for i in focus),
                       s.statics.get("NaheA732Kj"))
 
@@ -604,11 +654,13 @@ jobs:
                           rp=None
                           r=s.locals[114]
                           if isinstance(r,Reader):rp=r.s.pos
-                          s.milestones.append({
+                          event={
                               "kind":"LOCAL12_SET","length":len(v),
                               "reader_position_after":rp,
                               "mod16":len(v)%16,"step":s.steps
-                          })
+                          }
+                          s.milestones.append(event)
+                          GLOBAL_EVENTS.append(event)
                       if ln==29 and isinstance(v,(bytes,bytearray)):
                           s.milestones.append({
                               "kind":"LOCAL29_PLAINTEXT","length":len(v),
@@ -669,17 +721,118 @@ jobs:
                       v=pop(s)
                       ts=re.findall(r'IL_[0-9A-Fa-f]+',arg)
                       if isinstance(v,int) and 0<=v<len(ts):
-                          # The R112 search was dominated by a repeated state cycle
-                          # after key/IV aliases.  Three visits are enough for the
-                          # legitimate setup loops seen before the crypto gate.
-                          seen_count=sum(1 for x in s.trace if x["state"]==v)
-                          if seen_count >= 3:
+                          if v in (626,631,313,458,96,206,94,289,292,402,40,281):
+                              evt={
+                                  "state":v,
+                                  "target":ts[v],
+                                  "step":s.steps,
+                                  "local38":s.locals[38] if isinstance(s.locals[38],int) else None,
+                                  "local98":s.locals[98] if isinstance(s.locals[98],int) else None,
+                                  "key_local17_hex":(
+                                      bytes(s.locals[17]).hex().upper()
+                                      if isinstance(s.locals[17],bytearray) else None
+                                  ),
+                                  "key_local47_hex":(
+                                      bytes(s.locals[47]).hex().upper()
+                                      if isinstance(s.locals[47],(bytes,bytearray)) else None
+                                  ),
+                                  "iv_local100_hex":(
+                                      bytes(s.locals[100]).hex().upper()
+                                      if isinstance(s.locals[100],bytearray) else None
+                                  ),
+                                  "iv_local8_hex":(
+                                      bytes(s.locals[8]).hex().upper()
+                                      if isinstance(s.locals[8],(bytes,bytearray)) else None
+                                  ),
+                              }
+                              if v==96 and isinstance(s.locals[37],bytearray):
+                                  stage=bytes(s.locals[37])
+                                  (OUT/"decrypted/stage1_local37.bin").write_bytes(stage)
+                                  evt.update({
+                                      "stage1_len":len(stage),
+                                      "stage1_sha256":hashlib.sha256(stage).hexdigest(),
+                                      "stage1_head64":stage[:64].hex().upper(),
+                                  })
+                              GLOBAL_REACH.append(evt)
+
+                          # R113 proved 404<->625 is a legitimate 16-byte XOR loop.
+                          # The later 313 loop runs once per 4-byte word over ~608 KB.
+                          # Accelerate only the common non-final iterations using the
+                          # exact arithmetic visible in states
+                          # 313,2,117,141,502,215,299,342,664,46,33,321,95,199,617,451,458.
+                          # The final iteration stays in original IL for remainder/tail handling.
+                          if (
+                              v==313
+                              and isinstance(s.locals[38],int) and s.locals[38]==0
+                              and isinstance(s.locals[98],int) and s.locals[98]>1000
+                              and isinstance(s.locals[27],(bytes,bytearray))
+                              and isinstance(s.locals[47],(bytes,bytearray))
+                              and isinstance(s.locals[37],bytearray)
+                          ):
+                              MASK=0xffffffff
+                              def U32(x): return x & MASK
+
+                              # Exact constants and operations from state 46 / IL_5be0.
+                              D=1474240118
+                              B=725701736
+                              C=7651480
+                              L75=U32(D-B)
+                              L64=U32(658242601 ^ 1092075823 ^ 1441417454)
+                              L11=U32(B-L75)
+                              L74=U32((C<<11) | (C>>21))
+                              PRE=U32(U32(U32(L64<<16)+L11) ^ L11)
+
+                              def STEP(x):
+                                  y=U32(x+L75)
+                                  y=U32(y ^ U32(y<<6))
+                                  y=U32(y+L11)
+                                  y=U32(y ^ (y>>11))
+                                  y=U32(y+L74)
+                                  y=U32(y ^ U32(y<<1))
+                                  y=U32(y+y)
+                                  z=U32(PRE-y)
+                                  return U32(x+z)
+
+                              keybytes=bytes(s.locals[47])
+                              source=bytes(s.locals[27])
+                              dest=s.locals[37]
+
+                              if len(keybytes)%4:
+                                  raise RuntimeError("key length is not word aligned")
+
+                              key_words=[
+                                  struct.unpack_from("<I",keybytes,k)[0]
+                                  for k in range(0,len(keybytes),4)
+                              ]
+
+                              acc=U32(s.locals[105]) if isinstance(s.locals[105],int) else 0
+
+                              # local98 is ceil(len/4); therefore local98-1 are complete
+                              # 4-byte words and the final iteration handles the tail.
+                              complete_words=s.locals[98]-1
+                              for ii in range(complete_words):
+                                  kw=key_words[ii % len(key_words)]
+                                  acc=U32(acc+kw)       # state 299
+                                  acc=STEP(acc)         # state 46
+                                  dw=struct.unpack_from("<I",source,ii*4)[0]
+                                  struct.pack_into("<I",dest,ii*4,U32(acc^dw))
+
+                              s.locals[105]=acc
+                              s.locals[38]=complete_words
                               s.milestones.append({
-                                  "kind":"STATE_CYCLE_PRUNED",
-                                  "state":v,"step":s.steps
+                                  "kind":"FAST_WORD_LOOP",
+                                  "iterations":complete_words,
+                                  "source_len":len(source),
+                                  "key_hex":keybytes.hex().upper(),
+                                  "iv_hex":(
+                                      bytes(s.locals[8]).hex().upper()
+                                      if isinstance(s.locals[8],(bytes,bytearray))
+                                      else None
+                                  ),
+                                  "accumulator":acc,
+                                  "step":s.steps
                               })
-                              finished.append(s)
-                              break
+
                           s.trace.append({"state":v,"target":ts[v],"step":s.steps})
                           if v in (626,631,289,292,402,40,281):
                               s.milestones.append({
@@ -744,7 +897,13 @@ jobs:
                       if "Y7Uor8e58M9K22QZF7H::.ctor" in arg:
                           push(s,Reader(args[-1]) if args and isinstance(args[-1],Stream) else U("Reader"))
                       elif "MemoryStream::.ctor" in arg:
-                          push(s,Mem())
+                          if args and isinstance(args[-1],(bytes,bytearray)):
+                              # Exact IL at IL_51f2: new MemoryStream(local29),
+                              # then wrap it in Y7U... BinaryReader.
+                              push(s,Stream(bytes(args[-1])))
+                          else:
+                              # Parameterless MemoryStream used as CryptoStream output.
+                              push(s,Mem())
                       elif "CryptoStream::.ctor" in arg:
                           # ctor args: stream, transform, mode
                           mem=args[-3] if len(args)>=3 else U()
@@ -843,18 +1002,28 @@ jobs:
               "reached_aes_decrypt":any(any(m["kind"]=="AES_DECRYPT" for m in s.milestones) for s in allstates),
               "reached_plaintext":any(any(m["kind"]=="LOCAL29_PLAINTEXT" for m in s.milestones) for s in allstates),
               "static_intptr_size":4,
-              "initial_NaheA732Kj_assumption":False
+              "initial_NaheA732Kj_assumption":False,
+              "global_reach":GLOBAL_REACH[-5000:],
+              "global_events":GLOBAL_EVENTS[-5000:],
+              "global_reached_create_decryptor":any(
+                  x.get("kind")=="CreateDecryptor" for x in GLOBAL_EVENTS
+              ),
+              "global_reached_state289":any(x.get("state")==289 for x in GLOBAL_REACH),
+              "global_reached_state292":any(x.get("state")==292 for x in GLOBAL_REACH),
+              "global_reached_state402":any(x.get("state")==402 for x in GLOBAL_REACH),
+              "global_reached_state281":any(x.get("state")==281 for x in GLOBAL_REACH),
           }
 
           (OUT/"evidence/30_VM_SUMMARY.json").write_text(json.dumps(summary,indent=2)+"\n")
           (OUT/"evidence/31_VM_INTERESTING_PATHS.json").write_text(
               json.dumps(report,indent=2,ensure_ascii=False)+"\n")
           print(json.dumps(summary,indent=2))
+
           PY
 
           echo "EXACT_WRAPPERS: zfos=true omT=null"
           set +e
-          timeout 300s python3 "$OUT/n9_emulator.py" \
+          timeout 480s python3 "$OUT/n9_emulator.py" \
             > "$OUT/evidence/32_VM_STDOUT.txt" \
             2> "$OUT/evidence/33_VM_STDERR.txt"
           RC=$?
@@ -948,8 +1117,12 @@ jobs:
           except:
             paths=[]
 
-          states=(626,631,289,292,402,40,281)
+          states=(626,631,313,458,96,206,94,289,292,402,40,281)
           hit={str(st):False for st in states}
+          for e in summary.get("global_reach",[]):
+            st=e.get("state")
+            if str(st) in hit:
+              hit[str(st)]=True
           candidates=[]
 
           for p in paths:
@@ -984,15 +1157,105 @@ jobs:
             "critical_state_hits":hit,
             "candidate_key_iv_pairs":uniq[:20],
             "create_decryptor_reached":(
-              summary.get("reached_create_decryptor",False) or hit["402"]
+              summary.get("global_reached_create_decryptor",False)
+              or summary.get("reached_create_decryptor",False)
+              or hit["402"]
             ),
             "crypto_stream_reached":hit["281"],
-            "aes_decrypt_reached":summary.get("reached_aes_decrypt",False),
+            "aes_decrypt_reached":(
+              summary.get("reached_aes_decrypt",False)
+              or any(
+                x.get("kind")=="AES_DECRYPT"
+                for x in summary.get("global_events",[])
+              )
+            ),
           }
 
           (ev/"45_EXACT_CRYPTO_GATE_REPORT.json").write_text(
             json.dumps(result,indent=2,ensure_ascii=False)+"\n")
           print(json.dumps(result,indent=2,ensure_ascii=False))
+          PY
+
+      - name: Analyze recovered stage1 store and parser entry
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import os,json,struct,hashlib,math,collections,re
+
+          out=Path(os.environ["OUT"])
+          ev=out/"evidence"
+          stage=out/"decrypted/stage1_local37.bin"
+
+          result={
+            "stage1_recovered":stage.exists(),
+            "memory_stream_byte_array_model":"MemoryStream(local29) -> BinaryReader",
+            "update_token":"0x0600082C",
+            "update_rid":2092,
+          }
+
+          if stage.exists():
+            data=stage.read_bytes()
+            ctr=collections.Counter(data)
+            n=len(data)
+            entropy=(
+              -sum((v/n)*math.log2(v/n) for v in ctr.values())
+              if n else 0.0
+            )
+
+            int4=[]
+            for off in range(0,max(0,len(data)-3),4):
+              if struct.unpack_from("<i",data,off)[0]==4:
+                int4.append(off)
+                if len(int4)>=500:
+                  break
+
+            result.update({
+              "length":len(data),
+              "sha256":hashlib.sha256(data).hexdigest(),
+              "head64":data[:64].hex().upper(),
+              "first_int32_le":(
+                struct.unpack_from("<i",data,0)[0] if len(data)>=4 else None
+              ),
+              "entropy":entropy,
+              "aligned_int32_value4_offsets":int4,
+              "token_0600082c_offsets":[
+                m.start() for m in re.finditer(
+                  re.escape(bytes.fromhex("2C080006")),data
+                )
+              ][:100],
+              "rid_2092_le_offsets":[
+                m.start() for m in re.finditer(
+                  re.escape(struct.pack("<I",2092)),data
+                )
+              ][:100],
+            })
+
+          try:
+            vm=json.loads((ev/"30_VM_SUMMARY.json").read_text())
+          except Exception:
+            vm={}
+
+          result["critical_state_hits"]=sorted(set(
+            x.get("state")
+            for x in vm.get("global_reach",[])
+            if x.get("state") is not None
+          ))
+          result["reader_events"]=[
+            x for x in vm.get("global_events",[])
+            if x.get("kind") in ("ReadInt32","ReadBytes")
+          ][-500:]
+
+          (ev/"46_STAGE1_STORE_ANALYSIS.json").write_text(
+            json.dumps(result,indent=2,ensure_ascii=False)+"\n")
+          print(json.dumps({
+            "stage1_recovered":result.get("stage1_recovered"),
+            "length":result.get("length"),
+            "first_int32_le":result.get("first_int32_le"),
+            "critical_state_hits":result.get("critical_state_hits"),
+            "read_event_count":len(result.get("reader_events",[])),
+          },indent=2))
           PY
 
       - name: Validate any recovered plaintext and search method-store mappings
@@ -1076,14 +1339,14 @@ jobs:
               "firmware_readback_primitive_proven":False,
               "full_flash_readback_proven":False,
               "live_board_commands_allowed":False,
-              "next_gate":"If the VM reaches CreateDecryptor, independently verify the exact reader offset and key/IV before accepting decrypted bytes. If it stops earlier, use the packaged exact trace and static write sites to extend only the missing wrapper/native semantics."
+              "next_gate":"Use the exact stage1 buffer plus BinaryReader event positions to identify the second-stage parser path. Promote AES only if state292 reads value 4 and state402 is reached with the same key/IV path."
           }
 
-          (review/"60_R113_VERDICT.json").write_text(
+          (review/"60_R114_VERDICT.json").write_text(
               json.dumps(verdict,indent=2,ensure_ascii=False)+"\n")
 
           lines=[
-              "OKN R113 EXACT N9 IL EMULATOR",
+              "OKN R114 EXACT N9 IL EMULATOR",
               "OFFLINE_ONLY=true",
               f"EXACT_SWITCH_MAPPING_CORRECTED={str(verdict['exact_switch_mapping_corrected']).lower()}",
               f"SWITCH_TARGET_COUNT={verdict['switch_target_count']}",
@@ -1100,7 +1363,7 @@ jobs:
               "FULL_FLASH_READBACK_PROVEN=false",
               "LIVE_BOARD_COMMANDS_ALLOWED=false"
           ]
-          (review/"61_R113_SUMMARY.txt").write_text("\n".join(lines)+"\n")
+          (review/"61_R114_SUMMARY.txt").write_text("\n".join(lines)+"\n")
 
           for p in ev.iterdir():
               if p.is_file():shutil.copy2(p,review/p.name)
@@ -1132,17 +1395,17 @@ jobs:
         shell: bash
         run: |
           {
-            echo "## OKN R113 MEGA Exact N9 IL Emulator"
+            echo "## OKN R114 MEGA Exact N9 IL Emulator"
             echo
             echo "- Static/offline only; official EXE is never executed."
             echo "- Uses deterministic N9 method slicing; avoids the catastrophic R110 regex."
             echo "- Models the real h15 resource and BinaryReader position."
-            echo "- Uses wrapper bodies proven from official IL and prunes the post-alias state cycle."
+            echo "- Preserves the real 16-byte XOR loop, accelerates the 151k-word transform from exact IL, and models MemoryStream(byte[]) correctly."
             echo "- No DSP/USB activity."
             echo
-            if [ -f "$OUT/review/61_R113_SUMMARY.txt" ]; then
+            if [ -f "$OUT/review/61_R114_SUMMARY.txt" ]; then
               echo '```text'
-              cat "$OUT/review/61_R113_SUMMARY.txt"
+              cat "$OUT/review/61_R114_SUMMARY.txt"
               echo '```'
             fi
           } >> "$GITHUB_STEP_SUMMARY"
@@ -1151,9 +1414,9 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: R113-GOAL-DIRECTED-N9-CRYPTO-EVIDENCE
+          name: R114-FAST-STAGE1-N9-PARSER-EVIDENCE
           path: |
-            /tmp/r113/review
-            /tmp/r113/evidence
+            /tmp/r114/review
+            /tmp/r114/evidence
           if-no-files-found: warn
           retention-days: 30
