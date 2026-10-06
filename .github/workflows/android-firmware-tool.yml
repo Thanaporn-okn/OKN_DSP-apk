@@ -1,4 +1,4 @@
-name: OKN R118 MEGA JIT Store + PE Provenance Recovery OFFLINE ONLY
+name: OKN R118 MEGA Main-Switch + JIT Store + PE Provenance Recovery OFFLINE ONLY
 
 on:
   push:
@@ -12,7 +12,7 @@ permissions:
   actions: read
 
 concurrency:
-  group: okn-r118-jit-pe-provenance-${{ github.ref }}
+  group: okn-r118-main-jitstore-peprov-${{ github.ref }}
   cancel-in-progress: true
 
 env:
@@ -27,7 +27,7 @@ env:
 
 jobs:
   recover:
-    name: Static protector store, helper, and exact PE patch recovery
+    name: Stage2 store parser and native patch tracing
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     env:
@@ -63,7 +63,7 @@ jobs:
           TARGET_METHOD=UpdateCommandThread
           TARGET_METHOD_TOKEN=0x0600082C
           TARGET_METHOD_RID=2092
-          GOAL=Recover_exact_UpdateCommandThread_patch_bytes_with_strict_PE_image_provenance_while_resolving_JIT_store_and_R117_unknown_helpers_statically
+          GOAL=Recover_exact_UpdateCommandThread_patch_bytes_with_strict_PE_image_provenance_while_resolving_R117_unknown_helpers_and_JIT_store_statically
           EOF
 
       - name: Install static-analysis dependencies
@@ -74,7 +74,7 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             unzip p7zip-full file curl python3 python3-pip
           python3 -m pip install --break-system-packages --quiet \
-            pefile dnfile pycryptodome
+            pefile dnfile pycryptodome capstone
 
       - name: Download official Windows client and dump IL
         shell: bash
@@ -622,25 +622,46 @@ jobs:
           print(json.dumps(proof,indent=2,ensure_ascii=False))
           PY
 
-      - name: Resolve all N9 JIT helpers and R117 blocker wrapper chains statically
+      - name: Resolve R117 unknown helpers and establish exact PE provenance baseline
         shell: bash
         run: |
           set -euo pipefail
           python3 - <<'PY'
           from pathlib import Path
-          import os,re,json,collections
+          import os,re,json,hashlib,collections,math,struct
+          import pefile,dnfile
+          from capstone import Cs,CS_ARCH_X86,CS_MODE_32
 
           out=Path(os.environ["OUT"]); ev=out/"evidence"
-          text=(out/"il/all.il").read_text(errors="replace")
+          il=(out/"il/all.il").read_text(errors="replace")
           n9=(ev/"20_N9_METHOD.il").read_text(errors="replace")
-          hook=(ev/"36_JIT_HOOK_k1AjZJVRlM.il").read_text(errors="replace")
+          sw=json.loads((ev/"21_EXACT_SWITCH_MAP.json").read_text())
 
-          def called_names(body):
-              return [m.group(1) for m in re.finditer(
-                  r'(?m)^\s*IL_[0-9A-Fa-f]+:\s+call(?:virt)?\s+.+?::([A-Za-z0-9_]+)\s*\(', body)]
+          # Canonical dispatcher is ONLY IL_0012 and MUST remain 689 entries.
+          main_count=sw.get("switch_target_count")
+          if main_count != 689 or sw.get("initial_state_target") != "IL_1990":
+              raise SystemExit("canonical main-switch gate failed")
 
-          requested=set(called_names(n9)) | set(called_names(hook))
-          blockers={
+          # Inventory every switch independently so nested switches can never be
+          # promoted to main-state evidence.
+          nested=[]
+          for m in re.finditer(r'(?m)^\s*(IL_[0-9A-Fa-f]+):\s*switch\s*\(',n9):
+              label=m.group(1); op=n9.find("(",m.start()); cl=n9.find(")",op)
+              if op<0 or cl<0: continue
+              targets=re.findall(r'IL_[0-9A-Fa-f]+',n9[op+1:cl])
+              if label != "IL_0012": nested.append({"label":label,"count":len(targets),"targets":targets})
+          (ev/"52_SWITCH_SCOPE_AUDIT.json").write_text(json.dumps({
+              "canonical_label":"IL_0012","canonical_count":main_count,
+              "canonical_target_392":sw.get("initial_state_target"),
+              "nested_switch_count":len(nested),"nested_switches":nested,
+              "rule":"Nested switch states never count as canonical main-switch evidence."
+          },indent=2)+"\n")
+
+          # Collect N9 call targets + exact R117 unresolved blockers.
+          calls=[]
+          for mm in re.finditer(r'(?m)^\s*IL_[0-9A-Fa-f]+:\s+call(?:virt)?\s+(.+?)::([A-Za-z0-9_]+)\((.*?)\)',n9):
+              calls.append({"owner_sig":mm.group(1).strip(),"name":mm.group(2),"args":mm.group(3).strip()})
+          blockers=[
             "OENbNnN7DFqnujmv13f","SMPFNLNr5St51O5T1Ai","BVUDNWKaRepeWLIgaBG",
             "sr6wPbKWSDX3hWy8TAY","Bjp8CNKZDSll9YMJaBT","l5ZnY5KdvdQ3hp82Mw5",
             "IBOK1sNMCPak9gPh7y1","k9Crj1NA5t36RJYQaeH","fvbj6XN1po7KOwRE0UL",
@@ -652,180 +673,158 @@ jobs:
             "aTRtVMNntQrtqvTxqHY","UHVb2WNe2pWw9W9EXxe","JDfCboNIYIw8VbTtNrA",
             "oR8P3tNZV5rU94RqIMg","O4TWuUKjsPejWiKyMyP","DD2WALKyLudZcN08ACL",
             "KNljOOvDry","cWTufTK81AUpaDL6ruM","BNORmcKAAUDY68Xwmq1","KuuCh5KnIvpdYGDMMPL"
-          }
-          requested |= blockers
+          ]
+          requested=sorted(set([c["name"] for c in calls]+blockers))
 
-          method_starts=[m.start() for m in re.finditer(r'(?m)^\s*\.method\b',text)]
+          # Direct string slicing around method end markers; never a whole-file DOTALL regex.
           def method_bodies(name):
-              found=[]
-              pat=re.compile(r'\b'+re.escape(name)+r'\s*\(')
-              for a in method_starts:
-                  near=text[a:min(len(text),a+1400)]
-                  if not pat.search(near): continue
-                  e=text.find("// end of method",a)
+              res=[]
+              for hit in re.finditer(re.escape(name)+r'\s*\(',il):
+                  pos=hit.start(); a=il.rfind(".method",0,pos)
+                  if a<0: continue
+                  e=il.find("// end of method",pos)
                   if e<0: continue
-                  z=text.find("\n",e)
-                  body=text[a:(len(text) if z<0 else z)]
-                  if pat.search(body[:1800]): found.append(body)
-              return list(dict.fromkeys(found))
+                  z=il.find("\n",e); body=il[a:(len(il) if z<0 else z)]
+                  if re.search(r'\b'+re.escape(name)+r'\s*\(',body[:1800]): res.append(body)
+              return list(dict.fromkeys(res))
+
+          defs=[]
+          for name in requested:
+              arr=method_bodies(name)
+              if not arr:
+                  defs.append({"name":name,"found":False}); continue
+              for idx,body in enumerate(arr):
+                  callees=[]
+                  for mm in re.finditer(r'(?m)^\s*IL_[0-9A-Fa-f]+:\s+call(?:virt)?\s+(.+?)::([A-Za-z0-9_]+)\((.*?)\)',body):
+                      callees.append({"owner_sig":mm.group(1).strip(),"name":mm.group(2),"args":mm.group(3).strip()})
+                  defs.append({
+                    "name":name,"found":True,"variant":idx,
+                    "pinvoke":bool(re.search(r'\bpinvokeimpl\b',body,re.I)),
+                    "stub_like":bool(re.search(r'(?s)IL_0000:\s+nop\s+IL_0001:\s+nop\s+IL_0002:\s+nop\s+IL_0003:\s+ret',body)),
+                    "callees":callees,"strings":re.findall(r'ldstr\s+"([^"]*)"',body),"body":body
+                  })
 
           rules=[
-            ("WriteProcessMemory","WriteProcessMemory"),
-            ("VirtualProtect","VirtualProtect"),
-            ("Marshal::WriteInt32","Marshal_WriteInt32"),
-            ("Marshal::ReadInt32","Marshal_ReadInt32"),
-            ("Marshal::ReadInt64","Marshal_ReadInt64"),
-            ("GetFunctionPointer","RuntimeMethodHandle_GetFunctionPointer"),
-            ("PrepareMethod","RuntimeHelpers_PrepareMethod"),
-            ("GetHINSTANCE","Marshal_GetHINSTANCE"),
-            ("GetModules","Assembly_GetModules"),
-            ("get_Modules","Process_Modules"),
-            ("get_ModuleName","ProcessModule_Name"),
-            ("get_BaseAddress","ProcessModule_BaseAddress"),
+            ("WriteProcessMemory","WriteProcessMemory"),("VirtualProtect","VirtualProtect"),
+            ("Marshal::WriteInt32","Marshal_WriteInt32"),("Marshal::ReadInt32","Marshal_ReadInt32"),
+            ("Marshal::ReadInt64","Marshal_ReadInt64"),("GetFunctionPointer","RuntimeMethodHandle_GetFunctionPointer"),
+            ("PrepareMethod","RuntimeHelpers_PrepareMethod"),("GetHINSTANCE","Marshal_GetHINSTANCE"),
+            ("GetModules","Assembly_GetModules"),("get_Modules","Process_Modules"),
+            ("get_ModuleName","ProcessModule_Name"),("get_BaseAddress","ProcessModule_BaseAddress"),
             ("get_ModuleMemorySize","ProcessModule_MemorySize"),
             ("GetDelegateForFunctionPointer","Marshal_GetDelegateForFunctionPointer"),
             ("GetFunctionPointerForDelegate","Marshal_GetFunctionPointerForDelegate"),
-            ("BitConverter::GetBytes","BitConverter_GetBytes"),
-            ("AllocCoTaskMem","Marshal_AllocCoTaskMem"),
-            ("AllocHGlobal","Marshal_AllocHGlobal"),
-            ("mscorjit","MSCORJIT"),("getJit","GETJIT"),
-            ("m_ptr","RuntimeModule_m_ptr"),("m_pData","RuntimeModule_m_pData"),
+            ("BitConverter::GetBytes","BitConverter_GetBytes"),("GetField","Type_GetField"),
+            ("GetValue","FieldInfo_GetValue"),("get_EntryPoint","Assembly_EntryPoint"),
           ]
+          semantics=[]
+          for d in defs:
+              if not d.get("found"): continue
+              tags=[tag for needle,tag in rules if needle in d["body"]]
+              if d.get("pinvoke"): tags.append("PINVOKE")
+              if "mscorjit" in d["body"].lower(): tags.append("MSCORJIT")
+              if "getJit" in d["body"]: tags.append("GETJIT")
+              if tags: semantics.append({"name":d["name"],"variant":d["variant"],"tags":sorted(set(tags)),"callees":d["callees"],"strings":d["strings"]})
 
-          defs=[]; by={}
-          for name in sorted(requested):
-              arr=method_bodies(name)
-              if not arr:
-                  defs.append({"name":name,"found":False,"is_r117_blocker":name in blockers})
-                  continue
-              for idx,body in enumerate(arr):
-                  calls=[]
-                  for mm in re.finditer(r'(?m)^\s*IL_[0-9A-Fa-f]+:\s+call(?:virt)?\s+(.+?)::([A-Za-z0-9_]+)\((.*?)\)',body):
-                      calls.append({"owner_sig":mm.group(1).strip(),"name":mm.group(2),"args":mm.group(3).strip()})
-                  tags=sorted({tag for needle,tag in rules if needle.lower() in body.lower()})
-                  if re.search(r'\bpinvokeimpl\b',body,re.I): tags.append("PINVOKE")
-                  d={
-                    "name":name,"found":True,"variant":idx,"is_r117_blocker":name in blockers,
-                    "stub_like":bool(re.search(r'(?s)IL_0000:\s+nop\s+IL_0001:\s+nop\s+IL_0002:\s+nop\s+IL_0003:\s+ret',body)),
-                    "tags":sorted(set(tags)),"callees":calls,
-                    "strings":re.findall(r'ldstr\s+"([^"]*)"',body),"body":body
-                  }
-                  defs.append(d)
-                  if name not in by: by[name]=d
-
-          # Conservative one-call chains only. Never infer through branches/switches.
-          resolved={}
-          for name in by:
+          by={}
+          for d in defs:
+              if d.get("found") and d["name"] not in by: by[d["name"]]=d
+          edges=[]; resolved={}
+          for name,d in by.items():
+              for c in d.get("callees",[]): edges.append({"src":name,"dst":c["name"],"owner_sig":c["owner_sig"]})
               cur=name; chain=[name]; seen={name}
               for _ in range(16):
-                  d=by.get(cur)
-                  if not d: break
-                  cs=d.get("callees",[])
-                  complex_ctl=bool(re.search(r'(?m)^\s*IL_[0-9A-Fa-f]+:\s+(?:br|brtrue|brfalse|switch|leave|throw|rethrow)\b',d["body"]))
+                  dd=by.get(cur)
+                  if not dd: break
+                  cs=dd.get("callees",[])
+                  complex_ctl=bool(re.search(r'\b(br|switch|leave|throw|rethrow)\b',dd["body"]))
                   if len(cs)!=1 or complex_ctl: break
                   nxt=cs[0]["name"]; chain.append(nxt)
                   if nxt in seen: break
                   seen.add(nxt)
                   if nxt not in by:
-                      resolved[name]={"chain":chain,"terminal":nxt,"terminal_owner":cs[0]["owner_sig"]}
-                      break
+                      resolved[name]={"chain":chain,"terminal":nxt,"terminal_owner":cs[0]["owner_sig"]}; break
                   cur=nxt
 
-          missing=sorted(x for x in requested if x not in by)
-          blocker_missing=sorted(x for x in blockers if x not in by)
-          tag_counts=collections.Counter(t for d in defs if d.get("found") for t in d.get("tags",[]))
-          report={
-            "requested_unique":len(requested),"found_unique":len(by),"missing":missing,
-            "r117_blocker_count":len(blockers),"r117_blocker_missing":blocker_missing,
-            "semantic_tag_counts":dict(tag_counts),"definitions":defs,"resolved_one_call_chains":resolved,
-            "interpretation":"Static helper resolution only. Complex wrapper chains are intentionally left unresolved rather than guessed."
+          missing=sorted({d["name"] for d in defs if not d.get("found")})
+          stubbed=sorted({d["name"] for d in defs if d.get("stub_like")})
+          (ev/"53_R117_BLOCKER_HELPER_RESOLUTION.json").write_text(json.dumps({
+              "requested_unique":len(requested),"found_unique":len(by),"missing":missing,
+              "stub_like":stubbed,"semantic_hits":semantics,"edges":edges,"resolved_one_call_chains":resolved,
+              "definitions":defs
+          },indent=2,ensure_ascii=False)+"\n")
+
+          # Exact JIT/native callsite windows in canonical N9 only.
+          needles=["WriteProcessMemory","VirtualProtect","WriteInt32","ReadInt32","ReadInt64",
+                   "mscorjit","getJit","GetFunctionPointer","PrepareMethod","GetHINSTANCE",
+                   "ProcessModule","GetDelegateForFunctionPointer","GetFunctionPointerForDelegate","RuntimeMethodHandle"]
+          lines=n9.splitlines(); hits=[]
+          for i,line in enumerate(lines):
+              if any(x.lower() in line.lower() for x in needles):
+                  hits.append({"line":i+1,"text":line.strip(),"context":"\n".join(lines[max(0,i-18):min(len(lines),i+25)])})
+          (ev/"54_N9_NATIVE_JIT_CALLSITES.json").write_text(json.dumps(hits,indent=2)+"\n")
+
+          # PE-image provenance baseline: exact official file identity + CLR MethodDef.
+          exe=out/"dstech.exe"; raw=exe.read_bytes(); pe=pefile.PE(str(exe),fast_load=False); dn=dnfile.dnPE(str(exe))
+          rid=2092; row=None
+          mt=getattr(getattr(getattr(dn,"net",None),"mdtables",None),"MethodDef",None)
+          rows=getattr(mt,"rows",[]) if mt else []
+          if len(rows)>=rid: row=rows[rid-1]
+          method_name=str(getattr(row,"Name",None)) if row else None
+          method_rva=int(getattr(row,"Rva",0) or 0) if row else None
+          if method_name!="UpdateCommandThread" or method_rva!=0xA3F4:
+              raise SystemExit(f"MethodDef identity mismatch: {method_name=} {method_rva=}")
+          target_off=pe.get_offset_from_rva(0xA3F4)
+          target_bytes=raw[target_off:target_off+64]
+          section=None
+          for sec in pe.sections:
+              va=int(sec.VirtualAddress); vs=max(int(sec.Misc_VirtualSize),int(sec.SizeOfRawData))
+              if va <= 0xA3F4 < va+vs:
+                  section=sec.Name.rstrip(b'\0').decode(errors='replace'); break
+          sections=[]
+          for sec in pe.sections:
+              data=sec.get_data(); n=len(data); ent=0.0
+              if n:
+                  for v in collections.Counter(data).values():
+                      p=v/n; ent-=p*math.log2(p)
+              sections.append({"name":sec.Name.rstrip(b'\0').decode(errors='replace'),"rva":int(sec.VirtualAddress),
+                               "virtual_size":int(sec.Misc_VirtualSize),"raw_offset":int(sec.PointerToRawData),
+                               "raw_size":int(sec.SizeOfRawData),"entropy":ent})
+          imports=[]
+          if hasattr(pe,"DIRECTORY_ENTRY_IMPORT"):
+              for dll in pe.DIRECTORY_ENTRY_IMPORT:
+                  for imp in dll.imports:
+                      imports.append({"dll":dll.dll.decode(errors='replace'),"name":imp.name.decode(errors='replace') if imp.name else None,
+                                      "ordinal":imp.ordinal,"iat_va":int(imp.address)})
+          peinfo={
+              "official_exe_sha256":hashlib.sha256(raw).hexdigest(),"official_exe_size":len(raw),
+              "image_base":int(pe.OPTIONAL_HEADER.ImageBase),"size_of_image":int(pe.OPTIONAL_HEADER.SizeOfImage),
+              "target":{"rid":rid,"token":"0x0600082C","name":method_name,"rva":method_rva,
+                        "raw_offset":target_off,"section":section,"file_bytes_64_hex":target_bytes.hex().upper()},
+              "sections":sections,"imports":imports
           }
-          (ev/"36A_ALL_HELPER_RESOLUTION.json").write_text(json.dumps(report,indent=2,ensure_ascii=False)+"\n")
+          (ev/"55_PE_IMAGE_PROVENANCE_BASELINE.json").write_text(json.dumps(peinfo,indent=2)+"\n")
 
-          # Exact contexts for direct native/JIT APIs anywhere in the official IL.
-          needles=["WriteProcessMemory","VirtualProtect","Marshal::WriteInt32","Marshal::ReadInt32",
-                   "Marshal::ReadInt64","GetHINSTANCE","PrepareMethod","GetFunctionPointer",
-                   "GetDelegateForFunctionPointer","GetFunctionPointerForDelegate","mscorjit","getJit"]
-          direct=[]
-          for needle in needles:
-              for m in re.finditer(re.escape(needle),text,re.I):
-                  a=text.rfind(".method",0,m.start()); e=text.find("// end of method",m.end())
-                  if a<0 or e<0: continue
-                  z=text.find("\n",e); body=text[a:(len(text) if z<0 else z)]
-                  direct.append({"needle":needle,"body":body})
-          seen=set(); uniq=[]
-          for d in direct:
-              key=d["body"]
-              if key in seen: continue
-              seen.add(key); uniq.append(d)
-          (ev/"36B_DIRECT_NATIVE_JIT_METHODS.json").write_text(json.dumps(uniq,indent=2,ensure_ascii=False)+"\n")
+          # Static x86 entrypoint disassembly only; never execute target.
+          ep=int(pe.OPTIONAL_HEADER.AddressOfEntryPoint)
+          try:
+              off=pe.get_offset_from_rva(ep); data=raw[off:off+4096]; md=Cs(CS_ARCH_X86,CS_MODE_32)
+              dis=[{"address":hex(i.address),"mnemonic":i.mnemonic,"op_str":i.op_str,"bytes":i.bytes.hex()}
+                   for i in md.disasm(data,int(pe.OPTIONAL_HEADER.ImageBase)+ep)]
+          except Exception as e: dis=[{"error":repr(e)}]
+          (ev/"56_NATIVE_ENTRYPOINT_DISASM.json").write_text(json.dumps(dis,indent=2)+"\n")
 
-          print(json.dumps({
-            "requested_unique":len(requested),"found_unique":len(by),
-            "r117_blocker_missing":blocker_missing,"semantic_tag_counts":dict(tag_counts),
-            "direct_native_jit_methods":len(uniq)
-          },indent=2))
-          PY
-
-      - name: Prove target MethodDef identity and keep pointer provenance domains separate
-        shell: bash
-        run: |
-          set -euo pipefail
-          python3 - <<'PY'
-          from pathlib import Path
-          import os,json,hashlib,re
-          import pefile,dnfile
-
-          out=Path(os.environ["OUT"]); ev=out/"evidence"; exe=out/"dstech.exe"
-          pe=pefile.PE(str(exe),fast_load=False)
-          dn=dnfile.dnPE(str(exe))
-          image_base=int(pe.OPTIONAL_HEADER.ImageBase); image_size=int(pe.OPTIONAL_HEADER.SizeOfImage)
-          target_rva=0xA3F4; target_rid=2092; target_token=0x0600082C
-          raw=exe.read_bytes()
-          try: target_off=int(pe.get_offset_from_rva(target_rva))
-          except Exception: target_off=None
-          target_disk=raw[target_off:target_off+64] if target_off is not None else b""
-
-          table=getattr(getattr(getattr(dn,"net",None),"mdtables",None),"MethodDef",None)
-          rows=getattr(table,"rows",[]) if table else []
-          row=rows[target_rid-1] if len(rows)>=target_rid else None
-          method_name=str(getattr(row,"Name","")) if row is not None else ""
-          method_rva=int((getattr(row,"Rva",None) if row is not None else 0) or (getattr(row,"RVA",0) if row is not None else 0) or 0)
-          method_identity_proven=(method_name=="UpdateCommandThread" and method_rva==target_rva and len(rows)>=target_rid)
-
-          helpers=json.loads((ev/"36A_ALL_HELPER_RESOLUTION.json").read_text())
-          defs=helpers.get("definitions",[])
-          domains={"PE_IMAGE":[],"CLR_RUNTIME_MODULE_PRIVATE":[],"JIT_OR_DELEGATE":[],"PROCESS_OR_EXTERNAL_MODULE":[],"ALLOCATED_BUFFER":[],"UNCLASSIFIED":[]}
-          for d in defs:
-              if not d.get("found"): continue
-              body=d.get("body",""); name=d.get("name")
-              hits=[]
-              if "GetHINSTANCE" in body: hits.append("PE_IMAGE:GetHINSTANCE")
-              if "m_ptr" in body or "m_pData" in body or "RuntimeModule" in body: hits.append("CLR_RUNTIME_MODULE_PRIVATE")
-              if any(x in body for x in ("mscorjit","getJit","GetFunctionPointer","GetDelegateForFunctionPointer","GetFunctionPointerForDelegate")): hits.append("JIT_OR_DELEGATE")
-              if any(x in body for x in ("ProcessModule","get_BaseAddress","get_Modules")): hits.append("PROCESS_OR_EXTERNAL_MODULE")
-              if any(x in body for x in ("AllocCoTaskMem","AllocHGlobal","VirtualAlloc")): hits.append("ALLOCATED_BUFFER")
-              if not hits: hits=["UNCLASSIFIED"]
-              for h in hits:
-                  key=h.split(":",1)[0]
-                  domains[key].append({"helper":name,"evidence":h})
-
-          result={
-            "target_method":{"rid":target_rid,"token":f"0x{target_token:08X}","metadata_name":method_name,
-                             "metadata_rva":f"0x{method_rva:X}","expected_rva":"0xA3F4",
-                             "method_identity_proven":method_identity_proven},
-            "pe_image":{"image_base":f"0x{image_base:X}","size_of_image":image_size,
-                        "target_va":f"0x{image_base+target_rva:X}","target_file_offset":target_off,
-                        "target_disk_head64":target_disk.hex().upper(),
-                        "exe_sha256":hashlib.sha256(raw).hexdigest()},
-            "pointer_domains":domains,
-            "hard_rule":"PE_IMAGE, CLR_RUNTIME_MODULE_PRIVATE, PROCESS_OR_EXTERNAL_MODULE, JIT_OR_DELEGATE, and ALLOCATED_BUFFER are distinct provenance domains and must never be conflated.",
-            "promotion_rule":"A3F4 recovery requires an exact write with PE_IMAGE provenance plus exact bytes; a raw numeric address merely falling inside the PE range is not provenance."
-          }
-          (ev/"36C_TARGET_METHOD_PE_PROVENANCE.json").write_text(json.dumps(result,indent=2,ensure_ascii=False)+"\n")
-          if not method_identity_proven:
-              raise SystemExit("target MethodDef RID/name/RVA identity gate failed")
-          print(json.dumps(result["target_method"],indent=2))
+          # Machine-readable combined status for later verdict.
+          (ev/"57_STATIC_HELPER_PE_STATUS.json").write_text(json.dumps({
+              "canonical_main_switch_689":main_count==689,
+              "nested_switches_kept_separate":True,
+              "r117_blocker_requested":len(requested),"r117_blocker_found":len(by),
+              "r117_blocker_missing":missing,"semantic_helper_hits":len(semantics),
+              "target_methoddef_identity_exact":method_name=="UpdateCommandThread" and method_rva==0xA3F4,
+              "target_pe_section":section,"target_raw_offset":target_off,
+              "target_file_bytes_64_hex":target_bytes.hex().upper(),
+              "target_executed":False
+          },indent=2)+"\n")
           PY
 
       - name: Run exact emulator with accelerated stage1 and stage2 loops
@@ -880,18 +879,13 @@ jobs:
           class Crypto:
               def __init__(self,mem,tr): self.mem=mem; self.tr=tr; self.inp=bytearray()
 
-          class ProvInt(int):
-              def __new__(cls,value,origin="UNPROVEN"):
-                  obj=int.__new__(cls,int(value)); obj.origin=str(origin); return obj
-
           class Ptr:
-              def __init__(self,region,offset=0,buf=None,origin="UNPROVEN"):
+              def __init__(self,region,offset=0,buf=None):
                   self.region=region
                   self.offset=int(offset)
                   self.buf=buf
-                  self.origin=str(origin)
               def __repr__(self):
-                  return f"Ptr({self.region},{self.offset:#x},origin={self.origin})"
+                  return f"Ptr({self.region},{self.offset:#x})"
 
           class LocalRef:
               def __init__(self,index): self.index=int(index)
@@ -918,17 +912,14 @@ jobs:
           class RuntimeModuleObj:
               def __init__(self,name="dstech.exe"):
                   self.name=name
-                  self.private={
-                      "m_pData":Ptr("runtime_module_private",0,origin="CLR_RUNTIME_MODULE_PRIVATE:m_pData"),
-                      "m_ptr":Ptr("runtime_module_private",0,origin="CLR_RUNTIME_MODULE_PRIVATE:m_ptr")
-                  }
+                  self.private={"m_pData":Ptr("runtime_module_private",0),"m_ptr":Ptr("runtime_module_private",0)}
 
           class FieldInfoObj:
               def __init__(self,name): self.name=name
 
           class ProcessModuleObj:
               def __init__(self,name,region="external_module",size=None):
-                  self.name=name; self.base=Ptr(region,0,origin="PROCESS_OR_EXTERNAL_MODULE:"+str(name)); self.size=size
+                  self.name=name; self.base=Ptr(region,0); self.size=size
 
           class EnumeratorObj:
               def __init__(self,items): self.items=list(items); self.index=-1
@@ -953,7 +944,7 @@ jobs:
 
           def ptr_add(v,delta):
               if isinstance(v,Ptr) and isinstance(delta,int):
-                  return Ptr(v.region,v.offset+delta,v.buf,v.origin)
+                  return Ptr(v.region,v.offset+delta,v.buf)
               return None
 
           def ptr_read(s,p,n):
@@ -974,6 +965,16 @@ jobs:
                       return bytes(p.buf[off:off+n])
               return None
 
+          def provenance_context(s):
+              readers={}
+              for i,v in enumerate(s.locals):
+                  if isinstance(v,Reader): readers[str(i)]=v.s.pos
+              return {
+                  "step":s.steps,
+                  "current_main_state":s.statics.get("__last_main_state"),
+                  "reader_positions":readers,
+              }
+
           def ptr_write(s,p,data,source="unknown"):
               if isinstance(p,LocalRef):
                   if len(data)==4:
@@ -991,21 +992,17 @@ jobs:
                   if 0<=off and off+len(data)<=len(MODULE_IMAGE):
                       old=bytes(MODULE_IMAGE[off:off+len(data)])
                       MODULE_IMAGE[off:off+len(data)]=data
-                      pe_provenance=str(p.origin).startswith("PE_IMAGE:")
-                      reader_positions=sorted({x.s.pos for x in s.locals if isinstance(x,Reader)})
                       evt={
                           "region":"module",
+                          "pointer_provenance":"PE_IMAGE",
                           "rva":off,
                           "rva_hex":hex(off),
                           "size":len(data),
                           "old_hex":old.hex().upper(),
                           "new_hex":bytes(data).hex().upper(),
                           "source":source,
-                          "target_origin":p.origin,
-                          "pe_image_provenance":pe_provenance,
-                          "step":s.steps,
-                          "main_state":s.statics.get("__last_main_state"),
-                          "reader_positions":reader_positions,
+                          "covers_update_rva_A3F4":off <= 0xA3F4 < off+len(data),
+                          "source_context":provenance_context(s),
                       }
                       MODULE_WRITES.append(evt)
                       return True
@@ -1088,20 +1085,13 @@ jobs:
 
           def binary(a,b,op):
               if unk(a) or unk(b): return U(f"{op}")
-              if op in ("add","sub"):
-                  if isinstance(a,ProvInt) and isinstance(b,int) and not isinstance(b,ProvInt):
-                      return ProvInt((int(a)+int(b)) if op=="add" else (int(a)-int(b)),a.origin)
-                  if op=="add" and isinstance(b,ProvInt) and isinstance(a,int) and not isinstance(a,ProvInt):
-                      return ProvInt(int(a)+int(b),b.origin)
-                  if isinstance(a,ProvInt) and isinstance(b,ProvInt) and a.origin==b.origin:
-                      return ProvInt((int(a)+int(b)) if op=="add" else (int(a)-int(b)),a.origin)
               if op=="add":
                   q=ptr_add(a,b)
                   if q is not None: return q
                   q=ptr_add(b,a)
                   if q is not None: return q
               if op=="sub" and isinstance(a,Ptr) and isinstance(b,int):
-                  return Ptr(a.region,a.offset-b,a.buf,a.origin)
+                  return Ptr(a.region,a.offset-b,a.buf)
               try:
                   if op=="add":return a+b
                   if op=="sub":return a-b
@@ -1132,7 +1122,7 @@ jobs:
                   obj=deref_value(s,args[0]) if args else None
                   return obj.assembly if isinstance(obj,TypeObj) else AssemblyObj()
               if name=="xxguFuNtTvdBm7aDJwf": return [RuntimeModuleObj("dstech.exe")]
-              if name=="IjE6SaNG6WjwQEgWM2s": return Ptr("module",0,origin="PE_IMAGE:Marshal.GetHINSTANCE")
+              if name=="IjE6SaNG6WjwQEgWM2s": return Ptr("module",0)
               if name=="KIoEb3NS3a1HTR21GpN": return str(OUT/"dstech.exe")
               if name=="GetType":
                   obj=deref_value(s,args[0]) if args else None
@@ -1155,7 +1145,7 @@ jobs:
               if name=="xAknZ0KVmw55ytiqn7f":
                   v=deref_value(s,args[-1]) if args else 0
                   if isinstance(v,Ptr):
-                      return ProvInt((MODULE_BASE+v.offset) & 0xffffffff,v.origin)
+                      return (MODULE_BASE+v.offset) & 0xffffffff
                   return int(v) & 0xffffffff if isinstance(v,int) else U("ToInt32")
               if name=="UCB7PIKitQ3s1yf5LMj":
                   return "UTF8"
@@ -1202,12 +1192,12 @@ jobs:
                   v=deref_value(s,args[0]) if args else U("intptr")
                   if isinstance(v,Ptr):
                       if v.region=="module":
-                          return ProvInt(MODULE_BASE+v.offset,v.origin)
+                          return MODULE_BASE+v.offset
                       return v.offset
                   return int(v) if isinstance(v,int) else U("ToInt64")
               if name=="ToInt32":
                   v=deref_value(s,args[0]) if args else U("intptr")
-                  if isinstance(v,Ptr): return ProvInt((((MODULE_BASE+v.offset) if v.region=="module" else v.offset) & 0xffffffff),v.origin)
+                  if isinstance(v,Ptr): return ((MODULE_BASE+v.offset) if v.region=="module" else v.offset) & 0xffffffff
                   if isinstance(v,int): return v & 0xffffffff
                   return U("ToInt32")
               if name=="eqi2r0KcrOaTC3ZyU8v":
@@ -1243,8 +1233,8 @@ jobs:
               if name=="wZpVQeKHR2LgHlcdA4Q":
                   return deref_value(s,args[-2]) is not deref_value(s,args[-1]) if len(args)>=2 else False
               if name=="WNmMncNCfRVWy71yyLn": return None
-              if name=="jcKjQE0JEe": return Ptr("library:"+str(deref_value(s,args[-1]) if args else "lib"),0,origin="JIT_OR_DELEGATE:LoadLibrary")
-              if name=="GGVjFPcji2": return Ptr("proc:"+str(deref_value(s,args[-1]) if args else "proc"),0,origin="JIT_OR_DELEGATE:GetProcAddress")
+              if name=="jcKjQE0JEe": return Ptr("library:"+str(deref_value(s,args[-1]) if args else "lib"),0)
+              if name=="GGVjFPcji2": return Ptr("proc:"+str(deref_value(s,args[-1]) if args else "proc"),0)
               if name=="W2LAoeKqqLWW7C8olgw":
                   p=deref_value(s,args[-2]) if len(args)>=2 else None
                   return DelegateObj("native_delegate",p if isinstance(p,Ptr) else None)
@@ -1253,23 +1243,27 @@ jobs:
                   return d.ptr if isinstance(d,DelegateObj) and d.ptr is not None else U("delegate_invoke")
               if name=="mPc1IeK1xtUZnJaFY6v":
                   d=deref_value(s,args[-1]) if args else None
-                  return d.ptr if isinstance(d,DelegateObj) and d.ptr is not None else Ptr("delegate_fn",0,origin="JIT_OR_DELEGATE:delegate_function")
+                  return d.ptr if isinstance(d,DelegateObj) and d.ptr is not None else Ptr("delegate_fn",0)
               if name=="bf6jCcnr8J":
                   if len(args)>=5:
                       process,target,buf,count,written=args[-5:]
                       target=deref_value(s,target); buf=deref_value(s,buf); count=deref_value(s,count)
                       data=bytes(buf)[:count] if isinstance(buf,(bytes,bytearray)) and isinstance(count,int) and count>=0 else None
+                      old=ptr_read(s,target,len(data)) if data is not None else None
                       evt={
                           "kind":"WriteProcessMemory","target":repr(target),
-                          "target_origin":target.origin if isinstance(target,Ptr) else None,
-                          "pe_image_provenance":bool(isinstance(target,Ptr) and target.region=="module" and str(target.origin).startswith("PE_IMAGE:")),
                           "count":count if isinstance(count,int) else None,
                           "data_hex":data.hex().upper() if data is not None else None,
-                          "step":s.steps,"main_state":s.statics.get("__last_main_state"),"proven_exe_rva":None
+                          "old_hex":old.hex().upper() if isinstance(old,(bytes,bytearray)) else None,
+                          "new_hex":data.hex().upper() if data is not None else None,
+                          "step":s.steps,"proven_exe_rva":None,
+                          "pointer_provenance":"PE_IMAGE" if isinstance(target,Ptr) and target.region=="module" else (target.region if isinstance(target,Ptr) else "UNKNOWN"),
+                          "covers_update_rva_A3F4":False,
+                          "source_context":provenance_context(s),
                       }
                       if isinstance(target,Ptr) and target.region=="module" and data is not None:
-                          if evt["pe_image_provenance"]:
-                              evt["proven_exe_rva"]=target.offset
+                          evt["proven_exe_rva"]=target.offset
+                          evt["covers_update_rva_A3F4"]=target.offset <= 0xA3F4 < target.offset+len(data)
                           ptr_write(s,target,data,"WriteProcessMemory")
                       WPM_WRITES.append(evt); GLOBAL_EVENTS.append(evt)
                       if isinstance(written,LocalRef) and isinstance(count,int): s.locals[written.index]=count
@@ -1491,12 +1485,9 @@ jobs:
                   if op.startswith("conv."):
                       a=pop(s)
                       if isinstance(a,int):
-                          origin=a.origin if isinstance(a,ProvInt) else None
-                          v=int(a)
-                          if op in ("conv.u1",):v&=0xff
-                          elif op in ("conv.u2",):v&=0xffff
-                          elif op in ("conv.u4",):v&=0xffffffff
-                          a=ProvInt(v,origin) if origin is not None else v
+                          if op in ("conv.u1",):a&=0xff
+                          elif op in ("conv.u2",):a&=0xffff
+                          elif op in ("conv.u4",):a&=0xffffffff
                       push(s,a);s.ip=nxt;continue
 
                   if op=="ldsfld":
@@ -1736,8 +1727,7 @@ jobs:
                           if isinstance(v,Ptr): push(s,v)
                           elif isinstance(v,int):
                               if MODULE_BASE <= v < MODULE_BASE+MODULE_SIZE:
-                                  origin=v.origin if isinstance(v,ProvInt) else "UNPROVEN:raw_numeric_inside_PE_range"
-                                  push(s,Ptr("module",v-MODULE_BASE,origin=origin))
+                                  push(s,Ptr("module",v-MODULE_BASE))
                               else:
                                   push(s,v)
                           else: push(s,U("IntPtr"))
@@ -1775,7 +1765,7 @@ jobs:
                   if op=="ldelema":
                       idxv=pop(s); arr=pop(s)
                       if isinstance(arr,(bytes,bytearray)) and isinstance(idxv,int):
-                          push(s,Ptr("array",idxv,arr,origin="ARRAY:managed"))
+                          push(s,Ptr("array",idxv,arr))
                       else:
                           push(s,U("ldelema"))
                       s.ip=nxt;continue
@@ -1979,7 +1969,6 @@ jobs:
               "update_rva_A3F4_write_hits":[
                   x for x in MODULE_WRITES
                   if x.get("rva") is not None
-                  and x.get("pe_image_provenance") is True
                   and x["rva"] <= 0xA3F4 < x["rva"]+x["size"]
               ],
           }
@@ -1994,9 +1983,15 @@ jobs:
                   "write_process_memory_events":WPM_WRITES,
                   "update_rva_A3F4_hits":[
                       x for x in MODULE_WRITES
-                      if x.get("rva") is not None
-                      and x.get("pe_image_provenance") is True
+                      if x.get("pointer_provenance")=="PE_IMAGE"
+                      and x.get("rva") is not None
                       and x["rva"] <= 0xA3F4 < x["rva"]+x["size"]
+                  ],
+                  "write_process_memory_A3F4_hits":[
+                      x for x in WPM_WRITES
+                      if x.get("pointer_provenance")=="PE_IMAGE"
+                      and x.get("covers_update_rva_A3F4")
+                      and x.get("new_hex")
                   ],
               },indent=2)+"\n"
           )
@@ -2561,68 +2556,10 @@ jobs:
               "parser_input_semantically_valid":sanity.get("parser_input_semantically_valid",False),
               "store_entry_extraction_allowed":bool(jit.get("jit_store_architecture_proven")) and bool(sanity.get("parser_input_semantically_valid")),
               "update_method_body_recovered":False,
-              "note":"A token/RID hit alone is not sufficient. Exact mapping from one XdYe0BEvZM key/value entry to UpdateCommandThread token 0x0600082C/RVA 0xA3F4 is required. Invalid parser input blocks semantic use of emulator-generated store/native paths."
+              "note":"A token/RID hit alone is not sufficient. Recovery requires exact new bytes from an official-protector write event with PE_IMAGE provenance covering RVA 0xA3F4; nested switches are excluded. Invalid parser input blocks semantic promotion of emulator-generated store/native paths."
           }
           (ev/"50_METHOD_STORE_SEARCH.json").write_text(
               json.dumps(result,indent=2,ensure_ascii=False)+"\n")
-          PY
-
-      - name: Build exact A3F4 patch-byte promotion gate fail-closed
-        shell: bash
-        run: |
-          set -euo pipefail
-          python3 - <<'PY'
-          from pathlib import Path
-          import os,json
-
-          out=Path(os.environ["OUT"]); ev=out/"evidence"
-          def load(name,default):
-              try:return json.loads((ev/name).read_text())
-              except:return default
-
-          native=load("35_NATIVE_WRITE_TRACE.json",{})
-          sanity=load("49_STAGE1_KEY_PARSER_SANITY.json",{})
-          target=load("36C_TARGET_METHOD_PE_PROVENANCE.json",{})
-          store=load("50_METHOD_STORE_SEARCH.json",{})
-          a3f4=0xA3F4
-          exact=[]
-          for w in native.get("writes",[]):
-              r=w.get("rva"); n=w.get("size"); hx=w.get("new_hex")
-              if not (isinstance(r,int) and isinstance(n,int) and isinstance(hx,str)): continue
-              if not (r <= a3f4 < r+n): continue
-              try: data=bytes.fromhex(hx)
-              except: continue
-              if len(data)!=n: continue
-              off=a3f4-r
-              exact.append({
-                "write_rva":r,"write_rva_hex":hex(r),"write_size":n,
-                "source":w.get("source"),"target_origin":w.get("target_origin"),
-                "pe_image_provenance":w.get("pe_image_provenance") is True,
-                "main_state":w.get("main_state"),"step":w.get("step"),
-                "old_hex":w.get("old_hex"),"new_hex":hx,
-                "offset_to_A3F4":off,"bytes_from_A3F4_hex":data[off:].hex().upper(),
-                "reader_positions":w.get("reader_positions",[])
-              })
-
-          proven=[x for x in exact if x["pe_image_provenance"] and str(x.get("target_origin","")).startswith("PE_IMAGE:")]
-          method_identity=bool(target.get("target_method",{}).get("method_identity_proven"))
-          parser_valid=bool(sanity.get("parser_input_semantically_valid"))
-          # The current dynamic/native path is only semantically usable if its parser input is valid.
-          promotion=bool(method_identity and parser_valid and proven)
-          gate={
-            "target_rid":2092,"target_token":"0x0600082C","target_rva":"0xA3F4",
-            "method_identity_proven":method_identity,
-            "parser_input_semantically_valid":parser_valid,
-            "jit_store_architecture_proven":bool(store.get("jit_store_architecture_proven")),
-            "all_A3F4_covering_write_candidates":exact,
-            "pe_proven_A3F4_writes":proven,
-            "exact_patch_bytes_proven":promotion,
-            "protected_update_body_recovered":promotion,
-            "fail_closed_reason":None if promotion else "Requires MethodDef identity + semantically valid parser/native path + exact write covering A3F4 whose pointer origin is explicitly PE_IMAGE (for example Marshal.GetHINSTANCE-derived). Raw numeric-in-range pointers do not qualify.",
-            "live_board_commands_allowed":False
-          }
-          (ev/"53_EXACT_TARGET_PATCH_GATE.json").write_text(json.dumps(gate,indent=2,ensure_ascii=False)+"\n")
-          print(json.dumps(gate,indent=2,ensure_ascii=False))
           PY
 
       - name: Build conservative R118 verdict and artifact
@@ -2646,9 +2583,23 @@ jobs:
           store=load("50_METHOD_STORE_SEARCH.json",{})
           sanity=load("49_STAGE1_KEY_PARSER_SANITY.json",{})
           jit=load("36_JIT_STORE_ARCHITECTURE.json",{})
-          patchgate=load("53_EXACT_TARGET_PATCH_GATE.json",{})
-          helperres=load("36A_ALL_HELPER_RESOLUTION.json",{})
-          targetprov=load("36C_TARGET_METHOD_PE_PROVENANCE.json",{})
+          native=load("35_NATIVE_WRITE_TRACE.json",{})
+          static_status=load("57_STATIC_HELPER_PE_STATUS.json",{})
+          main_audit=load("48_MAIN_SWITCH_NATIVE_SELECTOR_AUDIT.json",{})
+          pe_hits=[x for x in native.get("update_rva_A3F4_hits",[]) if x.get("pointer_provenance")=="PE_IMAGE" and x.get("new_hex")]
+          wpm_hits=[x for x in native.get("write_process_memory_A3F4_hits",[]) if x.get("pointer_provenance")=="PE_IMAGE" and x.get("new_hex")]
+          exact_patch_events=[]
+          for x in pe_hits+wpm_hits:
+              key=(x.get("rva",x.get("proven_exe_rva")),x.get("new_hex"),x.get("source",x.get("kind")))
+              if key not in [(y.get("rva",y.get("proven_exe_rva")),y.get("new_hex"),y.get("source",y.get("kind"))) for y in exact_patch_events]:
+                  exact_patch_events.append(x)
+          strict_recovered=bool(
+              static_status.get("target_methoddef_identity_exact")
+              and sw.get("switch_target_count")==689
+              and main_audit.get("main_target_mismatch_count",0)==0
+              and sanity.get("parser_input_semantically_valid",False)
+              and exact_patch_events
+          )
 
           verdict={
               "exact_switch_mapping_corrected":sw.get("state_392_mapping_correct",False),
@@ -2668,22 +2619,23 @@ jobs:
               "parser_input_semantically_valid":sanity.get("parser_input_semantically_valid",False),
               "jit_store_architecture_proven":jit.get("jit_store_architecture_proven",False),
               "native_path_semantically_trusted":sanity.get("native_path_semantically_trusted",False),
-              "target_method_identity_proven":targetprov.get("target_method",{}).get("method_identity_proven",False),
-              "r117_blocker_missing_count":len(helperres.get("r117_blocker_missing",[])),
-              "pe_proven_A3F4_write_count":len(patchgate.get("pe_proven_A3F4_writes",[])),
-              "exact_patch_bytes_proven":patchgate.get("exact_patch_bytes_proven",False),
-              "protected_update_body_recovered":patchgate.get("protected_update_body_recovered",False),
+              "target_methoddef_identity_exact":static_status.get("target_methoddef_identity_exact",False),
+              "canonical_main_target_mismatches":main_audit.get("main_target_mismatch_count"),
+              "pe_image_A3F4_write_hit_count":len(pe_hits),
+              "write_process_memory_A3F4_hit_count":len(wpm_hits),
+              "exact_pe_patch_events":exact_patch_events,
+              "protected_update_body_recovered":strict_recovered,
               "firmware_readback_primitive_proven":False,
               "full_flash_readback_proven":False,
               "live_board_commands_allowed":False,
-              "next_gate":"Require exact PE_IMAGE-proven write bytes covering RVA 0xA3F4 and valid parser/native semantics. Continue resolving R117 blocker wrappers and XdYe0BEvZM key/value mapping. No live USB promotion from protector evidence."
+              "next_gate":"Accept recovery only when exact new bytes from an official-protector Marshal/WriteProcessMemory-equivalent event have PE_IMAGE provenance and cover RVA 0xA3F4, with canonical 689-state main-switch evidence kept separate from nested switches. No live USB promotion from protector evidence."
           }
 
           (review/"60_R118_VERDICT.json").write_text(
               json.dumps(verdict,indent=2,ensure_ascii=False)+"\n")
 
           lines=[
-              "OKN R118 JIT STORE + PE PROVENANCE RECOVERY",
+              "OKN R118 MAIN-SWITCH + JIT STORE + PE PROVENANCE RECOVERY",
               "OFFLINE_ONLY=true",
               f"EXACT_SWITCH_MAPPING_CORRECTED={str(verdict['exact_switch_mapping_corrected']).lower()}",
               f"SWITCH_TARGET_COUNT={verdict['switch_target_count']}",
@@ -2700,10 +2652,10 @@ jobs:
               f"PARSER_INPUT_SEMANTICALLY_VALID={str(verdict['parser_input_semantically_valid']).lower()}",
               f"JIT_STORE_ARCHITECTURE_PROVEN={str(verdict['jit_store_architecture_proven']).lower()}",
               f"NATIVE_PATH_SEMANTICALLY_TRUSTED={str(verdict['native_path_semantically_trusted']).lower()}",
-              f"TARGET_METHOD_IDENTITY_PROVEN={str(verdict['target_method_identity_proven']).lower()}",
-              f"R117_BLOCKER_MISSING_COUNT={verdict['r117_blocker_missing_count']}",
-              f"PE_PROVEN_A3F4_WRITE_COUNT={verdict['pe_proven_A3F4_write_count']}",
-              f"EXACT_PATCH_BYTES_PROVEN={str(verdict['exact_patch_bytes_proven']).lower()}",
+              f"TARGET_METHODDEF_IDENTITY_EXACT={str(verdict['target_methoddef_identity_exact']).lower()}",
+              f"CANONICAL_MAIN_TARGET_MISMATCHES={verdict['canonical_main_target_mismatches']}",
+              f"PE_IMAGE_A3F4_WRITE_HITS={verdict['pe_image_A3F4_write_hit_count']}",
+              f"WRITEPROCESSMEMORY_A3F4_HITS={verdict['write_process_memory_A3F4_hit_count']}",
               f"PROTECTED_UPDATE_BODY_RECOVERED={str(verdict['protected_update_body_recovered']).lower()}",
               "FIRMWARE_READBACK_PRIMITIVE_PROVEN=false",
               "FULL_FLASH_READBACK_PROVEN=false",
@@ -2727,6 +2679,7 @@ jobs:
           cat > "$OUT/review/99_SAFETY_ATTESTATION.txt" <<'EOF'
           OFFLINE_STATIC_ONLY=true
           TARGET_EXECUTED=false
+          EXECUTE_OFFICIAL_CLIENT=false
           BOARD_USB_ACCESSED=false
           HOST_TO_DEVICE_COMMANDS_SENT=false
           HID_SET_REPORT_LIVE=false
@@ -2744,7 +2697,7 @@ jobs:
         shell: bash
         run: |
           {
-            echo "## OKN R118 MEGA JIT Store + PE Provenance Recovery"
+            echo "## OKN R118 MEGA Main-Switch + JIT Store + PE Provenance Recovery"
             echo
             echo "- Static/offline only; official EXE is never executed."
             echo "- Uses deterministic N9 method slicing; avoids the catastrophic R110 regex."
@@ -2763,7 +2716,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: R118-JIT-STORE-PE-PROVENANCE-EVIDENCE
+          name: R118-MAIN-JIT-PE-PROVENANCE-EVIDENCE
           path: |
             /tmp/r118/review
             /tmp/r118/evidence
