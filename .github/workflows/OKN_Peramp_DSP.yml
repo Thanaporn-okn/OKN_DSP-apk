@@ -1,0 +1,219 @@
+name: Build OKN Peramp DSP V2 - FAST ONE FILE
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, master]
+    paths:
+      - '.github/workflows/OKN_Peramp_DSP_V2_FAST_ONE_FILE.yml'
+      - '.github/workflows/OKN_Peramp_DSP_V1_ONE_FILE.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: okn-peramp-dsp-v2-fast-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  JAVA_VERSION: '17'
+  GRADLE_VERSION: '8.9'
+  ANDROID_PLATFORM: 'android-35'
+  ANDROID_BUILD_TOOLS: '35.0.0'
+  V1_WORKFLOW: '.github/workflows/OKN_Peramp_DSP_V1_ONE_FILE.yml'
+  PATCH_SHA256: '98e8feb3dfddcf6b55851af1ff86ab69c9e944f6c4658ac1b7271f82116ea4f8'
+
+jobs:
+  build-apk:
+    name: Build OKN Peramp DSP V2 APK
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Restore V1 source and apply V2 patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -s "$V1_WORKFLOW"
+
+          WORK="$RUNNER_TEMP/okn_peramp_dsp_v2"
+          V1_B64="$RUNNER_TEMP/okn_v1.b64"
+          V1_TGZ="$RUNNER_TEMP/okn_v1.tar.gz"
+          PATCH_B64="$RUNNER_TEMP/v2_patch.b64"
+          PATCH_GZ="$RUNNER_TEMP/v2.patch.gz"
+          PATCH_FILE="$RUNNER_TEMP/v2.patch"
+          rm -rf "$WORK" "$V1_B64" "$V1_TGZ" "$PATCH_B64" "$PATCH_GZ" "$PATCH_FILE"
+          mkdir -p "$WORK"
+
+          awk '
+            /cat > "\$B64" <<'"'"'OKN_SOURCE_B64'"'"'/ {capture=1; next}
+            capture && /^[[:space:]]+OKN_SOURCE_B64[[:space:]]*$/ {capture=0; exit}
+            capture {print}
+          ' "$V1_WORKFLOW" > "$V1_B64"
+          test -s "$V1_B64"
+          tr -d ' \n\r\t' < "$V1_B64" | base64 --decode > "$V1_TGZ"
+
+          V1_SHA="$(sed -n "s/^[[:space:]]*SOURCE_SHA256:[[:space:]]*'\([0-9a-f]*\)'.*/\1/p" "$V1_WORKFLOW" | head -1)"
+          test -n "$V1_SHA"
+          echo "$V1_SHA  $V1_TGZ" | sha256sum -c -
+          tar -xzf "$V1_TGZ" -C "$WORK"
+
+          cat > "$PATCH_B64" <<'OKN_V2_PATCH_B64'
+          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
+          VbLuPwKFFuWdBE0AAA==
+          OKN_V2_PATCH_B64
+          tr -d ' \n\r\t' < "$PATCH_B64" | base64 --decode > "$PATCH_GZ"
+          echo "${PATCH_SHA256}  $PATCH_GZ" | sha256sum -c -
+          gzip -dc "$PATCH_GZ" > "$PATCH_FILE"
+          cd "$WORK"
+          patch -p1 --batch < "$PATCH_FILE"
+
+          grep -q 'versionCode 2' app/build.gradle
+          grep -q 'Authentication timeout' app/src/main/java/com/okn/perampdsp/BleManager.java
+          grep -q 'eqGainPlus' app/src/main/java/com/okn/perampdsp/DspView.java
+          echo "PROJECT_DIR=$WORK" >> "$GITHUB_ENV"
+          echo "V2 source restore + patch: PASS"
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ env.JAVA_VERSION }}
+
+      - name: Prepare Android SDK 35
+        shell: bash
+        run: |
+          set -euo pipefail
+          SDK_ROOT="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
+          export ANDROID_HOME="$SDK_ROOT"
+          export ANDROID_SDK_ROOT="$SDK_ROOT"
+          echo "ANDROID_HOME=$SDK_ROOT" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$SDK_ROOT" >> "$GITHUB_ENV"
+          SDKMANAGER="$(command -v sdkmanager || true)"
+          if [ -z "$SDKMANAGER" ]; then SDKMANAGER="$SDK_ROOT/cmdline-tools/latest/bin/sdkmanager"; fi
+          test -x "$SDKMANAGER"
+          set +o pipefail
+          yes | "$SDKMANAGER" --licenses >/dev/null 2>&1 || true
+          set -o pipefail
+          "$SDKMANAGER" "platform-tools" "platforms;${ANDROID_PLATFORM}" "build-tools;${ANDROID_BUILD_TOOLS}"
+          test -d "$SDK_ROOT/platforms/${ANDROID_PLATFORM}"
+          test -d "$SDK_ROOT/build-tools/${ANDROID_BUILD_TOOLS}"
+
+      - name: Set up Gradle 8.9
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: ${{ env.GRADLE_VERSION }}
+
+      - name: Run V2 checks
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$PROJECT_DIR"
+          python3 tools/preflight.py
+          bash tools/protocol_smoke.sh
+
+      - name: Build V2 debug APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$PROJECT_DIR"
+          gradle :app:assembleDebug --no-daemon --stacktrace
+
+      - name: Package V2 APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          APK="$PROJECT_DIR/app/build/outputs/apk/debug/app-debug.apk"
+          test -s "$APK"
+          rm -rf "$GITHUB_WORKSPACE/dist"
+          mkdir -p "$GITHUB_WORKSPACE/dist"
+          cp "$APK" "$GITHUB_WORKSPACE/dist/OKN_Peramp_DSP_V2-debug.apk"
+          sha256sum "$GITHUB_WORKSPACE/dist/OKN_Peramp_DSP_V2-debug.apk" > "$GITHUB_WORKSPACE/dist/OKN_Peramp_DSP_V2-debug.apk.sha256"
+
+      - name: Upload V2 APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: OKN-Peramp-DSP-V2-APK
+          path: |
+            dist/OKN_Peramp_DSP_V2-debug.apk
+            dist/OKN_Peramp_DSP_V2-debug.apk.sha256
+          if-no-files-found: error
+          retention-days: 30
