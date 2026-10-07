@@ -1,4 +1,4 @@
-name: Build OKN Peramp DSP V5 - DEBOUNCED VERIFIED WRITE
+name: Build OKN Peramp DSP V6 - VISIBLE VERIFIED WRITE
 
 on:
   workflow_dispatch:
@@ -12,7 +12,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: okn-peramp-dsp-v5-${{ github.ref }}
+  group: okn-peramp-dsp-v6-${{ github.ref }}
   cancel-in-progress: true
 
 env:
@@ -25,10 +25,11 @@ env:
   V3_PATCH_SHA256: 'e042d68841a9564ced9a126d3eababa6666d066298417c003c89c32e8a9f8273'
   V4_PATCH_SHA256: 'a15d48fe5baeaa929e43b2053538316738dc9b70e5dfe0fd678e079fb406e39e'
   V5_PATCH_SHA256: 'ff84265141a52970421d07e84a36d82ae2d826309f7ee8828ea18384b754f7ca'
+  V6_PATCH_SHA256: 'a4deec0960f447113b228b8df238f19a19bd1db67cfc3bdabf11d087a096f9c9'
 
 jobs:
   build-apk:
-    name: Build OKN Peramp DSP V5 APK
+    name: Build OKN Peramp DSP V6 APK
     runs-on: ubuntu-24.04
     timeout-minutes: 35
 
@@ -36,7 +37,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Restore V1 source and apply V2 + V3 + V4 + V5 patches
+      - name: Restore V1 source and apply V2 + V3 + V4 + V5 + V6 patches
         shell: bash
         run: |
           set -euo pipefail
@@ -307,7 +308,64 @@ jobs:
           gzip -dc "$V5_PATCH_GZ" > "$V5_PATCH_FILE"
           patch -p1 --batch < "$V5_PATCH_FILE"
 
-          grep -q 'versionCode 5' app/build.gradle
+          # V6: keep the proven write/readback path, but surface its state persistently
+          # on the EQ page so hardware verification is visible without opening diagnostics.
+          V6_PATCH_B64="$RUNNER_TEMP/v6_patch.b64"
+          V6_PATCH_GZ="$RUNNER_TEMP/v6.patch.gz"
+          V6_PATCH_FILE="$RUNNER_TEMP/v6.patch"
+          cat > "$V6_PATCH_B64" <<'OKN_V6_PATCH_B64'
+          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
+          OKN_V6_PATCH_B64
+          tr -d ' \n\r\t' < "$V6_PATCH_B64" | base64 --decode > "$V6_PATCH_GZ"
+          echo "${V6_PATCH_SHA256}  $V6_PATCH_GZ" | sha256sum -c -
+          gzip -dc "$V6_PATCH_GZ" > "$V6_PATCH_FILE"
+          patch -p1 --batch < "$V6_PATCH_FILE"
+
+          grep -q 'versionCode 6' app/build.gradle
           grep -q 'LIVE_VERIFY_SETTLE_MS' app/src/main/java/com/okn/perampdsp/BleManager.java
           grep -q 'WRITE VERIFIED' app/src/main/java/com/okn/perampdsp/BleManager.java
           grep -q 'READ ONLY' app/src/main/java/com/okn/perampdsp/DspView.java
@@ -349,7 +407,7 @@ jobs:
         with:
           gradle-version: ${{ env.GRADLE_VERSION }}
 
-      - name: Run V5 checks
+      - name: Run V6 checks
         shell: bash
         run: |
           set -euo pipefail
@@ -357,14 +415,14 @@ jobs:
           python3 tools/preflight.py
           bash tools/protocol_smoke.sh
 
-      - name: Build V5 debug APK
+      - name: Build V6 debug APK
         shell: bash
         run: |
           set -euo pipefail
           cd "$PROJECT_DIR"
           gradle :app:assembleDebug --no-daemon --stacktrace
 
-      - name: Package V5 APK
+      - name: Package V6 APK
         shell: bash
         run: |
           set -euo pipefail
@@ -372,15 +430,15 @@ jobs:
           test -s "$APK"
           rm -rf "$GITHUB_WORKSPACE/dist"
           mkdir -p "$GITHUB_WORKSPACE/dist"
-          cp "$APK" "$GITHUB_WORKSPACE/dist/OKN_Peramp_DSP_V5-debug.apk"
-          sha256sum "$GITHUB_WORKSPACE/dist/OKN_Peramp_DSP_V5-debug.apk" > "$GITHUB_WORKSPACE/dist/OKN_Peramp_DSP_V5-debug.apk.sha256"
+          cp "$APK" "$GITHUB_WORKSPACE/dist/OKN_Peramp_DSP_V6-debug.apk"
+          sha256sum "$GITHUB_WORKSPACE/dist/OKN_Peramp_DSP_V6-debug.apk" > "$GITHUB_WORKSPACE/dist/OKN_Peramp_DSP_V6-debug.apk.sha256"
 
-      - name: Upload V5 APK artifact
+      - name: Upload V6 APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: OKN-Peramp-DSP-V5-APK
+          name: OKN-Peramp-DSP-V6-APK
           path: |
-            dist/OKN_Peramp_DSP_V5-debug.apk
-            dist/OKN_Peramp_DSP_V5-debug.apk.sha256
+            dist/OKN_Peramp_DSP_V6-debug.apk
+            dist/OKN_Peramp_DSP_V6-debug.apk.sha256
           if-no-files-found: error
           retention-days: 30
