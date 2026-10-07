@@ -1,4 +1,4 @@
-name: Build OKN Peramp DSP V4 - WRITABLE BAND UX
+name: Build OKN Peramp DSP V5 - DEBOUNCED VERIFIED WRITE
 
 on:
   workflow_dispatch:
@@ -12,7 +12,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: okn-peramp-dsp-v4-${{ github.ref }}
+  group: okn-peramp-dsp-v5-${{ github.ref }}
   cancel-in-progress: true
 
 env:
@@ -24,10 +24,11 @@ env:
   PATCH_SHA256: '98e8feb3dfddcf6b55851af1ff86ab69c9e944f6c4658ac1b7271f82116ea4f8'
   V3_PATCH_SHA256: 'e042d68841a9564ced9a126d3eababa6666d066298417c003c89c32e8a9f8273'
   V4_PATCH_SHA256: 'a15d48fe5baeaa929e43b2053538316738dc9b70e5dfe0fd678e079fb406e39e'
+  V5_PATCH_SHA256: 'ff84265141a52970421d07e84a36d82ae2d826309f7ee8828ea18384b754f7ca'
 
 jobs:
   build-apk:
-    name: Build OKN Peramp DSP V4 APK
+    name: Build OKN Peramp DSP V5 APK
     runs-on: ubuntu-24.04
     timeout-minutes: 35
 
@@ -35,7 +36,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Restore V1 source and apply V2 + V3 + V4 patches
+      - name: Restore V1 source and apply V2 + V3 + V4 + V5 patches
         shell: bash
         run: |
           set -euo pipefail
@@ -266,15 +267,57 @@ jobs:
           gzip -dc "$V4_PATCH_GZ" > "$V4_PATCH_FILE"
           patch -p1 --batch < "$V4_PATCH_FILE"
 
-          grep -q 'versionCode 4' app/build.gradle
+          # V5: keep live EQ responsive while the user is still editing.
+          # Verification is still a fresh Device Description readback, but it starts only
+          # after a quiet window. During the readback the UI must not drift locally.
+          V5_PATCH_B64="$RUNNER_TEMP/v5_patch.b64"
+          V5_PATCH_GZ="$RUNNER_TEMP/v5.patch.gz"
+          V5_PATCH_FILE="$RUNNER_TEMP/v5.patch"
+          cat > "$V5_PATCH_B64" <<'OKN_V5_PATCH_B64'
+          H4sICEUqxmoCA3Y1LnBhdGNoAMVYbY/iyBH+nPkVHaQIWMDYgHkbrW7nhdugY5jZgZ3NarNCDW4PnTW2191mFt2tdIkiJX8gipKPF0WRIuVDEkXi/g3KL0lV
+          27yNzc5OLlIQwqbdVV1d9dRT1ba4bZNSEPYJLVPfL49D7ljabUAth5FxYuioVCqlzPxRRa/US4Ze0hvE0Nu1SrtqatW62WrWmo06KejwOSoUCika90SNtlFv
+          V1uaqVcqRs0wzFj02TMCU4pNUlC/z54dkfUH9Dl8QiX33K5FshNvpnnvXM1nAZ35lvCz26kz7g6sd6RS3w5JGtwyiaNV86i0Hp2zQIC+M89ipJYY7tMZI9ma
+          pmt69qiQJmMmhiMZM5JRDz4ekehGOWO48JkgXx9Z98Ihgkl5Rrlb/gWd0zJsrgybK282Vz512AV16S0LNJwR+/eRUjtBfaTkvbhXqm2zoZk1s6q3Ko1WIu4/
+          RPsWGka91mw2d6HRaBYbpKB+19DwAz6nkhEhARoTYnOXOoS78s1bcnndfd7tn/RGV5e93qjX6T8f/nRAnpKvjSKBbw2+H48/ocXx3FvS6950Rq+uu8POaNi9
+          6Fy+HI4uUIlh6novli4/eUJuqm1isbEXuhNGHD5npbuAg0bABbdj3BLhkYD63CLM4lKQiUcdJmA+2OsRz2XEDpiYgh4xCbgvvYAEjFpjOnmnkSflCKAPmHrT
+          ue5++Xo06AyHvU5kat1ESwv/nbDR3O7z86SvO8Pr17HwPR8ZtTbuyIG7KpnSwLqjASNszi2GbuPCc0C/RWho8THwkh/OfA7qwTvDgMHIqecJScqke24YyiWH
+          7bIdj0oyvO6c4lZOfjYaDDtXo/NTMEvXTPs44hoAMEIqviKo1ukKBseMgME9FFKN9D3isjtCJzKkELEyRoz4EDImYUMQ2jlzcU9TFrB2zBeg0fxfaSSxRi7J
+          HUVUha7kDjiVBQvlbMmBkt6HLGRKGqi4SOSUufAwFEBGcE+og4ssSn7ggfKNThriRImWwXrnECiI0nmMTgT0Gp6EuhbAeeZDPCON+MdhUmGbuRaIY3SYttZd
+          jv1frUf+V9ddvl9/PiaHhPT8y4DfYpzPvNkMFh9MpswKHRbk8sdJAR9QM4DlQ5HLrJa/XC3/uVr+ebX8+2r5m9Xyd6vln1bLv6yWv10t/7pa/m21/ONq+evV
+          9/D3H6vl71fLf+H999+ulr/C++V3q+UfMkVIUvQG8n2R2NQRDBYupS18wYQAqstlAEVRinT7z4miFPLvb7+Lc/58cLX1Jg67HrrfmylIB0wGi0z+eFtv0lcw
+          P3cFaksWACo4YOqOu5Z394lFUwJAA3m+YalrBvASMpfZoYGE3E4cgXUfW//OhX/D2d1jit+uyCMq367YoXanWa22Wuajy95B1TvtkKE3zYa+U/MqusqQ6LKb
+          IOVylFIQtDusLGABhEyFpuzZtsOhnlhc+A5dRAETAARvprLToUCjSA4lRIVwqS+mntSOdiMMyWo7oZheQfoCCefWIN/MGcgAyRl2DZyaE14YADs8fUrc0HHI
+          N9+QaESDWbNcXuOiM/PlIpfPky9I5mX/q/7lq36GtPen7eQQ0P05p7cuAJzjCpmbmsLw4HX/TIE1Qwpq8QLc4f+BGphQhwZnUIclPig31KPOC3zG3m/HDd1U
+          TwS1WaQJbq4YfQdbuvbuhJpkmpmdlEsaZP5fDCJ7GACvhIKOucPloo2ValNXJYBBBWjq3QH/yinUQ0p8bFQF8vmaDEqe60CpABRNqLun22F0zhRgbB4AYjov
+          YDsBg9rheB4aptg9gEoFtQxLjguTvfB2GpefjSlRmeMiIv16o16Ew4K6NhOkP/Y8WNclPoAPvMwtDegFsJfLsPfPIbuuYDzBLtwmuR9Hz1/BWhRi9WYyfftm
+          /DYP3XaCwKYQQw39sqHOU6xg6PbcGH6MvAoiqsOiCVEuOR4UYKu857QEI38kDJIksgZMuMaiigYUHjYAkTQOxSJqBhboXD+AGuOBFyL3ITrm1Akx4yWZTKl7
+          C1EEu6jjJHk6NiVl81Fn5LIPEtw7cYCccgHA0Bp6uSjtIz/G/kOXqFB8ofomSNgSXvNF+GvgpWRUbGioK3ZapVCeEFAkb9DwNP1FZUkevRSBo1lVHUG9aR7o
+          CPADZ0p/ekah6g/4rQuVHUD2lPSgF9Uuuv3RzUnvZec4XVQAn92ohotZHWVJbjItknH+wPxEqNDzLnOuPMFlfOSDsfwm7VOhtOaHiDQ12wugyOZ6GDymvRwU
+          SeYnBfAnsU4zsUeS3cTuB7XHAEM+jagDejXslQFKSKzRoMJHfP49Vi0iQgvWV9x13Tk5h1qd1lnsrxYpU22ktV7jkMeCqB/4MkDPpE36eL81UJFvtkxFC81W
+          o9hKjfx+6AZT6rP02O02G9uUFJqE4zeWqEFv1Hkxen7S7Sey8+Hchb4oDNz7mX90OMfW2TWPcyaNuz43R9J6MZgumNzFcixwvGGJp0QGIdvvuyQQrSgDyUCv
+          cDuVmr+APiY5GPdOyQfJ7sg0NNOomI1K1dD3uqMHhKH/abT1mmY0zFZdr9Qae/1P1P5sjmcuY1Yu44K/BByKWNqroAzUJeyHRtGrpyLJRi3wRiibX+t58LXS
+          IV17gqCvpPRl914pZfdl1Skpk/J2KbkGVPV4HhSFmQ/6C0n95sP6zUP6zfv6I39kL7/qkyu1eUxxtYBQlCWU9rTncP7iNuQ7qMUeFJ2M+o4UyXzAGW+yGE46
+          1iHc8IGww09TV3+bumm3xtWaPc4W19OMz5tW+eS0t22Fn7perJEC/NYVfqJd9i7PTnrkst97rXYw53jexu31LxUtXpxcbR6gt6oRjUadkhdKP5TQHM2Zg93B
+          BNqVAMYFg+MvnpS33hTMYRPZZ3gslrvNCdaIvRVq6uBVigTA16rm40xsusZoW3Rki8AnFu5kuwqSuNoMYR+g3XcVKO9pj9oXUiiX4GjuygDykeBpnwOOUIpP
+          uCQ2qMPmBuHsQ9BlLvtzdz/i2G9u8rhNrk4Ggy04P/kSSRk0XqNv/a5s3dzsvSeLXmFg3xkK2DOe94V6ZwY43K72AzumPQeZYBl4SOzGGRxvgWI4IE+5c89C
+          CDsujcYcdJSZ4qj/ANf/hoGHFwAA
+          OKN_V5_PATCH_B64
+          tr -d ' \n\r\t' < "$V5_PATCH_B64" | base64 --decode > "$V5_PATCH_GZ"
+          echo "${V5_PATCH_SHA256}  $V5_PATCH_GZ" | sha256sum -c -
+          gzip -dc "$V5_PATCH_GZ" > "$V5_PATCH_FILE"
+          patch -p1 --batch < "$V5_PATCH_FILE"
+
+          grep -q 'versionCode 5' app/build.gradle
           grep -q 'LIVE_VERIFY_SETTLE_MS' app/src/main/java/com/okn/perampdsp/BleManager.java
           grep -q 'WRITE VERIFIED' app/src/main/java/com/okn/perampdsp/BleManager.java
           grep -q 'READ ONLY' app/src/main/java/com/okn/perampdsp/DspView.java
           grep -q 'LOCAL ONLY' app/src/main/java/com/okn/perampdsp/DspView.java
           grep -q 'selectNearestGainWritableBand' app/src/main/java/com/okn/perampdsp/DspView.java
           grep -q 'READ ONLY explanation' app/src/main/java/com/okn/perampdsp/DspView.java
+          grep -q 'LIVE_VERIFY_SETTLE_MS = 1800L' app/src/main/java/com/okn/perampdsp/BleManager.java
+          grep -q 'DSP busy verifying previous write' app/src/main/java/com/okn/perampdsp/DspView.java
           echo "PROJECT_DIR=$WORK" >> "$GITHUB_ENV"
-          echo "V4 source restore + patches: PASS"
+          echo "V5 source restore + patches: PASS"
 
       - name: Set up JDK 17
         uses: actions/setup-java@v4
@@ -306,7 +349,7 @@ jobs:
         with:
           gradle-version: ${{ env.GRADLE_VERSION }}
 
-      - name: Run V4 checks
+      - name: Run V5 checks
         shell: bash
         run: |
           set -euo pipefail
@@ -314,14 +357,14 @@ jobs:
           python3 tools/preflight.py
           bash tools/protocol_smoke.sh
 
-      - name: Build V4 debug APK
+      - name: Build V5 debug APK
         shell: bash
         run: |
           set -euo pipefail
           cd "$PROJECT_DIR"
           gradle :app:assembleDebug --no-daemon --stacktrace
 
-      - name: Package V4 APK
+      - name: Package V5 APK
         shell: bash
         run: |
           set -euo pipefail
@@ -329,15 +372,15 @@ jobs:
           test -s "$APK"
           rm -rf "$GITHUB_WORKSPACE/dist"
           mkdir -p "$GITHUB_WORKSPACE/dist"
-          cp "$APK" "$GITHUB_WORKSPACE/dist/OKN_Peramp_DSP_V4-debug.apk"
-          sha256sum "$GITHUB_WORKSPACE/dist/OKN_Peramp_DSP_V4-debug.apk" > "$GITHUB_WORKSPACE/dist/OKN_Peramp_DSP_V4-debug.apk.sha256"
+          cp "$APK" "$GITHUB_WORKSPACE/dist/OKN_Peramp_DSP_V5-debug.apk"
+          sha256sum "$GITHUB_WORKSPACE/dist/OKN_Peramp_DSP_V5-debug.apk" > "$GITHUB_WORKSPACE/dist/OKN_Peramp_DSP_V5-debug.apk.sha256"
 
-      - name: Upload V4 APK artifact
+      - name: Upload V5 APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: OKN-Peramp-DSP-V4-APK
+          name: OKN-Peramp-DSP-V5-APK
           path: |
-            dist/OKN_Peramp_DSP_V4-debug.apk
-            dist/OKN_Peramp_DSP_V4-debug.apk.sha256
+            dist/OKN_Peramp_DSP_V5-debug.apk
+            dist/OKN_Peramp_DSP_V5-debug.apk.sha256
           if-no-files-found: error
           retention-days: 30
