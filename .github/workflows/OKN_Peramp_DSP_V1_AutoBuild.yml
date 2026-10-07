@@ -3,7 +3,9 @@ name: Build OKN Peramp DSP V1
 on:
   workflow_dispatch:
   push:
-    branches: [main, master]
+    branches:
+      - main
+      - master
     paths:
       - 'OKN_Peramp_DSP_V1_Source.zip'
       - '.github/workflows/OKN_Peramp_DSP_V1_AutoBuild.yml'
@@ -24,21 +26,23 @@ env:
 
 jobs:
   build-apk:
+    name: Build OKN Peramp DSP V1 APK
     runs-on: ubuntu-latest
     timeout-minutes: 35
 
     steps:
-      - name: Checkout
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Verify source ZIP
+      - name: Verify source archive
         shell: bash
         run: |
           set -euo pipefail
-          test -s "${SOURCE_ZIP}"
-          unzip -t "${SOURCE_ZIP}" >/dev/null
+          test -s "$SOURCE_ZIP"
+          unzip -t "$SOURCE_ZIP" >/dev/null
+          echo "Source archive: PASS"
 
-      - name: Extract source
+      - name: Extract Android project
         shell: bash
         run: |
           set -euo pipefail
@@ -46,7 +50,7 @@ jobs:
           WORK="$RUNNER_TEMP/okn_peramp_dsp_v1"
           rm -rf "$WORK"
           mkdir -p "$WORK"
-          unzip -q "${SOURCE_ZIP}" -d "$WORK"
+          unzip -q "$SOURCE_ZIP" -d "$WORK"
 
           PROJECT_DIR="$(find "$WORK" -maxdepth 3 -type f \
             \( -name settings.gradle -o -name settings.gradle.kts \) \
@@ -59,8 +63,10 @@ jobs:
           fi
 
           test -d "$PROJECT_DIR/app"
+          test -f "$PROJECT_DIR/app/build.gradle" -o -f "$PROJECT_DIR/app/build.gradle.kts"
+
           echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
-          echo "Project: $PROJECT_DIR"
+          echo "PROJECT_DIR=$PROJECT_DIR"
 
       - name: Set up JDK 17
         uses: actions/setup-java@v4
@@ -68,10 +74,18 @@ jobs:
           distribution: temurin
           java-version: ${{ env.JAVA_VERSION }}
 
+      - name: Verify Java
+        shell: bash
+        run: |
+          set -euo pipefail
+          java -version
+          javac -version
+          java -version 2>&1 | grep -q 'version "17\.'
+
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
 
-      - name: Install Android 35
+      - name: Accept licenses and install Android SDK 35
         shell: bash
         run: |
           set -euo pipefail
@@ -84,8 +98,8 @@ jobs:
 
           echo "sdkmanager=$SDKMANAGER"
 
-          # Use the runner's installed cmdline-tools.
-          # Do not replace cmdline-tools, which avoids the old license/version issue.
+          # Keep the runner's installed cmdline-tools. Do not replace it.
+          # Ignore SIGPIPE/non-zero from `yes` after sdkmanager exits.
           set +o pipefail
           yes | "$SDKMANAGER" --licenses >/dev/null 2>&1 || true
           set -o pipefail
@@ -103,20 +117,43 @@ jobs:
         with:
           gradle-version: ${{ env.GRADLE_VERSION }}
 
-      - name: Run preflight
+      - name: Verify Gradle
+        shell: bash
+        run: |
+          set -euo pipefail
+          gradle --version
+          gradle --version | grep -q 'Gradle 8.9'
+
+      - name: Run project preflight
         shell: bash
         run: |
           set -euo pipefail
           cd "$PROJECT_DIR"
 
-          if [ -f preflight_v1.py ]; then
-            python3 preflight_v1.py
-          elif [ -f tools/preflight.py ]; then
+          if [ -f tools/preflight.py ]; then
             python3 tools/preflight.py
+          elif [ -f preflight_v1.py ]; then
+            python3 preflight_v1.py
           elif [ -f tools/preflight_v1.py ]; then
             python3 tools/preflight_v1.py
           else
-            echo "No preflight script found; continue build."
+            echo "ERROR: preflight script not found"
+            exit 1
+          fi
+
+      - name: Run DSP protocol smoke test
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$PROJECT_DIR"
+
+          if [ -x tools/protocol_smoke.sh ]; then
+            tools/protocol_smoke.sh
+          elif [ -f tools/protocol_smoke.sh ]; then
+            bash tools/protocol_smoke.sh
+          else
+            echo "ERROR: tools/protocol_smoke.sh not found"
+            exit 1
           fi
 
       - name: Build debug APK
@@ -131,37 +168,35 @@ jobs:
             gradle :app:assembleDebug --no-daemon --stacktrace
           fi
 
-      - name: Package APK
+      - name: Verify and package APK
         shell: bash
         run: |
           set -euo pipefail
 
-          APK="$(find "$PROJECT_DIR/app/build/outputs/apk" \
-            -type f -name '*.apk' | sort | head -n 1)"
+          APK="$PROJECT_DIR/app/build/outputs/apk/debug/app-debug.apk"
+          if [ ! -s "$APK" ]; then
+            echo "ERROR: expected APK not found: $APK"
+            find "$PROJECT_DIR/app/build/outputs" -maxdepth 6 -type f -print 2>/dev/null | sort || true
+            exit 1
+          fi
 
-          test -n "${APK:-}"
-          test -s "$APK"
+          rm -rf "$GITHUB_WORKSPACE/dist"
+          mkdir -p "$GITHUB_WORKSPACE/dist"
 
-          OUT="$RUNNER_TEMP/okn_output"
-          rm -rf "$OUT"
-          mkdir -p "$OUT"
+          cp "$APK" "$GITHUB_WORKSPACE/dist/OKN_Peramp_DSP_V1-debug.apk"
+          sha256sum "$GITHUB_WORKSPACE/dist/OKN_Peramp_DSP_V1-debug.apk" \
+            > "$GITHUB_WORKSPACE/dist/OKN_Peramp_DSP_V1-debug.apk.sha256"
 
-          cp "$APK" "$OUT/OKN_Peramp_DSP_V1-debug.apk"
-          sha256sum "$OUT/OKN_Peramp_DSP_V1-debug.apk" \
-            > "$OUT/OKN_Peramp_DSP_V1-debug.apk.sha256"
+          ls -lh "$GITHUB_WORKSPACE/dist"
+          cat "$GITHUB_WORKSPACE/dist/OKN_Peramp_DSP_V1-debug.apk.sha256"
 
-          echo "OUTPUT_DIR=$OUT" >> "$GITHUB_ENV"
-
-          ls -lh "$OUT"
-          cat "$OUT/OKN_Peramp_DSP_V1-debug.apk.sha256"
-
-      - name: Upload APK
+      - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
           name: OKN-Peramp-DSP-V1-APK
           path: |
-            ${{ env.OUTPUT_DIR }}/OKN_Peramp_DSP_V1-debug.apk
-            ${{ env.OUTPUT_DIR }}/OKN_Peramp_DSP_V1-debug.apk.sha256
+            dist/OKN_Peramp_DSP_V1-debug.apk
+            dist/OKN_Peramp_DSP_V1-debug.apk.sha256
           if-no-files-found: error
           retention-days: 30
 
@@ -172,11 +207,14 @@ jobs:
           {
             echo "## OKN Peramp DSP V1"
             echo ""
-            echo "- Build: SUCCESS"
+            echo "- Source archive: PASS"
+            echo "- Preflight: PASS"
+            echo "- DSP protocol smoke: PASS"
+            echo "- Android APK compile: PASS"
             echo "- Java: ${JAVA_VERSION}"
             echo "- Gradle: ${GRADLE_VERSION}"
-            echo "- Android: ${ANDROID_PLATFORM}"
-            echo "- Build Tools: ${ANDROID_BUILD_TOOLS}"
+            echo "- Android platform: ${ANDROID_PLATFORM}"
+            echo "- Build tools: ${ANDROID_BUILD_TOOLS}"
             echo "- APK: OKN_Peramp_DSP_V1-debug.apk"
             echo "- Artifact: OKN-Peramp-DSP-V1-APK"
           } >> "$GITHUB_STEP_SUMMARY"
