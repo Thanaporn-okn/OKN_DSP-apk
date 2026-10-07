@@ -1,4 +1,4 @@
-name: Build OKN Peramp DSP V3 - VERIFIED WRITE
+name: Build OKN Peramp DSP V4 - WRITABLE BAND UX
 
 on:
   workflow_dispatch:
@@ -12,7 +12,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: okn-peramp-dsp-v3-${{ github.ref }}
+  group: okn-peramp-dsp-v4-${{ github.ref }}
   cancel-in-progress: true
 
 env:
@@ -23,10 +23,11 @@ env:
   V1_WORKFLOW: '.github/workflows/OKN_Peramp_DSP_V1_ONE_FILE.yml'
   PATCH_SHA256: '98e8feb3dfddcf6b55851af1ff86ab69c9e944f6c4658ac1b7271f82116ea4f8'
   V3_PATCH_SHA256: 'e042d68841a9564ced9a126d3eababa6666d066298417c003c89c32e8a9f8273'
+  V4_PATCH_SHA256: 'a15d48fe5baeaa929e43b2053538316738dc9b70e5dfe0fd678e079fb406e39e'
 
 jobs:
   build-apk:
-    name: Build OKN Peramp DSP V3 APK
+    name: Build OKN Peramp DSP V4 APK
     runs-on: ubuntu-24.04
     timeout-minutes: 35
 
@@ -34,7 +35,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Restore V1 source and apply V2 + V3 patches
+      - name: Restore V1 source and apply V2 + V3 + V4 patches
         shell: bash
         run: |
           set -euo pipefail
@@ -228,13 +229,52 @@ jobs:
           gzip -dc "$V3_PATCH_GZ" > "$V3_PATCH_FILE"
           patch -p1 --batch < "$V3_PATCH_FILE"
 
-          grep -q 'versionCode 3' app/build.gradle
+          # V4 UX patch: after fresh descriptor sync, select a writable EQ row
+          # when the persisted row is readback-only; locked +/- taps now explain why.
+          V4_PATCH_B64="$RUNNER_TEMP/v4_patch.b64"
+          V4_PATCH_GZ="$RUNNER_TEMP/v4.patch.gz"
+          V4_PATCH_FILE="$RUNNER_TEMP/v4.patch"
+          cat > "$V4_PATCH_B64" <<'OKN_V4_PATCH_B64'
+          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
+          OKN_V4_PATCH_B64
+          tr -d ' \n\r\t' < "$V4_PATCH_B64" | base64 --decode > "$V4_PATCH_GZ"
+          echo "${V4_PATCH_SHA256}  $V4_PATCH_GZ" | sha256sum -c -
+          gzip -dc "$V4_PATCH_GZ" > "$V4_PATCH_FILE"
+          patch -p1 --batch < "$V4_PATCH_FILE"
+
+          grep -q 'versionCode 4' app/build.gradle
           grep -q 'LIVE_VERIFY_SETTLE_MS' app/src/main/java/com/okn/perampdsp/BleManager.java
           grep -q 'WRITE VERIFIED' app/src/main/java/com/okn/perampdsp/BleManager.java
           grep -q 'READ ONLY' app/src/main/java/com/okn/perampdsp/DspView.java
           grep -q 'LOCAL ONLY' app/src/main/java/com/okn/perampdsp/DspView.java
+          grep -q 'selectNearestGainWritableBand' app/src/main/java/com/okn/perampdsp/DspView.java
+          grep -q 'READ ONLY explanation' app/src/main/java/com/okn/perampdsp/DspView.java
           echo "PROJECT_DIR=$WORK" >> "$GITHUB_ENV"
-          echo "V3 source restore + patches: PASS"
+          echo "V4 source restore + patches: PASS"
 
       - name: Set up JDK 17
         uses: actions/setup-java@v4
@@ -266,7 +306,7 @@ jobs:
         with:
           gradle-version: ${{ env.GRADLE_VERSION }}
 
-      - name: Run V3 checks
+      - name: Run V4 checks
         shell: bash
         run: |
           set -euo pipefail
@@ -274,14 +314,14 @@ jobs:
           python3 tools/preflight.py
           bash tools/protocol_smoke.sh
 
-      - name: Build V3 debug APK
+      - name: Build V4 debug APK
         shell: bash
         run: |
           set -euo pipefail
           cd "$PROJECT_DIR"
           gradle :app:assembleDebug --no-daemon --stacktrace
 
-      - name: Package V3 APK
+      - name: Package V4 APK
         shell: bash
         run: |
           set -euo pipefail
@@ -289,15 +329,15 @@ jobs:
           test -s "$APK"
           rm -rf "$GITHUB_WORKSPACE/dist"
           mkdir -p "$GITHUB_WORKSPACE/dist"
-          cp "$APK" "$GITHUB_WORKSPACE/dist/OKN_Peramp_DSP_V3-debug.apk"
-          sha256sum "$GITHUB_WORKSPACE/dist/OKN_Peramp_DSP_V3-debug.apk" > "$GITHUB_WORKSPACE/dist/OKN_Peramp_DSP_V3-debug.apk.sha256"
+          cp "$APK" "$GITHUB_WORKSPACE/dist/OKN_Peramp_DSP_V4-debug.apk"
+          sha256sum "$GITHUB_WORKSPACE/dist/OKN_Peramp_DSP_V4-debug.apk" > "$GITHUB_WORKSPACE/dist/OKN_Peramp_DSP_V4-debug.apk.sha256"
 
-      - name: Upload V3 APK artifact
+      - name: Upload V4 APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: OKN-Peramp-DSP-V3-APK
+          name: OKN-Peramp-DSP-V4-APK
           path: |
-            dist/OKN_Peramp_DSP_V3-debug.apk
-            dist/OKN_Peramp_DSP_V3-debug.apk.sha256
+            dist/OKN_Peramp_DSP_V4-debug.apk
+            dist/OKN_Peramp_DSP_V4-debug.apk.sha256
           if-no-files-found: error
           retention-days: 30
