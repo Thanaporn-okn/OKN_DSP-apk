@@ -1,0 +1,762 @@
+name: Build OKN Peramp
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main, master ]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v4
+
+      - name: Accept Android licenses and install SDK
+        shell: bash
+        run: |
+          set -euo pipefail
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager \
+            "platform-tools" \
+            "platforms;android-35" \
+            "build-tools;35.0.0"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v6
+        with:
+          gradle-version: '8.10.2'
+
+      - name: Generate OKN Peramp project
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          rm -rf app build.gradle settings.gradle gradle.properties
+          mkdir -p app/src/main/java/com/okn/peramp
+          mkdir -p app/src/main/res/values
+          mkdir -p app/src/main/res/drawable
+
+          cat > settings.gradle <<'EOF'
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+          rootProject.name = "OKN Peramp"
+          include ':app'
+          EOF
+
+          cat > build.gradle <<'EOF'
+          plugins {
+              id 'com.android.application' version '8.7.3' apply false
+          }
+          EOF
+
+          cat > gradle.properties <<'EOF'
+          org.gradle.jvmargs=-Xmx2048m -Dfile.encoding=UTF-8
+          android.useAndroidX=false
+          android.nonTransitiveRClass=true
+          EOF
+
+          cat > app/build.gradle <<'EOF'
+          plugins {
+              id 'com.android.application'
+          }
+
+          android {
+              namespace 'com.okn.peramp'
+              compileSdk 35
+
+              defaultConfig {
+                  applicationId 'com.okn.peramp'
+                  minSdk 24
+                  targetSdk 35
+                  versionCode 1
+                  versionName '1.0.0'
+              }
+
+              buildTypes {
+                  release {
+                      minifyEnabled false
+                      proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+                  }
+              }
+
+              compileOptions {
+                  sourceCompatibility JavaVersion.VERSION_17
+                  targetCompatibility JavaVersion.VERSION_17
+              }
+          }
+          EOF
+
+          cat > app/proguard-rules.pro <<'EOF'
+          # OKN Peramp - no custom ProGuard rules yet.
+          EOF
+
+          cat > app/src/main/AndroidManifest.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+              <application
+                  android:allowBackup="true"
+                  android:label="OKN Peramp"
+                  android:theme="@style/AppTheme"
+                  android:supportsRtl="true">
+                  <activity
+                      android:name=".MainActivity"
+                      android:screenOrientation="portrait"
+                      android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+              </application>
+          </manifest>
+          EOF
+
+          cat > app/src/main/res/values/styles.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <resources>
+              <style name="AppTheme" parent="android:style/Theme.Material.NoActionBar">
+                  <item name="android:fontFamily">sans</item>
+                  <item name="android:windowLightStatusBar">false</item>
+                  <item name="android:statusBarColor">#08111D</item>
+                  <item name="android:navigationBarColor">#08111D</item>
+                  <item name="android:windowActionModeOverlay">true</item>
+                  <item name="android:colorAccent">#37CEC4</item>
+              </style>
+          </resources>
+          EOF
+
+          cat > app/src/main/res/drawable/app_background.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <shape xmlns:android="http://schemas.android.com/apk/res/android" android:shape="rectangle">
+              <gradient
+                  android:angle="315"
+                  android:startColor="#07101B"
+                  android:centerColor="#102238"
+                  android:endColor="#050B13" />
+          </shape>
+          EOF
+
+          cat > app/src/main/java/com/okn/peramp/MainActivity.java <<'EOF'
+          package com.okn.peramp;
+
+          import android.app.Activity;
+          import android.graphics.Color;
+          import android.graphics.Typeface;
+          import android.graphics.drawable.GradientDrawable;
+          import android.os.Bundle;
+          import android.view.Gravity;
+          import android.view.View;
+          import android.view.ViewGroup;
+          import android.widget.Button;
+          import android.widget.FrameLayout;
+          import android.widget.HorizontalScrollView;
+          import android.widget.LinearLayout;
+          import android.widget.ScrollView;
+          import android.widget.SeekBar;
+          import android.widget.Spinner;
+          import android.widget.ArrayAdapter;
+          import android.widget.TextView;
+          import android.widget.Toast;
+          import android.content.SharedPreferences;
+
+          import java.util.Locale;
+
+          public class MainActivity extends Activity {
+
+              private static final int TEXT = Color.rgb(246, 249, 255);
+              private static final int MUTED = Color.rgb(180, 195, 214);
+              private static final int ACCENT = Color.rgb(55, 206, 196);
+              private static final int ACCENT_2 = Color.rgb(90, 190, 255);
+              private static final int PANEL = Color.argb(222, 14, 22, 35);
+              private static final int PANEL_2 = Color.argb(205, 22, 34, 50);
+              private static final int PANEL_3 = Color.argb(215, 28, 43, 61);
+              private static final int BORDER = Color.argb(115, 220, 235, 255);
+
+              private FrameLayout pageHost;
+              private final Button[] navButtons = new Button[4];
+              private int activePage = 0;
+              private int selectedPeqChannel = 0;
+              private int selectedBand = 0;
+              private Button selectedBandButton;
+
+              private final double[] homeValues = {72, 40, 50, 120, 0, 0, 20};
+              private final double[] outputValues = {-6, -6, -6, -6, -6, -6, -6};
+              private final double[][] peqFreq = new double[10][15];
+              private final double[][] peqGain = new double[10][15];
+              private final double[][] peqQ = new double[10][15];
+              private final int[] defaultFreq = {20, 31, 50, 80, 125, 200, 315, 500, 800, 1250, 2000, 3150, 5000, 8000, 12500};
+
+              private SharedPreferences prefs;
+
+              @Override
+              protected void onCreate(Bundle savedInstanceState) {
+                  super.onCreate(savedInstanceState);
+                  prefs = getSharedPreferences("okn_peramp", MODE_PRIVATE);
+                  initPeqDefaults();
+                  loadAll();
+
+                  LinearLayout root = new LinearLayout(this);
+                  root.setOrientation(LinearLayout.VERTICAL);
+                  root.setPadding(dp(12), dp(10), dp(12), dp(10));
+                  root.setBackgroundResource(com.okn.peramp.R.drawable.app_background);
+
+                  root.addView(makeHeader());
+
+                  pageHost = new FrameLayout(this);
+                  LinearLayout.LayoutParams hostLp = new LinearLayout.LayoutParams(
+                          ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f);
+                  hostLp.topMargin = dp(10);
+                  root.addView(pageHost, hostLp);
+
+                  root.addView(makeBottomNav());
+                  setContentView(root);
+                  showPage(0);
+              }
+
+              private void initPeqDefaults() {
+                  for (int ch = 0; ch < 10; ch++) {
+                      for (int b = 0; b < 15; b++) {
+                          peqFreq[ch][b] = defaultFreq[b];
+                          peqGain[ch][b] = 0.0;
+                          peqQ[ch][b] = 1.0;
+                      }
+                  }
+              }
+
+              private View makeHeader() {
+                  LinearLayout header = panel(PANEL, 18);
+                  header.setOrientation(LinearLayout.HORIZONTAL);
+                  header.setGravity(Gravity.CENTER_VERTICAL);
+                  header.setPadding(dp(14), dp(12), dp(12), dp(12));
+
+                  TextView logo = text("OKN", 18, ACCENT, true);
+                  logo.setGravity(Gravity.CENTER);
+                  GradientDrawable logoBg = rounded(Color.argb(75, 55, 206, 196), ACCENT, 16);
+                  logo.setBackground(logoBg);
+                  LinearLayout.LayoutParams logoLp = new LinearLayout.LayoutParams(dp(54), dp(54));
+                  header.addView(logo, logoLp);
+
+                  LinearLayout titles = new LinearLayout(this);
+                  titles.setOrientation(LinearLayout.VERTICAL);
+                  titles.setPadding(dp(12), 0, 0, 0);
+                  TextView title = text("OKN Peramp", 22, TEXT, true);
+                  TextView sub = text("DSP Digital Audio Processor Preamp", 12, MUTED, false);
+                  titles.addView(title);
+                  titles.addView(sub);
+                  header.addView(titles, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+
+                  TextView offline = text("OFFLINE", 11, Color.rgb(255, 188, 92), true);
+                  offline.setGravity(Gravity.CENTER);
+                  offline.setBackground(rounded(Color.argb(90, 255, 174, 66), Color.rgb(255, 174, 66), 30));
+                  offline.setPadding(dp(12), dp(7), dp(12), dp(7));
+                  header.addView(offline);
+                  return header;
+              }
+
+              private View makeBottomNav() {
+                  LinearLayout nav = panel(PANEL, 18);
+                  nav.setOrientation(LinearLayout.HORIZONTAL);
+                  nav.setPadding(dp(6), dp(6), dp(6), dp(6));
+                  String[] names = {"HOME", "PEQ", "OUTPUT", "SET"};
+                  for (int i = 0; i < names.length; i++) {
+                      final int index = i;
+                      Button b = navButton(names[i]);
+                      b.setOnClickListener(v -> showPage(index));
+                      navButtons[i] = b;
+                      nav.addView(b, new LinearLayout.LayoutParams(0, dp(50), 1f));
+                  }
+                  LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                          ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+                  lp.topMargin = dp(10);
+                  nav.setLayoutParams(lp);
+                  return nav;
+              }
+
+              private void showPage(int page) {
+                  activePage = page;
+                  pageHost.removeAllViews();
+                  for (int i = 0; i < navButtons.length; i++) {
+                      navButtons[i].setTextColor(i == page ? Color.rgb(5, 30, 34) : MUTED);
+                      navButtons[i].setBackground(i == page
+                              ? rounded(ACCENT, ACCENT, 16)
+                              : rounded(Color.TRANSPARENT, Color.TRANSPARENT, 16));
+                  }
+                  View content;
+                  if (page == 0) content = makeHome();
+                  else if (page == 1) content = makePeq();
+                  else if (page == 2) content = makeOutput();
+                  else content = makeSet();
+                  pageHost.addView(content);
+              }
+
+              private View makeHome() {
+                  ScrollView scroll = baseScroll();
+                  LinearLayout body = body();
+                  scroll.addView(body);
+
+                  body.addView(sectionTitle("HOME / SYSTEM"));
+                  LinearLayout status = card("Device Status");
+                  status.addView(labelLine("Connection", "OFFLINE", Color.rgb(255, 188, 92)));
+                  status.addView(labelLine("Local Data", "READY", ACCENT));
+                  status.addView(labelLine("DSP Safety", "FAIL-CLOSED", ACCENT_2));
+                  body.addView(status);
+
+                  LinearLayout metrics = card("Metrics");
+                  metrics.addView(labelLine("Sample Rate", "48 kHz", TEXT));
+                  metrics.addView(labelLine("Channels", "10 PEQ / 7 OUT", TEXT));
+                  metrics.addView(labelLine("Control Step", "0.5 dB", TEXT));
+                  body.addView(metrics);
+
+                  LinearLayout audio = card("Audio Control");
+                  addAdjustRow(audio, "Master Volume", 0, 100, 1, homeValues[0], "%", v -> homeValues[0] = v);
+                  addAdjustRow(audio, "Remind Sound Volume", 0, 100, 1, homeValues[1], "%", v -> homeValues[1] = v);
+                  addAdjustRow(audio, "Bass Volume", 0, 100, 1, homeValues[2], "%", v -> homeValues[2] = v);
+                  addAdjustRow(audio, "Bass Cutoff", 40, 250, 1, homeValues[3], " Hz", v -> homeValues[3] = v);
+                  addAdjustRow(audio, "Bass Boost", -12, 12, 0.5, homeValues[4], " dB", v -> homeValues[4] = v);
+                  addAdjustRow(audio, "Treble Boost", -12, 12, 0.5, homeValues[5], " dB", v -> homeValues[5] = v);
+                  addAdjustRow(audio, "Virtual Surround", 0, 100, 1, homeValues[6], "%", v -> homeValues[6] = v);
+                  body.addView(audio);
+                  return scroll;
+              }
+
+              private View makePeq() {
+                  ScrollView scroll = baseScroll();
+                  LinearLayout body = body();
+                  scroll.addView(body);
+                  body.addView(sectionTitle("PEQ / PARAMETRIC EQUALIZER"));
+
+                  HorizontalScrollView channelScroll = new HorizontalScrollView(this);
+                  channelScroll.setHorizontalScrollBarEnabled(false);
+                  LinearLayout channels = new LinearLayout(this);
+                  channels.setOrientation(LinearLayout.HORIZONTAL);
+                  channels.setPadding(0, dp(2), 0, dp(6));
+                  for (int ch = 0; ch < 10; ch++) {
+                      final int index = ch;
+                      Button b = smallButton("CH" + (ch + 1));
+                      if (ch == selectedPeqChannel) {
+                          b.setBackground(rounded(ACCENT, ACCENT, 16));
+                          b.setTextColor(Color.rgb(5, 30, 34));
+                      }
+                      b.setOnClickListener(v -> {
+                          selectedPeqChannel = index;
+                          selectedBand = 0;
+                          showPage(1);
+                      });
+                      LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(dp(72), dp(42));
+                      lp.rightMargin = dp(6);
+                      channels.addView(b, lp);
+                  }
+                  channelScroll.addView(channels);
+                  body.addView(channelScroll);
+
+                  LinearLayout bandsCard = card("15-Band PEQ — CH" + (selectedPeqChannel + 1));
+                  for (int row = 0; row < 5; row++) {
+                      LinearLayout rowView = new LinearLayout(this);
+                      rowView.setOrientation(LinearLayout.HORIZONTAL);
+                      for (int col = 0; col < 3; col++) {
+                          int band = row * 3 + col;
+                          final int bIndex = band;
+                          Button b = bandButton(band);
+                          if (band == selectedBand) selectedBandButton = b;
+                          b.setOnClickListener(v -> {
+                              selectedBand = bIndex;
+                              showPage(1);
+                          });
+                          LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, dp(86), 1f);
+                          lp.setMargins(dp(3), dp(3), dp(3), dp(3));
+                          rowView.addView(b, lp);
+                      }
+                      bandsCard.addView(rowView);
+                  }
+                  body.addView(bandsCard);
+
+                  LinearLayout editor = card("Band Editor — B" + String.format(Locale.US, "%02d", selectedBand + 1));
+                  addAdjustRow(editor, "Frequency", 20, 20000, 1,
+                          peqFreq[selectedPeqChannel][selectedBand], " Hz", v -> {
+                              peqFreq[selectedPeqChannel][selectedBand] = v;
+                              refreshSelectedBandText();
+                          });
+                  addAdjustRow(editor, "Gain", -12, 12, 0.5,
+                          peqGain[selectedPeqChannel][selectedBand], " dB", v -> {
+                              peqGain[selectedPeqChannel][selectedBand] = v;
+                              refreshSelectedBandText();
+                          });
+                  addAdjustRow(editor, "Q", 0.1, 10.0, 0.1,
+                          peqQ[selectedPeqChannel][selectedBand], "", v -> {
+                              peqQ[selectedPeqChannel][selectedBand] = v;
+                              refreshSelectedBandText();
+                          });
+                  body.addView(editor);
+                  return scroll;
+              }
+
+              private void refreshSelectedBandText() {
+                  if (selectedBandButton != null) {
+                      selectedBandButton.setText(bandText(selectedBand));
+                  }
+              }
+
+              private Button bandButton(int band) {
+                  Button b = new Button(this);
+                  b.setAllCaps(false);
+                  b.setText(bandText(band));
+                  b.setTextSize(12);
+                  b.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+                  b.setPadding(dp(4), dp(4), dp(4), dp(4));
+                  boolean selected = band == selectedBand;
+                  b.setTextColor(selected ? Color.rgb(5, 30, 34) : TEXT);
+                  b.setBackground(selected
+                          ? rounded(ACCENT, ACCENT, 14)
+                          : rounded(PANEL_3, BORDER, 14));
+                  return b;
+              }
+
+              private String bandText(int band) {
+                  return "B" + String.format(Locale.US, "%02d", band + 1)
+                          + "\n" + format(peqFreq[selectedPeqChannel][band]) + " Hz"
+                          + "\n" + signed(peqGain[selectedPeqChannel][band]) + " dB";
+              }
+
+              private View makeOutput() {
+                  ScrollView scroll = baseScroll();
+                  LinearLayout body = body();
+                  scroll.addView(body);
+                  body.addView(sectionTitle("OUTPUT / CHANNEL TRIM"));
+                  LinearLayout card = card("CH1–CH7 Output Level");
+                  for (int i = 0; i < 7; i++) {
+                      final int ch = i;
+                      addAdjustRow(card, "CH" + (i + 1), -70, 6, 0.5, outputValues[i], " dB", v -> outputValues[ch] = v);
+                  }
+                  body.addView(card);
+                  return scroll;
+              }
+
+              private View makeSet() {
+                  ScrollView scroll = baseScroll();
+                  LinearLayout body = body();
+                  scroll.addView(body);
+                  body.addView(sectionTitle("SET / SETTINGS"));
+
+                  LinearLayout localeCard = card("Locale");
+                  String[] locales = {
+                          "English", "ไทย", "中文", "日本語", "한국어", "Deutsch", "Français",
+                          "Español", "Português", "Italiano", "Русский", "العربية", "हिन्दी",
+                          "Bahasa Indonesia", "Tiếng Việt", "Türkçe", "Nederlands"
+                  };
+                  Spinner spinner = new Spinner(this);
+                  ArrayAdapter<String> adapter = new ArrayAdapter<String>(this, android.R.layout.simple_spinner_dropdown_item, locales) {
+                      @Override
+                      public View getView(int position, View convertView, ViewGroup parent) {
+                          TextView v = (TextView) super.getView(position, convertView, parent);
+                          v.setTextColor(TEXT);
+                          v.setTextSize(15);
+                          return v;
+                      }
+                  };
+                  spinner.setAdapter(adapter);
+                  spinner.setSelection(prefs.getInt("locale_index", 0));
+                  localeCard.addView(spinner, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(54)));
+                  body.addView(localeCard);
+
+                  LinearLayout data = card("Parameters");
+                  Button save = actionButton("SAVE PARAMETERS", ACCENT);
+                  save.setOnClickListener(v -> {
+                      prefs.edit().putInt("locale_index", spinner.getSelectedItemPosition()).apply();
+                      saveAll();
+                      Toast.makeText(this, "Parameters saved", Toast.LENGTH_SHORT).show();
+                  });
+                  data.addView(save);
+
+                  Button reset = actionButton("RESET LOCAL VALUES", Color.rgb(255, 174, 66));
+                  LinearLayout.LayoutParams resetLp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(52));
+                  resetLp.topMargin = dp(8);
+                  reset.setLayoutParams(resetLp);
+                  reset.setOnClickListener(v -> {
+                      prefs.edit().clear().apply();
+                      resetModel();
+                      Toast.makeText(this, "Local values reset", Toast.LENGTH_SHORT).show();
+                      showPage(3);
+                  });
+                  data.addView(reset);
+                  body.addView(data);
+
+                  LinearLayout safety = card("Fail-Closed Safety");
+                  TextView safe = text("SAFE MODE ACTIVE\nNo external DSP hardware session is opened while status is OFFLINE. UI values remain local until integrated with a supported DSP transport/audio engine.", 13, MUTED, false);
+                  safe.setPadding(0, dp(4), 0, dp(4));
+                  safety.addView(safe);
+                  body.addView(safety);
+                  return scroll;
+              }
+
+              private void resetModel() {
+                  double[] defaults = {72, 40, 50, 120, 0, 0, 20};
+                  System.arraycopy(defaults, 0, homeValues, 0, homeValues.length);
+                  for (int i = 0; i < outputValues.length; i++) outputValues[i] = -6;
+                  initPeqDefaults();
+              }
+
+              private void saveAll() {
+                  SharedPreferences.Editor e = prefs.edit();
+                  for (int i = 0; i < homeValues.length; i++) e.putFloat("home_" + i, (float) homeValues[i]);
+                  for (int i = 0; i < outputValues.length; i++) e.putFloat("out_" + i, (float) outputValues[i]);
+                  for (int ch = 0; ch < 10; ch++) {
+                      for (int b = 0; b < 15; b++) {
+                          e.putFloat("pf_" + ch + "_" + b, (float) peqFreq[ch][b]);
+                          e.putFloat("pg_" + ch + "_" + b, (float) peqGain[ch][b]);
+                          e.putFloat("pq_" + ch + "_" + b, (float) peqQ[ch][b]);
+                      }
+                  }
+                  e.apply();
+              }
+
+              private void loadAll() {
+                  for (int i = 0; i < homeValues.length; i++) homeValues[i] = prefs.getFloat("home_" + i, (float) homeValues[i]);
+                  for (int i = 0; i < outputValues.length; i++) outputValues[i] = prefs.getFloat("out_" + i, (float) outputValues[i]);
+                  for (int ch = 0; ch < 10; ch++) {
+                      for (int b = 0; b < 15; b++) {
+                          peqFreq[ch][b] = prefs.getFloat("pf_" + ch + "_" + b, (float) peqFreq[ch][b]);
+                          peqGain[ch][b] = prefs.getFloat("pg_" + ch + "_" + b, (float) peqGain[ch][b]);
+                          peqQ[ch][b] = prefs.getFloat("pq_" + ch + "_" + b, (float) peqQ[ch][b]);
+                      }
+                  }
+              }
+
+              private interface ValueChange { void onChange(double value); }
+
+              private void addAdjustRow(LinearLayout parent, String name, double min, double max, double step,
+                                        double initial, String suffix, ValueChange callback) {
+                  LinearLayout block = new LinearLayout(this);
+                  block.setOrientation(LinearLayout.VERTICAL);
+                  block.setPadding(0, dp(8), 0, dp(8));
+
+                  LinearLayout head = new LinearLayout(this);
+                  head.setOrientation(LinearLayout.HORIZONTAL);
+                  TextView label = text(name, 14, TEXT, true);
+                  TextView value = text(formatValue(initial, step, suffix), 14, ACCENT, true);
+                  value.setGravity(Gravity.END);
+                  head.addView(label, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+                  head.addView(value, new LinearLayout.LayoutParams(dp(110), ViewGroup.LayoutParams.WRAP_CONTENT));
+                  block.addView(head);
+
+                  LinearLayout controls = new LinearLayout(this);
+                  controls.setOrientation(LinearLayout.HORIZONTAL);
+                  controls.setGravity(Gravity.CENTER_VERTICAL);
+
+                  Button minus = smallButton("−");
+                  Button plus = smallButton("+");
+                  SeekBar seek = new SeekBar(this);
+                  int maxProgress = (int) Math.round((max - min) / step);
+                  seek.setMax(maxProgress);
+                  int start = (int) Math.round((initial - min) / step);
+                  seek.setProgress(Math.max(0, Math.min(maxProgress, start)));
+                  if (android.os.Build.VERSION.SDK_INT >= 21) {
+                      seek.setProgressTintList(android.content.res.ColorStateList.valueOf(ACCENT));
+                      seek.setThumbTintList(android.content.res.ColorStateList.valueOf(ACCENT_2));
+                  }
+
+                  View.OnClickListener minusClick = v -> seek.setProgress(Math.max(0, seek.getProgress() - 1));
+                  View.OnClickListener plusClick = v -> seek.setProgress(Math.min(seek.getMax(), seek.getProgress() + 1));
+                  minus.setOnClickListener(minusClick);
+                  plus.setOnClickListener(plusClick);
+
+                  seek.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+                      @Override public void onProgressChanged(SeekBar seekBar, int progress, boolean fromUser) {
+                          double v = min + progress * step;
+                          callback.onChange(v);
+                          value.setText(formatValue(v, step, suffix));
+                      }
+                      @Override public void onStartTrackingTouch(SeekBar seekBar) { }
+                      @Override public void onStopTrackingTouch(SeekBar seekBar) { }
+                  });
+
+                  controls.addView(minus, new LinearLayout.LayoutParams(dp(48), dp(42)));
+                  controls.addView(seek, new LinearLayout.LayoutParams(0, dp(48), 1f));
+                  controls.addView(plus, new LinearLayout.LayoutParams(dp(48), dp(42)));
+                  block.addView(controls);
+
+                  View divider = new View(this);
+                  divider.setBackgroundColor(Color.argb(45, 220, 235, 255));
+                  LinearLayout.LayoutParams divLp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(1));
+                  block.addView(divider, divLp);
+                  parent.addView(block);
+              }
+
+              private LinearLayout labelLine(String left, String right, int rightColor) {
+                  LinearLayout row = new LinearLayout(this);
+                  row.setOrientation(LinearLayout.HORIZONTAL);
+                  row.setPadding(0, dp(6), 0, dp(6));
+                  row.addView(text(left, 14, MUTED, false), new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+                  TextView r = text(right, 14, rightColor, true);
+                  r.setGravity(Gravity.END);
+                  row.addView(r);
+                  return row;
+              }
+
+              private LinearLayout card(String title) {
+                  LinearLayout card = panel(PANEL_2, 18);
+                  card.setOrientation(LinearLayout.VERTICAL);
+                  card.setPadding(dp(14), dp(12), dp(14), dp(12));
+                  TextView t = text(title, 16, ACCENT_2, true);
+                  t.setPadding(0, 0, 0, dp(6));
+                  card.addView(t);
+                  LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+                  lp.bottomMargin = dp(10);
+                  card.setLayoutParams(lp);
+                  return card;
+              }
+
+              private LinearLayout panel(int color, int radiusDp) {
+                  LinearLayout v = new LinearLayout(this);
+                  v.setBackground(rounded(color, BORDER, radiusDp));
+                  return v;
+              }
+
+              private GradientDrawable rounded(int fill, int stroke, int radiusDp) {
+                  GradientDrawable g = new GradientDrawable();
+                  g.setColor(fill);
+                  g.setCornerRadius(dp(radiusDp));
+                  if (stroke != Color.TRANSPARENT) g.setStroke(dp(1), stroke);
+                  return g;
+              }
+
+              private ScrollView baseScroll() {
+                  ScrollView s = new ScrollView(this);
+                  s.setFillViewport(true);
+                  s.setClipToPadding(false);
+                  s.setPadding(0, 0, 0, dp(4));
+                  return s;
+              }
+
+              private LinearLayout body() {
+                  LinearLayout b = new LinearLayout(this);
+                  b.setOrientation(LinearLayout.VERTICAL);
+                  b.setPadding(0, 0, 0, dp(12));
+                  return b;
+              }
+
+              private TextView sectionTitle(String title) {
+                  TextView t = text(title, 13, MUTED, true);
+                  t.setPadding(dp(4), dp(2), 0, dp(8));
+                  return t;
+              }
+
+              private Button navButton(String text) {
+                  Button b = new Button(this);
+                  b.setText(text);
+                  b.setTextSize(12);
+                  b.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+                  b.setAllCaps(false);
+                  b.setPadding(0, 0, 0, 0);
+                  return b;
+              }
+
+              private Button smallButton(String text) {
+                  Button b = new Button(this);
+                  b.setText(text);
+                  b.setTextSize(15);
+                  b.setTextColor(TEXT);
+                  b.setAllCaps(false);
+                  b.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+                  b.setPadding(dp(4), 0, dp(4), 0);
+                  b.setBackground(rounded(PANEL_3, BORDER, 14));
+                  return b;
+              }
+
+              private Button actionButton(String text, int color) {
+                  Button b = new Button(this);
+                  b.setText(text);
+                  b.setAllCaps(false);
+                  b.setTextSize(14);
+                  b.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+                  b.setTextColor(Color.rgb(5, 30, 34));
+                  b.setBackground(rounded(color, color, 16));
+                  b.setLayoutParams(new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(52)));
+                  return b;
+              }
+
+              private TextView text(String value, int sp, int color, boolean bold) {
+                  TextView t = new TextView(this);
+                  t.setText(value);
+                  t.setTextSize(sp);
+                  t.setTextColor(color);
+                  if (bold) t.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+                  return t;
+              }
+
+              private String formatValue(double value, double step, String suffix) {
+                  String number = step < 1 ? String.format(Locale.US, "%.1f", value) : String.format(Locale.US, "%.0f", value);
+                  if (suffix.contains("dB") && value > 0) number = "+" + number;
+                  return number + suffix;
+              }
+
+              private String format(double value) {
+                  if (Math.abs(value - Math.rint(value)) < 0.0001) return String.format(Locale.US, "%.0f", value);
+                  return String.format(Locale.US, "%.1f", value);
+              }
+
+              private String signed(double value) {
+                  return (value > 0 ? "+" : "") + String.format(Locale.US, "%.1f", value);
+              }
+
+              private int dp(int value) {
+                  return (int) (value * getResources().getDisplayMetrics().density + 0.5f);
+              }
+          }
+          EOF
+
+      - name: Build debug APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          gradle --version
+          gradle :app:assembleDebug --stacktrace
+          cp app/build/outputs/apk/debug/app-debug.apk OKN-Peramp-debug.apk
+
+      - name: Package generated source
+        shell: bash
+        run: |
+          set -euo pipefail
+          zip -r OKN-Peramp-source.zip \
+            app \
+            build.gradle \
+            settings.gradle \
+            gradle.properties \
+            -x "*/build/*"
+
+      - name: Upload APK and source
+        uses: actions/upload-artifact@v6
+        with:
+          name: OKN-Peramp-build
+          path: |
+            OKN-Peramp-debug.apk
+            OKN-Peramp-source.zip
+          if-no-files-found: error
+          retention-days: 30
