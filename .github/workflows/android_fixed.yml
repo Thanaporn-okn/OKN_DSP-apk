@@ -1,0 +1,57 @@
+name: Build OKN Peramp APK
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'OKN_Peramp_Source_Only.zip'
+      - '.github/workflows/android.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Gradle 8.9
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: Prepare Android SDK 35
+        shell: bash
+        run: |
+          yes | sdkmanager --licenses >/dev/null 2>&1 || true
+          sdkmanager 'platforms;android-35' 'build-tools;35.0.0'
+
+      - name: Extract OKN Peramp source
+        shell: bash
+        run: |
+          rm -rf OKN_Peramp_build
+          mkdir -p OKN_Peramp_build
+          unzip -q OKN_Peramp_Source_Only.zip -d OKN_Peramp_build
+          test -f OKN_Peramp_build/settings.gradle
+          test -f OKN_Peramp_build/build.gradle
+          test -f OKN_Peramp_build/app/build.gradle
+
+      - name: Build debug APK
+        working-directory: OKN_Peramp_build
+        run: gradle --no-daemon :app:assembleDebug
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: OKN-Peramp-debug
+          path: OKN_Peramp_build/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
