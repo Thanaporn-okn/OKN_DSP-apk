@@ -1,0 +1,1832 @@
+name: OKN Peramp V5 - Real DSP Build
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - ".github/workflows/OKNPV5.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: okn-peramp-v5-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  APP_NAME: OKN_Peramp
+  PACKAGE_NAME: com.okn.peramp
+  COMPILE_SDK: "35"
+  BUILD_TOOLS: "35.0.0"
+  GRADLE_VERSION: "8.9"
+
+jobs:
+  build:
+    name: Build OKN Peramp V5 APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Java 17
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v4
+
+      - name: Install only required Android SDK packages
+        shell: bash
+        run: |
+          set -euo pipefail
+          sdkmanager --install \
+            "platform-tools" \
+            "platforms;android-${COMPILE_SDK}" \
+            "build-tools;${BUILD_TOOLS}"
+          sdkmanager --list_installed | grep -E "platforms;android-${COMPILE_SDK}|build-tools;${BUILD_TOOLS}"
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v6
+        with:
+          gradle-version: "${{ env.GRADLE_VERSION }}"
+
+      - name: Generate clean-room OKN Peramp V5 project
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          rm -rf generated-okn-peramp
+          mkdir -p generated-okn-peramp/app/src/main/java/com/okn/peramp
+
+          cat > generated-okn-peramp/settings.gradle.kts <<'EOF'
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+
+          rootProject.name = "OKN_Peramp_V5"
+          include(":app")
+          EOF
+
+          cat > generated-okn-peramp/build.gradle.kts <<'EOF'
+          plugins {
+              id("com.android.application") version "8.7.3" apply false
+              id("org.jetbrains.kotlin.android") version "2.0.21" apply false
+          }
+          EOF
+
+          cat > generated-okn-peramp/gradle.properties <<'EOF'
+          org.gradle.jvmargs=-Xmx3g -Dfile.encoding=UTF-8
+          android.useAndroidX=false
+          kotlin.code.style=official
+          EOF
+
+          cat > generated-okn-peramp/app/build.gradle.kts <<'EOF'
+          plugins {
+              id("com.android.application")
+              id("org.jetbrains.kotlin.android")
+          }
+
+          android {
+              namespace = "com.okn.peramp"
+              compileSdk = 35
+
+              defaultConfig {
+                  applicationId = "com.okn.peramp"
+                  minSdk = 26
+                  targetSdk = 35
+                  versionCode = 5
+                  versionName = "5.0.0-real-hardware"
+              }
+
+              buildTypes {
+                  getByName("debug") {
+                      isMinifyEnabled = false
+                  }
+                  getByName("release") {
+                      isMinifyEnabled = false
+                      proguardFiles(
+                          getDefaultProguardFile("proguard-android-optimize.txt"),
+                          "proguard-rules.pro"
+                      )
+                  }
+              }
+
+              compileOptions {
+                  sourceCompatibility = JavaVersion.VERSION_17
+                  targetCompatibility = JavaVersion.VERSION_17
+              }
+
+              kotlinOptions {
+                  jvmTarget = "17"
+              }
+          }
+          EOF
+
+          cat > generated-okn-peramp/app/proguard-rules.pro <<'EOF'
+          # OKN Peramp V5 - no shrinking rules required yet.
+          EOF
+
+          cat > generated-okn-peramp/app/src/main/AndroidManifest.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+              <uses-feature
+                  android:name="android.hardware.bluetooth_le"
+                  android:required="true" />
+
+              <uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30" />
+              <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" android:maxSdkVersion="30" />
+              <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" android:maxSdkVersion="30" />
+              <uses-permission
+                  android:name="android.permission.BLUETOOTH_SCAN"
+                  android:usesPermissionFlags="neverForLocation" />
+              <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+
+              <application
+                  android:allowBackup="false"
+                  android:label="OKN Peramp"
+                  android:supportsRtl="true"
+                  android:theme="@android:style/Theme.Material.NoActionBar">
+
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true"
+                      android:screenOrientation="portrait">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+              </application>
+
+          </manifest>
+          EOF
+
+          cat > generated-okn-peramp/app/src/main/java/com/okn/peramp/MainActivity.kt <<'EOF'
+          package com.okn.peramp
+
+          import android.Manifest
+          import android.app.Activity
+          import android.app.AlertDialog
+          import android.bluetooth.BluetoothAdapter
+          import android.bluetooth.BluetoothDevice
+          import android.bluetooth.BluetoothGatt
+          import android.bluetooth.BluetoothGattCallback
+          import android.bluetooth.BluetoothGattCharacteristic
+          import android.bluetooth.BluetoothGattDescriptor
+          import android.bluetooth.BluetoothGattService
+          import android.bluetooth.BluetoothManager
+          import android.bluetooth.BluetoothProfile
+          import android.bluetooth.le.ScanCallback
+          import android.bluetooth.le.ScanResult
+          import android.content.Context
+          import android.content.pm.PackageManager
+          import android.graphics.Color
+          import android.os.Build
+          import android.os.Bundle
+          import android.os.Handler
+          import android.os.Looper
+          import android.os.ParcelUuid
+          import android.view.Gravity
+          import android.view.View
+          import android.widget.Button
+          import android.widget.HorizontalScrollView
+          import android.widget.LinearLayout
+          import android.widget.ScrollView
+          import android.widget.TextView
+          import android.widget.Toast
+          import java.io.ByteArrayOutputStream
+          import java.nio.ByteBuffer
+          import java.nio.ByteOrder
+          import java.nio.charset.StandardCharsets
+          import java.util.ArrayDeque
+          import java.util.Locale
+          import java.util.UUID
+          import javax.crypto.Cipher
+          import javax.crypto.spec.IvParameterSpec
+          import javax.crypto.spec.SecretKeySpec
+          import kotlin.math.PI
+          import kotlin.math.abs
+          import kotlin.math.cos
+          import kotlin.math.pow
+          import kotlin.math.sin
+          import org.json.JSONObject
+
+          private object VerifiedProtocol {
+              val SERVICE_UUID: UUID = UUID.fromString("0000ab00-0000-1000-8000-00805f9b34fb")
+              val WRITE_UUID: UUID = UUID.fromString("0000ab01-0000-1000-8000-00805f9b34fb")
+              val NOTIFY_UUID: UUID = UUID.fromString("0000ab02-0000-1000-8000-00805f9b34fb")
+              val NOTIFY2_UUID: UUID = UUID.fromString("0000ab03-0000-1000-8000-00805f9b34fb")
+              val CCCD_UUID: UUID = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
+
+              val AUTH16: ByteArray = hex("631C062443FD3844558001F3EDA0CCF8")
+              val DEVICE_DESCRIPTION_REQUEST: ByteArray = hex("661C0624")
+              val PREAUTH_53284: ByteArray = hex("2AAF948632A59FF8F2B23E6E4193FD21")
+              val PREAUTH_53285: ByteArray = hex("10E7D2F443924938A28D759BAC0E9E22")
+              val SAVE_PARAMS: ByteArray = hex("570000000700000000")
+              val IV: ByteArray = ByteArray(16) { 0x01 }
+
+              const val TYPE_53284 = 53284
+              const val TYPE_53285 = 53285
+
+              const val WRITE_ACTUATOR = 0x57
+              const val MASTER_VOLUME_ID = 2
+              val EQ_IDS = intArrayOf(4, 5, 6, 14, 15, 16, 17)
+              const val EQ_BANDS = 15
+              const val EQ_RECORD_BYTES = 48
+              const val PEAKING_TYPE = 12
+              const val SAMPLE_RATE = 44100.0
+
+              fun ufeWrite(id: Int, offset: Int, payload: ByteArray): ByteArray {
+                  require(offset in 0..0xFFFF)
+                  require(payload.size in 0..0xFFFF)
+                  val out = ByteBuffer.allocate(9 + payload.size).order(ByteOrder.BIG_ENDIAN)
+                  out.put(WRITE_ACTUATOR.toByte())
+                  out.putInt(id)
+                  out.putShort(offset.toShort())
+                  out.putShort(payload.size.toShort())
+                  out.put(payload)
+                  return out.array()
+              }
+
+              fun float32Le(value: Float): ByteArray =
+                  ByteBuffer.allocate(4).order(ByteOrder.LITTLE_ENDIAN).putFloat(value).array()
+
+              fun hex(text: String): ByteArray {
+                  val clean = text.replace(" ", "").replace("\n", "")
+                  require(clean.length % 2 == 0)
+                  return ByteArray(clean.length / 2) { i ->
+                      clean.substring(i * 2, i * 2 + 2).toInt(16).toByte()
+                  }
+              }
+
+              fun toHex(bytes: ByteArray): String =
+                  bytes.joinToString("") { "%02X".format(Locale.US, it.toInt() and 0xFF) }
+          }
+
+          data class EqBandRecord(
+              val type: Int,
+              val f: Float,
+              val f2: Float,
+              val q: Float,
+              val b: Float,
+              val g: Float,
+              val r: Float,
+              val b0: Float,
+              val b1: Float,
+              val b2: Float,
+              val a1: Float,
+              val a2: Float
+          ) {
+              val safeGainWritable: Boolean
+                  get() = type == VerifiedProtocol.PEAKING_TYPE && abs(r) < 0.00001f
+
+              fun withGainDb(targetDb: Float): EqBandRecord {
+                  require(safeGainWritable)
+                  val gain = targetDb.coerceIn(-12f, 12f)
+                  val a = 10.0.pow(gain / 40.0)
+                  val w0 = 2.0 * PI * f / VerifiedProtocol.SAMPLE_RATE
+                  val alpha = sin(w0) / (2.0 * q)
+                  val a0n = 1.0 + alpha / a
+
+                  val nb0 = ((1.0 + alpha * a) / a0n).toFloat()
+                  val nb1 = ((-2.0 * cos(w0)) / a0n).toFloat()
+                  val nb2 = ((1.0 - alpha * a) / a0n).toFloat()
+                  val na1 = ((-2.0 * cos(w0)) / a0n).toFloat()
+                  val na2 = ((1.0 - alpha / a) / a0n).toFloat()
+
+                  return copy(
+                      b = gain,
+                      b0 = nb0,
+                      b1 = nb1,
+                      b2 = nb2,
+                      a1 = na1,
+                      a2 = na2
+                  )
+              }
+
+              fun encode(): ByteArray {
+                  return ByteBuffer.allocate(VerifiedProtocol.EQ_RECORD_BYTES)
+                      .order(ByteOrder.LITTLE_ENDIAN)
+                      .putInt(type)
+                      .putFloat(f)
+                      .putFloat(f2)
+                      .putFloat(q)
+                      .putFloat(b)
+                      .putFloat(g)
+                      .putFloat(r)
+                      .putFloat(b0)
+                      .putFloat(b1)
+                      .putFloat(b2)
+                      .putFloat(a1)
+                      .putFloat(a2)
+                      .array()
+              }
+
+              companion object {
+                  fun fromJson(o: JSONObject): EqBandRecord {
+                      return EqBandRecord(
+                          type = o.optInt("typ", -1),
+                          f = o.optDouble("F", 0.0).toFloat(),
+                          f2 = o.optDouble("F2", 0.0).toFloat(),
+                          q = o.optDouble("Q", 0.0).toFloat(),
+                          b = o.optDouble("B", 0.0).toFloat(),
+                          g = o.optDouble("G", 0.0).toFloat(),
+                          r = o.optDouble("R", 0.0).toFloat(),
+                          b0 = o.optDouble("B0", 0.0).toFloat(),
+                          b1 = o.optDouble("B1", 0.0).toFloat(),
+                          b2 = o.optDouble("B2", 0.0).toFloat(),
+                          a1 = o.optDouble("A1", 0.0).toFloat(),
+                          a2 = o.optDouble("A2", 0.0).toFloat()
+                      )
+                  }
+              }
+          }
+
+          data class DspSnapshot(
+              val masterVolume: Float?,
+              val eqByActuator: Map<Int, List<EqBandRecord>>,
+              val sensorCount: Int,
+              val actuatorCount: Int,
+              val rawJson: String
+          ) {
+              fun eqBand(channelIndex: Int, bandIndex: Int): EqBandRecord? {
+                  val id = VerifiedProtocol.EQ_IDS.getOrNull(channelIndex) ?: return null
+                  return eqByActuator[id]?.getOrNull(bandIndex)
+              }
+
+              val safePeakingCount: Int
+                  get() = eqByActuator.values.sumOf { bands -> bands.count { it.safeGainWritable } }
+
+              companion object {
+                  fun parse(json: String): DspSnapshot {
+                      val root = JSONObject(json)
+                      val actuators = root.optJSONArray("actuators")
+                      val sensors = root.optJSONArray("sensors")
+                      var master: Float? = null
+                      val eq = linkedMapOf<Int, List<EqBandRecord>>()
+
+                      if (actuators != null) {
+                          for (i in 0 until actuators.length()) {
+                              val a = actuators.optJSONObject(i) ?: continue
+                              val id = a.optInt("ID", -1)
+
+                              if (id == VerifiedProtocol.MASTER_VOLUME_ID &&
+                                  a.has("UFE_TYPE_FLOAT32")) {
+                                  master = a.optDouble("UFE_TYPE_FLOAT32", Double.NaN)
+                                      .takeUnless { it.isNaN() }
+                                      ?.toFloat()
+                              }
+
+                              if (VerifiedProtocol.EQ_IDS.contains(id)) {
+                                  val array = a.optJSONArray("UFE_TYPE_BIQUAD_CASCADE15_F") ?: continue
+                                  val bands = ArrayList<EqBandRecord>(array.length())
+                                  for (b in 0 until array.length()) {
+                                      val row = array.optJSONObject(b) ?: continue
+                                      bands += EqBandRecord.fromJson(row)
+                                  }
+                                  eq[id] = bands
+                              }
+                          }
+                      }
+
+                      return DspSnapshot(
+                          masterVolume = master,
+                          eqByActuator = eq,
+                          sensorCount = sensors?.length() ?: 0,
+                          actuatorCount = actuators?.length() ?: 0,
+                          rawJson = json
+                      )
+                  }
+              }
+          }
+
+          private class DescriptorCollector(
+              private val onComplete: (String) -> Unit,
+              private val onError: (String) -> Unit
+          ) {
+              private var expected = -1
+              private val data = ByteArrayOutputStream()
+
+              fun reset() {
+                  expected = -1
+                  data.reset()
+              }
+
+              fun accept(packet: ByteArray) {
+                  if (packet.isEmpty()) return
+                  when (packet[0].toInt() and 0xFF) {
+                      0x86 -> {
+                          if (packet.size < 4) {
+                              onError("Descriptor start packet too short")
+                              return
+                          }
+                          expected = (packet[1].toInt() and 0xFF) or
+                              ((packet[2].toInt() and 0xFF) shl 8) or
+                              ((packet[3].toInt() and 0xFF) shl 16)
+                          data.reset()
+                          if (packet.size > 4) data.write(packet, 4, packet.size - 4)
+                          tryFinish()
+                      }
+                      0x82 -> {
+                          if (expected <= 0) return
+                          if (packet.size > 1) data.write(packet, 1, packet.size - 1)
+                          tryFinish()
+                      }
+                  }
+              }
+
+              private fun tryFinish() {
+                  if (expected <= 0 || data.size() < expected) return
+                  val bytes = data.toByteArray().copyOf(expected)
+                  val json = String(bytes, StandardCharsets.UTF_8)
+                  reset()
+                  onComplete(json)
+              }
+          }
+
+          private class DspBleClient(
+              private val context: Context,
+              private val listener: Listener
+          ) {
+              interface Listener {
+                  fun onState(text: String, connected: Boolean)
+                  fun onSnapshot(snapshot: DspSnapshot)
+                  fun onLog(line: String)
+              }
+
+              private data class Tx(
+                  val plain: ByteArray,
+                  val encrypted: Boolean,
+                  val label: String,
+                  val onDone: ((Boolean) -> Unit)?
+              )
+
+              private val handler = Handler(Looper.getMainLooper())
+              private val manager = context.getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager
+              private val adapter: BluetoothAdapter? get() = manager.adapter
+              private val scanner get() = adapter?.bluetoothLeScanner
+
+              private var gatt: BluetoothGatt? = null
+              private var writeChar: BluetoothGattCharacteristic? = null
+              private var notifyChar: BluetoothGattCharacteristic? = null
+              private var notify2Char: BluetoothGattCharacteristic? = null
+
+              private val txQueue = ArrayDeque<Tx>()
+              private var txInFlight: Tx? = null
+              private var lastWriteMs = 0L
+
+              private var sessionTx: Cipher? = null
+              private var sessionRx: Cipher? = null
+              private var authenticated = false
+              private var descriptorCallback: ((DspSnapshot?) -> Unit)? = null
+              private var descriptorRequestActive = false
+
+              private val descriptorCollector = DescriptorCollector(
+                  onComplete = { json ->
+                      try {
+                          val snap = DspSnapshot.parse(json)
+                          listener.onLog(
+                              "Descriptor OK: ${json.toByteArray().size} B, " +
+                                  "actuators=${snap.actuatorCount}, sensors=${snap.sensorCount}, " +
+                                  "EQ=${snap.eqByActuator.values.sumOf { it.size }}, safe=${snap.safePeakingCount}"
+                          )
+                          if (snap.eqByActuator.values.sumOf { it.size } != 105 ||
+                              snap.safePeakingCount != 55) {
+                              listener.onLog("SAFE GATE LOCKED: expected 105 EQ rows and exactly 55 R=0 PEAKING rows")
+                          }
+                          listener.onSnapshot(snap)
+                          descriptorCallback?.invoke(snap)
+                          descriptorCallback = null
+                          descriptorRequestActive = false
+                          listener.onState("READY", true)
+                      } catch (t: Throwable) {
+                          listener.onLog("Descriptor parse failed: ${t.message}")
+                          descriptorCallback?.invoke(null)
+                          descriptorCallback = null
+                          descriptorRequestActive = false
+                          listener.onState("DESCRIPTOR ERROR", false)
+                      }
+                  },
+                  onError = {
+                      listener.onLog(it)
+                      descriptorCallback?.invoke(null)
+                      descriptorCallback = null
+                      descriptorRequestActive = false
+                  }
+              )
+
+              private val scanCallback = object : ScanCallback() {
+                  override fun onScanResult(callbackType: Int, result: ScanResult) {
+                      val device = result.device ?: return
+                      val name = if (hasConnectPermission()) {
+                          try { device.name ?: result.scanRecord?.deviceName ?: "" }
+                          catch (_: SecurityException) { result.scanRecord?.deviceName ?: "" }
+                      } else {
+                          result.scanRecord?.deviceName ?: ""
+                      }
+                      val services = result.scanRecord?.serviceUuids ?: emptyList<ParcelUuid>()
+                      val serviceMatch = services.any { it.uuid == VerifiedProtocol.SERVICE_UUID }
+                      val nameMatch = name.contains("GoloPine", true) ||
+                          name.contains("DSP_Amplifier", true) ||
+                          name.contains("LE-GoloPine", true)
+
+                      if (serviceMatch || nameMatch) {
+                          listener.onLog("Found target ${name.ifBlank { device.address }} RSSI=${result.rssi}")
+                          stopScan()
+                          connect(device)
+                      }
+                  }
+
+                  override fun onScanFailed(errorCode: Int) {
+                      listener.onState("SCAN FAILED $errorCode", false)
+                      listener.onLog("BLE scan failed: $errorCode")
+                  }
+              }
+
+              private val gattCallback = object : BluetoothGattCallback() {
+                  override fun onConnectionStateChange(g: BluetoothGatt, status: Int, newState: Int) {
+                      if (newState == BluetoothProfile.STATE_CONNECTED && status == BluetoothGatt.GATT_SUCCESS) {
+                          gatt = g
+                          listener.onState("CONNECTED • DISCOVERING", true)
+                          listener.onLog("GATT connected")
+                          if (hasConnectPermission()) {
+                              @Suppress("MissingPermission")
+                              g.requestMtu(247)
+                              @Suppress("MissingPermission")
+                              g.discoverServices()
+                          }
+                      } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
+                          listener.onLog("GATT disconnected status=$status")
+                          resetSession()
+                          listener.onState("DISCONNECTED", false)
+                      }
+                  }
+
+                  override fun onServicesDiscovered(g: BluetoothGatt, status: Int) {
+                      if (status != BluetoothGatt.GATT_SUCCESS) {
+                          listener.onState("SERVICE DISCOVERY FAILED", false)
+                          return
+                      }
+                      val service: BluetoothGattService = g.getService(VerifiedProtocol.SERVICE_UUID)
+                          ?: run {
+                              listener.onState("AB00 SERVICE NOT FOUND", false)
+                              return
+                          }
+
+                      writeChar = service.getCharacteristic(VerifiedProtocol.WRITE_UUID)
+                      notifyChar = service.getCharacteristic(VerifiedProtocol.NOTIFY_UUID)
+                      notify2Char = service.getCharacteristic(VerifiedProtocol.NOTIFY2_UUID)
+
+                      if (writeChar == null || notifyChar == null) {
+                          listener.onState("AB01/AB02 NOT FOUND", false)
+                          return
+                      }
+
+                      listener.onLog("AB00 ready; enabling AB02/AB03 notifications")
+                      enableNotifications(notifyChar!!) {
+                          val second = notify2Char
+                          if (second != null) {
+                              enableNotifications(second) { sendAuth() }
+                          } else {
+                              sendAuth()
+                          }
+                      }
+                  }
+
+                  override fun onCharacteristicChanged(
+                      gatt: BluetoothGatt,
+                      characteristic: BluetoothGattCharacteristic,
+                      value: ByteArray
+                  ) {
+                      handleNotify(value)
+                  }
+
+                  @Deprecated("Deprecated in API 33")
+                  override fun onCharacteristicChanged(
+                      gatt: BluetoothGatt,
+                      characteristic: BluetoothGattCharacteristic
+                  ) {
+                      handleNotify(characteristic.value ?: return)
+                  }
+
+                  override fun onCharacteristicWrite(
+                      gatt: BluetoothGatt,
+                      characteristic: BluetoothGattCharacteristic,
+                      status: Int
+                  ) {
+                      val tx = txInFlight
+                      txInFlight = null
+                      val ok = status == BluetoothGatt.GATT_SUCCESS
+                      listener.onLog("TX ${tx?.label ?: "?"} status=$status")
+                      tx?.onDone?.invoke(ok)
+                      if (ok) {
+                          handler.postDelayed({ pumpTx() }, 45L)
+                      } else {
+                          listener.onLog("Fail closed: GATT write failed after AES stream advance")
+                          disconnect()
+                      }
+                  }
+
+                  override fun onDescriptorWrite(
+                      gatt: BluetoothGatt,
+                      descriptor: BluetoothGattDescriptor,
+                      status: Int
+                  ) {
+                      val cb = pendingDescriptorWrite
+                      pendingDescriptorWrite = null
+                      cb?.invoke(status == BluetoothGatt.GATT_SUCCESS)
+                  }
+              }
+
+              private var pendingDescriptorWrite: ((Boolean) -> Unit)? = null
+
+              fun startScan() {
+                  if (!hasScanPermission()) {
+                      listener.onState("BLUETOOTH PERMISSION REQUIRED", false)
+                      return
+                  }
+                  disconnect()
+                  listener.onState("SCANNING…", false)
+                  listener.onLog("Scanning for AB00 / GoloPine DSP")
+                  @Suppress("MissingPermission")
+                  scanner?.startScan(scanCallback)
+                  handler.postDelayed({ stopScan() }, 12_000L)
+              }
+
+              fun stopScan() {
+                  if (!hasScanPermission()) return
+                  try {
+                      @Suppress("MissingPermission")
+                      scanner?.stopScan(scanCallback)
+                  } catch (_: Throwable) {}
+              }
+
+              private fun connect(device: BluetoothDevice) {
+                  if (!hasConnectPermission()) return
+                  listener.onState("CONNECTING…", false)
+                  @Suppress("MissingPermission")
+                  gatt = device.connectGatt(context, false, gattCallback, BluetoothDevice.TRANSPORT_LE)
+              }
+
+              fun disconnect() {
+                  stopScan()
+                  try {
+                      if (hasConnectPermission()) {
+                          @Suppress("MissingPermission")
+                          gatt?.disconnect()
+                          @Suppress("MissingPermission")
+                          gatt?.close()
+                      }
+                  } catch (_: Throwable) {}
+                  gatt = null
+                  resetSession()
+              }
+
+              fun isSessionReady(): Boolean =
+                  authenticated && sessionTx != null && sessionRx != null && writeChar != null
+
+              fun requestDescriptor(onDone: ((DspSnapshot?) -> Unit)? = null) {
+                  if (!isSessionReady()) {
+                      onDone?.invoke(null)
+                      return
+                  }
+                  if (descriptorRequestActive) {
+                      listener.onLog("Descriptor request already active")
+                      onDone?.invoke(null)
+                      return
+                  }
+                  descriptorCollector.reset()
+                  descriptorCallback = onDone
+                  descriptorRequestActive = true
+                  enqueueSession(VerifiedProtocol.DEVICE_DESCRIPTION_REQUEST, "DESC") { ok ->
+                      if (!ok) {
+                          descriptorCallback?.invoke(null)
+                          descriptorCallback = null
+                          descriptorRequestActive = false
+                      }
+                  }
+              }
+
+              fun sendSession(
+                  plain: ByteArray,
+                  label: String,
+                  onDone: ((Boolean) -> Unit)? = null
+              ) {
+                  if (!isSessionReady()) {
+                      onDone?.invoke(false)
+                      return
+                  }
+                  enqueueSession(plain, label, onDone)
+              }
+
+              private fun sendAuth() {
+                  authenticated = false
+                  sessionTx = null
+                  sessionRx = null
+                  descriptorCollector.reset()
+                  listener.onState("AUTHENTICATING…", true)
+                  enqueueRaw(VerifiedProtocol.AUTH16, "AUTH16") { ok ->
+                      if (!ok) listener.onState("AUTH TX FAILED", false)
+                  }
+              }
+
+              private fun handleNotify(cipherText: ByteArray) {
+                  if (!authenticated) {
+                      handleAuthResponse(cipherText)
+                      return
+                  }
+                  val rx = sessionRx ?: return
+                  try {
+                      val plain = rx.update(cipherText) ?: ByteArray(0)
+                      descriptorCollector.accept(plain)
+                  } catch (t: Throwable) {
+                      listener.onLog("RX decrypt failed: ${t.message}")
+                      listener.onState("SESSION RX ERROR", false)
+                  }
+              }
+
+              private fun handleAuthResponse(response: ByteArray) {
+                  if (response.size != 32) {
+                      listener.onLog("Ignoring pre-auth notify len=${response.size}")
+                      return
+                  }
+
+                  val typeId = ((response[0].toInt() and 0xFF) shl 8) or
+                      (response[1].toInt() and 0xFF)
+
+                  val key = when (typeId) {
+                      VerifiedProtocol.TYPE_53284 -> VerifiedProtocol.PREAUTH_53284
+                      VerifiedProtocol.TYPE_53285 -> VerifiedProtocol.PREAUTH_53285
+                      else -> {
+                          listener.onState("UNVERIFIED DSP TYPE $typeId", false)
+                          listener.onLog("Fail closed: unsupported TypeID=$typeId")
+                          return
+                      }
+                  }
+
+                  try {
+                      val pre = Cipher.getInstance("AES/CFB8/NoPadding")
+                      pre.init(
+                          Cipher.DECRYPT_MODE,
+                          SecretKeySpec(key, "AES"),
+                          IvParameterSpec(VerifiedProtocol.IV)
+                      )
+                      val decoded = pre.doFinal(response.copyOfRange(8, 32))
+                      if (decoded.size != 24) error("AUTH payload length ${decoded.size}")
+                      val uniqueId = decoded.copyOfRange(0, 8)
+                      val randKey = decoded.copyOfRange(8, 24)
+
+                      val tx = Cipher.getInstance("AES/CFB8/NoPadding")
+                      tx.init(
+                          Cipher.ENCRYPT_MODE,
+                          SecretKeySpec(randKey, "AES"),
+                          IvParameterSpec(VerifiedProtocol.IV)
+                      )
+                      val rx = Cipher.getInstance("AES/CFB8/NoPadding")
+                      rx.init(
+                          Cipher.DECRYPT_MODE,
+                          SecretKeySpec(randKey, "AES"),
+                          IvParameterSpec(VerifiedProtocol.IV)
+                      )
+                      sessionTx = tx
+                      sessionRx = rx
+                      authenticated = true
+
+                      listener.onLog(
+                          "AUTH OK type=$typeId uniqueId=${VerifiedProtocol.toHex(uniqueId)}"
+                      )
+                      listener.onState("AUTH OK • READING DSP", true)
+                      requestDescriptor()
+                  } catch (t: Throwable) {
+                      listener.onLog("AUTH decode failed: ${t.message}")
+                      listener.onState("AUTH FAILED", false)
+                  }
+              }
+
+              private fun enqueueRaw(
+                  bytes: ByteArray,
+                  label: String,
+                  onDone: ((Boolean) -> Unit)?
+              ) {
+                  txQueue.addLast(Tx(bytes.copyOf(), false, label, onDone))
+                  pumpTx()
+              }
+
+              private fun enqueueSession(
+                  plain: ByteArray,
+                  label: String,
+                  onDone: ((Boolean) -> Unit)?
+              ) {
+                  txQueue.addLast(Tx(plain.copyOf(), true, label, onDone))
+                  pumpTx()
+              }
+
+              private fun pumpTx() {
+                  if (txInFlight != null || txQueue.isEmpty()) return
+                  val now = android.os.SystemClock.elapsedRealtime()
+                  val delay = (45L - (now - lastWriteMs)).coerceAtLeast(0L)
+                  if (delay > 0L) {
+                      handler.postDelayed({ pumpTx() }, delay)
+                      return
+                  }
+
+                  val g = gatt ?: return
+                  val ch = writeChar ?: return
+                  if (!hasConnectPermission()) return
+
+                  val tx = txQueue.removeFirst()
+                  val wire = try {
+                      if (tx.encrypted) {
+                          val cipher = sessionTx ?: error("No TX cipher")
+                          cipher.update(tx.plain) ?: ByteArray(0)
+                      } else {
+                          tx.plain
+                      }
+                  } catch (t: Throwable) {
+                      listener.onLog("TX crypto failed: ${t.message}")
+                      tx.onDone?.invoke(false)
+                      handler.post { pumpTx() }
+                      return
+                  }
+
+                  txInFlight = tx
+                  lastWriteMs = now
+
+                  val startStatus = try {
+                      if (Build.VERSION.SDK_INT >= 33) {
+                          @Suppress("MissingPermission")
+                          g.writeCharacteristic(
+                              ch,
+                              wire,
+                              BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
+                          )
+                      } else {
+                          @Suppress("DEPRECATION")
+                          ch.writeType = BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
+                          @Suppress("DEPRECATION", "MissingPermission")
+                          ch.value = wire
+                          @Suppress("DEPRECATION", "MissingPermission")
+                          if (g.writeCharacteristic(ch)) BluetoothGatt.GATT_SUCCESS else 1
+                      }
+                  } catch (t: Throwable) {
+                      listener.onLog("GATT write start failed: ${t.message}")
+                      1
+                  }
+
+                  if (startStatus != BluetoothGatt.GATT_SUCCESS) {
+                      txInFlight = null
+                      listener.onLog("GATT write rejected startStatus=$startStatus")
+                      tx.onDone?.invoke(false)
+                      listener.onLog("Fail closed: write never started after AES stream advance")
+                      disconnect()
+                  } else {
+                      // The verified Samsung/GoloPine path returns onCharacteristicWrite(status=0)
+                      // even with WRITE_TYPE_NO_RESPONSE. Never convert a missing callback into
+                      // success: after encryption the continuous CFB8 stream cannot be replayed.
+                      handler.postDelayed({
+                          if (txInFlight === tx) {
+                              txInFlight = null
+                              listener.onLog("TX ${tx.label} callback timeout — fail closed")
+                              tx.onDone?.invoke(false)
+                              disconnect()
+                          }
+                      }, 1500L)
+                  }
+              }
+
+              private fun enableNotifications(
+                  ch: BluetoothGattCharacteristic,
+                  onDone: () -> Unit
+              ) {
+                  val g = gatt ?: return
+                  if (!hasConnectPermission()) return
+
+                  @Suppress("MissingPermission")
+                  g.setCharacteristicNotification(ch, true)
+
+                  val cccd = ch.getDescriptor(VerifiedProtocol.CCCD_UUID)
+                  if (cccd == null) {
+                      listener.onLog("CCCD missing for ${ch.uuid}")
+                      onDone()
+                      return
+                  }
+
+                  pendingDescriptorWrite = { ok ->
+                      listener.onLog("Notify ${ch.uuid} enabled=$ok")
+                      if (ok) onDone() else listener.onState("NOTIFY ENABLE FAILED", false)
+                  }
+
+                  val status = if (Build.VERSION.SDK_INT >= 33) {
+                      @Suppress("MissingPermission")
+                      g.writeDescriptor(cccd, BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE)
+                  } else {
+                      @Suppress("DEPRECATION")
+                      cccd.value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
+                      @Suppress("DEPRECATION", "MissingPermission")
+                      if (g.writeDescriptor(cccd)) BluetoothGatt.GATT_SUCCESS else 1
+                  }
+
+                  if (status != BluetoothGatt.GATT_SUCCESS) {
+                      val cb = pendingDescriptorWrite
+                      pendingDescriptorWrite = null
+                      cb?.invoke(false)
+                  }
+              }
+
+              private fun resetSession() {
+                  authenticated = false
+                  sessionTx = null
+                  sessionRx = null
+                  descriptorCallback = null
+                  descriptorRequestActive = false
+                  descriptorCollector.reset()
+                  txQueue.clear()
+                  txInFlight = null
+                  writeChar = null
+                  notifyChar = null
+                  notify2Char = null
+              }
+
+              private fun hasScanPermission(): Boolean {
+                  return if (Build.VERSION.SDK_INT >= 31) {
+                      context.checkSelfPermission(Manifest.permission.BLUETOOTH_SCAN) ==
+                          PackageManager.PERMISSION_GRANTED
+                  } else {
+                      context.checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) ==
+                          PackageManager.PERMISSION_GRANTED
+                  }
+              }
+
+              private fun hasConnectPermission(): Boolean {
+                  return if (Build.VERSION.SDK_INT >= 31) {
+                      context.checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT) ==
+                          PackageManager.PERMISSION_GRANTED
+                  } else true
+              }
+          }
+
+          private class GuardedController(
+              private val client: DspBleClient,
+              private val listener: Listener
+          ) {
+              interface Listener {
+                  fun onBusy(busy: Boolean, message: String)
+                  fun onResult(ok: Boolean, message: String)
+              }
+
+              private val handler = Handler(Looper.getMainLooper())
+              private var busy = false
+              private var pending: (() -> Unit)? = null
+              private var dirty = false
+
+              fun isDirty(): Boolean = dirty
+
+              private fun enqueueLatest(action: () -> Unit) {
+                  if (busy) {
+                      pending = action
+                      listener.onResult(true, "Queued latest target")
+                      return
+                  }
+                  busy = true
+                  action()
+              }
+
+              private fun finish(ok: Boolean, message: String) {
+                  busy = false
+                  listener.onBusy(false, "")
+                  listener.onResult(ok, message)
+                  val next = pending
+                  pending = null
+                  if (next != null) {
+                      busy = true
+                      handler.post(next)
+                  }
+              }
+
+              fun setMasterVolume(targetDb: Float) {
+                  enqueueLatest {
+                      val target = targetDb.coerceIn(-70f, 6f)
+                      listener.onBusy(true, "Master preflight…")
+                      client.requestDescriptor { before ->
+                          val baseline = before?.masterVolume
+                          if (before == null || baseline == null) {
+                              finish(false, "Master preflight failed")
+                              return@requestDescriptor
+                          }
+                          val payload = VerifiedProtocol.float32Le(target)
+                          val packet = VerifiedProtocol.ufeWrite(
+                              VerifiedProtocol.MASTER_VOLUME_ID,
+                              0,
+                              payload
+                          )
+                          listener.onBusy(true, "Writing Master ${fmt(target)} dB…")
+                          client.sendSession(packet, "MASTER") { writeOk ->
+                              if (!writeOk) {
+                                  finish(false, "Master GATT write failed")
+                                  return@sendSession
+                              }
+                              handler.postDelayed({
+                                  client.requestDescriptor { after ->
+                                      val actual = after?.masterVolume
+                                      if (actual != null && abs(actual - target) <= 0.02f) {
+                                          dirty = true
+                                          finish(true, "Master verified ${fmt(actual)} dB • RAM DIRTY")
+                                      } else {
+                                          rollbackMaster(baseline, actual)
+                                      }
+                                  }
+                              }, 3000L)
+                          }
+                      }
+                  }
+              }
+
+              private fun rollbackMaster(baseline: Float, observed: Float?) {
+                  listener.onBusy(true, "Master verify failed; rolling back…")
+                  val restore = VerifiedProtocol.ufeWrite(
+                      VerifiedProtocol.MASTER_VOLUME_ID,
+                      0,
+                      VerifiedProtocol.float32Le(baseline)
+                  )
+                  client.sendSession(restore, "MASTER_ROLLBACK") { ok ->
+                      if (!ok) {
+                          finish(false, "Master verify failed and rollback write failed")
+                          return@sendSession
+                      }
+                      handler.postDelayed({
+                          client.requestDescriptor { snap ->
+                              val restored = snap?.masterVolume
+                              val verified = restored != null && abs(restored - baseline) <= 0.02f
+                              finish(
+                                  false,
+                                  if (verified) {
+                                      "Master target verify failed (${observed ?: Float.NaN}); rollback verified"
+                                  } else {
+                                      "CRITICAL: Master rollback could not be verified"
+                                  }
+                              )
+                          }
+                      }, 3000L)
+                  }
+              }
+
+              fun setEqGain(channelIndex: Int, bandIndex: Int, targetDb: Float) {
+                  enqueueLatest {
+                      if (channelIndex !in 0..6 || bandIndex !in 0..14) {
+                          finish(false, "Invalid EQ target")
+                          return@enqueueLatest
+                      }
+                      val actuatorId = VerifiedProtocol.EQ_IDS[channelIndex]
+                      listener.onBusy(true, "CH${channelIndex + 1} B${bandIndex + 1} preflight…")
+                      client.requestDescriptor { before ->
+                          val total = before?.eqByActuator?.values?.sumOf { it.size } ?: 0
+                          val safe = before?.safePeakingCount ?: 0
+                          val baseline = before?.eqBand(channelIndex, bandIndex)
+
+                          if (before == null || total != 105 || safe != 55 || baseline == null) {
+                              finish(false, "EQ safe gate failed: rows=$total safe=$safe")
+                              return@requestDescriptor
+                          }
+                          if (!baseline.safeGainWritable) {
+                              finish(false, "CH${channelIndex + 1} B${bandIndex + 1} is locked (not strict R=0 PEAKING)")
+                              return@requestDescriptor
+                          }
+
+                          val rounded = (kotlin.math.round(targetDb * 2f) / 2f).coerceIn(-12f, 12f)
+                          val targetRecord = baseline.withGainDb(rounded)
+                          val offset = bandIndex * VerifiedProtocol.EQ_RECORD_BYTES
+                          val packet = VerifiedProtocol.ufeWrite(
+                              actuatorId,
+                              offset,
+                              targetRecord.encode()
+                          )
+
+                          listener.onBusy(
+                              true,
+                              "Writing CH${channelIndex + 1} B${bandIndex + 1} ${fmt(rounded)} dB…"
+                          )
+                          client.sendSession(packet, "EQ_CH${channelIndex + 1}_B${bandIndex + 1}") { writeOk ->
+                              if (!writeOk) {
+                                  finish(false, "EQ GATT write failed")
+                                  return@sendSession
+                              }
+                              handler.postDelayed({
+                                  client.requestDescriptor { after ->
+                                      val actual = after?.eqBand(channelIndex, bandIndex)
+                                      if (actual != null &&
+                                          actual.safeGainWritable &&
+                                          abs(actual.b - rounded) <= 0.02f) {
+                                          dirty = true
+                                          finish(
+                                              true,
+                                              "CH${channelIndex + 1} B${bandIndex + 1} verified ${fmt(actual.b)} dB • RAM DIRTY"
+                                          )
+                                      } else {
+                                          rollbackEq(
+                                              channelIndex,
+                                              bandIndex,
+                                              actuatorId,
+                                              baseline,
+                                              actual?.b
+                                          )
+                                      }
+                                  }
+                              }, 3000L)
+                          }
+                      }
+                  }
+              }
+
+              private fun rollbackEq(
+                  channelIndex: Int,
+                  bandIndex: Int,
+                  actuatorId: Int,
+                  baseline: EqBandRecord,
+                  observed: Float?
+              ) {
+                  listener.onBusy(true, "EQ verify failed; exact rollback…")
+                  val packet = VerifiedProtocol.ufeWrite(
+                      actuatorId,
+                      bandIndex * VerifiedProtocol.EQ_RECORD_BYTES,
+                      baseline.encode()
+                  )
+                  client.sendSession(packet, "EQ_ROLLBACK") { ok ->
+                      if (!ok) {
+                          finish(false, "EQ target failed and rollback write failed")
+                          return@sendSession
+                      }
+                      handler.postDelayed({
+                          client.requestDescriptor { snap ->
+                              val restored = snap?.eqBand(channelIndex, bandIndex)
+                              val verified = restored != null &&
+                                  abs(restored.b - baseline.b) <= 0.02f &&
+                                  restored.type == baseline.type &&
+                                  abs(restored.f - baseline.f) <= 0.01f &&
+                                  abs(restored.q - baseline.q) <= 0.001f
+                              finish(
+                                  false,
+                                  if (verified) {
+                                      "EQ target verify failed (${observed ?: Float.NaN}); rollback verified"
+                                  } else {
+                                      "CRITICAL: EQ rollback could not be verified"
+                                  }
+                              )
+                          }
+                      }, 3000L)
+                  }
+              }
+
+              fun saveParams() {
+                  enqueueLatest {
+                      if (!dirty) {
+                          finish(false, "Nothing verified in RAM to save")
+                          return@enqueueLatest
+                      }
+                      listener.onBusy(true, "Fresh descriptor before permanent save…")
+                      client.requestDescriptor { current ->
+                          val rows = current?.eqByActuator?.values?.sumOf { it.size } ?: 0
+                          val safe = current?.safePeakingCount ?: 0
+                          if (current == null || current.masterVolume == null || rows != 105 || safe != 55) {
+                              finish(false, "Permanent save locked: fresh DSP state failed safety gate")
+                              return@requestDescriptor
+                          }
+                          listener.onBusy(true, "Sending verified SaveParams ID7…")
+                          client.sendSession(VerifiedProtocol.SAVE_PARAMS, "SAVE_PARAMS_ID7") { ok ->
+                              if (ok) {
+                                  dirty = false
+                                  finish(true, "SaveParams accepted • persistence command sent")
+                              } else {
+                                  finish(false, "SaveParams GATT write failed")
+                              }
+                          }
+                      }
+                  }
+              }
+
+              companion object {
+                  private fun fmt(v: Float): String = String.format(Locale.US, "%+.1f", v)
+              }
+          }
+
+          class MainActivity : Activity(), DspBleClient.Listener, GuardedController.Listener {
+              private val mainHandler = Handler(Looper.getMainLooper())
+
+              private lateinit var ble: DspBleClient
+              private lateinit var controller: GuardedController
+
+              private lateinit var root: LinearLayout
+              private lateinit var statusText: TextView
+              private lateinit var content: LinearLayout
+              private lateinit var logText: TextView
+
+              private var snapshot: DspSnapshot? = null
+              private var currentPage = "HOME"
+              private var eqChannel = 0
+              private var operationBusy = false
+              private val logs = ArrayDeque<String>()
+
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+                  window.statusBarColor = Color.rgb(7, 11, 18)
+                  window.navigationBarColor = Color.rgb(7, 11, 18)
+
+                  ble = DspBleClient(this, this)
+                  controller = GuardedController(ble, this)
+
+                  buildShell()
+                  requestBlePermissions()
+                  renderPage()
+              }
+
+              override fun onDestroy() {
+                  ble.disconnect()
+                  super.onDestroy()
+              }
+
+              private fun buildShell() {
+                  root = LinearLayout(this).apply {
+                      orientation = LinearLayout.VERTICAL
+                      setBackgroundColor(Color.rgb(7, 11, 18))
+                      setPadding(dp(12), dp(12), dp(12), dp(10))
+                  }
+
+                  val title = TextView(this).apply {
+                      text = "OKN PERAMP  •  V5"
+                      setTextColor(Color.WHITE)
+                      textSize = 22f
+                      setTypeface(typeface, android.graphics.Typeface.BOLD)
+                  }
+                  root.addView(title)
+
+                  statusText = TextView(this).apply {
+                      text = "DISCONNECTED"
+                      setTextColor(Color.rgb(255, 183, 77))
+                      textSize = 13f
+                      setPadding(0, dp(3), 0, dp(8))
+                  }
+                  root.addView(statusText)
+
+                  val connectRow = LinearLayout(this).apply {
+                      orientation = LinearLayout.HORIZONTAL
+                  }
+                  connectRow.addView(actionButton("SCAN / CONNECT") {
+                      if (operationBusy) toast("Wait for current DSP operation")
+                      else ble.startScan()
+                  }, LinearLayout.LayoutParams(0, dp(46), 1f).apply { rightMargin = dp(6) })
+                  connectRow.addView(actionButton("REFRESH DSP") {
+                      if (operationBusy) toast("Wait for current DSP operation")
+                      else ble.requestDescriptor()
+                  }, LinearLayout.LayoutParams(0, dp(46), 1f))
+                  root.addView(connectRow)
+
+                  val tabsScroll = HorizontalScrollView(this).apply {
+                      isHorizontalScrollBarEnabled = false
+                  }
+                  val tabs = LinearLayout(this).apply {
+                      orientation = LinearLayout.HORIZONTAL
+                      setPadding(0, dp(10), 0, dp(8))
+                  }
+                  listOf("HOME", "PEQ", "OUTPUT", "SET").forEach { page ->
+                      tabs.addView(actionButton(page) {
+                          currentPage = page
+                          renderPage()
+                      }, LinearLayout.LayoutParams(dp(92), dp(42)).apply { rightMargin = dp(6) })
+                  }
+                  tabsScroll.addView(tabs)
+                  root.addView(tabsScroll)
+
+                  val scroll = ScrollView(this)
+                  content = LinearLayout(this).apply {
+                      orientation = LinearLayout.VERTICAL
+                      setPadding(0, 0, 0, dp(24))
+                  }
+                  scroll.addView(content)
+                  root.addView(scroll, LinearLayout.LayoutParams(
+                      LinearLayout.LayoutParams.MATCH_PARENT,
+                      0,
+                      1f
+                  ))
+
+                  setContentView(root)
+              }
+
+              private fun renderPage() {
+                  content.removeAllViews()
+                  when (currentPage) {
+                      "HOME" -> renderHome()
+                      "PEQ" -> renderPeq()
+                      "OUTPUT" -> renderOutput()
+                      "SET" -> renderSettings()
+                  }
+              }
+
+              private fun renderHome() {
+                  section("REAL HARDWARE CONTROL")
+                  val snap = snapshot
+                  if (snap == null) {
+                      info(
+                          "Connect to GoloPine DSP",
+                          "V5 waits for authenticated Device Description before enabling any DSP write."
+                      )
+                      return
+                  }
+
+                  val master = snap.masterVolume
+                  if (master == null) {
+                      info("Master Volume", "ID2 was not found in the fresh Device Description.")
+                  } else {
+                      val card = card()
+                      card.addView(label("Master Volume • actuator ID2", 14f, Color.LTGRAY))
+                      card.addView(label(
+                          String.format(Locale.US, "%+.2f dB", master),
+                          28f,
+                          Color.rgb(72, 202, 255)
+                      ))
+                      val row = LinearLayout(this).apply {
+                          orientation = LinearLayout.HORIZONTAL
+                          gravity = Gravity.CENTER
+                      }
+                      row.addView(bigStepButton("− 0.1") {
+                          controller.setMasterVolume(master - 0.1f)
+                      })
+                      row.addView(bigStepButton("+ 0.1") {
+                          controller.setMasterVolume(master + 0.1f)
+                      })
+                      card.addView(row)
+                      card.addView(label(
+                          "Every change: fresh descriptor → write → fresh verify → exact rollback on failure.",
+                          11f,
+                          Color.GRAY
+                      ))
+                      content.addView(card)
+                  }
+
+                  section("LIVE DSP SNAPSHOT")
+                  info(
+                      "Verified descriptor",
+                      "Actuators ${snap.actuatorCount} • Sensors ${snap.sensorCount} • " +
+                          "EQ rows ${snap.eqByActuator.values.sumOf { it.size }} • " +
+                          "safe PEAKING ${snap.safePeakingCount}/55"
+                  )
+              }
+
+              private fun renderPeq() {
+                  section("7-CHANNEL • 15-BAND PARAMETRIC EQ")
+
+                  val channelScroll = HorizontalScrollView(this).apply {
+                      isHorizontalScrollBarEnabled = false
+                  }
+                  val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+                  for (ch in 0 until 7) {
+                      row.addView(actionButton("CH${ch + 1}") {
+                          eqChannel = ch
+                          renderPage()
+                      }, LinearLayout.LayoutParams(dp(70), dp(40)).apply { rightMargin = dp(5) })
+                  }
+                  channelScroll.addView(row)
+                  content.addView(channelScroll)
+
+                  val snap = snapshot
+                  val actuator = VerifiedProtocol.EQ_IDS[eqChannel]
+                  val bands = snap?.eqByActuator?.get(actuator)
+
+                  if (bands == null || bands.size != 15) {
+                      info(
+                          "CH${eqChannel + 1} • actuator ID$actuator",
+                          "Connect/refresh first. Hardware write remains locked until 105 rows and 55 strict safe PEAKING rows are present."
+                      )
+                      return
+                  }
+
+                  info(
+                      "CH${eqChannel + 1} • actuator ID$actuator",
+                      "${bands.count { it.safeGainWritable }} safe gain rows on this channel. " +
+                          "Only Gain is writable in V5; Frequency/Q/non-PEAKING rows are locked."
+                  )
+
+                  bands.forEachIndexed { index, band ->
+                      val c = card()
+                      val titleRow = LinearLayout(this).apply {
+                          orientation = LinearLayout.HORIZONTAL
+                          gravity = Gravity.CENTER_VERTICAL
+                      }
+                      titleRow.addView(label(
+                          "B${index + 1}",
+                          16f,
+                          if (band.safeGainWritable) Color.WHITE else Color.GRAY
+                      ), LinearLayout.LayoutParams(dp(44), dp(42)))
+                      titleRow.addView(label(
+                          formatFrequency(band.f),
+                          15f,
+                          Color.rgb(168, 218, 255)
+                      ), LinearLayout.LayoutParams(0, dp(42), 1f))
+                      titleRow.addView(label(
+                          "Q ${String.format(Locale.US, "%.2f", band.q)}",
+                          13f,
+                          Color.LTGRAY
+                      ), LinearLayout.LayoutParams(dp(78), dp(42)))
+                      c.addView(titleRow)
+
+                      val gainRow = LinearLayout(this).apply {
+                          orientation = LinearLayout.HORIZONTAL
+                          gravity = Gravity.CENTER_VERTICAL
+                      }
+
+                      if (band.safeGainWritable) {
+                          gainRow.addView(stepButton("−") {
+                              controller.setEqGain(eqChannel, index, band.b - 0.5f)
+                          })
+                      } else {
+                          gainRow.addView(disabledButton("LOCK"))
+                      }
+
+                      gainRow.addView(label(
+                          String.format(Locale.US, "%+.1f dB", band.b),
+                          18f,
+                          if (band.safeGainWritable) Color.rgb(81, 220, 155) else Color.GRAY
+                      ), LinearLayout.LayoutParams(0, dp(44), 1f))
+
+                      if (band.safeGainWritable) {
+                          gainRow.addView(stepButton("+") {
+                              controller.setEqGain(eqChannel, index, band.b + 0.5f)
+                          })
+                      } else {
+                          gainRow.addView(disabledButton("LOCK"))
+                      }
+
+                      c.addView(gainRow)
+                      c.addView(label(
+                          if (band.safeGainWritable) {
+                              "SAFE PEAKING • type=12 • R=0 • full 48-byte write"
+                          } else {
+                              "READ ONLY • type=${band.type} • R=${String.format(Locale.US, "%.2f", band.r)}"
+                          },
+                          10.5f,
+                          if (band.safeGainWritable) Color.rgb(116, 190, 150) else Color.rgb(180, 120, 120)
+                      ))
+                      content.addView(c)
+                  }
+              }
+
+              private fun renderOutput() {
+                  section("OUTPUT")
+                  info(
+                      "Hardware write locked",
+                      "No standalone CH1–CH7 output-volume actuator has been verified for this board. " +
+                          "OKN Peramp V5 deliberately does not invent packets or fake working controls."
+                  )
+                  info(
+                      "What is real now",
+                      "MasterVolume ID2 and safe 7×15 PEQ Gain are connected to the verified AB00 protocol."
+                  )
+              }
+
+              private fun renderSettings() {
+                  section("DSP SESSION")
+                  info(
+                      "Safety policy",
+                      "AB00/AB01/AB02/AB03 • AES-CFB8 session • one GATT write in flight • " +
+                          "45 ms minimum TX spacing • strict 55-row PEQ gate • verify/rollback • no auto-save."
+                  )
+
+                  content.addView(actionButton("REFRESH DEVICE DESCRIPTION") {
+                      if (!operationBusy) ble.requestDescriptor()
+                  }, LinearLayout.LayoutParams(
+                      LinearLayout.LayoutParams.MATCH_PARENT,
+                      dp(48)
+                  ))
+
+                  val save = actionButton(
+                      if (controller.isDirty()) "SAVE VERIFIED RAM STATE TO DSP" else "SAVE DSP (NO VERIFIED CHANGE)"
+                  ) {
+                      if (!controller.isDirty()) {
+                          toast("No verified RAM change to save")
+                      } else {
+                          AlertDialog.Builder(this)
+                              .setTitle("Permanent SaveParams")
+                              .setMessage(
+                                  "This sends verified actuator ID7 SaveParams and persists the current DSP turning parameters. Continue?"
+                              )
+                              .setNegativeButton("Cancel", null)
+                              .setPositiveButton("SAVE") { _, _ -> controller.saveParams() }
+                              .show()
+                      }
+                  }
+                  content.addView(save, LinearLayout.LayoutParams(
+                      LinearLayout.LayoutParams.MATCH_PARENT,
+                      dp(50)
+                  ).apply { topMargin = dp(8) })
+
+                  section("DIAGNOSTIC LOG")
+                  logText = TextView(this).apply {
+                      text = logs.joinToString("\n")
+                      setTextColor(Color.rgb(170, 185, 202))
+                      textSize = 10.5f
+                      setPadding(dp(10), dp(10), dp(10), dp(10))
+                      setBackgroundColor(Color.rgb(13, 19, 29))
+                  }
+                  content.addView(logText)
+              }
+
+              override fun onState(text: String, connected: Boolean) {
+                  runOnUiThread {
+                      statusText.text = text
+                      statusText.setTextColor(
+                          if (connected) Color.rgb(81, 220, 155) else Color.rgb(255, 183, 77)
+                      )
+                  }
+              }
+
+              override fun onSnapshot(snapshot: DspSnapshot) {
+                  runOnUiThread {
+                      this.snapshot = snapshot
+                      renderPage()
+                  }
+              }
+
+              override fun onLog(line: String) {
+                  runOnUiThread {
+                      if (logs.size >= 80) logs.removeFirst()
+                      logs.addLast(line)
+                      if (::logText.isInitialized && currentPage == "SET") {
+                          logText.text = logs.joinToString("\n")
+                      }
+                  }
+              }
+
+              override fun onBusy(busy: Boolean, message: String) {
+                  runOnUiThread {
+                      operationBusy = busy
+                      if (message.isNotBlank()) {
+                          statusText.text = message
+                          statusText.setTextColor(Color.rgb(255, 213, 79))
+                      }
+                  }
+              }
+
+              override fun onResult(ok: Boolean, message: String) {
+                  runOnUiThread {
+                      toast(message)
+                      onLog(message)
+                      if (!operationBusy) {
+                          statusText.text = if (ble.isSessionReady()) "READY" else "DISCONNECTED"
+                      }
+                  }
+              }
+
+              private fun requestBlePermissions() {
+                  val permissions = if (Build.VERSION.SDK_INT >= 31) {
+                      arrayOf(
+                          Manifest.permission.BLUETOOTH_SCAN,
+                          Manifest.permission.BLUETOOTH_CONNECT
+                      )
+                  } else {
+                      arrayOf(Manifest.permission.ACCESS_FINE_LOCATION)
+                  }
+                  val missing = permissions.filter {
+                      checkSelfPermission(it) != PackageManager.PERMISSION_GRANTED
+                  }
+                  if (missing.isNotEmpty()) {
+                      requestPermissions(missing.toTypedArray(), 1201)
+                  }
+              }
+
+              private fun section(text: String) {
+                  content.addView(TextView(this).apply {
+                      this.text = text
+                      setTextColor(Color.rgb(112, 202, 255))
+                      textSize = 12f
+                      setTypeface(typeface, android.graphics.Typeface.BOLD)
+                      setPadding(dp(3), dp(12), dp(3), dp(7))
+                  })
+              }
+
+              private fun card(): LinearLayout = LinearLayout(this).apply {
+                  orientation = LinearLayout.VERTICAL
+                  setPadding(dp(12), dp(10), dp(12), dp(10))
+                  setBackgroundColor(Color.rgb(16, 24, 36))
+                  val p = LinearLayout.LayoutParams(
+                      LinearLayout.LayoutParams.MATCH_PARENT,
+                      LinearLayout.LayoutParams.WRAP_CONTENT
+                  )
+                  p.bottomMargin = dp(8)
+                  layoutParams = p
+              }
+
+              private fun info(title: String, detail: String) {
+                  val c = card()
+                  c.addView(label(title, 15f, Color.WHITE))
+                  c.addView(label(detail, 12f, Color.LTGRAY))
+                  content.addView(c)
+              }
+
+              private fun label(text: String, size: Float, color: Int): TextView =
+                  TextView(this).apply {
+                      this.text = text
+                      setTextColor(color)
+                      textSize = size
+                      gravity = Gravity.CENTER_VERTICAL
+                      setPadding(dp(4), dp(3), dp(4), dp(3))
+                  }
+
+              private fun actionButton(text: String, onClick: () -> Unit): Button =
+                  Button(this).apply {
+                      this.text = text
+                      textSize = 11.5f
+                      setTextColor(Color.WHITE)
+                      setBackgroundColor(Color.rgb(30, 58, 82))
+                      isAllCaps = false
+                      setOnClickListener { onClick() }
+                  }
+
+              private fun stepButton(text: String, onClick: () -> Unit): Button =
+                  Button(this).apply {
+                      this.text = text
+                      textSize = 18f
+                      setTextColor(Color.WHITE)
+                      setBackgroundColor(Color.rgb(34, 86, 112))
+                      isAllCaps = false
+                      setOnClickListener {
+                          if (operationBusy) toast("Current DSP operation is still verifying")
+                          else onClick()
+                      }
+                      layoutParams = LinearLayout.LayoutParams(dp(62), dp(44))
+                  }
+
+              private fun bigStepButton(text: String, onClick: () -> Unit): Button =
+                  Button(this).apply {
+                      this.text = text
+                      textSize = 14f
+                      setTextColor(Color.WHITE)
+                      setBackgroundColor(Color.rgb(34, 86, 112))
+                      isAllCaps = false
+                      setOnClickListener {
+                          if (operationBusy) toast("Current DSP operation is still verifying")
+                          else onClick()
+                      }
+                      layoutParams = LinearLayout.LayoutParams(0, dp(48), 1f).apply {
+                          leftMargin = dp(4)
+                          rightMargin = dp(4)
+                      }
+                  }
+
+              private fun disabledButton(text: String): Button =
+                  Button(this).apply {
+                      this.text = text
+                      textSize = 9f
+                      setTextColor(Color.GRAY)
+                      isEnabled = false
+                      layoutParams = LinearLayout.LayoutParams(dp(62), dp(44))
+                  }
+
+              private fun formatFrequency(hz: Float): String {
+                  return if (hz >= 1000f) {
+                      String.format(Locale.US, "%.2f kHz", hz / 1000f)
+                  } else {
+                      String.format(Locale.US, "%.1f Hz", hz)
+                  }
+              }
+
+              private fun toast(message: String) {
+                  Toast.makeText(this, message, Toast.LENGTH_SHORT).show()
+              }
+
+              private fun dp(v: Int): Int =
+                  (v * resources.displayMetrics.density + 0.5f).toInt()
+          }
+          EOF
+
+          cat > generated-okn-peramp/README_BUILD.txt <<'EOF'
+          OKN Peramp V5
+          =============
+
+          Clean-room Native Android controller generated entirely by OKNPV5.yml.
+
+          VERIFIED REAL-HARDWARE SCOPE INCLUDED
+          - BLE service AB00
+          - AB01 write, AB02/AB03 notify
+          - AUTH16 + TypeID-specific pre-auth AES-CFB8
+          - RandKey extraction and continuous independent TX/RX AES-CFB8
+          - Device Description 0x86/0x82 reassembly
+          - MasterVolume actuator ID2
+          - EQ CH1..CH7 actuator IDs 4,5,6,14,15,16,17
+          - 15 bands/channel, 48-byte records
+          - Strict safe gain gate: type=12 and R=0; expected exactly 55 writable rows
+          - Full peaking-record coefficient rebuild at Fs=44100
+          - Fresh descriptor preflight, post-write verify, exact rollback on failure
+          - One GATT write in flight and 45 ms minimum write spacing
+          - SaveParams actuator ID7 is manual only; never automatic
+
+          INTENTIONALLY LOCKED
+          - Unverified standalone CH1..CH7 output volume
+          - Generic actuator writes
+          - Frequency/Q/reset in this new V5 baseline
+          - Any guessed protocol or UUID family
+
+          CI
+          - Java 17
+          - compileSdk 35
+          - Android Gradle Plugin 8.7.3
+          - Gradle 8.9
+          - GitHub Actions uses Node-24-capable current action majors
+          EOF
+
+          echo "Generated files:"
+          find generated-okn-peramp -maxdepth 6 -type f -print | sort
+
+      - name: Protocol self-test
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import math, struct
+
+          def f32(x):
+              return struct.pack("<f", x)
+
+          def ufe_write(actuator_id, offset, payload):
+              return (
+                  bytes([0x57]) +
+                  actuator_id.to_bytes(4, "big") +
+                  offset.to_bytes(2, "big") +
+                  len(payload).to_bytes(2, "big") +
+                  payload
+              )
+
+          # Proven SaveParams exact plaintext.
+          assert ufe_write(7, 0, b"").hex().upper() == "570000000700000000"
+
+          # Proven EQ CH1 / ID4 / Band4 offset = (4-1)*48 = 144.
+          f = 100.0
+          q = 2.23
+          gain = -0.5
+          A = 10 ** (gain / 40)
+          w0 = 2 * math.pi * f / 44100.0
+          alpha = math.sin(w0) / (2 * q)
+          a0 = 1 + alpha / A
+          coeff = [
+              (1 + alpha * A) / a0,
+              (-2 * math.cos(w0)) / a0,
+              (1 - alpha * A) / a0,
+              (-2 * math.cos(w0)) / a0,
+              (1 - alpha / A) / a0,
+          ]
+          record = (
+              struct.pack("<i", 12) +
+              f32(100.0) + f32(0.0) + f32(2.23) +
+              f32(-0.5) + f32(0.0) + f32(0.0) +
+              b"".join(f32(x) for x in coeff)
+          )
+          packet = ufe_write(4, 144, record).hex().upper()
+
+          expected = (
+              "570000000400900030"
+              "0C0000000000C8420000000052B80E40"
+              "000000BF0000000000000000"
+              "FDF37F3F9D22FFBF805E7E3F9D22FFBF7D527E3F"
+          )
+          assert packet == expected, (packet, expected)
+          print("Protocol self-test PASS")
+          PY
+
+      - name: Build debug APK
+        working-directory: generated-okn-peramp
+        shell: bash
+        run: |
+          set -euo pipefail
+          gradle --no-daemon --stacktrace :app:assembleDebug
+
+      - name: Package APK and source snapshot
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          cp generated-okn-peramp/app/build/outputs/apk/debug/app-debug.apk out/OKN_Peramp_V5-debug.apk
+          tar -czf out/OKN_Peramp_V5-source.tar.gz -C generated-okn-peramp .
+          sha256sum out/* | tee out/SHA256SUMS.txt
+
+      - name: Upload OKN Peramp V5 artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: OKN_Peramp_V5
+          path: out/*
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 6
