@@ -1,0 +1,140 @@
+name: OKNPV6 - Verified V50 APK Build
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main, master ]
+    paths:
+      - '.github/workflows/OKNPV6.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: oknpv6-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  SOURCE_COMMIT: d248f67ac950eb489b8b1b699bdf616700e947cf
+  SOURCE_SHA256: d38a4d4b2443b8b341e65721c2b10bdc80a11c5e59fb159313d4a954fec158cf
+  JAVA_VERSION: '17'
+  GRADLE_VERSION: '8.9'
+
+jobs:
+  build:
+    name: Validate and build OKN Peramp V50
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ env.JAVA_VERSION }}
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v4
+        with:
+          packages: 'platform-tools'
+          accept-android-sdk-licenses: 'true'
+
+      - name: Retrieve and verify pinned V50 source
+        shell: bash
+        run: |
+          set -euo pipefail
+          SOURCE_URL="https://raw.githubusercontent.com/Thanaporn-okn/OKN_DSP-apk/${SOURCE_COMMIT}/.github/workflows/OKNPV6.yml"
+          curl --fail --location --retry 3 --retry-delay 2 "$SOURCE_URL" -o "$RUNNER_TEMP/OKNPV6_original.yml"
+          python3 - <<'PY'
+          from pathlib import Path
+          import base64, hashlib, os, sys
+          workflow = Path(os.environ["RUNNER_TEMP"]) / "OKNPV6_original.yml"
+          text = workflow.read_text(encoding="utf-8")
+          marker = "base64 -d > \"$ARCHIVE\" <<'OKNPV6_SOURCE_ARCHIVE'"
+          if marker not in text:
+              sys.exit("ERROR: pinned workflow did not contain the expected V50 archive marker.")
+          payload = text.split(marker, 1)[1].split("\n          OKNPV6_SOURCE_ARCHIVE", 1)[0]
+          encoded = "".join(line.strip() for line in payload.splitlines())
+          data = base64.b64decode(encoded, validate=True)
+          expected = os.environ["SOURCE_SHA256"]
+          actual = hashlib.sha256(data).hexdigest()
+          if actual != expected:
+              sys.exit(f"ERROR: source SHA256 mismatch: {actual}")
+          archive = Path(os.environ["RUNNER_TEMP"]) / "OKNPV6_V50_Sources.zip"
+          archive.write_bytes(data)
+          print(f"Verified source archive SHA256: {actual}")
+          PY
+          mkdir -p "$GITHUB_WORKSPACE/OKNPV6_BUILD"
+          unzip -q "$RUNNER_TEMP/OKNPV6_V50_Sources.zip" -d "$GITHUB_WORKSPACE/OKNPV6_BUILD"
+          SRC_DIR="$GITHUB_WORKSPACE/OKNPV6_BUILD/OKN_DSP_V50"
+          test -f "$SRC_DIR/settings.gradle"
+          test -f "$SRC_DIR/app/build.gradle"
+          echo "SRC_DIR=$SRC_DIR" >> "$GITHUB_ENV"
+          VERSION_NAME="$(sed -n "s/.*versionName[[:space:]]*['\"]\\([^'\"]*\\)['\"].*/\\1/p" "$SRC_DIR/app/build.gradle" | head -n1)"
+          VERSION_CODE="$(sed -n 's/.*versionCode[[:space:]]*\\([0-9][0-9]*\\).*/\\1/p' "$SRC_DIR/app/build.gradle" | head -n1)"
+          echo "VERSION_NAME=$VERSION_NAME" >> "$GITHUB_ENV"
+          echo "VERSION_CODE=$VERSION_CODE" >> "$GITHUB_ENV"
+
+      - name: Verify source manifest and run safety validators
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$SRC_DIR"
+          sha256sum -c Sources/SHA256SUMS.txt
+          python3 Sources/validate_v38_gate.py
+          python3 Sources/validate_v39_reset.py
+          python3 Sources/validate_v50_real_ui.py
+
+      - name: Install Android SDK 35
+        shell: bash
+        run: |
+          set -euo pipefail
+          SDK="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-}}"
+          test -n "$SDK"
+          SDKMANAGER="$(find "$SDK/cmdline-tools" -type f -path '*/bin/sdkmanager' 2>/dev/null | sort -V | tail -n1)"
+          test -x "$SDKMANAGER"
+          yes | "$SDKMANAGER" --licenses >/dev/null || true
+          "$SDKMANAGER" "platforms;android-35" "build-tools;35.0.0" "platform-tools"
+
+      - name: Set up Gradle 8.9
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: ${{ env.GRADLE_VERSION }}
+
+      - name: Build signed Release APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          gradle --no-daemon -p "$SRC_DIR" :app:assembleRelease --stacktrace
+          APK="$SRC_DIR/app/build/outputs/apk/release/app-release.apk"
+          test -s "$APK"
+          mkdir -p dist
+          cp "$APK" "dist/OKN_DSP_V50_release.apk"
+          sha256sum dist/OKN_DSP_V50_release.apk > dist/OKN_DSP_V50_release.apk.sha256
+          cp "$SRC_DIR/Sources/VERSION.txt" dist/VERSION.txt
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: OKN_DSP_V50_APK
+          path: |
+            dist/OKN_DSP_V50_release.apk
+            dist/OKN_DSP_V50_release.apk.sha256
+            dist/VERSION.txt
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Build summary
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo '## OKN DSP V50 build'
+            echo
+            echo "- Source commit: ${SOURCE_COMMIT}"
+            echo "- Version: ${VERSION_NAME:-unknown} (code ${VERSION_CODE:-unknown})"
+            echo '- Safety validators: V38, V39, V50'
+            echo '- Output: signed Release APK artifact'
+          } >> "$GITHUB_STEP_SUMMARY"
