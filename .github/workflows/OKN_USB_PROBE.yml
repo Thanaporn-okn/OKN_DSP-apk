@@ -1,0 +1,602 @@
+# ─────────────────────────────────────────────────────────────────────
+# OKN USB Probe  (com.okn.usbprobe)  -  READ-ONLY USB-C inspection app
+# Single-file builder. Put at .github/workflows/OKN_USB_PROBE.yml in any
+# GitHub repo (empty is fine) -> Actions -> "OKN USB Probe" -> Run workflow.
+#
+# The app only lists USB devices and dumps their descriptors using the
+# standard GET_DESCRIPTOR request. It never claims an interface and never
+# writes to endpoints. A CI step below fails the build if that ever changes.
+# Tool/action versions are copied from the OKNPV12.1.1 workflow.
+# ─────────────────────────────────────────────────────────────────────
+name: OKN USB Probe
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main, master ]
+    paths:
+      - '.github/workflows/OKN_USB_PROBE.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: okn-usb-probe-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build OKN USB Probe 1.0.0
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Set up Java 17
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK 35 non-interactively
+        uses: android-actions/setup-android@v4
+        with:
+          accept-android-sdk-licenses: 'true'
+          log-accepted-android-sdk-licenses: 'false'
+          packages: 'platform-tools platforms;android-35 build-tools;35.0.0'
+
+      - name: Generate project
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p $(dirname settings.gradle)
+          cat > settings.gradle <<'F0_EOF'
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+
+          rootProject.name = "OKN_USB_Probe"
+          include ':app'
+          F0_EOF
+          mkdir -p $(dirname build.gradle)
+          cat > build.gradle <<'F1_EOF'
+          plugins {
+              id 'com.android.application' version '8.7.3' apply false
+          }
+          F1_EOF
+          mkdir -p $(dirname gradle.properties)
+          cat > gradle.properties <<'F2_EOF'
+          org.gradle.jvmargs=-Xmx2048m -Dfile.encoding=UTF-8
+          android.useAndroidX=false
+          android.nonTransitiveRClass=true
+          F2_EOF
+          mkdir -p $(dirname app/build.gradle)
+          cat > app/build.gradle <<'F3_EOF'
+          plugins {
+              id 'com.android.application'
+          }
+
+          android {
+              namespace 'com.okn.usbprobe'
+              compileSdk 35
+
+              defaultConfig {
+                  applicationId 'com.okn.usbprobe'
+                  minSdk 26
+                  targetSdk 35
+                  versionCode 1
+                  versionName '1.0.0'
+              }
+
+              compileOptions {
+                  sourceCompatibility JavaVersion.VERSION_17
+                  targetCompatibility JavaVersion.VERSION_17
+              }
+          }
+          F3_EOF
+          mkdir -p $(dirname app/src/main/AndroidManifest.xml)
+          cat > app/src/main/AndroidManifest.xml <<'F4_EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+              <uses-feature android:name="android.hardware.usb.host" android:required="true" />
+
+              <application
+                  android:allowBackup="false"
+                  android:label="@string/app_name"
+                  android:theme="@style/Theme.OKNUSBProbe">
+
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+              </application>
+          </manifest>
+          F4_EOF
+          mkdir -p $(dirname app/src/main/res/values/styles.xml)
+          cat > app/src/main/res/values/styles.xml <<'F5_EOF'
+          <resources>
+              <style name="Theme.OKNUSBProbe" parent="android:style/Theme.Material.NoActionBar">
+                  <item name="android:colorAccent">#37CEC4</item>
+                  <item name="android:statusBarColor">#0C1421</item>
+                  <item name="android:navigationBarColor">#0C1421</item>
+                  <item name="android:windowLightStatusBar">false</item>
+              </style>
+          </resources>
+          F5_EOF
+          mkdir -p $(dirname app/src/main/res/values/strings.xml)
+          cat > app/src/main/res/values/strings.xml <<'F6_EOF'
+          <resources>
+              <string name="app_name">OKN USB Probe</string>
+          </resources>
+          F6_EOF
+          mkdir -p $(dirname app/src/main/java/com/okn/usbprobe/MainActivity.java)
+          cat > app/src/main/java/com/okn/usbprobe/MainActivity.java <<'F7_EOF'
+          package com.okn.usbprobe;
+
+          import android.app.Activity;
+          import android.app.PendingIntent;
+          import android.content.BroadcastReceiver;
+          import android.content.ClipData;
+          import android.content.ClipboardManager;
+          import android.content.Context;
+          import android.content.Intent;
+          import android.content.IntentFilter;
+          import android.content.pm.PackageManager;
+          import android.graphics.Color;
+          import android.graphics.Typeface;
+          import android.hardware.usb.UsbConstants;
+          import android.hardware.usb.UsbDevice;
+          import android.hardware.usb.UsbDeviceConnection;
+          import android.hardware.usb.UsbManager;
+          import android.net.Uri;
+          import android.os.Build;
+          import android.os.Handler;
+          import android.os.Looper;
+          import android.view.Gravity;
+          import android.view.View;
+          import android.widget.Button;
+          import android.widget.LinearLayout;
+          import android.widget.ScrollView;
+          import android.widget.TextView;
+          import android.widget.Toast;
+
+          import java.io.OutputStream;
+          import java.nio.charset.StandardCharsets;
+          import java.text.SimpleDateFormat;
+          import java.util.ArrayList;
+          import java.util.Date;
+          import java.util.List;
+          import java.util.Locale;
+
+          /**
+           * OKN USB Probe - READ-ONLY.
+           * Lists USB devices seen by the phone and dumps their descriptors.
+           * It never claims an interface, never uses bulk/interrupt endpoints and only sends
+           * the standard GET_DESCRIPTOR control request (bmRequestType 0x80) on endpoint 0.
+           */
+          public final class MainActivity extends Activity {
+              private static final String ACTION_PERM = "com.okn.usbprobe.USB_PERMISSION";
+              private static final int REQ_SAVE = 9001;
+
+              private UsbManager usb;
+              private TextView out;
+              private final Handler ui = new Handler(Looper.getMainLooper());
+              private volatile String report = "";
+              private volatile boolean scanning = false;
+
+              private final BroadcastReceiver receiver = new BroadcastReceiver() {
+                  @Override
+                  public void onReceive(Context ctx, Intent intent) {
+                      String a = intent.getAction();
+                      if (ACTION_PERM.equals(a)
+                              || UsbManager.ACTION_USB_DEVICE_ATTACHED.equals(a)
+                              || UsbManager.ACTION_USB_DEVICE_DETACHED.equals(a)) {
+                          scan(false);
+                      }
+                  }
+              };
+
+              @Override
+              protected void onCreate(android.os.Bundle b) {
+                  super.onCreate(b);
+                  usb = (UsbManager) getSystemService(Context.USB_SERVICE);
+
+                  LinearLayout root = new LinearLayout(this);
+                  root.setOrientation(LinearLayout.VERTICAL);
+                  root.setBackgroundColor(Color.parseColor("#0C1421"));
+                  root.setOnApplyWindowInsetsListener((v, insets) -> {
+                      v.setPadding(insets.getSystemWindowInsetLeft() + 12,
+                              insets.getSystemWindowInsetTop() + 12,
+                              insets.getSystemWindowInsetRight() + 12,
+                              insets.getSystemWindowInsetBottom() + 12);
+                      return insets;
+                  });
+
+                  TextView title = new TextView(this);
+                  title.setText("OKN USB Probe (read-only)");
+                  title.setTextColor(Color.parseColor("#37CEC4"));
+                  title.setTextSize(18);
+                  title.setTypeface(Typeface.DEFAULT_BOLD);
+                  root.addView(title);
+
+                  LinearLayout row = new LinearLayout(this);
+                  row.setOrientation(LinearLayout.HORIZONTAL);
+                  row.setGravity(Gravity.CENTER_VERTICAL);
+                  row.addView(btn("Scan", v -> scan(true)));
+                  row.addView(btn("Copy", v -> copy()));
+                  row.addView(btn("Save", v -> save()));
+                  row.addView(btn("Share", v -> share()));
+                  root.addView(row);
+
+                  ScrollView sv = new ScrollView(this);
+                  out = new TextView(this);
+                  out.setTextColor(Color.parseColor("#D6E2E0"));
+                  out.setTypeface(Typeface.MONOSPACE);
+                  out.setTextSize(11);
+                  out.setTextIsSelectable(true);
+                  out.setText("Connect the USB-C cable between the phone and the board, then tap Scan.");
+                  sv.addView(out);
+                  root.addView(sv, new LinearLayout.LayoutParams(
+                          LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f));
+
+                  setContentView(root);
+                  root.requestApplyInsets();
+
+                  IntentFilter f = new IntentFilter();
+                  f.addAction(ACTION_PERM);
+                  f.addAction(UsbManager.ACTION_USB_DEVICE_ATTACHED);
+                  f.addAction(UsbManager.ACTION_USB_DEVICE_DETACHED);
+                  if (Build.VERSION.SDK_INT >= 33) {
+                      registerReceiver(receiver, f, Context.RECEIVER_NOT_EXPORTED);
+                  } else {
+                      registerReceiver(receiver, f);
+                  }
+              }
+
+              @Override
+              protected void onDestroy() {
+                  try {
+                      unregisterReceiver(receiver);
+                  } catch (Exception ignored) {
+                  }
+                  super.onDestroy();
+              }
+
+              private Button btn(String t, View.OnClickListener l) {
+                  Button x = new Button(this);
+                  x.setText(t);
+                  x.setAllCaps(false);
+                  x.setOnClickListener(l);
+                  return x;
+              }
+
+              // ───────────────────────── scan ─────────────────────────
+              private void scan(final boolean requestMissing) {
+                  if (scanning) return;
+                  scanning = true;
+                  out.setText("Scanning...");
+                  new Thread(() -> {
+                      final List<UsbDevice> need = new ArrayList<>();
+                      final String text = buildReport(need);
+                      report = text;
+                      ui.post(() -> {
+                          out.setText(text);
+                          scanning = false;
+                          if (requestMissing) {
+                              int flags = PendingIntent.FLAG_UPDATE_CURRENT;
+                              if (Build.VERSION.SDK_INT >= 31) flags |= PendingIntent.FLAG_MUTABLE;
+                              PendingIntent pi = PendingIntent.getBroadcast(this, 0,
+                                      new Intent(ACTION_PERM).setPackage(getPackageName()), flags);
+                              for (UsbDevice d : need) usb.requestPermission(d, pi);
+                          }
+                      });
+                  }).start();
+              }
+
+              private String buildReport(List<UsbDevice> need) {
+                  StringBuilder sb = new StringBuilder();
+                  String ts = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(new Date());
+                  sb.append("OKN USB Probe report  ").append(ts).append('\n');
+                  sb.append("Phone: ").append(Build.MANUFACTURER).append(' ').append(Build.MODEL)
+                          .append("  Android ").append(Build.VERSION.RELEASE)
+                          .append(" (SDK ").append(Build.VERSION.SDK_INT).append(")\n");
+                  sb.append("USB host feature: ")
+                          .append(getPackageManager().hasSystemFeature(PackageManager.FEATURE_USB_HOST))
+                          .append('\n');
+                  sb.append("------------------------------------------------------------\n");
+
+                  java.util.HashMap<String, UsbDevice> map = usb.getDeviceList();
+                  if (map == null || map.isEmpty()) {
+                      sb.append("No USB device visible.\n");
+                      sb.append("Check: data-capable USB-C cable, board powered, try another port/OTG mode.\n");
+                      return sb.toString();
+                  }
+                  int n = 0;
+                  for (UsbDevice d : map.values()) {
+                      n++;
+                      sb.append("\n### Device ").append(n).append(": ").append(d.getDeviceName()).append('\n');
+                      sb.append(String.format(Locale.US, "VID:PID = %04X:%04X   class=%s sub=0x%02X proto=0x%02X\n",
+                              d.getVendorId(), d.getProductId(), cls(d.getDeviceClass(), d.getDeviceSubclass()),
+                              d.getDeviceSubclass(), d.getDeviceProtocol()));
+                      sb.append("Interfaces (Android view): ").append(d.getInterfaceCount()).append('\n');
+                      if (!usb.hasPermission(d)) {
+                          sb.append("PERMISSION NOT GRANTED yet -> tap Scan and allow the system dialog.\n");
+                          need.add(d);
+                          continue;
+                      }
+                      dump(d, sb);
+                  }
+                  return sb.toString();
+              }
+
+              // ───────────────────────── descriptor dump ─────────────────────────
+              private boolean fDfu, fVendor, fMsc, fCdc, fHid, fAudio;
+
+              private void dump(UsbDevice d, StringBuilder sb) {
+                  fDfu = fVendor = fMsc = fCdc = fHid = fAudio = false;
+                  UsbDeviceConnection c = usb.openDevice(d);
+                  if (c == null) {
+                      sb.append("openDevice() returned null.\n");
+                      return;
+                  }
+                  try {
+                      int lang = firstLang(c);
+                      try {
+                          sb.append("Serial (API): ").append(d.getSerialNumber()).append('\n');
+                      } catch (Exception e) {
+                          sb.append("Serial (API): <denied>\n");
+                      }
+                      byte[] raw = c.getRawDescriptors();
+                      if (raw == null) {
+                          sb.append("getRawDescriptors() returned null.\n");
+                          return;
+                      }
+                      sb.append("Raw descriptors: ").append(raw.length).append(" bytes\n");
+                      parse(raw, c, lang, sb);
+                      sb.append("Raw hex:\n").append(hex(raw, 0, raw.length)).append('\n');
+                      sb.append("Summary: ");
+                      if (fDfu) sb.append("[DFU interface] ");
+                      if (fVendor) sb.append("[vendor-specific] ");
+                      if (fMsc) sb.append("[mass storage] ");
+                      if (fCdc) sb.append("[CDC serial] ");
+                      if (fHid) sb.append("[HID] ");
+                      if (fAudio) sb.append("[audio] ");
+                      if (!(fDfu || fVendor || fMsc || fCdc || fHid || fAudio)) sb.append("none of the known classes");
+                      sb.append('\n');
+                  } finally {
+                      c.close();
+                  }
+              }
+
+              private void parse(byte[] r, UsbDeviceConnection c, int lang, StringBuilder sb) {
+                  int i = 0;
+                  int curClass = -1;
+                  while (i + 2 <= r.length) {
+                      int len = r[i] & 0xFF;
+                      if (len < 2 || i + len > r.length) {
+                          sb.append("  <malformed descriptor at offset ").append(i).append(">\n");
+                          break;
+                      }
+                      int type = r[i + 1] & 0xFF;
+                      switch (type) {
+                          case 0x01:
+                              if (len >= 18) {
+                                  sb.append(String.format(Locale.US,
+                                          "DEVICE  bcdUSB=%x.%02x class=%s maxPkt0=%d VID=%04X PID=%04X bcdDev=%x.%02x cfgs=%d\n",
+                                          u8(r, i + 3), u8(r, i + 2), cls(u8(r, i + 4), u8(r, i + 5)), u8(r, i + 7),
+                                          u16(r, i + 8), u16(r, i + 10), u8(r, i + 13), u8(r, i + 12), u8(r, i + 17)));
+                                  sb.append("  manufacturer: ").append(str(c, u8(r, i + 14), lang)).append('\n');
+                                  sb.append("  product     : ").append(str(c, u8(r, i + 15), lang)).append('\n');
+                                  sb.append("  serial      : ").append(str(c, u8(r, i + 16), lang)).append('\n');
+                              }
+                              break;
+                          case 0x02:
+                              if (len >= 9) {
+                                  sb.append(String.format(Locale.US,
+                                          "CONFIG  value=%d ifaces=%d attrs=0x%02X maxPower=%dmA totalLen=%d name=%s\n",
+                                          u8(r, i + 5), u8(r, i + 4), u8(r, i + 7), u8(r, i + 8) * 2,
+                                          u16(r, i + 2), str(c, u8(r, i + 6), lang)));
+                              }
+                              break;
+                          case 0x04:
+                              if (len >= 9) {
+                                  int cl = u8(r, i + 5), sub = u8(r, i + 6);
+                                  curClass = cl;
+                                  sb.append(String.format(Locale.US,
+                                          "  INTERFACE #%d alt=%d eps=%d class=%s proto=0x%02X name=%s\n",
+                                          u8(r, i + 2), u8(r, i + 3), u8(r, i + 4), cls(cl, sub),
+                                          u8(r, i + 7), str(c, u8(r, i + 8), lang)));
+                                  if (cl == 0xFE && sub == 0x01) fDfu = true;
+                                  if (cl == 0xFF) fVendor = true;
+                                  if (cl == 0x08) fMsc = true;
+                                  if (cl == 0x02 || cl == 0x0A) fCdc = true;
+                                  if (cl == 0x03) fHid = true;
+                                  if (cl == 0x01) fAudio = true;
+                              }
+                              break;
+                          case 0x05:
+                              if (len >= 7) {
+                                  int addr = u8(r, i + 2), at = u8(r, i + 3);
+                                  String[] tn = {"control", "isochronous", "bulk", "interrupt"};
+                                  sb.append(String.format(Locale.US,
+                                          "    ENDPOINT 0x%02X %s %s maxPkt=%d interval=%d\n",
+                                          addr, (addr & 0x80) != 0 ? "IN " : "OUT", tn[at & 3],
+                                          u16(r, i + 4), u8(r, i + 6)));
+                              }
+                              break;
+                          default:
+                              sb.append(String.format(Locale.US, "    type 0x%02X len=%d (class ctx %s): %s\n",
+                                      type, len, curClass < 0 ? "-" : String.format(Locale.US, "0x%02X", curClass),
+                                      hex(r, i, len).replace("\n", " ")));
+                              if (type == 0x21 && curClass == 0xFE) {
+                                  sb.append("      (DFU functional descriptor)\n");
+                              }
+                      }
+                      i += len;
+                  }
+              }
+
+              // ───────────────────────── helpers (GET_DESCRIPTOR only) ─────────────────────────
+              private int firstLang(UsbDeviceConnection c) {
+                  byte[] b = new byte[255];
+                  int n = c.controlTransfer(0x80, 0x06, 0x0300, 0, b, b.length, 1000);
+                  if (n >= 4) return (b[2] & 0xFF) | ((b[3] & 0xFF) << 8);
+                  return 0x0409;
+              }
+
+              private String str(UsbDeviceConnection c, int idx, int lang) {
+                  if (idx == 0) return "-";
+                  byte[] b = new byte[255];
+                  int n = c.controlTransfer(0x80, 0x06, 0x0300 | idx, lang, b, b.length, 1000);
+                  if (n < 2) return "<unreadable>";
+                  int len = Math.min(n, b[0] & 0xFF);
+                  if (len < 2) return "<unreadable>";
+                  return new String(b, 2, len - 2, StandardCharsets.UTF_16LE);
+              }
+
+              private static int u8(byte[] b, int o) {
+                  return b[o] & 0xFF;
+              }
+
+              private static int u16(byte[] b, int o) {
+                  return (b[o] & 0xFF) | ((b[o + 1] & 0xFF) << 8);
+              }
+
+              private static String hex(byte[] b, int off, int len) {
+                  StringBuilder s = new StringBuilder();
+                  for (int k = 0; k < len; k++) {
+                      s.append(String.format(Locale.US, "%02X", b[off + k] & 0xFF));
+                      if ((k & 15) == 15) s.append('\n');
+                      else if (k != len - 1) s.append(' ');
+                  }
+                  return s.toString();
+              }
+
+              private static String cls(int c, int sub) {
+                  String n;
+                  switch (c) {
+                      case 0x00: n = "per-interface"; break;
+                      case 0x01: n = "Audio"; break;
+                      case 0x02: n = "CDC-Comm"; break;
+                      case 0x03: n = "HID"; break;
+                      case 0x05: n = "Physical"; break;
+                      case 0x06: n = "Image"; break;
+                      case 0x07: n = "Printer"; break;
+                      case 0x08: n = "MassStorage"; break;
+                      case 0x09: n = "Hub"; break;
+                      case 0x0A: n = "CDC-Data"; break;
+                      case 0x0B: n = "SmartCard"; break;
+                      case 0x0E: n = "Video"; break;
+                      case 0xDC: n = "Diagnostic"; break;
+                      case 0xE0: n = "Wireless"; break;
+                      case 0xEF: n = "Misc"; break;
+                      case 0xFE: n = sub == 1 ? "AppSpecific/DFU" : "AppSpecific"; break;
+                      case 0xFF: n = "Vendor-specific"; break;
+                      default: n = "other";
+                  }
+                  return String.format(Locale.US, "0x%02X(%s)", c, n);
+              }
+
+              // ───────────────────────── export ─────────────────────────
+              private void copy() {
+                  ClipboardManager cm = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
+                  cm.setPrimaryClip(ClipData.newPlainText("okn_usb_probe", report));
+                  Toast.makeText(this, "Copied", Toast.LENGTH_SHORT).show();
+              }
+
+              private void share() {
+                  Intent i = new Intent(Intent.ACTION_SEND);
+                  i.setType("text/plain");
+                  i.putExtra(Intent.EXTRA_TEXT, report);
+                  startActivity(Intent.createChooser(i, "Share report"));
+              }
+
+              private void save() {
+                  Intent i = new Intent(Intent.ACTION_CREATE_DOCUMENT);
+                  i.addCategory(Intent.CATEGORY_OPENABLE);
+                  i.setType("text/plain");
+                  i.putExtra(Intent.EXTRA_TITLE, "okn_usb_probe_"
+                          + new SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(new Date()) + ".txt");
+                  startActivityForResult(i, REQ_SAVE);
+              }
+
+              @Override
+              protected void onActivityResult(int req, int res, Intent data) {
+                  super.onActivityResult(req, res, data);
+                  if (req != REQ_SAVE || res != RESULT_OK || data == null) return;
+                  Uri u = data.getData();
+                  if (u == null) return;
+                  try (OutputStream os = getContentResolver().openOutputStream(u)) {
+                      if (os != null) os.write(report.getBytes(StandardCharsets.UTF_8));
+                      Toast.makeText(this, "Saved", Toast.LENGTH_SHORT).show();
+                  } catch (Exception e) {
+                      Toast.makeText(this, "Save failed: " + e.getMessage(), Toast.LENGTH_LONG).show();
+                  }
+              }
+          }
+          F7_EOF
+
+      - name: Read-only guard (no writes to the board)
+        shell: bash
+        run: |
+          set -euo pipefail
+          SRC=app/src/main/java/com/okn/usbprobe/MainActivity.java
+          if grep -nE 'claimInterface|bulkTransfer|UsbRequest|setConfiguration|setInterface|releaseInterface' "$SRC"; then
+            echo "FORBIDDEN USB call found"; exit 1
+          fi
+          # every controlTransfer must be a device-to-host request (bmRequestType 0x80)
+          if grep -n 'controlTransfer(' "$SRC" | grep -v 'controlTransfer(0x80, 0x06'; then
+            echo "controlTransfer other than GET_DESCRIPTOR found"; exit 1
+          fi
+          echo "guard OK: only GET_DESCRIPTOR control reads"
+
+      - name: Set up Gradle 8.9
+        uses: gradle/actions/setup-gradle@v6
+        with:
+          gradle-version: '8.9'
+          cache-provider: basic
+
+      - name: Build debug APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          gradle --version
+          gradle :app:assembleDebug --no-daemon --stacktrace
+          cp app/build/outputs/apk/debug/app-debug.apk OKN_USB_PROBE-debug.apk
+
+      - name: Verify APK identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          AAPT="$ANDROID_HOME/build-tools/35.0.0/aapt"
+          "$AAPT" dump badging OKN_USB_PROBE-debug.apk | tee OKN_USB_PROBE-badging.txt
+          grep -q "package: name='com.okn.usbprobe' versionCode='1' versionName='1.0.0'" OKN_USB_PROBE-badging.txt
+          grep -q "uses-feature: name='android.hardware.usb.host'" OKN_USB_PROBE-badging.txt
+          sha256sum OKN_USB_PROBE-debug.apk | tee OKN_USB_PROBE-SHA256.txt
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: OKN_USB_PROBE
+          path: |
+            OKN_USB_PROBE-debug.apk
+            OKN_USB_PROBE-badging.txt
+            OKN_USB_PROBE-SHA256.txt
+          if-no-files-found: error
+          retention-days: 30
