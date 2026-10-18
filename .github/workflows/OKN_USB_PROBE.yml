@@ -1,11 +1,12 @@
 # ─────────────────────────────────────────────────────────────────────
-# OKN USB Probe  (com.okn.usbprobe)  -  READ-ONLY USB-C inspection app
-# Single-file builder. Put at .github/workflows/OKN_USB_PROBE.yml in any
-# GitHub repo (empty is fine) -> Actions -> "OKN USB Probe" -> Run workflow.
+# OKN USB Probe 1.1  (com.okn.usbprobe)  -  READ-ONLY USB-C inspection app
+# Single-file builder. Same path as before: .github/workflows/OKN_USB_PROBE.yml
+# (replace the old file) -> Actions -> "OKN USB Probe" -> Run workflow.
 #
-# The app only lists USB devices and dumps their descriptors using the
-# standard GET_DESCRIPTOR request. It never claims an interface and never
-# writes to endpoints. A CI step below fails the build if that ever changes.
+# 1.1 adds: reads and decodes the HID report descriptors of the board.
+# The app never writes to the board: no bulk/interrupt/iso transfers, no
+# configuration changes. Only GET_DESCRIPTOR control reads (0x80 / 0x81).
+# A CI step below fails the build if that ever changes.
 # Tool/action versions are copied from the OKNPV12.1.1 workflow.
 # ─────────────────────────────────────────────────────────────────────
 name: OKN USB Probe
@@ -26,7 +27,7 @@ concurrency:
 
 jobs:
   build:
-    name: Build OKN USB Probe 1.0.0
+    name: Build OKN USB Probe 1.1.0
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
@@ -95,8 +96,8 @@ jobs:
                   applicationId 'com.okn.usbprobe'
                   minSdk 26
                   targetSdk 35
-                  versionCode 1
-                  versionName '1.0.0'
+                  versionCode 2
+                  versionName '1.1.0'
               }
 
               compileOptions {
@@ -163,6 +164,7 @@ jobs:
           import android.hardware.usb.UsbConstants;
           import android.hardware.usb.UsbDevice;
           import android.hardware.usb.UsbDeviceConnection;
+          import android.hardware.usb.UsbInterface;
           import android.hardware.usb.UsbManager;
           import android.net.Uri;
           import android.os.Build;
@@ -187,8 +189,10 @@ jobs:
           /**
            * OKN USB Probe - READ-ONLY.
            * Lists USB devices seen by the phone and dumps their descriptors.
-           * It never claims an interface, never uses bulk/interrupt endpoints and only sends
-           * the standard GET_DESCRIPTOR control request (bmRequestType 0x80) on endpoint 0.
+           * It never uses bulk/interrupt/isochronous endpoints and only sends the standard
+           * GET_DESCRIPTOR control request on endpoint 0 (bmRequestType 0x80 for the device,
+           * 0x81 for the HID report descriptor of an interface). To read a HID report descriptor
+           * Android may require claiming that interface once; it is released right after.
            */
           public final class MainActivity extends Activity {
               private static final String ACTION_PERM = "com.okn.usbprobe.USB_PERMISSION";
@@ -229,7 +233,7 @@ jobs:
                   });
 
                   TextView title = new TextView(this);
-                  title.setText("OKN USB Probe (read-only)");
+                  title.setText("OKN USB Probe 1.1 (read-only)");
                   title.setTextColor(Color.parseColor("#37CEC4"));
                   title.setTextSize(18);
                   title.setTypeface(Typeface.DEFAULT_BOLD);
@@ -312,7 +316,7 @@ jobs:
               private String buildReport(List<UsbDevice> need) {
                   StringBuilder sb = new StringBuilder();
                   String ts = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(new Date());
-                  sb.append("OKN USB Probe report  ").append(ts).append('\n');
+                  sb.append("OKN USB Probe 1.1 report  ").append(ts).append('\n');
                   sb.append("Phone: ").append(Build.MANUFACTURER).append(' ').append(Build.MODEL)
                           .append("  Android ").append(Build.VERSION.RELEASE)
                           .append(" (SDK ").append(Build.VERSION.SDK_INT).append(")\n");
@@ -347,9 +351,11 @@ jobs:
 
               // ───────────────────────── descriptor dump ─────────────────────────
               private boolean fDfu, fVendor, fMsc, fCdc, fHid, fAudio;
+              private UsbDevice usbDev;
 
               private void dump(UsbDevice d, StringBuilder sb) {
                   fDfu = fVendor = fMsc = fCdc = fHid = fAudio = false;
+                  usbDev = d;
                   UsbDeviceConnection c = usb.openDevice(d);
                   if (c == null) {
                       sb.append("openDevice() returned null.\n");
@@ -387,6 +393,7 @@ jobs:
               private void parse(byte[] r, UsbDeviceConnection c, int lang, StringBuilder sb) {
                   int i = 0;
                   int curClass = -1;
+                  int curIf = -1;
                   while (i + 2 <= r.length) {
                       int len = r[i] & 0xFF;
                       if (len < 2 || i + len > r.length) {
@@ -418,6 +425,7 @@ jobs:
                               if (len >= 9) {
                                   int cl = u8(r, i + 5), sub = u8(r, i + 6);
                                   curClass = cl;
+                                  curIf = u8(r, i + 2);
                                   sb.append(String.format(Locale.US,
                                           "  INTERFACE #%d alt=%d eps=%d class=%s proto=0x%02X name=%s\n",
                                           u8(r, i + 2), u8(r, i + 3), u8(r, i + 4), cls(cl, sub),
@@ -447,8 +455,146 @@ jobs:
                               if (type == 0x21 && curClass == 0xFE) {
                                   sb.append("      (DFU functional descriptor)\n");
                               }
+                              if (type == 0x21 && curClass == 0x03 && len >= 9 && curIf >= 0) {
+                                  int nd = u8(r, i + 5);
+                                  for (int k = 0; k < nd; k++) {
+                                      int off = i + 6 + 3 * k;
+                                      if (off + 3 > i + len) break;
+                                      if (u8(r, off) == 0x22) {
+                                          readHid(c, usbDev, curIf, u16(r, off + 1), sb);
+                                      }
+                                  }
+                              }
                       }
                       i += len;
+                  }
+              }
+
+              // ───────────────────────── HID report descriptor (read-only) ─────────────────────────
+              private void readHid(UsbDeviceConnection c, UsbDevice d, int ifnum, int len, StringBuilder sb) {
+                  if (len <= 0 || len > 4096) {
+                      sb.append("      HID report descriptor: bad length ").append(len).append('\n');
+                      return;
+                  }
+                  byte[] buf = new byte[len];
+                  int n = c.controlTransfer(0x81, 0x06, 0x2200, ifnum, buf, len, 1000);
+                  UsbInterface target = null;
+                  boolean claimed = false;
+                  if (n < 0) {
+                      for (int k = 0; k < d.getInterfaceCount(); k++) {
+                          UsbInterface u = d.getInterface(k);
+                          if (u.getId() == ifnum) {
+                              target = u;
+                              break;
+                          }
+                      }
+                      if (target != null && c.claimInterface(target, true)) {
+                          claimed = true;
+                          n = c.controlTransfer(0x81, 0x06, 0x2200, ifnum, buf, len, 1000);
+                      }
+                  }
+                  sb.append("      HID REPORT DESCRIPTOR (interface ").append(ifnum).append(", ")
+                          .append(len).append(" bytes declared, ").append(n).append(" read")
+                          .append(claimed ? ", interface claimed once for reading" : "").append(")\n");
+                  if (n > 0) {
+                      sb.append(indent(hex(buf, 0, n), "        ")).append('\n');
+                      try {
+                          hidParse(buf, n, sb);
+                      } catch (Exception e) {
+                          sb.append("        <decode error: ").append(e).append(">\n");
+                      }
+                  } else {
+                      sb.append("        <could not read>\n");
+                  }
+                  if (claimed) c.releaseInterface(target);
+              }
+
+              private static String indent(String t, String pre) {
+                  return pre + t.replace("\n", "\n" + pre);
+              }
+
+              private static String pageName(int p) {
+                  switch (p) {
+                      case 0x01: return "GenericDesktop";
+                      case 0x02: return "Simulation";
+                      case 0x06: return "GenericDevice";
+                      case 0x07: return "Keyboard";
+                      case 0x08: return "LED";
+                      case 0x09: return "Button";
+                      case 0x0B: return "Telephony";
+                      case 0x0C: return "Consumer";
+                      default:
+                          if (p >= 0xFF00) return "Vendor-defined";
+                          return "other";
+                  }
+              }
+
+              private void hidParse(byte[] d, int n, StringBuilder sb) {
+                  int page = 0, size = 0, count = 0, id = 0, depth = 0;
+                  long lmin = 0, lmax = 0;
+                  java.util.TreeMap<String, Integer> bits = new java.util.TreeMap<>();
+                  sb.append("        decoded:\n");
+                  int i = 0;
+                  while (i < n) {
+                      int b = d[i] & 0xFF;
+                      if (b == 0xFE) {
+                          int l = i + 1 < n ? (d[i + 1] & 0xFF) : 0;
+                          sb.append("        long item skipped\n");
+                          i += 3 + l;
+                          continue;
+                      }
+                      int sz = b & 3;
+                      if (sz == 3) sz = 4;
+                      int type = (b >> 2) & 3;
+                      int tag = (b >> 4) & 0xF;
+                      long u = 0;
+                      for (int k = 0; k < sz && i + 1 + k < n; k++) {
+                          u |= ((long) (d[i + 1 + k] & 0xFF)) << (8 * k);
+                      }
+                      long sv = u;
+                      if (sz > 0 && sz < 8 && (u & (1L << (8 * sz - 1))) != 0) sv = u - (1L << (8 * sz));
+                      StringBuilder pad = new StringBuilder("        ");
+                      for (int k = 0; k < depth; k++) pad.append("  ");
+                      if (type == 1) {
+                          switch (tag) {
+                              case 0:
+                                  page = (int) u;
+                                  sb.append(pad).append(String.format(Locale.US, "UsagePage 0x%04X (%s)\n", page, pageName(page)));
+                                  break;
+                              case 1: lmin = sv; sb.append(pad).append("LogicalMin ").append(sv).append('\n'); break;
+                              case 2: lmax = sv; sb.append(pad).append("LogicalMax ").append(sv).append('\n'); break;
+                              case 7: size = (int) u; sb.append(pad).append("ReportSize ").append(u).append('\n'); break;
+                              case 8: id = (int) u; sb.append(pad).append("ReportID ").append(u).append('\n'); break;
+                              case 9: count = (int) u; sb.append(pad).append("ReportCount ").append(u).append('\n'); break;
+                              default:
+                                  sb.append(pad).append(String.format(Locale.US, "Global tag 0x%X = %d\n", tag, sv));
+                          }
+                      } else if (type == 2) {
+                          String nm = tag == 0 ? "Usage" : tag == 1 ? "UsageMin" : tag == 2 ? "UsageMax" : "Local" + tag;
+                          sb.append(pad).append(String.format(Locale.US, "%s 0x%X\n", nm, u));
+                      } else if (type == 0) {
+                          if (tag == 0xA) {
+                              sb.append(pad).append(String.format(Locale.US, "Collection %d\n", u));
+                              depth++;
+                          } else if (tag == 0xC) {
+                              if (depth > 0) depth--;
+                              sb.append(pad.substring(0, Math.max(8, pad.length() - 2))).append("EndCollection\n");
+                          } else if (tag == 8 || tag == 9 || tag == 0xB) {
+                              String kind = tag == 8 ? "Input" : tag == 9 ? "Output" : "Feature";
+                              sb.append(pad).append(String.format(Locale.US,
+                                      "%s attr=0x%02X  size=%d x count=%d = %d bits  id=%d  logical %d..%d\n",
+                                      kind, u, size, count, size * count, id, lmin, lmax));
+                              String key = kind + " reportID=" + id;
+                              Integer old = bits.get(key);
+                              bits.put(key, (old == null ? 0 : old) + size * count);
+                          }
+                      }
+                      i += 1 + sz;
+                  }
+                  sb.append("        totals:\n");
+                  for (java.util.Map.Entry<String, Integer> e : bits.entrySet()) {
+                      sb.append("          ").append(e.getKey()).append(" -> ")
+                              .append((e.getValue() + 7) / 8).append(" byte(s) payload\n");
                   }
               }
 
@@ -557,11 +703,14 @@ jobs:
         run: |
           set -euo pipefail
           SRC=app/src/main/java/com/okn/usbprobe/MainActivity.java
-          if grep -nE 'claimInterface|bulkTransfer|UsbRequest|setConfiguration|setInterface|releaseInterface' "$SRC"; then
+          if grep -nE 'bulkTransfer|UsbRequest|setConfiguration|setInterface' "$SRC"; then
             echo "FORBIDDEN USB call found"; exit 1
           fi
-          # every controlTransfer must be a device-to-host request (bmRequestType 0x80)
-          if grep -n 'controlTransfer(' "$SRC" | grep -v 'controlTransfer(0x80, 0x06'; then
+          # claimInterface is allowed exactly once (to read a HID report descriptor) and must be released
+          test "$(grep -c 'claimInterface(' "$SRC")" = "1"
+          test "$(grep -c 'releaseInterface(' "$SRC")" = "1"
+          # every controlTransfer must be a GET_DESCRIPTOR read (0x80 device / 0x81 interface)
+          if grep -n 'controlTransfer(' "$SRC" | grep -vE 'controlTransfer\(0x8[01], 0x06,'; then
             echo "controlTransfer other than GET_DESCRIPTOR found"; exit 1
           fi
           echo "guard OK: only GET_DESCRIPTOR control reads"
@@ -578,25 +727,25 @@ jobs:
           set -euo pipefail
           gradle --version
           gradle :app:assembleDebug --no-daemon --stacktrace
-          cp app/build/outputs/apk/debug/app-debug.apk OKN_USB_PROBE-debug.apk
+          cp app/build/outputs/apk/debug/app-debug.apk OKN_USB_PROBE_1_1-debug.apk
 
       - name: Verify APK identity
         shell: bash
         run: |
           set -euo pipefail
           AAPT="$ANDROID_HOME/build-tools/35.0.0/aapt"
-          "$AAPT" dump badging OKN_USB_PROBE-debug.apk | tee OKN_USB_PROBE-badging.txt
-          grep -q "package: name='com.okn.usbprobe' versionCode='1' versionName='1.0.0'" OKN_USB_PROBE-badging.txt
-          grep -q "uses-feature: name='android.hardware.usb.host'" OKN_USB_PROBE-badging.txt
-          sha256sum OKN_USB_PROBE-debug.apk | tee OKN_USB_PROBE-SHA256.txt
+          "$AAPT" dump badging OKN_USB_PROBE_1_1-debug.apk | tee OKN_USB_PROBE_1_1-badging.txt
+          grep -q "package: name='com.okn.usbprobe' versionCode='2' versionName='1.1.0'" OKN_USB_PROBE_1_1-badging.txt
+          grep -q "uses-feature: name='android.hardware.usb.host'" OKN_USB_PROBE_1_1-badging.txt
+          sha256sum OKN_USB_PROBE_1_1-debug.apk | tee OKN_USB_PROBE_1_1-SHA256.txt
 
       - name: Upload artifact
         uses: actions/upload-artifact@v7
         with:
-          name: OKN_USB_PROBE
+          name: OKN_USB_PROBE_1_1
           path: |
-            OKN_USB_PROBE-debug.apk
-            OKN_USB_PROBE-badging.txt
-            OKN_USB_PROBE-SHA256.txt
+            OKN_USB_PROBE_1_1-debug.apk
+            OKN_USB_PROBE_1_1-badging.txt
+            OKN_USB_PROBE_1_1-SHA256.txt
           if-no-files-found: error
           retention-days: 30
