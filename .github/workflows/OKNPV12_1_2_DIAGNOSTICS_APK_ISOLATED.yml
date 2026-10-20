@@ -1,0 +1,306 @@
+name: OKNPV12.1.2 - Isolated read-only PEQ diagnostics APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - master
+      - 'diag/**'
+    paths:
+      - '.github/workflows/OKNPV12_1_2_DIAGNOSTICS_SINGLE.yml'
+      - '.github/workflows/OKNPV12_1_2_DIAGNOSTICS_APK_ISOLATED.yml'
+      - '.github/workflows/OKNPV12_1_2_DIAGNOSTICS_SINGLE.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: oknpv1212-diagnostics-isolated-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  diagnostics:
+    name: Patch, verify, and assemble debug diagnostics APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK 35
+        uses: android-actions/setup-android@v3
+        with:
+          accept-android-sdk-licenses: 'true'
+          packages: 'platform-tools platforms;android-35 build-tools;35.0.0'
+
+      - name: Set up Gradle 8.9
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: Extract checksum-pinned V12.1 source payload
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          workflow = Path('.github/workflows/OKNPV12_1_1.yml').read_text()
+          start_marker = "          cat > payload.tar.gz.b64 <<'PAYLOAD'\n"
+          end_marker = "          PAYLOAD\n"
+          start = workflow.index(start_marker) + len(start_marker)
+          end = workflow.index(end_marker, start)
+          lines = workflow[start:end].splitlines()
+          lines = [line[10:] if line.startswith('          ') else line for line in lines]
+          Path('payload.tar.gz.b64').write_text('\n'.join(lines) + '\n')
+          PY
+          base64 -d payload.tar.gz.b64 > payload.tar.gz
+          echo '1651a3d3015d01faddb3c3f985a5538260e69872bee2ac2b51b36f6635ffc6dd  payload.tar.gz' | sha256sum -c -
+          tar -xzf payload.tar.gz
+          rm -f payload.tar.gz payload.tar.gz.b64
+
+      - name: Preserve pre-patch sources and apply additive diagnostics (inline; single YAML file)
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p diagnostics-artifacts/prepatch
+          cp app/src/main/java/com/okn/peramp/DspProtocol.java diagnostics-artifacts/prepatch/DspProtocol.java
+          cp app/src/main/java/com/okn/peramp/BleManager.java diagnostics-artifacts/prepatch/BleManager.java
+          cp Sources/V12FullPeqSelfTest.java diagnostics-artifacts/prepatch/V12FullPeqSelfTest.java
+          python3 - <<'PY' | tee diagnostics-artifacts/PATCH-RESULT.txt
+          #!/usr/bin/env python3
+          """Apply additive read-only PEQ gate diagnostics to the known V12.1 payload."""
+          from hashlib import sha256
+          from pathlib import Path
+          
+          ROOT = Path.cwd()
+          EXPECTED = {
+              "app/src/main/java/com/okn/peramp/DspProtocol.java": "a04f51149dbb369ee186043b3a00bacaa5f7f75cfd6722f5b95a170c22d45f0c",
+              "app/src/main/java/com/okn/peramp/BleManager.java": "9167734662297ad8524523fab5811b2fed1066305d829d0b96ed36a0949bb64e",
+              "Sources/V12FullPeqSelfTest.java": "ca49b57cb5358f091384e8512dfb060882c6501a369ce66d3d9b448cb1919e4a",
+          }
+          for rel, expected in EXPECTED.items():
+              actual = sha256((ROOT / rel).read_bytes()).hexdigest()
+              if actual != expected:
+                  raise SystemExit(f"FAIL: unexpected base source {rel}: {actual}")
+          
+          proto_path = ROOT / "app/src/main/java/com/okn/peramp/DspProtocol.java"
+          proto = proto_path.read_text()
+          proto_anchor = '''        boolean safePeakingDescriptor() {
+                      if (type != EQ_PEAKING_TYPE || !structurallyFinite()) return false;
+                      if (frequency < 20f || frequency > 20000f) return false;
+                      if (q < 0.05f || q > 20f) return false;
+                      // The real safe set includes factory PEQ boosts above the UI's +/-12 dB
+                      // edit range (for example +18.71 dB). Existing descriptor boost therefore
+                      // must not be used to reject an otherwise verified active row.
+                      if (boostDb < -24f || boostDb > 24f) return false;
+                      if (Math.abs(r) > 0.0001f) return false;
+                      // A safe live row has a real biquad shape. Reject identity/bypass placeholders
+                      // even if a future descriptor reports R as zero unexpectedly.
+                      boolean identity = Math.abs(b0 - 1f) < 0.0001f &&
+                              Math.abs(b1) < 0.0001f && Math.abs(b2) < 0.0001f &&
+                              Math.abs(a1) < 0.0001f && Math.abs(a2) < 0.0001f;
+                      return !identity;
+                  }
+          '''
+          proto_insert = proto_anchor + '''
+                  /** Read-only explanation for the existing strict gate; does not grant write permission. */
+                  String safePeakingRejectionReason() {
+                      if (type != EQ_PEAKING_TYPE) return "TYPE_MISMATCH";
+                      if (!structurallyFinite()) return "NON_FINITE";
+                      if (frequency < 20f || frequency > 20000f) return "FREQ_RANGE";
+                      if (q < 0.05f || q > 20f) return "Q_RANGE";
+                      if (boostDb < -24f || boostDb > 24f) return "BOOST_RANGE";
+                      if (Math.abs(r) > 0.0001f) return "R_NONZERO";
+                      if (v12IdentityPlaceholder()) return "IDENTITY";
+                      return "PASS";
+                  }
+          
+                  /** Read-only explanation for the V12 descriptor gate; does not grant write permission. */
+                  String v12PeqSlotRejectionReason() {
+                      if (type != EQ_PEAKING_TYPE) return "TYPE_MISMATCH";
+                      if (!structurallyFinite()) return "NON_FINITE";
+                      if (frequency < 20f || frequency > 20000f) return "FREQ_RANGE";
+                      if (q < 0.05f || q > 20f) return "Q_RANGE";
+                      if (boostDb < -24f || boostDb > 24f) return "BOOST_RANGE";
+                      if (v12IdentityPlaceholder()) return "PASS_IDENTITY";
+                      if (v12PeakingMathMatches(0.00008f)) return "PASS_FORMULA";
+                      return "COEFFICIENT_MISMATCH";
+                  }
+          '''
+          if proto.count(proto_anchor) != 1:
+              raise SystemExit("FAIL: strict PEQ gate anchor missing or ambiguous")
+          proto_path.write_text(proto.replace(proto_anchor, proto_insert, 1))
+          
+          ble_path = ROOT / "app/src/main/java/com/okn/peramp/BleManager.java"
+          ble = ble_path.read_text()
+          ble_anchor = '''        out.append("v12CoefficientGainQuantizationDb=0.1\\n");
+                  out.append("v12RejectedSlotDiagnosticsBegin\\n");
+          '''
+          ble_insert = '''        out.append("v12CoefficientGainQuantizationDb=0.1\\n");
+                  out.append("[STRICT_SAFE_PEAKING_DIAGNOSTICS]\\n");
+                  out.append("mode=READ_ONLY_NO_WRITE_PERMISSION_CHANGE\\n");
+                  Map<String, Integer> strictReasonCounts = new LinkedHashMap<>();
+                  Map<String, Integer> v12ReasonCounts = new LinkedHashMap<>();
+                  for (int ch = 0; ch < 7; ch++) {
+                      for (int band0 = 0; band0 < DspProtocol.EQ_BANDS; band0++) {
+                          DspProtocol.EqBand row = eqBands[ch][band0];
+                          String strictReason = row == null ? "NULL_ROW" : row.safePeakingRejectionReason();
+                          String v12Reason = row == null ? "NULL_ROW" : row.v12PeqSlotRejectionReason();
+                          strictReasonCounts.put(strictReason, strictReasonCounts.getOrDefault(strictReason, 0) + 1);
+                          v12ReasonCounts.put(v12Reason, v12ReasonCounts.getOrDefault(v12Reason, 0) + 1);
+                          out.append("CH").append(ch + 1).append(" Band").append(band0 + 1)
+                                  .append(" strictSafeReason=").append(strictReason)
+                                  .append(" v12SlotReason=").append(v12Reason);
+                          if (row != null) {
+                              out.append(" type=").append(row.type)
+                                      .append(" F=").append(row.frequency)
+                                      .append(" Q=").append(row.q)
+                                      .append(" B=").append(row.boostDb)
+                                      .append(" R=").append(row.r)
+                                      .append(" identity=").append(row.v12IdentityPlaceholder())
+                                      .append(" rbjMatch=").append(row.v12PeakingMathMatches(0.00008f));
+                          }
+                          out.append('\\n');
+                      }
+                  }
+                  out.append("strictReasonCounts=").append(strictReasonCounts).append('\\n');
+                  out.append("v12ReasonCounts=").append(v12ReasonCounts).append('\\n');
+                  out.append("[STRICT_SAFE_PEAKING_DIAGNOSTICS_END]\\n\\n");
+                  out.append("v12RejectedSlotDiagnosticsBegin\\n");
+          '''
+          if ble.count(ble_anchor) != 1:
+              raise SystemExit("FAIL: evidence report anchor missing or ambiguous")
+          ble_path.write_text(ble.replace(ble_anchor, ble_insert, 1))
+          
+          self_path = ROOT / "Sources/V12FullPeqSelfTest.java"
+          self = self_path.read_text()
+          self_anchor = '''        check(bypass.v12PeqSlotDescriptor(), "identity placeholder must be editable slot");
+                  DspProtocol.EqBand activated = DspProtocol.peakingFromCurrent(bypass, 3.0f);
+          '''
+          self_insert = '''        check(bypass.v12PeqSlotDescriptor(), "identity placeholder must be editable slot");
+                  check("R_NONZERO".equals(bypass.safePeakingRejectionReason()),
+                          "strict diagnostics must explain why R=0.12 fails strict gate");
+                  check("PASS_IDENTITY".equals(bypass.v12PeqSlotRejectionReason()),
+                          "V12 diagnostics must classify valid identity placeholder separately");
+                  DspProtocol.EqBand formulaWithR = DspProtocol.peaking(1000f, 1f, 3f);
+                  DspProtocol.EqBand activeWithR = new DspProtocol.EqBand(12, formulaWithR.frequency,
+                          formulaWithR.frequency2, formulaWithR.q, formulaWithR.boostDb, formulaWithR.gain,
+                          0.12f, formulaWithR.b0, formulaWithR.b1, formulaWithR.b2,
+                          formulaWithR.a1, formulaWithR.a2);
+                  check("R_NONZERO".equals(activeWithR.safePeakingRejectionReason()),
+                          "strict gate reason must not infer that R=0.12 means identity");
+                  check("PASS_FORMULA".equals(activeWithR.v12PeqSlotRejectionReason()),
+                          "V12 diagnostics must classify formula-matching row independently of R");
+                  DspProtocol.EqBand wrongCoefficients = new DspProtocol.EqBand(12, 1000f, 0f,
+                          1f, 3f, 0f, 0f, 1.2f, 0f, 0f, 0f, 0f);
+                  check("PASS".equals(wrongCoefficients.safePeakingRejectionReason()),
+                          "strict gate diagnostics must reflect the existing strict gate only");
+                  check("COEFFICIENT_MISMATCH".equals(wrongCoefficients.v12PeqSlotRejectionReason()),
+                          "V12 diagnostics must detect coefficient mismatch separately");
+                  DspProtocol.EqBand activated = DspProtocol.peakingFromCurrent(bypass, 3.0f);
+          '''
+          if self.count(self_anchor) != 1:
+              raise SystemExit("FAIL: Java self-test anchor missing or ambiguous")
+          self_path.write_text(self.replace(self_anchor, self_insert, 1))
+          
+          # Guardrails: this patch must only add diagnostics/tests, not change gate or TX policy.
+          ble = ble_path.read_text()
+          proto = proto_path.read_text()
+          for required in [
+              'eqShapeHealthGate = safePeakingRows == EXPECTED_SAFE_PEAKING_ROWS;',
+              'v12FullPeqEditGate = v10HistoricalSameHardware && v12RowsHealthy && v12IndependentPeqSlots == 92;',
+              'return b.v12PeqSlotDescriptor();',
+              'unknownWriteTargetsAddedByV12_1=0',
+          ]:
+              if required not in ble:
+                  raise SystemExit('FAIL: existing gate/TX invariant missing: ' + required)
+          if 'safePeakingDescriptor() {' not in proto or 'v12PeqSlotDescriptor() {' not in proto:
+              raise SystemExit('FAIL: existing gate methods missing')
+          if 'STRICT_SAFE_PEAKING_DIAGNOSTICS' not in ble or 'COEFFICIENT_MISMATCH' not in proto:
+              raise SystemExit('FAIL: diagnostics patch incomplete')
+          print('OKNPV12_1_2_READ_ONLY_PEQ_DIAGNOSTICS_PATCH_PASS')
+          for rel in EXPECTED:
+              print(f'SOURCE_SHA256 {rel} {sha256((ROOT / rel).read_bytes()).hexdigest()}')
+          PY
+          {
+            diff -u diagnostics-artifacts/prepatch/DspProtocol.java app/src/main/java/com/okn/peramp/DspProtocol.java || test "$?" -eq 1
+            diff -u diagnostics-artifacts/prepatch/BleManager.java app/src/main/java/com/okn/peramp/BleManager.java || test "$?" -eq 1
+            diff -u diagnostics-artifacts/prepatch/V12FullPeqSelfTest.java Sources/V12FullPeqSelfTest.java || test "$?" -eq 1
+          } > diagnostics-artifacts/OKNPV12_1_2-DIAGNOSTICS.patch
+
+      - name: Run existing gate and PEQ self-validation
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 Sources/validate_v38_gate.py | tee diagnostics-artifacts/VALIDATE-V38.txt
+          python3 Sources/validate_oknpv12.py | tee diagnostics-artifacts/VALIDATE-V12.txt
+
+      - name: Set a separate package ID for diagnostics build only
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('app/build.gradle')
+          s = p.read_text()
+          anchor = "        debug {\n        }"
+          replacement = "        debug {\n            applicationIdSuffix '.diagnostics'\n            versionNameSuffix '-diag'\n        }"
+          if s.count(anchor) != 1:
+              raise SystemExit('FAIL: debug buildType anchor missing or ambiguous; no APK built')
+          p.write_text(s.replace(anchor, replacement, 1))
+          if "applicationIdSuffix '.diagnostics'" not in p.read_text():
+              raise SystemExit('FAIL: isolated package suffix not applied')
+          print('DIAGNOSTICS_PACKAGE_SUFFIX_PASS')
+          PY
+
+      - name: Compile and assemble isolated debug APK (debug key only)
+        shell: bash
+        run: |
+          set -euo pipefail
+          gradle :app:compileDebugJavaWithJavac :app:assembleDebug --no-daemon --stacktrace | tee diagnostics-artifacts/ANDROID-BUILD.txt
+          APK='app/build/outputs/apk/debug/app-debug.apk'
+          test -s "$APK"
+          "$ANDROID_HOME/build-tools/35.0.0/aapt" dump badging "$APK" | tee diagnostics-artifacts/APK-BADGING.txt
+          grep -q "package: name='com.okn.peramp.diagnostics' versionCode='12001' versionName='12.1.0-diag'" diagnostics-artifacts/APK-BADGING.txt
+          sha256sum "$APK" | tee diagnostics-artifacts/APK-SHA256.txt
+
+      - name: Package diagnostic source and evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          zip -qr OKNPV12_1_2-DIAGNOSTICS-source.zip app Sources build.gradle settings.gradle gradle.properties .github/workflows/OKNPV12_1_2_DIAGNOSTICS_APK_ISOLATED.yml .github/workflows/OKNPV12_1_2_DIAGNOSTICS_SINGLE.yml -x '*/build/*' -x '.gradle/*'
+          {
+            echo 'OKN Peramp V12.1.2 read-only PEQ diagnostics patch'
+            echo 'Base commit: 4cc2f20f3c0277e60660f079d44659be99f8676f'
+            echo 'Diagnostics APK uses isolated package com.okn.peramp.diagnostics, versionName 12.1.0-diag / versionCode 12001; debug key only.'
+            echo 'No gate threshold, TX permission, writer, queue, save, or descriptor parsing behavior was changed.'
+            echo 'Tests: V38 static gate validator; V12 historical RBJ and pure-Java self-test; Android Java compilation and debug APK assembly.'
+            echo 'Hardware round-trip remains NOT_RUN and must not be inferred from CI.'
+            echo
+            sha256sum OKNPV12_1_2-DIAGNOSTICS-source.zip diagnostics-artifacts/OKNPV12_1_2-DIAGNOSTICS.patch diagnostics-artifacts/PATCH-RESULT.txt diagnostics-artifacts/VALIDATE-V38.txt diagnostics-artifacts/VALIDATE-V12.txt diagnostics-artifacts/ANDROID-BUILD.txt diagnostics-artifacts/APK-BADGING.txt diagnostics-artifacts/APK-SHA256.txt
+          } | tee diagnostics-artifacts/OKNPV12_1_2-REPORT.txt
+
+      - name: Upload read-only diagnostics APK and proof
+        uses: actions/upload-artifact@v4
+        with:
+          name: OKNPV12_1_2_DIAGNOSTICS_APK_ISOLATED
+          path: |
+            OKNPV12_1_2-DIAGNOSTICS-source.zip
+            diagnostics-artifacts/OKNPV12_1_2-DIAGNOSTICS.patch
+            diagnostics-artifacts/OKNPV12_1_2-REPORT.txt
+            diagnostics-artifacts/PATCH-RESULT.txt
+            diagnostics-artifacts/VALIDATE-V38.txt
+            diagnostics-artifacts/VALIDATE-V12.txt
+            diagnostics-artifacts/ANDROID-BUILD.txt
+            diagnostics-artifacts/APK-BADGING.txt
+            diagnostics-artifacts/APK-SHA256.txt
+            app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+          retention-days: 30
